@@ -71,6 +71,21 @@ namespace Truedat
         public DateTime LastModified;
     }
 
+    class AudioDetails
+    {
+        public int TrackId;
+        public string Artist = "", Title = "";
+        public string Codec = "", Format = "";
+        public int Channels;
+        public int SampleRate;
+        public int BitRate;
+        public int BitDepth;
+        public double Duration;
+        public double SizeMb;
+        public DateTime LastProbed;
+        public DateTime LastModified;
+    }
+
     /// <summary>
     /// Path normalization utilities for cross-source path matching.
     /// Copied from MBXC (restfulbee/MBXC/PathHelper.cs) to keep Truedat self-contained.
@@ -161,9 +176,14 @@ namespace Truedat
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
+        static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
+        static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
         /// <summary>
         /// Convert non-ASCII paths to 8.3 short form for Essentia compatibility.
@@ -197,6 +217,35 @@ namespace Truedat
             return path;
         }
 
+        static void CleanupOrphanedHardlinks()
+        {
+            // Check all drive roots for .truedat-tmp directories left behind by crashed runs
+            try
+            {
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    if (!drive.IsReady) continue;
+                    var tmpDir = Path.Combine(drive.RootDirectory.FullName, ".truedat-tmp");
+                    if (!Directory.Exists(tmpDir)) continue;
+                    try
+                    {
+                        var files = Directory.GetFiles(tmpDir);
+                        if (files.Length > 0)
+                        {
+                            Console.WriteLine($"  Cleaning {files.Length} orphaned hardlink(s) from {tmpDir}");
+                            foreach (var f in files)
+                                try { File.Delete(f); } catch { }
+                        }
+                        // Remove the directory itself if now empty
+                        if (Directory.GetFiles(tmpDir).Length == 0)
+                            try { Directory.Delete(tmpDir); } catch { }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -211,6 +260,7 @@ namespace Truedat
             bool md5Only = false;
             bool auditLog = false;
             bool checkFilenames = false;
+            bool detailsMode = false;
 
             bool showHelp = false;
 
@@ -228,6 +278,7 @@ namespace Truedat
                 else if (arg == "--fingerprint") fingerprintMode = true;
                 else if (arg == "--chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
                 else if (arg == "--md5-only") { fingerprintMode = true; md5Only = true; }
+                else if (arg == "--details") { fingerprintMode = true; detailsMode = true; }
                 else if (arg == "--audit") auditLog = true;
                 else if (arg == "--check-filenames") checkFilenames = true;
                 else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
@@ -246,9 +297,12 @@ namespace Truedat
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
+                Console.WriteLine("  --details           Probe audio files with ffprobe -> mbxhub-details.json (implies --fingerprint)");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
                 Console.WriteLine("  -?, --help          Show this help");
+                Console.WriteLine();
+                Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
                 return;
             }
 
@@ -267,6 +321,7 @@ namespace Truedat
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
+                Console.WriteLine("  --details           Probe audio files with ffprobe -> mbxhub-details.json (implies --fingerprint)");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -283,17 +338,27 @@ namespace Truedat
                 Console.SetOut(tee);
             }
 
+            // Clean up orphaned hardlinks from previous crashed runs
+            CleanupOrphanedHardlinks();
+
             if (checkFilenames) { RunCheckFilenames(xmlPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
-            if (fingerprintMode) { RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (fingerprintMode) { RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only, detailsMode); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            var essentiaExe = Path.Combine(baseDir, "essentia_streaming_extractor_music.exe");
+            var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
 
-            if (!File.Exists(essentiaExe))
+            Console.WriteLine("=== Tool Check ===");
+            Console.WriteLine($"  App dir:    {baseDir}");
+            Console.WriteLine($"  Output dir: {outputDir}");
+            Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
+            Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
+            Console.WriteLine();
+
+            if (essentiaExe == null)
             {
-                Console.WriteLine($"Essentia extractor not found: {essentiaExe}");
+                Console.WriteLine("Essentia extractor not found in any search directory.");
                 Console.WriteLine("Download from: https://essentia.upf.edu/extractors/");
                 tee?.Dispose();
                 return;
@@ -366,6 +431,7 @@ namespace Truedat
             {
                 Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
                 {
+                    if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
 
                     try
@@ -427,7 +493,7 @@ namespace Truedat
                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
 
                         var analyzeStart = Stopwatch.GetTimestamp();
-                        var (feat, errorReason) = AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes);
+                        var (feat, errorReason) = AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token);
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -858,25 +924,49 @@ namespace Truedat
 
         // -- Fingerprint mode ------------------------------------------------
 
-        static void RunFingerprint(string xmlPath, string outputDir, int parallelism, bool retryErrors, bool chromaprintOnly, bool md5Only)
+        /// <summary>
+        /// Find a tool exe by checking: app base directory, output/library directory, working directory.
+        /// </summary>
+        static string? FindTool(string exeName, params string[] searchDirs)
+        {
+            foreach (var dir in searchDirs)
+            {
+                if (string.IsNullOrEmpty(dir)) continue;
+                var path = Path.Combine(dir, exeName);
+                if (File.Exists(path)) return path;
+            }
+            return null;
+        }
+
+        static void RunFingerprint(string xmlPath, string outputDir, int parallelism, bool retryErrors, bool chromaprintOnly, bool md5Only, bool detailsMode)
         {
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            var chromaprintExe = Path.Combine(baseDir, "essentia_standard_chromaprinter.exe");
-            var md5Exe = Path.Combine(baseDir, "essentia_streaming_md5.exe");
+            var cwd = Environment.CurrentDirectory;
+            var chromaprintExe = FindTool("essentia_standard_chromaprinter.exe", baseDir, outputDir, cwd);
+            var md5Exe = FindTool("essentia_streaming_md5.exe", baseDir, outputDir, cwd);
 
             bool runChromaprint = !md5Only;
             bool runMd5 = !chromaprintOnly;
 
-            if (runChromaprint && !File.Exists(chromaprintExe))
+            Console.WriteLine("=== Tool Check ===");
+            Console.WriteLine($"  App dir:      {baseDir}");
+            Console.WriteLine($"  Library dir:  {outputDir}");
+            Console.WriteLine($"  Chromaprint:  {chromaprintExe ?? "NOT FOUND"}");
+            Console.WriteLine($"  MD5:          {md5Exe ?? "NOT FOUND"}");
+            Console.WriteLine($"  ffmpeg:       {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
+            if (detailsMode) Console.WriteLine($"  ffprobe:      {_ffprobePath.Value ?? "not found (--details will be skipped)"}");
+            Console.WriteLine();
+
+            if (runChromaprint && chromaprintExe == null)
             {
-                Console.WriteLine($"Chromaprinter not found: {chromaprintExe}");
+                Console.WriteLine("Chromaprinter not found in any search directory.");
                 if (!runMd5) { Console.WriteLine("No fingerprint tools available."); return; }
                 Console.WriteLine("Falling back to MD5 only.");
                 runChromaprint = false;
             }
-            if (runMd5 && !File.Exists(md5Exe))
+            if (runMd5 && md5Exe == null)
             {
-                Console.WriteLine($"MD5 tool not found: {md5Exe}");
+                Console.WriteLine("MD5 tool not found in any search directory.");
                 if (!runChromaprint) { Console.WriteLine("No fingerprint tools available."); return; }
                 Console.WriteLine("Falling back to chromaprint only.");
                 runMd5 = false;
@@ -888,6 +978,23 @@ namespace Truedat
             if (runMd5) Console.WriteLine($"  MD5:         {md5Exe}");
             Console.WriteLine();
 
+            string? ffprobePath = null;
+            var detailsPath = "";
+            if (detailsMode)
+            {
+                ffprobePath = _ffprobePath.Value;
+                if (ffprobePath == null)
+                {
+                    Console.WriteLine("WARNING: ffprobe not found - --details will be skipped (fingerprinting continues)");
+                    Console.WriteLine();
+                    detailsMode = false;
+                }
+                else
+                {
+                    detailsPath = Path.Combine(outputDir, "mbxhub-details.json");
+                }
+            }
+
             var fingerprintsPath = Path.Combine(outputDir, "mbxhub-fingerprints.json");
             var errorsPath = Path.Combine(outputDir, "mbxhub-fingerprints-errors.csv");
 
@@ -898,6 +1005,13 @@ namespace Truedat
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(fingerprintsPath, allFp);
             Console.WriteLine($"Existing fingerprints: {existingCount}");
+
+            var allDetails = new ConcurrentDictionary<string, AudioDetails>(PathComparer.Instance);
+            if (detailsMode)
+            {
+                int existingDetails = LoadExistingDetails(detailsPath, allDetails);
+                Console.WriteLine($"Existing details: {existingDetails}");
+            }
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
@@ -911,10 +1025,10 @@ namespace Truedat
             }
             Console.WriteLine($"Existing errors: {existingErrors.Count}");
 
-            int cachedCount = 0, fingerprinted = 0, skipped = 0, failed = 0;
+            int cachedCount = 0, fingerprinted = 0, skipped = 0, failed = 0, probed = 0;
             int processed = 0, total = tracks.Count;
-            int lastSaveCount = 0;
-            const int SaveInterval = 25;
+            int lastSaveCount = 0, lastProbeSaveCount = 0;
+            const int SaveInterval = 200;
             var saveLock = new object();
             long fpTicksTotal = 0;
 
@@ -947,6 +1061,7 @@ namespace Truedat
             {
                 Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
                 {
+                    if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
                     try
                     {
@@ -985,6 +1100,41 @@ namespace Truedat
                                         };
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
+                                        if (detailsMode)
+                                        {
+                                            if (allDetails.TryGetValue(t.Location, out var existingDet) &&
+                                                TruncateToSeconds(currentLastMod) == TruncateToSeconds(existingDet.LastModified))
+                                            {
+                                                existingDet.TrackId = t.TrackId;
+                                                existingDet.Artist = t.Artist;
+                                                existingDet.Title = t.Name;
+                                            }
+                                            else
+                                            {
+                                                var det = ProbeAudio(ffprobePath!, t.Location);
+                                                if (det != null)
+                                                {
+                                                    det.TrackId = t.TrackId;
+                                                    det.Artist = t.Artist;
+                                                    det.Title = t.Name;
+                                                    det.LastModified = currentLastMod;
+                                                    allDetails[t.Location] = det;
+                                                    var np = Interlocked.Increment(ref probed);
+                                                    if (np - lastProbeSaveCount >= SaveInterval)
+                                                    {
+                                                        lock (saveLock)
+                                                        {
+                                                            if (Volatile.Read(ref probed) - lastProbeSaveCount >= SaveInterval)
+                                                            {
+                                                                lastProbeSaveCount = Volatile.Read(ref probed);
+                                                                SaveDetails(detailsPath, allDetails);
+                                                                Console.WriteLine($"  [Saved {allDetails.Count} details]");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         return;
                                     }
                                 }
@@ -1028,14 +1178,14 @@ namespace Truedat
 
                         if (runChromaprint)
                         {
-                            var (chromaprint, duration, chromaErr) = RunChromaprinter(chromaprintExe, t.Location);
+                            var (chromaprint, duration, chromaErr) = RunChromaprinter(chromaprintExe!, t.Location, cts.Token);
                             if (chromaErr != null) errorMsg = $"chromaprint: {chromaErr}";
                             else { fp.Chromaprint = chromaprint; fp.Duration = duration; }
                         }
 
                         if (runMd5 && errorMsg == null)
                         {
-                            var (md5, md5Err) = RunMd5(md5Exe, t.Location);
+                            var (md5, md5Err) = RunMd5(md5Exe!, t.Location, cts.Token);
                             if (md5Err != null) errorMsg = $"md5: {md5Err}";
                             else fp.Md5 = md5;
                         }
@@ -1055,6 +1205,19 @@ namespace Truedat
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                         allFp[t.Location] = new FingerprintEntry { Fp = fp, LastModified = lastMod };
+                        if (detailsMode)
+                        {
+                            var det = ProbeAudio(ffprobePath!, t.Location);
+                            if (det != null)
+                            {
+                                det.TrackId = t.TrackId;
+                                det.Artist = t.Artist;
+                                det.Title = t.Name;
+                                det.LastModified = lastMod;
+                                allDetails[t.Location] = det;
+                                Interlocked.Increment(ref probed);
+                            }
+                        }
                         var newCount = Interlocked.Increment(ref fingerprinted);
 
                         if (newCount - lastSaveCount >= SaveInterval)
@@ -1066,8 +1229,9 @@ namespace Truedat
                                     lastSaveCount = newCount;
                                     var saveSw = Stopwatch.StartNew();
                                     SaveFingerprints(fingerprintsPath, allFp);
+                                    if (detailsMode) SaveDetails(detailsPath, allDetails);
                                     saveSw.Stop();
-                                    Console.WriteLine($"  [Saved {allFp.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
+                                    Console.WriteLine($"  [Saved {allFp.Count} fingerprints{(detailsMode ? $" + {allDetails.Count} details" : "")} in {saveSw.Elapsed.TotalSeconds:F1}s]");
                                 }
                             }
                         }
@@ -1091,6 +1255,7 @@ namespace Truedat
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
 
             SaveFingerprints(fingerprintsPath, allFp);
+            if (detailsMode) SaveDetails(detailsPath, allDetails);
 
             Console.WriteLine();
             if (wasCancelled) Console.WriteLine("=== Interrupted (Ctrl+C) - progress saved ===");
@@ -1105,6 +1270,11 @@ namespace Truedat
             Console.WriteLine($"  ----------     -----");
             Console.WriteLine($"  Processed:     {cachedCount + fingerprinted + skipped + failed}");
             Console.WriteLine($"  Output:        {allFp.Count} tracks in fingerprints file");
+            if (detailsMode)
+            {
+                Console.WriteLine($"  Probed:        {probed}");
+                Console.WriteLine($"  Details:       {allDetails.Count} tracks in details file");
+            }
             if (fingerprinted > 0)
             {
                 var avgFp = StopwatchTicksToTimeSpan(Volatile.Read(ref fpTicksTotal) / fingerprinted);
@@ -1119,17 +1289,65 @@ namespace Truedat
             catch { }
             Console.WriteLine();
             Console.WriteLine($"Output: {fingerprintsPath}");
+            if (detailsMode) Console.WriteLine($"Output: {detailsPath}");
         }
 
         // -- External tool runner (shared by chromaprinter and md5) ----------
 
-        static (string Stdout, string? Error) RunTool(string exe, string audioPath, int timeoutMs = 60000)
+        /// <summary>
+        /// Run an external tool and capture its output. Uses CPU activity monitoring
+        /// instead of arbitrary timeouts: keeps waiting while the process consumes CPU,
+        /// only kills after 60s of zero CPU activity (truly stuck).
+        /// When SafePath can't produce an ASCII path (8.3 disabled), creates a temporary
+        /// hardlink on the same volume so the C++ tool gets a clean ASCII path.
+        /// </summary>
+        static (string Stdout, string? Error) RunTool(string exe, string audioPath, CancellationToken ct = default)
         {
+            string toolPath = SafePath(audioPath);
+            string? tempLink = null;
+            string pathMethod = toolPath == audioPath ? "original" : "8.3";
+
+            // If SafePath couldn't produce an ASCII path (8.3 not available),
+            // create a hardlink on the same volume with an ASCII name.
+            bool stillNonAscii = false;
+            for (int i = 0; i < toolPath.Length; i++)
+                if (toolPath[i] > 127) { stillNonAscii = true; break; }
+
+            if (stillNonAscii)
+            {
+                try
+                {
+                    var ext = Path.GetExtension(audioPath);
+                    var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
+                    var tempDir = Path.Combine(root, ".truedat-tmp");
+                    Directory.CreateDirectory(tempDir);
+                    tempLink = Path.Combine(tempDir, $"{Guid.NewGuid():N}{ext}");
+                    if (CreateHardLink(tempLink, audioPath, IntPtr.Zero))
+                    {
+                        toolPath = tempLink;
+                        pathMethod = "hardlink";
+                        Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {tempLink}");
+                    }
+                    else
+                    {
+                        pathMethod = "original (hardlink failed)";
+                        Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}), falling through: {audioPath}");
+                        tempLink = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    pathMethod = "original (hardlink error)";
+                    Console.WriteLine($"  DEBUG: hardlink exception for non-ASCII path: {ex.Message}");
+                    tempLink = null;
+                }
+            }
+
             try
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = exe, Arguments = $"\"{SafePath(audioPath)}\"",
+                    FileName = exe, Arguments = $"\"{toolPath}\"",
                     RedirectStandardOutput = true, RedirectStandardError = true,
                     UseShellExecute = false, CreateNoWindow = true
                 };
@@ -1137,29 +1355,213 @@ namespace Truedat
                 using var proc = Process.Start(psi)!;
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(timeoutMs))
+
+                // Monitor by CPU activity instead of arbitrary timeout.
+                // Poll every 5s. Only kill after 60s of zero CPU (truly stuck).
+                const int pollMs = 5000;
+                const int maxIdlePolls = 12; // 12 * 5s = 60s with no CPU activity
+                var lastCpu = TimeSpan.Zero;
+                int idleCount = 0;
+
+                while (!proc.WaitForExit(pollMs))
                 {
-                    try { proc.Kill(); } catch { }
-                    return ("", $"Timeout (>{timeoutMs / 1000}s)");
+                    if (ct.IsCancellationRequested)
+                    {
+                        try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                        return ("", "Cancelled");
+                    }
+                    try
+                    {
+                        proc.Refresh();
+                        var cpu = proc.TotalProcessorTime;
+                        if (cpu > lastCpu)
+                        {
+                            lastCpu = cpu;
+                            idleCount = 0;
+                        }
+                        else
+                        {
+                            idleCount++;
+                            if (idleCount >= maxIdlePolls)
+                            {
+                                try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                                var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "(timeout reading stderr)";
+                                var partialStdout = stdoutTask.Wait(3000) ? stdoutTask.Result : "(timeout reading stdout)";
+                                Console.WriteLine($"  DEBUG watchdog: killed stalled process after {maxIdlePolls * pollMs / 1000}s idle");
+                                Console.WriteLine($"    exe:    {Path.GetFileName(exe)}");
+                                Console.WriteLine($"    path:   {toolPath}");
+                                Console.WriteLine($"    method: {pathMethod}");
+                                Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
+                                Console.WriteLine($"    stdout: {partialStdout.Length} chars");
+                                if (partialStderr.Length > 0)
+                                    Console.WriteLine($"    stderr: [{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]");
+                                return ("", $"Process stalled (no CPU activity for {maxIdlePolls * pollMs / 1000}s)");
+                            }
+                        }
+                    }
+                    catch { break; } // Process likely exited between WaitForExit and Refresh
                 }
 
-                var stdout = stdoutTask.Wait(5000) ? stdoutTask.Result : "";
-                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+                // Flush async stdout/stderr read buffers.
+                proc.WaitForExit();
+
+                // Generous timeout on output capture — process already exited, just draining buffers.
+                var stdout = stdoutTask.Wait(30000) ? stdoutTask.Result : "";
+                var stderr = stderrTask.Wait(30000) ? stderrTask.Result : "";
 
                 if (proc.ExitCode != 0)
                 {
+                    Console.WriteLine($"  DEBUG RunTool: exit code {proc.ExitCode}, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
                     var err = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim().Split('\n').Last().Trim() : $"Exit code {proc.ExitCode}";
                     return ("", err);
                 }
 
+                if (stdout.Length == 0)
+                {
+                    Console.WriteLine($"  DEBUG RunTool: exit 0, stdout empty, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
+                    else Console.WriteLine($"    stderr: (empty)");
+                    Console.WriteLine($"    cpu: {lastCpu.TotalSeconds:F1}s total");
+                }
+
                 return (stdout, null);
             }
-            catch (Exception ex) { return ("", ex.Message); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  DEBUG RunTool: exception, method={pathMethod}, path={toolPath}");
+                Console.WriteLine($"    error:  {ex.Message}");
+                return ("", ex.Message);
+            }
+            finally
+            {
+                if (tempLink != null)
+                {
+                    try { File.Delete(tempLink); }
+                    catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+                }
+            }
         }
 
-        static (string Fingerprint, int Duration, string? Error) RunChromaprinter(string exe, string audioPath)
+        static string? FindFfmpeg()
         {
-            var (stdout, error) = RunTool(exe, audioPath);
+            // Check app dir, working dir
+            var found = FindTool("ffmpeg.exe", AppDomain.CurrentDomain.BaseDirectory, Environment.CurrentDirectory);
+            if (found != null) return found;
+
+            // Check PATH
+            try
+            {
+                var psi = new ProcessStartInfo("where", "ffmpeg.exe")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)!;
+                var output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                if (proc.ExitCode == 0)
+                {
+                    var path = output.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    if (!string.IsNullOrEmpty(path) && File.Exists(path)) return path;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        static string? FindFfprobe()
+        {
+            var found = FindTool("ffprobe.exe", AppDomain.CurrentDomain.BaseDirectory, Environment.CurrentDirectory);
+            if (found != null) return found;
+
+            try
+            {
+                var psi = new ProcessStartInfo("where", "ffprobe.exe")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)!;
+                var output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                if (proc.ExitCode == 0)
+                {
+                    var path = output.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    if (!string.IsNullOrEmpty(path) && File.Exists(path)) return path;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Downmix a multi-channel audio file to stereo using ffmpeg.
+        /// Returns path to temp WAV file, or null on failure. Caller must delete the temp file.
+        /// </summary>
+        static string? DownmixToStereo(string audioPath)
+        {
+            var ffmpeg = _ffmpegPath.Value;
+            if (ffmpeg == null) return null;
+
+            try
+            {
+                var tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpeg,
+                    Arguments = $"-i \"{audioPath}\" -ac 2 -y \"{tempPath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)!;
+                proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+                proc.WaitForExit();
+                if (proc.ExitCode == 0 && File.Exists(tempPath)) return tempPath;
+                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+                Console.WriteLine($"  DEBUG downmix failed (exit {proc.ExitCode}): {stderr.Substring(0, Math.Min(200, stderr.Length))}");
+                try { File.Delete(tempPath); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  DEBUG downmix exception: {ex.Message}");
+            }
+            return null;
+        }
+
+        static (string Fingerprint, int Duration, string? Error) RunChromaprinter(string exe, string audioPath, CancellationToken ct = default)
+        {
+            var (stdout, error) = RunTool(exe, audioPath, ct);
+
+            // Multi-channel files: downmix to stereo and retry
+            if (error != null && error.Contains("more than 2 channels"))
+            {
+                var stereoPath = DownmixToStereo(audioPath);
+                if (stereoPath != null)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)");
+                        (stdout, error) = RunTool(exe, stereoPath, ct);
+                    }
+                    finally
+                    {
+                        try { File.Delete(stereoPath); } catch { }
+                    }
+                }
+                else if (_ffmpegPath.Value == null)
+                {
+                    error += " (install ffmpeg on PATH to auto-downmix)";
+                }
+            }
+
             if (error != null) return ("", 0, error);
 
             string fingerprint = "";
@@ -1170,13 +1572,40 @@ namespace Truedat
                 else if (line.StartsWith("FINGERPRINT=")) fingerprint = line.Substring("FINGERPRINT=".Length).Trim();
             }
 
-            if (string.IsNullOrEmpty(fingerprint)) return ("", 0, "No FINGERPRINT in output");
+            if (string.IsNullOrEmpty(fingerprint))
+            {
+                Console.WriteLine($"  DEBUG chromaprint: exit 0 but no FINGERPRINT. stdout={stdout.Length} chars, first 200: [{stdout.Substring(0, Math.Min(200, stdout.Length))}]");
+                return ("", 0, "No FINGERPRINT in output");
+            }
             return (fingerprint, duration, null);
         }
 
-        static (string Md5, string? Error) RunMd5(string exe, string audioPath)
+        static (string Md5, string? Error) RunMd5(string exe, string audioPath, CancellationToken ct = default)
         {
-            var (stdout, error) = RunTool(exe, audioPath);
+            var (stdout, error) = RunTool(exe, audioPath, ct);
+
+            // Multi-channel files: downmix to stereo and retry
+            if (error != null && error.Contains("more than 2 channels"))
+            {
+                var stereoPath = DownmixToStereo(audioPath);
+                if (stereoPath != null)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)");
+                        (stdout, error) = RunTool(exe, stereoPath, ct);
+                    }
+                    finally
+                    {
+                        try { File.Delete(stereoPath); } catch { }
+                    }
+                }
+                else if (_ffmpegPath.Value == null)
+                {
+                    error += " (install ffmpeg on PATH to auto-downmix)";
+                }
+            }
+
             if (error != null) return ("", error);
 
             foreach (var line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
@@ -1187,7 +1616,98 @@ namespace Truedat
                     if (!string.IsNullOrEmpty(md5)) return (md5, null);
                 }
             }
+
+            Console.WriteLine($"  DEBUG md5: exit 0 but no MD5 line. stdout={stdout.Length} chars, first 200: [{stdout.Substring(0, Math.Min(200, stdout.Length))}]");
             return ("", "No MD5 in output");
+        }
+
+        static AudioDetails? ProbeAudio(string ffprobe, string audioPath)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffprobe,
+                    Arguments = $"-v quiet -print_format json -show_streams -show_format \"{audioPath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+                var stdout = proc.StandardOutput.ReadToEnd();
+                proc.StandardError.ReadToEnd();
+                if (!proc.WaitForExit(30000))
+                {
+                    try { proc.Kill(); } catch { }
+                    return null;
+                }
+                if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout)) return null;
+
+                using var doc = JsonDocument.Parse(stdout);
+                var root = doc.RootElement;
+
+                string codec = "", format = "";
+                int channels = 0, sampleRate = 0, bitRate = 0, bitDepth = 0;
+                double duration = 0;
+
+                if (root.TryGetProperty("streams", out var streams))
+                {
+                    foreach (var stream in streams.EnumerateArray())
+                    {
+                        if (GetStr(stream, "codec_type") == "audio")
+                        {
+                            codec = GetStr(stream, "codec_name");
+                            channels = GetInt(stream, "channels");
+                            var srStr = GetStr(stream, "sample_rate");
+                            if (int.TryParse(srStr, out var sr)) sampleRate = sr;
+                            var brStr = GetStr(stream, "bit_rate");
+                            if (long.TryParse(brStr, out var br)) bitRate = (int)(br / 1000);
+                            var bpsStr = GetStr(stream, "bits_per_raw_sample");
+                            if (!string.IsNullOrEmpty(bpsStr) && int.TryParse(bpsStr, out var bps))
+                                bitDepth = bps;
+                            else
+                                bitDepth = GetInt(stream, "bits_per_sample");
+                            break;
+                        }
+                    }
+                }
+
+                if (root.TryGetProperty("format", out var fmt))
+                {
+                    format = GetStr(fmt, "format_name");
+                    var durStr = GetStr(fmt, "duration");
+                    if (double.TryParse(durStr, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var d))
+                        duration = Math.Round(d, 1);
+                    if (bitRate == 0)
+                    {
+                        var fbrStr = GetStr(fmt, "bit_rate");
+                        if (long.TryParse(fbrStr, out var fbr)) bitRate = (int)(fbr / 1000);
+                    }
+                }
+
+                double sizeMb = 0;
+                try { sizeMb = Math.Round(new FileInfo(audioPath).Length / (1024.0 * 1024.0), 1); } catch { }
+
+                return new AudioDetails
+                {
+                    Codec = codec,
+                    Format = format,
+                    Channels = channels,
+                    SampleRate = sampleRate,
+                    BitRate = bitRate,
+                    BitDepth = bitDepth,
+                    Duration = duration,
+                    SizeMb = sizeMb,
+                    LastProbed = DateTime.UtcNow
+                };
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         static void SaveFingerprints(string path, ConcurrentDictionary<string, FingerprintEntry> allFp)
@@ -1298,6 +1818,116 @@ namespace Truedat
             catch (Exception ex)
             {
                 Console.WriteLine($"WARNING: Could not load existing fingerprints ({ex.Message})");
+                return 0;
+            }
+        }
+
+        static void SaveDetails(string path, ConcurrentDictionary<string, AudioDetails> allDetails)
+        {
+            var tmpPath = path + ".tmp";
+            try { File.Delete(tmpPath); } catch { }
+
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            {
+                jw.WriteStartObject();
+                jw.WriteString("version", "1.0");
+                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+                jw.WriteNumber("trackCount", allDetails.Count);
+                jw.WritePropertyName("tracks");
+                jw.WriteStartObject();
+                foreach (var kvp in allDetails)
+                {
+                    var d = kvp.Value;
+                    jw.WritePropertyName(kvp.Key);
+                    jw.WriteStartObject();
+                    jw.WriteNumber("trackId", d.TrackId);
+                    jw.WriteString("artist", d.Artist);
+                    jw.WriteString("title", d.Title);
+                    jw.WriteString("codec", d.Codec);
+                    jw.WriteNumber("channels", d.Channels);
+                    jw.WriteNumber("sampleRate", d.SampleRate);
+                    jw.WriteNumber("bitRate", d.BitRate);
+                    jw.WriteNumber("bitDepth", d.BitDepth);
+                    jw.WriteNumber("duration", d.Duration);
+                    jw.WriteString("format", d.Format);
+                    jw.WriteNumber("sizeMb", d.SizeMb);
+                    jw.WriteString("lastProbed", d.LastProbed.ToString("o"));
+                    jw.WriteString("lastModified", d.LastModified.ToString("o"));
+                    jw.WriteEndObject();
+                }
+                jw.WriteEndObject();
+                jw.WriteEndObject();
+            }
+
+            AtomicReplace(tmpPath, path);
+        }
+
+        static int LoadExistingDetails(string path, ConcurrentDictionary<string, AudioDetails> allDetails)
+        {
+            if (!File.Exists(path)) return 0;
+            try
+            {
+                var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                using var doc = JsonDocument.Parse(fs, docOptions);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
+                    return 0;
+
+                foreach (var prop in tracks.EnumerateObject())
+                {
+                    var filePath = PathHelper.NormalizeSeparators(prop.Name);
+                    var t = prop.Value;
+
+                    DateTime lastMod = DateTime.MinValue;
+                    var lastModStr = GetStr(t, "lastModified");
+                    if (!string.IsNullOrEmpty(lastModStr))
+                        DateTime.TryParse(lastModStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastMod);
+
+                    DateTime lastProbed = DateTime.MinValue;
+                    var lastProbedStr = GetStr(t, "lastProbed");
+                    if (!string.IsNullOrEmpty(lastProbedStr))
+                        DateTime.TryParse(lastProbedStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastProbed);
+
+                    allDetails[filePath] = new AudioDetails
+                    {
+                        TrackId = GetInt(t, "trackId"),
+                        Artist = GetStr(t, "artist"),
+                        Title = GetStr(t, "title"),
+                        Codec = GetStr(t, "codec"),
+                        Channels = GetInt(t, "channels"),
+                        SampleRate = GetInt(t, "sampleRate"),
+                        BitRate = GetInt(t, "bitRate"),
+                        BitDepth = GetInt(t, "bitDepth"),
+                        Duration = GetDbl(t, "duration"),
+                        Format = GetStr(t, "format"),
+                        SizeMb = GetDbl(t, "sizeMb"),
+                        LastProbed = lastProbed,
+                        LastModified = lastMod
+                    };
+                }
+                return allDetails.Count;
+            }
+            catch (JsonException ex)
+            {
+                var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
+                try
+                {
+                    File.Copy(path, bakPath);
+                    Console.WriteLine($"Backup saved to: {bakPath}");
+                }
+                catch (Exception bakEx)
+                {
+                    Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
+                }
+                Console.WriteLine($"WARNING: Existing details file is corrupt ({ex.Message})");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"WARNING: Could not load existing details ({ex.Message})");
                 return 0;
             }
         }
@@ -1550,13 +2180,83 @@ namespace Truedat
         }
 
         /// <summary>
-        /// Run Essentia extractor on an audio file. Uses async stderr read so the
-        /// timeout actually fires if the process hangs. Uses SafePath for non-ASCII filenames.
+        /// Run Essentia extractor on an audio file. Uses CPU activity monitoring
+        /// instead of arbitrary timeouts. Creates hardlink for non-ASCII paths
+        /// when 8.3 short names aren't available.
         /// </summary>
-        static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes)
+        static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default)
         {
             if (!File.Exists(audioPath))
                 return (null, "File not found");
+
+            var result = AnalyzeWithEssentiaCore(essentiaExe, audioPath, fileSizeBytes, ct);
+
+            // Multi-channel files: downmix to stereo and retry
+            if (result.Features == null && result.Error != null && result.Error.Contains("more than 2 channels"))
+            {
+                var stereoPath = DownmixToStereo(audioPath);
+                if (stereoPath != null)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)");
+                        var stereoSize = new FileInfo(stereoPath).Length;
+                        result = AnalyzeWithEssentiaCore(essentiaExe, stereoPath, stereoSize, ct);
+                    }
+                    finally
+                    {
+                        try { File.Delete(stereoPath); } catch { }
+                    }
+                }
+                else if (_ffmpegPath.Value == null)
+                {
+                    result = (null, result.Error + " (install ffmpeg on PATH to auto-downmix)");
+                }
+            }
+
+            return result;
+        }
+
+        static (TrackFeatures? Features, string? Error) AnalyzeWithEssentiaCore(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default)
+        {
+            string toolPath = SafePath(audioPath);
+            string? tempLink = null;
+            string pathMethod = toolPath == audioPath ? "original" : "8.3";
+
+            // Hardlink fallback for non-ASCII paths where 8.3 isn't available
+            bool stillNonAscii = false;
+            for (int i = 0; i < toolPath.Length; i++)
+                if (toolPath[i] > 127) { stillNonAscii = true; break; }
+
+            if (stillNonAscii)
+            {
+                try
+                {
+                    var ext = Path.GetExtension(audioPath);
+                    var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
+                    var tempDir = Path.Combine(root, ".truedat-tmp");
+                    Directory.CreateDirectory(tempDir);
+                    tempLink = Path.Combine(tempDir, $"{Guid.NewGuid():N}{ext}");
+                    if (CreateHardLink(tempLink, audioPath, IntPtr.Zero))
+                    {
+                        toolPath = tempLink;
+                        pathMethod = "hardlink";
+                        Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {tempLink}");
+                    }
+                    else
+                    {
+                        pathMethod = "original (hardlink failed)";
+                        Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}), falling through: {audioPath}");
+                        tempLink = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    pathMethod = "original (hardlink error)";
+                    Console.WriteLine($"  DEBUG: hardlink exception for non-ASCII path: {ex.Message}");
+                    tempLink = null;
+                }
+            }
 
             var tempJson = Path.GetTempFileName();
             try
@@ -1564,7 +2264,7 @@ namespace Truedat
                 var psi = new ProcessStartInfo
                 {
                     FileName = essentiaExe,
-                    Arguments = $"\"{SafePath(audioPath)}\" \"{tempJson}\"",
+                    Arguments = $"\"{toolPath}\" \"{tempJson}\"",
                     RedirectStandardOutput = false,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -1576,20 +2276,52 @@ namespace Truedat
                 if (proc == null) return (null, "Failed to start Essentia process");
                 var pid = proc.Id;
 
-                // Async stderr — ReadToEnd() blocks forever if process hangs, preventing the timeout
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
-                // Catch hung/zombie processes — real analysis rarely exceeds 2-3 min even for large files
-                const int timeoutMs = 5 * 60 * 1000; // 5 minutes
+                // CPU activity monitoring — same approach as RunTool
+                const int pollMs = 5000;
+                const int maxIdlePolls = 12; // 60s of no CPU activity
+                var lastCpu = TimeSpan.Zero;
+                int idleCount = 0;
 
-                if (!proc.WaitForExit(timeoutMs))
+                while (!proc.WaitForExit(pollMs))
                 {
-                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    timer.Stop();
-                    var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "";
-                    var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                    var hint = !string.IsNullOrWhiteSpace(partialStderr) ? $" | {ExtractEssentiaError(partialStderr, -1)}" : "";
-                    return (null, $"Timeout after {timer.Elapsed.TotalSeconds:F0}s (PID {pid}, {sizeMb:F0} MB){hint}");
+                    if (ct.IsCancellationRequested)
+                    {
+                        try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                        return (null, "Cancelled");
+                    }
+                    try
+                    {
+                        proc.Refresh();
+                        var cpu = proc.TotalProcessorTime;
+                        if (cpu > lastCpu)
+                        {
+                            lastCpu = cpu;
+                            idleCount = 0;
+                        }
+                        else
+                        {
+                            idleCount++;
+                            if (idleCount >= maxIdlePolls)
+                            {
+                                try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                                timer.Stop();
+                                var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "";
+                                var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
+                                Console.WriteLine($"  DEBUG watchdog: killed stalled essentia after {timer.Elapsed.TotalSeconds:F0}s");
+                                Console.WriteLine($"    exe:    {Path.GetFileName(essentiaExe)}");
+                                Console.WriteLine($"    path:   {toolPath}");
+                                Console.WriteLine($"    method: {pathMethod}");
+                                Console.WriteLine($"    size:   {sizeMb:F1} MB");
+                                Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
+                                Console.WriteLine($"    stderr: {(partialStderr.Length > 0 ? $"[{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]" : "(empty)")}");
+                                var hint = !string.IsNullOrWhiteSpace(partialStderr) ? $" | {ExtractEssentiaError(partialStderr, -1)}" : "";
+                                return (null, $"Process stalled after {timer.Elapsed.TotalSeconds:F0}s (no CPU for 60s, PID {pid}, {sizeMb:F0} MB){hint}");
+                            }
+                        }
+                    }
+                    catch { break; }
                 }
 
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
@@ -1600,27 +2332,43 @@ namespace Truedat
                 {
                     var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                     var errorMsg = ExtractEssentiaError(stderr, exitCode);
+                    Console.WriteLine($"  DEBUG essentia: exit {exitCode}, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
                     return (null, $"{errorMsg} (exit {exitCode}, PID {pid}, {sizeMb:F0} MB, {timer.Elapsed.TotalSeconds:F1}s)");
                 }
 
                 if (!File.Exists(tempJson) || new FileInfo(tempJson).Length == 0)
+                {
+                    Console.WriteLine($"  DEBUG essentia: exit 0 but empty output, method={pathMethod}, path={toolPath}");
+                    Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s, wall: {timer.Elapsed.TotalSeconds:F1}s");
+                    Console.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
                     return (null, $"Empty output from Essentia ({ExtractEssentiaError(stderr, 0)})");
+                }
 
                 var json = File.ReadAllText(tempJson);
                 var features = ParseEssentiaOutput(json);
                 if (features != null) return (features, null);
 
                 var jsonSize = new FileInfo(tempJson).Length;
+                Console.WriteLine($"  DEBUG essentia: exit 0, output unparseable ({jsonSize} bytes), method={pathMethod}, path={toolPath}");
+                Console.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
                 var parseHint = !string.IsNullOrWhiteSpace(stderr) ? ExtractEssentiaError(stderr, 0) : $"output {jsonSize} bytes";
                 return (null, $"Failed to parse Essentia output ({parseHint})");
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"  DEBUG essentia: exception, method={pathMethod}, path={toolPath}");
+                Console.WriteLine($"    error:  {ex.Message}");
                 return (null, $"Exception: {ex.Message}");
             }
             finally
             {
                 try { File.Delete(tempJson); } catch { }
+                if (tempLink != null)
+                {
+                    try { File.Delete(tempLink); }
+                    catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+                }
             }
         }
 
