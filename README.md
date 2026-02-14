@@ -53,23 +53,23 @@ truedat.exe "iTunes Music Library.xml" --fixup
 
 ## Installation
 
-### Pre-built
+Everything you need is in [`dist/truedat/`](dist/truedat/):
 
-Download the release package containing:
+| File | Size | Description |
+| ---- | ---- | ----------- |
+| `truedat.exe` | 694 KB | Main scanner (.NET Framework 4.8, built into Windows 10/11) |
+| `essentia_streaming_extractor_music.exe` | 28 MB | Essentia extractor (x64, custom build) |
 
-- `truedat.exe` (694 KB) - Main scanner, requires .NET Framework 4.8 (built into Windows 10/11)
-- `essentia_streaming_extractor_music.exe` (24 MB) - Pre-built Essentia extractor
+Copy the folder contents to any location and run. No additional runtime needed on Windows 10+.
 
-Place both files in the same folder. No additional runtime needed on Windows 10+.
+### Essentia Builds
 
-### Manual Setup
+The `dist/truedat/` folder includes two Essentia builds:
 
-1. **Download truedat.exe** from releases, or build from source (see below)
+- **`essentia_streaming_extractor_music.exe`** (x64) - Custom 64-bit build from Essentia v2.1_beta5 source. Handles large files that exceed the 2 GB address space limit of the 32-bit version. See [`essentia-build/`](essentia-build/) for build scripts and documentation.
+- **`essentia_streaming_extractor_music_i686.exe`** (x86) - Original 32-bit binary from the [MTG Essentia project](https://essentia.upf.edu/) (v2.1_beta5-356, 03-Dec-2020). May fail with `bad_alloc` on large audio files.
 
-2. **Download Essentia extractor** (tested with v2.1_beta5-356, 03-Dec-2020):
-   [essentia_streaming_extractor_music.exe](https://essentia.upf.edu/extractors/essentia-extractors-v2.1_beta5-356-g673b6a14-win-i686/essentia_streaming_extractor_music.exe)
-
-3. **Place both files in the same folder**
+Truedat uses whichever binary is named `essentia_streaming_extractor_music.exe` in the same folder.
 
 ### Building from Source
 
@@ -210,7 +210,7 @@ Place `mbxmoods.json` in your MusicBee Library folder (sibling to `AppData`) or 
 - **truedat.exe**: MIT - Copyright (c) 2026 Halrad LLC
 - **Newtonsoft.Json**: MIT - Copyright (c) James Newton-King (bundled)
 
-The Essentia extractor (`essentia_streaming_extractor_music.exe`) is a separate download, licensed under AGPL-3.0 by the Music Technology Group.
+The Essentia extractor (`essentia_streaming_extractor_music.exe`) is built from [Essentia](https://github.com/MTG/essentia) source, licensed under AGPL-3.0 by the Music Technology Group.
 
 See [LICENSE](LICENSE) for details.
 
