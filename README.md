@@ -1,0 +1,224 @@
+# Truedat - Music Mood Extractor
+
+Audio feature extraction tool that generates mood vectors (valence/arousal) for music libraries using [Essentia](https://essentia.upf.edu/). Extracts 15 audio features per track and maps every song onto a 2D emotion space.
+
+**Output:** `mbxmoods.json` - mood coordinates and raw audio features for every track in your library.
+
+## What It Does
+
+Truedat reads an iTunes Music Library XML file, runs each audio file through Essentia's streaming extractor, and produces a mood database with:
+
+- **Valence** (0-1): Sad ← → Happy (8 input features)
+- **Arousal** (0-1): Calm ← → Energetic (7 input features)
+- **15 raw Essentia features** stored per track for runtime recomputation
+
+This enables mood-based selection in MBXHub - pick a vibe like "Energetic" or "Chill" and the AutoQ engine filters your library accordingly.
+
+## Quick Start
+
+```cmd
+truedat.exe "iTunes Music Library.xml"
+```
+
+Output: `mbxmoods.json` (next to the XML file)
+
+### Options
+
+```
+truedat.exe <path-to-iTunes-Music-Library.xml> [options]
+
+  -p, --parallel <N>    Number of parallel threads (default: all cores)
+  --fixup               Validate and remap paths in mbxmoods.json without re-analyzing
+```
+
+### Large Libraries
+
+For large libraries (50K+ tracks), expect multi-day scans. Truedat is designed for this:
+
+- **Incremental** - Skips tracks already in `mbxmoods.json` (by file path + last-modified timestamp)
+- **Resumable** - Stop and restart anytime. Progress is saved every 10 analyzed tracks.
+- **ETA tracking** - Shows per-track analysis rate and estimated completion time
+- **Error resilience** - Failed tracks logged to `mbxmoods_errors.csv`, skipped on retry
+
+```cmd
+REM First run - analyzes everything
+truedat.exe "iTunes Music Library.xml" -p 4
+
+REM Resume after interruption - picks up where it left off
+truedat.exe "iTunes Music Library.xml" -p 4
+
+REM Fix path separators without re-analyzing (e.g., after moving files)
+truedat.exe "iTunes Music Library.xml" --fixup
+```
+
+## Installation
+
+### Pre-built
+
+Download the release package containing:
+
+- `truedat.exe` (694 KB) - Main scanner, requires .NET Framework 4.8 (built into Windows 10/11)
+- `essentia_streaming_extractor_music.exe` (24 MB) - Pre-built Essentia extractor
+
+Place both files in the same folder. No additional runtime needed on Windows 10+.
+
+### Manual Setup
+
+1. **Download truedat.exe** from releases, or build from source (see below)
+
+2. **Download Essentia extractor** (tested with v2.1_beta5-356, 03-Dec-2020):
+   [essentia_streaming_extractor_music.exe](https://essentia.upf.edu/extractors/essentia-extractors-v2.1_beta5-356-g673b6a14-win-i686/essentia_streaming_extractor_music.exe)
+
+3. **Place both files in the same folder**
+
+### Building from Source
+
+```cmd
+build-all.cmd
+```
+
+Creates `dist/truedat/truedat.exe` (694 KB single file). Requires .NET SDK 6.0+.
+
+## Extracted Features
+
+Truedat extracts 15 audio features per track from Essentia's output:
+
+### Arousal-related (energy/intensity)
+
+| Feature            | Essentia Path                         | What It Measures                  |
+| ------------------ | ------------------------------------- | --------------------------------- |
+| BPM                | `rhythm.bpm`                          | Tempo in beats per minute         |
+| Onset rate         | `rhythm.onset_rate`                   | Percussive events per second      |
+| Loudness           | `lowlevel.loudness_ebu128.integrated` | Perceived loudness (EBU R128, dB) |
+| Spectral flux      | `lowlevel.spectral_flux.mean`         | Rate of spectral change           |
+| Spectral RMS       | `lowlevel.spectral_rms.mean`          | Raw energy level                  |
+| Zero-crossing rate | `lowlevel.zerocrossingrate.mean`      | Noise/distortion indicator        |
+| Danceability       | `rhythm.danceability`                 | Rhythmic regularity (0-1)         |
+
+### Valence-related (positivity/happiness)
+
+| Feature            | Essentia Path                        | What It Measures                  |
+| ------------------ | ------------------------------------ | --------------------------------- |
+| Key                | `tonal.key_edma.key`                 | Musical key (C, D, E...)          |
+| Mode               | `tonal.key_edma.scale`               | Major (bright) vs minor (dark)    |
+| Spectral centroid  | `lowlevel.spectral_centroid.mean`    | Brightness/timbre (Hz)            |
+| Spectral flatness  | `lowlevel.spectral_flatness_db.mean` | Tonal vs noise-like               |
+| Dissonance         | `lowlevel.dissonance.mean`           | Harmonic tension                  |
+| Pitch salience     | `lowlevel.pitch_salience.mean`       | Harmonic clarity (HNR proxy)      |
+| Chord changes rate | `tonal.chords_changes_rate`          | Rate of harmonic movement         |
+| MFCCs              | `lowlevel.mfcc.mean`                 | 13-coefficient timbre fingerprint |
+
+## Output Format
+
+`mbxmoods.json`:
+
+```json
+{
+  "version": "1.0",
+  "generatedAt": "2026-02-06T...",
+  "trackCount": 70000,
+  "tracks": {
+    "C:/Users/Truedat/Music/Artist/Song.mp3": {
+      "trackId": 123,
+      "artist": "Artist",
+      "title": "Song",
+      "album": "Album",
+      "genre": "Rock",
+      "bpm": 128.0,
+      "valence": 0.652,
+      "arousal": 0.718,
+      "key": "C",
+      "mode": "major",
+      "spectralCentroid": 2456.3,
+      "spectralFlux": 0.2134,
+      "loudness": -8.52,
+      "danceability": 0.7821,
+      "onsetRate": 3.45,
+      "zeroCrossingRate": 0.0892,
+      "spectralRms": 0.1245,
+      "spectralFlatness": 0.2341,
+      "dissonance": 0.3456,
+      "pitchSalience": 0.6789,
+      "chordsChangesRate": 0.8901,
+      "mfcc": [-234.5, 45.2, -12.3, 8.7, -3.1, 1.2, -0.8, 0.5, -0.3, 0.2, -0.1, 0.1, -0.05],
+      "lastModified": "2025-12-01T00:00:00.0000000Z"
+    }
+  }
+}
+```
+
+Raw features are stored alongside pre-computed valence/arousal so MBXHub can recompute mood at runtime with tunable weights - no re-scan needed to adjust the formulas.
+
+## How Mood Vectors Work
+
+Based on Russell's circumplex model of emotion. Each track gets a 2D coordinate `[valence, arousal]`:
+
+```
+                    High Arousal
+                         |
+         Angry/Tense     |     Energetic/Happy
+                         |
+  Low Valence -----------+----------- High Valence
+                         |
+         Sad/Melancholy  |     Calm/Relaxed
+                         |
+                    Low Arousal
+```
+
+**Valence** = weighted combination of 8 features:
+mode (0.25), dissonance (0.15), spectral centroid (0.15), spectral flatness (0.10), pitch salience (0.10), danceability (0.10), MFCC2 (0.10), chord changes (0.05)
+
+**Arousal** = weighted combination of 7 features:
+BPM (0.20), onset rate (0.15), spectral RMS (0.15), loudness (0.15), spectral flux (0.15), zero-crossing rate (0.10), danceability (0.10)
+
+All weights are configurable in MBXHub's `autoQ.estimation` settings.
+
+## Visualization
+
+```cmd
+python src/visualize.py mbxmoods.json
+```
+
+Scatter plot of your library's mood distribution.
+
+## iTunes Music Library XML
+
+Truedat uses the iTunes Music Library XML format as its input. MusicBee can export your library in this format:
+
+1. In MusicBee, go to **Edit > Preferences > Library**
+2. Enable **"iTunes Music Library.xml"** export
+3. MusicBee writes `iTunes Music Library.xml` to your library folder, updating it automatically
+
+This is a standard XML format originally from iTunes/Apple Music that many music players support as an export option.
+
+## Integration with MBXHub
+
+Truedat generates the mood data that MBXHub's AutoQ engine consumes. The workflow:
+
+1. **Truedat** scans your library using the iTunes XML export and produces `mbxmoods.json`
+2. **MBXHub** loads the file at startup and recomputes valence/arousal using its current weight settings
+3. **AutoQ** uses mood vectors for mood-aware shuffle, reactions, and influence scoring
+
+Place `mbxmoods.json` in your MusicBee Library folder (sibling to `AppData`) or in `%APPDATA%\MusicBee\MBXHub\`. MBXHub searches both locations automatically.
+
+## License
+
+- **truedat.exe**: MIT - Copyright (c) 2026 Halrad LLC
+- **Newtonsoft.Json**: MIT - Copyright (c) James Newton-King (bundled)
+
+The Essentia extractor (`essentia_streaming_extractor_music.exe`) is a separate download, licensed under AGPL-3.0 by the Music Technology Group.
+
+See [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+This software uses [Essentia](https://essentia.upf.edu/), an open-source C++ library for audio analysis developed by the Music Technology Group at Universitat Pompeu Fabra.
+
+If you use this in academic work, please cite:
+
+> Bogdanov, D., Wack N., Gomez E., Gulati S., Herrera P., Mayor O., et al. (2013).
+> ESSENTIA: an Audio Analysis Library for Music Information Retrieval.
+> International Society for Music Information Retrieval Conference (ISMIR'13).
+
+- [Essentia on GitHub](https://github.com/MTG/essentia)
+- [Essentia Documentation](https://essentia.upf.edu/documentation.html)

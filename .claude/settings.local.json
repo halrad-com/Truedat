@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit --author=\"haro <haro@halrad.com>\" -m \"$\\(cat <<''EOF''\n15-feature Essentia extraction, expanded mood formulas, docs refresh\n\nExtract all 15 audio features per track \\(was 6\\): onset rate, ZCR, spectral RMS,\nspectral flatness, dissonance, pitch salience, chords changes rate, 13-coeff\nMFCCs. Valence formula expanded to 8 weighted inputs, arousal to 7. Raw features\nstored in mbxmoods.json for runtime recomputation with tunable weights.\n\nFix CSV error output CR corruption from Essentia stderr. Harden CsvEscape\nagainst embedded newlines. README and SBOM freshened for release.\nEOF\n\\)\")",
+      "Bash(git subtree push:*)",
+      "Bash(git fetch:*)"
+    ]
+  }
+}

@@ -1,0 +1,61 @@
+Truedat - Music Mood Extractor
+Copyright (c) 2026 Halrad LLC
+
+## truedat.exe - MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+## Newtonsoft.Json (Bundled)
+
+Copyright (c) 2007 James Newton-King
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+## Essentia (Separate Download)
+
+This software is designed to work with the Essentia extractor, which is a
+separate download licensed under AGPL-3.0 by the Music Technology Group,
+Universitat Pompeu Fabra.
+
+Download from: https://essentia.upf.edu/extractors/
+License: https://www.gnu.org/licenses/agpl-3.0.html
+
+### Essentia Attribution
+
+Essentia is an open-source C++ library for audio analysis and audio-based
+music information retrieval.
+
+    Essentia
+    Copyright (c) Music Technology Group, Universitat Pompeu Fabra
+    https://essentia.upf.edu/
+    Licensed under AGPL-3.0
+
+If you use Essentia in academic work, please cite:
+
+    Bogdanov, D., Wack N., Gómez E., Gulati S., Herrera P., Mayor O., et al. (2013).
+    ESSENTIA: an Audio Analysis Library for Music Information Retrieval.
+    International Society for Music Information Retrieval Conference (ISMIR'13).

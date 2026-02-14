@@ -1,0 +1,2 @@
+C:\Users\scott\source\repos\MBX\truedat\dist-small\mbxm.pdb
+C:\Users\scott\source\repos\MBX\truedat\dist-small\mbxm.exe

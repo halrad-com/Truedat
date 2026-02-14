@@ -1,0 +1,1 @@
+Get-ChildItem -Path "$PSScriptRoot\..\truedat" -Recurse -Include *.cs,*.py,*.csproj -File | Where-Object { $_.FullName -notmatch "\\bin\\|\\obj\\\\" } | ForEach-Object { $lines = (Get-Content $_.FullName | Measure-Object -Line).Lines; "$($_.FullName)|$($_.Length)|$lines" }
