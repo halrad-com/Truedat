@@ -60,17 +60,15 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 
 **Pre-built dependencies:** `essentia-build/3rdparty-x64-deps.tar.gz` contains all 9 third-party libraries as static x64 `.a` files, enabling a build without recompiling dependencies from source.
 
-### Distributed Files
+### Built Tools
 
 | File | Architecture | Source |
 |------|-------------|--------|
-| `essentia_streaming_extractor_music.exe` | x64 | Built from `essentia-build/` (primary) |
-| `essentia_streaming_extractor_music_x64.exe` | x64 | Same binary, explicit architecture name |
-| `essentia_streaming_extractor_music_i686.exe` | x86 | Legacy 32-bit (from official Essentia builds) |
+| `essentia_streaming_extractor_music.exe` | x64 | Built from `essentia-build/` — mood analysis |
 | `essentia_standard_chromaprinter.exe` | x64 | Built from `essentia-build/` — Chromaprint/AcoustID fingerprinting |
 | `essentia_streaming_md5.exe` | x64 | Built from `essentia-build/` — Audio payload MD5 hashing |
 
-All Essentia tools share the same dependency tree above. The fingerprint tools (`essentia_standard_chromaprinter.exe`, `essentia_streaming_md5.exe`) are placed in the same folder as `truedat.exe`.
+All Essentia tools share the same dependency tree above. Place them in the same folder as `truedat.exe`.
 
 ### FFmpeg (Optional Dependency)
 

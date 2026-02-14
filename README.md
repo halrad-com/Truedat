@@ -115,10 +115,7 @@ All tools are optional — truedat runs without them but the corresponding featu
 
 ### Essentia Builds
 
-All Essentia tools are custom 64-bit builds from source. See [`essentia-build/`](essentia-build/) for build scripts and documentation.
-
-- **x64 builds** handle large files that exceed the 2 GB address space limit of 32-bit binaries.
-- **`essentia_streaming_extractor_music_i686.exe`** (x86) - Legacy 32-bit binary from the [MTG Essentia project](https://essentia.upf.edu/) (v2.1_beta5-356, 03-Dec-2020). May fail with `bad_alloc` on large audio files.
+All Essentia tools are custom 64-bit builds from source. See [`essentia-build/`](essentia-build/) for build scripts and documentation. The x64 builds handle large files that exceed the 2 GB address space limit of 32-bit binaries.
 
 ### Building from Source
 
