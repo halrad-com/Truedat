@@ -8,13 +8,13 @@
     <AssemblyName>truedat</AssemblyName>
   </PropertyGroup>
 
-  <!-- ILRepack: Merge Newtonsoft.Json into single exe -->
+  <!-- ILRepack: Merge System.Text.Json + dependencies into single exe -->
   <PropertyGroup>
     <ILRepackInternalize>true</ILRepackInternalize>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" PrivateAssets="all" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" PrivateAssets="all" />
     <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" PrivateAssets="all" />
   </ItemGroup>
 

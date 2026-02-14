@@ -17,7 +17,7 @@
 | Component | Version | License | Purpose |
 |-----------|---------|---------|---------|
 | .NET Framework | 4.8 | MIT | Runtime (ships with Windows 10/11) |
-| Newtonsoft.Json | 13.0.3 | MIT | JSON serialization (merged into exe) |
+| System.Text.Json | 8.0.5 | MIT | JSON serialization (merged into exe via ILRepack) |
 
 **Build tools:**
 
@@ -67,13 +67,20 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 | `essentia_streaming_extractor_music.exe` | x64 | Built from `essentia-build/` (primary) |
 | `essentia_streaming_extractor_music_x64.exe` | x64 | Same binary, explicit architecture name |
 | `essentia_streaming_extractor_music_i686.exe` | x86 | Legacy 32-bit (from official Essentia builds) |
+| `essentia_standard_chromaprinter.exe` | x64 | Built from `essentia-build/` — Chromaprint/AcoustID fingerprinting |
+| `essentia_streaming_md5.exe` | x64 | Built from `essentia-build/` — Audio payload MD5 hashing |
+
+All Essentia tools share the same dependency tree above. The fingerprint tools (`essentia_standard_chromaprinter.exe`, `essentia_streaming_md5.exe`) are placed in the same folder as `truedat.exe`.
 
 ## Output Files
 
 | File | Description |
 |------|-------------|
 | `mbxmoods.json` | Mood vectors and 15 raw Essentia features per track |
-| `mbxmoods_errors.csv` | Failed tracks with error reasons |
+| `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
+| `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
+| `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
+| `truedat.log` | Console output log (when `--audit` is used) |
 
 ## Platform Support
 

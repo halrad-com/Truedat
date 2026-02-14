@@ -21,30 +21,36 @@ namespace Truedat
     {
         public static List<ITunesTrack> Parse(string xmlPath)
         {
-            // Read and sanitize XML - iTunes can have invalid control characters
-            var xml = SanitizeXml(File.ReadAllText(xmlPath));
+            var xml = SanitizeXml(File.ReadAllText(xmlPath, Encoding.UTF8));
             var doc = XDocument.Parse(xml);
 
-            // Find the "Tracks" dict
-            var plistDict = doc.Root!.Element("dict");
-            var keys = plistDict!.Elements("key").ToList();
-            var tracksKey = keys.First(k => k.Value == "Tracks");
-            var tracksDict = tracksKey.ElementsAfterSelf("dict").First();
+            var root = doc.Root;
+            if (root == null)
+                throw new InvalidOperationException("Invalid iTunes library XML: missing root element.");
+
+            var plistDict = root.Element("dict");
+            if (plistDict == null)
+                throw new InvalidOperationException("Invalid iTunes library XML: missing root <dict>.");
+
+            var tracksKey = plistDict.Elements("key").FirstOrDefault(k => k.Value == "Tracks");
+            if (tracksKey == null)
+                throw new InvalidOperationException("Invalid iTunes library XML: no 'Tracks' key found. Is this a valid iTunes Music Library.xml file?");
+
+            var tracksDict = tracksKey.ElementsAfterSelf("dict").FirstOrDefault();
+            if (tracksDict == null)
+                throw new InvalidOperationException("Invalid iTunes library XML: no tracks dictionary found after 'Tracks' key.");
 
             var result = new List<ITunesTrack>();
-
-            // Each track is a <key>id</key><dict>...</dict> pair
             var elements = tracksDict.Elements().ToList();
-            for (int i = 0; i < elements.Count; i++)
+            for (int i = 0; i < elements.Count - 1; i++)
             {
-                if (elements[i].Name == "key")
-                {
-                    var id = int.Parse(elements[i].Value);
-                    var dict = elements[i + 1];
-                    var track = ParseTrackDict(id, dict);
-                    if (!string.IsNullOrEmpty(track.Location))
-                        result.Add(track);
-                }
+                if (elements[i].Name != "key") continue;
+                if (!int.TryParse(elements[i].Value, out var id)) continue;
+                var dict = elements[i + 1];
+                if (dict.Name != "dict") continue;
+                var track = ParseTrackDict(id, dict);
+                if (!string.IsNullOrEmpty(track.Location))
+                    result.Add(track);
             }
 
             return result;
@@ -76,30 +82,49 @@ namespace Truedat
 
         private static string ParseLocation(string location)
         {
-            // iTunes stores paths as file:// URLs
-            // Windows: file://localhost/C:/Users/...
-            // Mac: file:///Users/...
-            var path = location
-                .Replace("file://localhost/", "")
-                .Replace("file:///", "")
-                .Replace("file://", "");
-            path = Uri.UnescapeDataString(path);
+            if (string.IsNullOrWhiteSpace(location)) return "";
 
-            // Normalize to Windows backslash paths (iTunes uses forward slashes)
-            path = path.Replace('/', '\\');
-
-            return path;
+            // Use System.Uri for proper URL handling — correctly decodes percent-encoding
+            // and all RFC 8089 file URI forms
+            try
+            {
+                var uri = new Uri(location);
+                var path = uri.LocalPath;
+                // Uri treats file://localhost/ as UNC \\localhost\ — convert back to local path
+                if (path.StartsWith(@"\\localhost\", StringComparison.OrdinalIgnoreCase))
+                    path = path.Substring(@"\\localhost\".Length);
+                return PathHelper.NormalizeSeparators(path);
+            }
+            catch
+            {
+                // Fallback for malformed URIs
+                var path = location
+                    .Replace("file://localhost/", "")
+                    .Replace("file:///", "")
+                    .Replace("file://", "");
+                path = Uri.UnescapeDataString(path);
+                return PathHelper.NormalizeSeparators(path);
+            }
         }
 
         private static string SanitizeXml(string xml)
         {
-            // Remove invalid XML 1.0 characters (control chars except tab, newline, carriage return)
+            // Fast path: scan for invalid XML 1.0 characters; if none, return input with zero allocation
+            for (int i = 0; i < xml.Length; i++)
+            {
+                var c = xml[i];
+                if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
+                    continue;
+                goto needsSanitization;
+            }
+            return xml;
+
+            needsSanitization:
             var sb = new StringBuilder(xml.Length);
             foreach (var c in xml)
             {
                 if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
                     sb.Append(c);
-                // else skip invalid character
             }
             return sb.ToString();
         }

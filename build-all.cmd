@@ -18,7 +18,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Build C# console app (ILRepack merges Newtonsoft.Json)
+REM Build C# console app (ILRepack merges System.Text.Json)
 echo Building C# scanner...
 if not exist dist\truedat mkdir dist\truedat
 dotnet build Truedat/Truedat.csproj -c Release -f net48 --no-incremental
@@ -37,11 +37,8 @@ echo ========================================
 echo.
 echo Output: dist\truedat\truedat.exe
 echo.
-echo To use:
-echo   1. Download essentia_streaming_extractor_music.exe from:
-echo      https://essentia.upf.edu/extractors/
-echo   2. Place both files in the same folder
-echo   3. Run: truedat.exe "iTunes Music Library.xml"
-echo   4. Output: mbxmoods.json
+echo Copy dist\truedat\ contents to any folder and run:
+echo   truedat.exe "iTunes Music Library.xml"
+echo   truedat.exe "iTunes Music Library.xml" --fingerprint
 echo.
 pause

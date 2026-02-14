@@ -4,11 +4,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 
 namespace Truedat
 {
@@ -70,13 +71,136 @@ namespace Truedat
         public DateTime LastModified;
     }
 
+    /// <summary>
+    /// Path normalization utilities for cross-source path matching.
+    /// Copied from MBXC (restfulbee/MBXC/PathHelper.cs) to keep Truedat self-contained.
+    /// </summary>
+    static class PathHelper
+    {
+        /// <summary>Normalize path separators to backslash (Windows native).</summary>
+        public static string NormalizeSeparators(string path)
+        {
+            return path.Replace('/', '\\');
+        }
+    }
+
+    /// <summary>
+    /// Case-insensitive, separator-normalizing path comparer.
+    /// Drop-in replacement for StringComparer.OrdinalIgnoreCase on
+    /// dictionaries and hashsets that store file paths.
+    /// </summary>
+    class PathComparer : IEqualityComparer<string>
+    {
+        public static readonly PathComparer Instance = new PathComparer();
+
+        public bool Equals(string x, string y)
+        {
+            if (ReferenceEquals(x, y)) return true;
+            if (x is null || y is null) return false;
+            if (x.Length != y.Length) return false;
+            for (int i = 0; i < x.Length; i++)
+            {
+                var cx = x[i] == '/' ? '\\' : x[i];
+                var cy = y[i] == '/' ? '\\' : y[i];
+                if (char.ToUpperInvariant(cx) != char.ToUpperInvariant(cy))
+                    return false;
+            }
+            return true;
+        }
+
+        public int GetHashCode(string obj)
+        {
+            if (obj is null) return 0;
+            unchecked
+            {
+                int hash = (int)2166136261;
+                for (int i = 0; i < obj.Length; i++)
+                {
+                    var c = obj[i] == '/' ? '\\' : obj[i];
+                    c = char.ToUpperInvariant(c);
+                    hash = (hash ^ c) * 16777619;
+                }
+                return hash;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Tee writer — sends all Console.WriteLine output to both console and a log file.
+    /// Thread-safe via lock on the file writer. WriteThrough ensures real-time tail -f.
+    /// </summary>
+    class TeeWriter : TextWriter
+    {
+        readonly TextWriter _console;
+        readonly StreamWriter _file;
+        readonly object _lock = new object();
+
+        public TeeWriter(TextWriter console, string logPath)
+        {
+            _console = console;
+            _file = new StreamWriter(
+                new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough),
+                new UTF8Encoding(false))
+            { AutoFlush = true };
+        }
+
+        public override Encoding Encoding => _console.Encoding;
+        public override void Write(char value) { _console.Write(value); lock (_lock) { _file.Write(value); } }
+        public override void Write(string? value) { _console.Write(value); lock (_lock) { _file.Write(value); } }
+        public override void WriteLine(string? value) { _console.WriteLine(value); lock (_lock) { _file.WriteLine(value); } }
+        public override void WriteLine() { _console.WriteLine(); lock (_lock) { _file.WriteLine(); } }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { _file.Flush(); _file.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
     class Program
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
+
+        /// <summary>
+        /// Convert non-ASCII paths to 8.3 short form for Essentia compatibility.
+        /// Essentia's C++ main() receives paths in the system ANSI code page, which
+        /// can't represent characters outside that code page (fullwidth ⧸ ： ＂, CJK, etc.).
+        /// 8.3 short names are pure ASCII and work universally.
+        /// If 8.3 is unavailable, the path is passed through — accented Latin chars
+        /// survive ANSI fine; truly unsupported chars will fail in Essentia and appear
+        /// in the errors CSV.
+        /// </summary>
+        static string SafePath(string path)
+        {
+            for (int i = 0; i < path.Length; i++)
+                if (path[i] > 127) goto needsShortPath;
+            return path;
+
+            needsShortPath:
+            try
+            {
+                var sb = new StringBuilder(260);
+                var result = GetShortPathName(path, sb, sb.Capacity);
+                if (result > sb.Capacity)
+                {
+                    sb.Capacity = result + 1;
+                    result = GetShortPathName(path, sb, sb.Capacity);
+                }
+                if (result > 0 && result <= sb.Capacity)
+                    return sb.ToString();
+            }
+            catch { }
+            return path;
+        }
+
         static void Main(string[] args)
         {
+            Console.OutputEncoding = Encoding.UTF8;
+
             var parallelism = Environment.ProcessorCount;
             string? xmlPath = null;
             bool fixupMode = false;
@@ -85,17 +209,47 @@ namespace Truedat
             bool fingerprintMode = false;
             bool chromaprintOnly = false;
             bool md5Only = false;
+            bool auditLog = false;
+            bool checkFilenames = false;
+
+            bool showHelp = false;
 
             for (int i = 0; i < args.Length; i++)
             {
-                if (args[i] == "--fixup") fixupMode = true;
-                else if (args[i] == "--retry-errors") retryErrors = true;
-                else if (args[i] == "--migrate") migrateMode = true;
-                else if (args[i] == "--fingerprint") fingerprintMode = true;
-                else if (args[i] == "--chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
-                else if (args[i] == "--md5-only") { fingerprintMode = true; md5Only = true; }
-                else if ((args[i] == "-p" || args[i] == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
-                else if (!args[i].StartsWith("-") && xmlPath == null) xmlPath = args[i];
+                var arg = args[i];
+                if (arg == "-?" || arg == "--?" || arg == "/?" ||
+                    arg == "?" || arg == "help" ||
+                    arg == "-h" || arg == "--help" ||
+                    arg == "/h" || arg == "/help")
+                    showHelp = true;
+                else if (arg == "--fixup") fixupMode = true;
+                else if (arg == "--retry-errors") retryErrors = true;
+                else if (arg == "--migrate") migrateMode = true;
+                else if (arg == "--fingerprint") fingerprintMode = true;
+                else if (arg == "--chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
+                else if (arg == "--md5-only") { fingerprintMode = true; md5Only = true; }
+                else if (arg == "--audit") auditLog = true;
+                else if (arg == "--check-filenames") checkFilenames = true;
+                else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
+                else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
+            }
+
+            if (showHelp)
+            {
+                Console.WriteLine("Usage: truedat.exe <path-to-iTunes-Music-Library.xml> [options]");
+                Console.WriteLine();
+                Console.WriteLine("Options:");
+                Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
+                Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
+                Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
+                Console.WriteLine("  --migrate           Strip legacy valence/arousal fields from mbxmoods.json (creates backup)");
+                Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
+                Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
+                Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
+                Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
+                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
+                Console.WriteLine("  -?, --help          Show this help");
+                return;
             }
 
             xmlPath = xmlPath ?? "iTunes Music Library.xml";
@@ -110,18 +264,29 @@ namespace Truedat
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Strip legacy valence/arousal fields from mbxmoods.json (creates backup)");
-                Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json");
+                Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
+                Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
+                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
+                Console.WriteLine("  -?, --help          Show this help");
                 return;
             }
 
             var outputDir = Path.GetDirectoryName(Path.GetFullPath(xmlPath)) ?? ".";
             var moodsPath = Path.Combine(outputDir, "mbxmoods.json");
+            var logPath = Path.Combine(outputDir, "truedat.log");
+            TeeWriter? tee = null;
+            if (auditLog)
+            {
+                tee = new TeeWriter(Console.Out, logPath);
+                Console.SetOut(tee);
+            }
 
-            if (migrateMode) { RunMigrate(moodsPath); return; }
-            if (fixupMode) { RunFixup(xmlPath, moodsPath); return; }
-            if (fingerprintMode) { RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only); return; }
+            if (checkFilenames) { RunCheckFilenames(xmlPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (fingerprintMode) { RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = Path.Combine(baseDir, "essentia_streaming_extractor_music.exe");
@@ -130,6 +295,7 @@ namespace Truedat
             {
                 Console.WriteLine($"Essentia extractor not found: {essentiaExe}");
                 Console.WriteLine("Download from: https://essentia.upf.edu/extractors/");
+                tee?.Dispose();
                 return;
             }
 
@@ -141,14 +307,14 @@ namespace Truedat
 
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
-            var allTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+            var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
             {
-                existingErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                existingErrors = new Dictionary<string, string>(PathComparer.Instance);
                 if (File.Exists(errorsPath))
                 {
                     File.Delete(errorsPath);
@@ -192,6 +358,7 @@ namespace Truedat
                 }
             };
 
+            WarnLowDiskSpace(outputDir);
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Parallelism: {parallelism} threads");
             Console.WriteLine();
@@ -221,14 +388,25 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    var f = existing.Features;
-                                    f.TrackId = t.TrackId;
-                                    f.Artist = t.Artist;
-                                    f.Title = t.Name;
-                                    f.Album = t.Album;
-                                    f.Genre = t.Genre;
-                                    f.FilePath = t.Location;
-                                    existing.LastModified = currentLastMod;
+                                    // Update metadata atomically — replace the entire entry
+                                    var updatedFeatures = existing.Features;
+                                    allTracks[t.Location] = new TrackEntry
+                                    {
+                                        Features = new TrackFeatures
+                                        {
+                                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                            Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                            Bpm = updatedFeatures.Bpm, Key = updatedFeatures.Key, Mode = updatedFeatures.Mode,
+                                            SpectralCentroid = updatedFeatures.SpectralCentroid, SpectralFlux = updatedFeatures.SpectralFlux,
+                                            Loudness = updatedFeatures.Loudness, Danceability = updatedFeatures.Danceability,
+                                            OnsetRate = updatedFeatures.OnsetRate, ZeroCrossingRate = updatedFeatures.ZeroCrossingRate,
+                                            SpectralRms = updatedFeatures.SpectralRms, SpectralFlatness = updatedFeatures.SpectralFlatness,
+                                            Dissonance = updatedFeatures.Dissonance, PitchSalience = updatedFeatures.PitchSalience,
+                                            ChordsChangesRate = updatedFeatures.ChordsChangesRate, Mfcc = updatedFeatures.Mfcc
+                                        },
+                                        LastModified = currentLastMod,
+                                        AnalysisDurationSecs = existing.AnalysisDurationSecs
+                                    };
                                     Interlocked.Increment(ref cachedCount);
                                     Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
                                     return;
@@ -251,7 +429,7 @@ namespace Truedat
                         var analyzeStart = Stopwatch.GetTimestamp();
                         var (feat, errorReason) = AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes);
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
-                        var analyzeDuration = TimeSpan.FromTicks(analyzeTicks);
+                        var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
 
@@ -295,8 +473,12 @@ namespace Truedat
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
-                        AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, saveLock);
+                        try
+                        {
+                            Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, saveLock);
+                        }
+                        catch { }
                         Interlocked.Increment(ref failed);
                     }
                 });
@@ -322,23 +504,200 @@ namespace Truedat
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
-            Console.WriteLine($"  ────────    ─────");
+            Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
-                var avgAnalyze = TimeSpan.FromTicks(_analyzeTicksTotal / analyzed);
+                var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
                 Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only)");
             }
             Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
             try
             {
-                var peakMb = Process.GetCurrentProcess().PeakWorkingSet64 / (1024.0 * 1024.0);
+                using var currentProcess = Process.GetCurrentProcess();
+                var peakMb = currentProcess.PeakWorkingSet64 / (1024.0 * 1024.0);
                 Console.WriteLine($"  Peak mem:   {peakMb:F0} MB");
             }
             catch { }
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
+            if (auditLog) Console.WriteLine($"Log:    {logPath}");
+            tee?.Dispose();
+        }
+
+        // Known-bad: fullwidth Unicode substitutions for OS-illegal filename characters.
+        // These WILL break Essentia tools — they can't survive ANSI conversion.
+        static readonly HashSet<char> _errorChars = new HashSet<char>
+        {
+            '\u29F8',  // ⧸ BIG SOLIDUS
+            '\uFF0F',  // ／ FULLWIDTH SOLIDUS
+            '\uFF1A',  // ： FULLWIDTH COLON
+            '\uFF02',  // ＂ FULLWIDTH QUOTATION MARK
+            '\uFF1C',  // ＜ FULLWIDTH LESS-THAN
+            '\uFF1E',  // ＞ FULLWIDTH GREATER-THAN
+            '\uFF5C',  // ｜ FULLWIDTH VERTICAL LINE
+            '\uFF1F',  // ？ FULLWIDTH QUESTION MARK
+            '\uFF0A',  // ＊ FULLWIDTH ASTERISK
+        };
+
+        static string DescribeChar(char c)
+        {
+            switch (c)
+            {
+                case '\u29F8': return "BIG SOLIDUS (for /)";
+                case '\uFF0F': return "FULLWIDTH SOLIDUS (for /)";
+                case '\uFF1A': return "FULLWIDTH COLON (for :)";
+                case '\uFF02': return "FULLWIDTH QUOTATION MARK (for \")";
+                case '\uFF1C': return "FULLWIDTH LESS-THAN (for <)";
+                case '\uFF1E': return "FULLWIDTH GREATER-THAN (for >)";
+                case '\uFF5C': return "FULLWIDTH VERTICAL LINE (for |)";
+                case '\uFF1F': return "FULLWIDTH QUESTION MARK (for ?)";
+                case '\uFF0A': return "FULLWIDTH ASTERISK (for *)";
+                case '\u2018': return "LEFT SINGLE QUOTATION MARK";
+                case '\u2019': return "RIGHT SINGLE QUOTATION MARK";
+                case '\u201C': return "LEFT DOUBLE QUOTATION MARK";
+                case '\u201D': return "RIGHT DOUBLE QUOTATION MARK";
+                case '\u2013': return "EN DASH";
+                case '\u2014': return "EM DASH";
+                case '\u2026': return "HORIZONTAL ELLIPSIS";
+                case '\u00BD': return "VULGAR FRACTION ONE HALF";
+                default:
+                    if (c >= 0xFF01 && c <= 0xFF5E) return $"FULLWIDTH {(char)(c - 0xFEE0)}";
+                    if (c >= 0x0080 && c <= 0x00FF) return "LATIN EXTENDED";
+                    if (c >= 0x0100 && c <= 0x024F) return "LATIN EXTENDED";
+                    if (c >= 0x3000 && c <= 0x9FFF) return "CJK";
+                    if (c >= 0xAC00 && c <= 0xD7AF) return "KOREAN";
+                    return "UNICODE";
+            }
+        }
+
+        static void RunCheckFilenames(string xmlPath)
+        {
+            Console.WriteLine("=== Check Filenames ===");
+            Console.WriteLine();
+
+            Console.WriteLine($"Loading iTunes library: {xmlPath}");
+            var tracks = ITunesParser.Parse(xmlPath);
+            Console.WriteLine($"Found {tracks.Count} tracks");
+            Console.WriteLine();
+
+            var errors = new List<(ITunesTrack Track, List<char> Chars)>();
+            var warnings = new List<(ITunesTrack Track, List<char> Chars, bool Has83)>();
+            var smallFiles = new List<(ITunesTrack Track, long Bytes)>();
+            const long SmallFileThreshold = 50 * 1024; // 50 KB
+
+            foreach (var t in tracks)
+            {
+                var fileName = Path.GetFileName(t.Location);
+                if (string.IsNullOrEmpty(fileName)) continue;
+
+                List<char>? errorList = null;
+                List<char>? warnList = null;
+
+                var seen = new HashSet<char>();
+                foreach (var c in fileName)
+                {
+                    if (c <= 127 || !seen.Add(c)) continue;
+
+                    if (_errorChars.Contains(c))
+                    {
+                        if (errorList == null) errorList = new List<char>();
+                        errorList.Add(c);
+                    }
+                    else
+                    {
+                        if (warnList == null) warnList = new List<char>();
+                        warnList.Add(c);
+                    }
+                }
+
+                // Check file size
+                try
+                {
+                    var size = new FileInfo(t.Location).Length;
+                    if (size < SmallFileThreshold)
+                        smallFiles.Add((t, size));
+                }
+                catch { }
+
+                if (errorList != null)
+                    errors.Add((t, errorList));
+                else if (warnList != null)
+                {
+                    // Check if 8.3 short path is available — if so, Essentia will be fine
+                    bool has83 = false;
+                    try
+                    {
+                        var sb = new StringBuilder(260);
+                        var result = GetShortPathName(t.Location, sb, sb.Capacity);
+                        has83 = result > 0 && result <= sb.Capacity;
+                    }
+                    catch { }
+                    warnings.Add((t, warnList, has83));
+                }
+            }
+
+            // Errors — these WILL break
+            if (errors.Count > 0)
+            {
+                Console.WriteLine($"ERRORS: {errors.Count} file(s) with characters that WILL break Essentia:");
+                Console.WriteLine();
+                foreach (var (t, chars) in errors)
+                {
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}");
+                    foreach (var c in chars)
+                        Console.WriteLine($"    ERROR  '{c}' U+{(int)c:X4} {DescribeChar(c)}");
+                    Console.WriteLine();
+                }
+            }
+
+            // Warnings — may or may not work depending on 8.3 and code page
+            var warnsNo83 = warnings.Where(w => !w.Has83).ToList();
+            var warnsOk = warnings.Where(w => w.Has83).ToList();
+
+            if (warnsNo83.Count > 0)
+            {
+                Console.WriteLine($"WARNINGS: {warnsNo83.Count} file(s) with non-ASCII characters (no 8.3 short path available):");
+                Console.WriteLine();
+                foreach (var (t, chars, _) in warnsNo83)
+                {
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}");
+                    foreach (var c in chars)
+                        Console.WriteLine($"    WARN   '{c}' U+{(int)c:X4} {DescribeChar(c)}");
+                    Console.WriteLine();
+                }
+            }
+
+            // Small files — likely corrupt or truncated
+            if (smallFiles.Count > 0)
+            {
+                Console.WriteLine($"SUSPECT: {smallFiles.Count} file(s) under {SmallFileThreshold / 1024} KB (may be corrupt/truncated):");
+                Console.WriteLine();
+                foreach (var (t, bytes) in smallFiles)
+                {
+                    var kb = bytes / 1024.0;
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}  ({kb:F1} KB)");
+                }
+                Console.WriteLine();
+            }
+
+            // Summary
+            Console.WriteLine("=== Summary ===");
+            Console.WriteLine($"  Total tracks:     {tracks.Count}");
+            Console.WriteLine($"  Errors:           {errors.Count}  (will break - rename these)");
+            Console.WriteLine($"  Warnings (no 8.3):{warnsNo83.Count}  (may break - check these)");
+            Console.WriteLine($"  Warnings (8.3 ok):{warnsOk.Count}  (safe - 8.3 short path available)");
+            Console.WriteLine($"  Suspect files:    {smallFiles.Count}  (under {SmallFileThreshold / 1024} KB)");
+            Console.WriteLine($"  Clean:            {tracks.Count - errors.Count - warnings.Count}");
+            if (errors.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Rename files listed as ERRORS to remove fullwidth Unicode characters.");
+            }
         }
 
         static void RunFixup(string xmlPath, string moodsPath)
@@ -350,8 +709,10 @@ namespace Truedat
 
             Console.WriteLine($"Loading moods: {moodsPath}");
             var json = File.ReadAllText(moodsPath);
-            var root = JObject.Parse(json);
-            var tracks = root["tracks"] as JObject;
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
+            var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
             Console.WriteLine($"Moods entries: {tracks.Count}");
 
@@ -369,23 +730,25 @@ namespace Truedat
             }
 
             int unchanged = 0, remapped = 0, orphaned = 0;
-            var newTracks = new JObject();
+            var newTracks = new JsonObject();
             var orphanedEntries = new List<(string OldPath, string Artist, string Title)>();
 
-            foreach (var prop in tracks.Properties().ToList())
+            foreach (var kv in tracks.ToList())
             {
-                var oldPath = prop.Name;
-                var trackData = prop.Value as JObject;
-                if (trackData == null) continue;
-                var normalizedOldPath = oldPath.Replace('/', '\\');
+                var oldPath = kv.Key;
+                var trackNode = kv.Value;
+                if (trackNode == null) continue;
+                tracks.Remove(oldPath); // detach from old parent so it can be re-parented
+                var trackData = trackNode.AsObject();
+                var normalizedOldPath = PathHelper.NormalizeSeparators(oldPath);
 
                 if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
 
                 var filename = Path.GetFileName(normalizedOldPath);
-                var moodArtist = trackData["artist"]?.Value<string>() ?? "";
-                var moodTitle = trackData["title"]?.Value<string>() ?? "";
-                var moodAlbum = trackData["album"]?.Value<string>() ?? "";
-                var moodGenre = trackData["genre"]?.Value<string>() ?? "";
+                var moodArtist = trackData["artist"]?.GetValue<string>() ?? "";
+                var moodTitle = trackData["title"]?.GetValue<string>() ?? "";
+                var moodAlbum = trackData["album"]?.GetValue<string>() ?? "";
+                var moodGenre = trackData["genre"]?.GetValue<string>() ?? "";
                 ITunesTrack? match = null;
 
                 if (!string.IsNullOrEmpty(filename) && byFilename.TryGetValue(filename, out var candidates))
@@ -413,7 +776,7 @@ namespace Truedat
                 else { orphaned++; orphanedEntries.Add((oldPath, moodArtist, moodTitle)); }
             }
 
-            var moodPaths = new HashSet<string>(newTracks.Properties().Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+            var moodPaths = new HashSet<string>(newTracks.Select(kv => kv.Key), PathComparer.Instance);
             int unanalyzed = library.Count(t => !moodPaths.Contains(t.Location));
 
             Console.WriteLine();
@@ -444,8 +807,8 @@ namespace Truedat
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
                 root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; root["generatedAt"] = DateTime.UtcNow.ToString("o");
                 var tmpPath = moodsPath + ".tmp";
-                File.WriteAllText(tmpPath, root.ToString(Formatting.Indented));
-                File.Delete(moodsPath); File.Move(tmpPath, moodsPath);
+                File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                AtomicReplace(tmpPath, moodsPath);
                 Console.WriteLine($"Updated: {moodsPath}");
             }
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
@@ -461,14 +824,16 @@ namespace Truedat
 
             Console.WriteLine($"Loading: {moodsPath}");
             var json = File.ReadAllText(moodsPath);
-            var root = JObject.Parse(json);
-            var tracks = root["tracks"] as JObject;
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
+            var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
 
             int stripped = 0, total = tracks.Count;
-            foreach (var prop in tracks.Properties())
+            foreach (var kv in tracks)
             {
-                var trackData = prop.Value as JObject;
+                var trackData = kv.Value?.AsObject();
                 if (trackData == null) continue;
                 bool changed = false;
                 if (trackData.Remove("valence")) changed = true;
@@ -486,14 +851,462 @@ namespace Truedat
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             root["generatedAt"] = DateTime.UtcNow.ToString("o");
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToString(Formatting.Indented));
-            File.Delete(moodsPath); File.Move(tmpPath, moodsPath);
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            AtomicReplace(tmpPath, moodsPath);
             Console.WriteLine($"Updated: {moodsPath}");
         }
 
+        // -- Fingerprint mode ------------------------------------------------
+
+        static void RunFingerprint(string xmlPath, string outputDir, int parallelism, bool retryErrors, bool chromaprintOnly, bool md5Only)
+        {
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var chromaprintExe = Path.Combine(baseDir, "essentia_standard_chromaprinter.exe");
+            var md5Exe = Path.Combine(baseDir, "essentia_streaming_md5.exe");
+
+            bool runChromaprint = !md5Only;
+            bool runMd5 = !chromaprintOnly;
+
+            if (runChromaprint && !File.Exists(chromaprintExe))
+            {
+                Console.WriteLine($"Chromaprinter not found: {chromaprintExe}");
+                if (!runMd5) { Console.WriteLine("No fingerprint tools available."); return; }
+                Console.WriteLine("Falling back to MD5 only.");
+                runChromaprint = false;
+            }
+            if (runMd5 && !File.Exists(md5Exe))
+            {
+                Console.WriteLine($"MD5 tool not found: {md5Exe}");
+                if (!runChromaprint) { Console.WriteLine("No fingerprint tools available."); return; }
+                Console.WriteLine("Falling back to chromaprint only.");
+                runMd5 = false;
+            }
+
+            Console.WriteLine("=== Fingerprint Mode ===");
+            Console.WriteLine();
+            if (runChromaprint) Console.WriteLine($"  Chromaprint: {chromaprintExe}");
+            if (runMd5) Console.WriteLine($"  MD5:         {md5Exe}");
+            Console.WriteLine();
+
+            var fingerprintsPath = Path.Combine(outputDir, "mbxhub-fingerprints.json");
+            var errorsPath = Path.Combine(outputDir, "mbxhub-fingerprints-errors.csv");
+
+            Console.WriteLine($"Loading iTunes library: {xmlPath}");
+            var tracks = ITunesParser.Parse(xmlPath);
+            Console.WriteLine($"Found {tracks.Count} tracks");
+
+            var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
+            int existingCount = LoadExistingFingerprints(fingerprintsPath, allFp);
+            Console.WriteLine($"Existing fingerprints: {existingCount}");
+
+            Dictionary<string, string> existingErrors;
+            if (retryErrors)
+            {
+                existingErrors = new Dictionary<string, string>(PathComparer.Instance);
+                if (File.Exists(errorsPath)) { File.Delete(errorsPath); Console.WriteLine("Errors CSV cleared (--retry-errors)"); }
+            }
+            else
+            {
+                existingErrors = LoadExistingErrors(errorsPath);
+            }
+            Console.WriteLine($"Existing errors: {existingErrors.Count}");
+
+            int cachedCount = 0, fingerprinted = 0, skipped = 0, failed = 0;
+            int processed = 0, total = tracks.Count;
+            int lastSaveCount = 0;
+            const int SaveInterval = 25;
+            var saveLock = new object();
+            long fpTicksTotal = 0;
+
+            var startTime = DateTime.Now;
+            var sw = Stopwatch.StartNew();
+
+            var cts = new CancellationTokenSource();
+            var cancelRequested = 0;
+            Console.CancelKeyPress += (_, e) =>
+            {
+                if (Interlocked.Exchange(ref cancelRequested, 1) == 0)
+                {
+                    e.Cancel = true;
+                    Console.WriteLine();
+                    Console.WriteLine("Ctrl+C received - finishing current tracks and saving...");
+                    cts.Cancel();
+                }
+                else
+                {
+                    Console.WriteLine("Force exit.");
+                }
+            };
+
+            WarnLowDiskSpace(outputDir);
+            Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Parallelism: {parallelism} threads");
+            Console.WriteLine();
+
+            try
+            {
+                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
+                {
+                    var current = Interlocked.Increment(ref processed);
+                    try
+                    {
+                        var pct = (current * 100) / total;
+                        var eta = FormatEta(sw.Elapsed, current, total);
+
+                        if (existingErrors.TryGetValue(t.Location, out var prevError))
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
+                            Interlocked.Increment(ref skipped);
+                            return;
+                        }
+
+                        // Check cache — atomic entry replacement for thread safety
+                        if (allFp.TryGetValue(t.Location, out var existing))
+                        {
+                            try
+                            {
+                                var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
+                                if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
+                                {
+                                    bool hasChromaprint = !string.IsNullOrEmpty(existing.Fp.Chromaprint);
+                                    bool hasMd5 = !string.IsNullOrEmpty(existing.Fp.Md5);
+                                    if ((!runChromaprint || hasChromaprint) && (!runMd5 || hasMd5))
+                                    {
+                                        allFp[t.Location] = new FingerprintEntry
+                                        {
+                                            LastModified = currentLastMod,
+                                            Fp = new TrackFingerprint
+                                            {
+                                                TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                                Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                                Chromaprint = existing.Fp.Chromaprint, Duration = existing.Fp.Duration,
+                                                Md5 = existing.Fp.Md5
+                                            }
+                                        };
+                                        Interlocked.Increment(ref cachedCount);
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
+                                        return;
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        long fileSizeBytes = 0;
+                        try { fileSizeBytes = new FileInfo(t.Location).Length; }
+                        catch
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (file not found)");
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, "File not found", 0, 0, saveLock);
+                            Interlocked.Increment(ref failed);
+                            return;
+                        }
+
+                        var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
+                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}");
+
+                        var fpStart = Stopwatch.GetTimestamp();
+                        var fp = new TrackFingerprint
+                        {
+                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                            Album = t.Album, Genre = t.Genre, FilePath = t.Location
+                        };
+
+                        // Preserve existing data when running subset mode
+                        if (allFp.TryGetValue(t.Location, out var prev))
+                        {
+                            if (!runChromaprint && !string.IsNullOrEmpty(prev.Fp.Chromaprint))
+                            {
+                                fp.Chromaprint = prev.Fp.Chromaprint;
+                                fp.Duration = prev.Fp.Duration;
+                            }
+                            if (!runMd5 && !string.IsNullOrEmpty(prev.Fp.Md5))
+                                fp.Md5 = prev.Fp.Md5;
+                        }
+
+                        string? errorMsg = null;
+
+                        if (runChromaprint)
+                        {
+                            var (chromaprint, duration, chromaErr) = RunChromaprinter(chromaprintExe, t.Location);
+                            if (chromaErr != null) errorMsg = $"chromaprint: {chromaErr}";
+                            else { fp.Chromaprint = chromaprint; fp.Duration = duration; }
+                        }
+
+                        if (runMd5 && errorMsg == null)
+                        {
+                            var (md5, md5Err) = RunMd5(md5Exe, t.Location);
+                            if (md5Err != null) errorMsg = $"md5: {md5Err}";
+                            else fp.Md5 = md5;
+                        }
+
+                        var fpTicks = Stopwatch.GetTimestamp() - fpStart;
+                        Interlocked.Add(ref fpTicksTotal, fpTicks);
+
+                        if (errorMsg != null)
+                        {
+                            var fpDuration = StopwatchTicksToTimeSpan(fpTicks).TotalSeconds;
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, errorMsg, sizeMb, fpDuration, saveLock);
+                            Console.WriteLine($"  FAILED: {errorMsg}");
+                            Interlocked.Increment(ref failed);
+                            return;
+                        }
+
+                        var lastMod = DateTime.MinValue;
+                        try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                        allFp[t.Location] = new FingerprintEntry { Fp = fp, LastModified = lastMod };
+                        var newCount = Interlocked.Increment(ref fingerprinted);
+
+                        if (newCount - lastSaveCount >= SaveInterval)
+                        {
+                            lock (saveLock)
+                            {
+                                if (newCount - lastSaveCount >= SaveInterval)
+                                {
+                                    lastSaveCount = newCount;
+                                    var saveSw = Stopwatch.StartNew();
+                                    SaveFingerprints(fingerprintsPath, allFp);
+                                    saveSw.Stop();
+                                    Console.WriteLine($"  [Saved {allFp.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, saveLock);
+                        }
+                        catch { }
+                        Interlocked.Increment(ref failed);
+                    }
+                });
+            }
+            catch (OperationCanceledException) { }
+
+            sw.Stop();
+            var endTime = DateTime.Now;
+            var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
+
+            SaveFingerprints(fingerprintsPath, allFp);
+
+            Console.WriteLine();
+            if (wasCancelled) Console.WriteLine("=== Interrupted (Ctrl+C) - progress saved ===");
+            Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
+            Console.WriteLine();
+            Console.WriteLine($"  Cached:        {cachedCount}");
+            Console.WriteLine($"  Fingerprinted: {fingerprinted}");
+            Console.WriteLine($"  Skipped:       {skipped}  (errors from previous run)");
+            Console.WriteLine($"  Failed:        {failed}");
+            Console.WriteLine($"  ----------     -----");
+            Console.WriteLine($"  Processed:     {cachedCount + fingerprinted + skipped + failed}");
+            Console.WriteLine($"  Output:        {allFp.Count} tracks in fingerprints file");
+            if (fingerprinted > 0)
+            {
+                var avgFp = StopwatchTicksToTimeSpan(Volatile.Read(ref fpTicksTotal) / fingerprinted);
+                Console.WriteLine($"  Avg/track:     {avgFp.TotalSeconds:F1}s");
+            }
+            try
+            {
+                using var currentProcess = Process.GetCurrentProcess();
+                var peakMb = currentProcess.PeakWorkingSet64 / (1024.0 * 1024.0);
+                Console.WriteLine($"  Peak mem:      {peakMb:F0} MB");
+            }
+            catch { }
+            Console.WriteLine();
+            Console.WriteLine($"Output: {fingerprintsPath}");
+        }
+
+        // -- External tool runner (shared by chromaprinter and md5) ----------
+
+        static (string Stdout, string? Error) RunTool(string exe, string audioPath, int timeoutMs = 60000)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exe, Arguments = $"\"{SafePath(audioPath)}\"",
+                    RedirectStandardOutput = true, RedirectStandardError = true,
+                    UseShellExecute = false, CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi)!;
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(timeoutMs))
+                {
+                    try { proc.Kill(); } catch { }
+                    return ("", $"Timeout (>{timeoutMs / 1000}s)");
+                }
+
+                var stdout = stdoutTask.Wait(5000) ? stdoutTask.Result : "";
+                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+
+                if (proc.ExitCode != 0)
+                {
+                    var err = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim().Split('\n').Last().Trim() : $"Exit code {proc.ExitCode}";
+                    return ("", err);
+                }
+
+                return (stdout, null);
+            }
+            catch (Exception ex) { return ("", ex.Message); }
+        }
+
+        static (string Fingerprint, int Duration, string? Error) RunChromaprinter(string exe, string audioPath)
+        {
+            var (stdout, error) = RunTool(exe, audioPath);
+            if (error != null) return ("", 0, error);
+
+            string fingerprint = "";
+            int duration = 0;
+            foreach (var line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.StartsWith("DURATION=")) int.TryParse(line.Substring("DURATION=".Length).Trim(), out duration);
+                else if (line.StartsWith("FINGERPRINT=")) fingerprint = line.Substring("FINGERPRINT=".Length).Trim();
+            }
+
+            if (string.IsNullOrEmpty(fingerprint)) return ("", 0, "No FINGERPRINT in output");
+            return (fingerprint, duration, null);
+        }
+
+        static (string Md5, string? Error) RunMd5(string exe, string audioPath)
+        {
+            var (stdout, error) = RunTool(exe, audioPath);
+            if (error != null) return ("", error);
+
+            foreach (var line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.StartsWith("MD5:"))
+                {
+                    var md5 = line.Substring("MD5:".Length).Trim();
+                    if (!string.IsNullOrEmpty(md5)) return (md5, null);
+                }
+            }
+            return ("", "No MD5 in output");
+        }
+
+        static void SaveFingerprints(string path, ConcurrentDictionary<string, FingerprintEntry> allFp)
+        {
+            var tmpPath = path + ".tmp";
+            try { File.Delete(tmpPath); } catch { }
+
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            {
+                jw.WriteStartObject();
+                jw.WriteString("version", "1.0");
+                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+                jw.WriteNumber("trackCount", allFp.Count);
+                jw.WritePropertyName("tracks");
+                jw.WriteStartObject();
+                foreach (var kvp in allFp)
+                {
+                    var fp = kvp.Value.Fp;
+                    jw.WritePropertyName(kvp.Key);
+                    jw.WriteStartObject();
+                    jw.WriteNumber("trackId", fp.TrackId);
+                    jw.WriteString("artist", fp.Artist);
+                    jw.WriteString("title", fp.Title);
+                    jw.WriteString("album", fp.Album);
+                    jw.WriteString("genre", fp.Genre);
+                    if (!string.IsNullOrEmpty(fp.Chromaprint))
+                    {
+                        jw.WriteString("chromaprint", fp.Chromaprint);
+                        jw.WriteNumber("duration", fp.Duration);
+                    }
+                    if (!string.IsNullOrEmpty(fp.Md5))
+                    {
+                        jw.WriteString("md5", fp.Md5);
+                    }
+                    jw.WriteString("lastModified", kvp.Value.LastModified.ToString("o"));
+                    jw.WriteEndObject();
+                }
+                jw.WriteEndObject();
+                jw.WriteEndObject();
+            }
+
+            AtomicReplace(tmpPath, path);
+        }
+
+        static int LoadExistingFingerprints(string path, ConcurrentDictionary<string, FingerprintEntry> allFp)
+        {
+            if (!File.Exists(path)) return 0;
+            try
+            {
+                var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                using var doc = JsonDocument.Parse(fs, docOptions);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
+                    return 0;
+
+                foreach (var prop in tracks.EnumerateObject())
+                {
+                    var filePath = PathHelper.NormalizeSeparators(prop.Name);
+                    var track = prop.Value;
+
+                    DateTime lastMod;
+                    var lastModStr = GetStr(track, "lastModified");
+                    if (string.IsNullOrEmpty(lastModStr))
+                    {
+                        try { lastMod = File.GetLastWriteTimeUtc(filePath); }
+                        catch { continue; }
+                    }
+                    else if (!DateTime.TryParse(lastModStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastMod))
+                        continue;
+
+                    allFp[filePath] = new FingerprintEntry
+                    {
+                        LastModified = lastMod,
+                        Fp = new TrackFingerprint
+                        {
+                            FilePath = filePath,
+                            TrackId = GetInt(track, "trackId"),
+                            Artist = GetStr(track, "artist"),
+                            Title = GetStr(track, "title"),
+                            Album = GetStr(track, "album"),
+                            Genre = GetStr(track, "genre"),
+                            Chromaprint = GetStr(track, "chromaprint"),
+                            Duration = GetInt(track, "duration"),
+                            Md5 = GetStr(track, "md5")
+                        }
+                    };
+                }
+                return allFp.Count;
+            }
+            catch (JsonException ex)
+            {
+                var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
+                try
+                {
+                    File.Copy(path, bakPath);
+                    Console.WriteLine($"Backup saved to: {bakPath}");
+                }
+                catch (Exception bakEx)
+                {
+                    Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
+                }
+                Console.WriteLine($"WARNING: Existing fingerprints file is corrupt ({ex.Message})");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"WARNING: Could not load existing fingerprints ({ex.Message})");
+                return 0;
+            }
+        }
+
+        // -- Shared helpers ---------------------------------------------------
+
         static Dictionary<string, string> LoadExistingErrors(string path)
         {
-            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var result = new Dictionary<string, string>(PathComparer.Instance);
             if (!File.Exists(path)) return result;
             try
             {
@@ -511,16 +1324,16 @@ namespace Truedat
         static string[] ParseCsvLine(string line)
         {
             var result = new List<string>();
-            var current = "";
+            var sb = new StringBuilder();
             bool inQuotes = false;
             for (int i = 0; i < line.Length; i++)
             {
                 var c = line[i];
-                if (c == '"') { if (inQuotes && i + 1 < line.Length && line[i + 1] == '"') { current += '"'; i++; } else inQuotes = !inQuotes; }
-                else if (c == ',' && !inQuotes) { result.Add(current); current = ""; }
-                else current += c;
+                if (c == '"') { if (inQuotes && i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; } else inQuotes = !inQuotes; }
+                else if (c == ',' && !inQuotes) { result.Add(sb.ToString()); sb.Clear(); }
+                else sb.Append(c);
             }
-            result.Add(current);
+            result.Add(sb.ToString());
             return result.ToArray();
         }
 
@@ -535,7 +1348,7 @@ namespace Truedat
                     {
                         bool needsHeader = !File.Exists(errorsPath) || new FileInfo(errorsPath).Length == 0;
                         using (var fs = new FileStream(errorsPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
-                        using (var writer = new StreamWriter(fs))
+                        using (var writer = new StreamWriter(fs, new UTF8Encoding(false)))
                         {
                             if (needsHeader) writer.WriteLine("Error,Artist,Title,FilePath,SizeMB,Duration");
                             writer.WriteLine($"{CsvEscape(error)},{CsvEscape(artist)},{CsvEscape(title)},{CsvEscape(filePath)},{sizeMb:F1},{durationSecs:F1}");
@@ -549,22 +1362,21 @@ namespace Truedat
         }
 
         /// <summary>
-        /// Stream allTracks to disk using JsonTextWriter — no intermediate strings or JObject trees.
-        /// Writes directly to FileStream with 64K buffer. Memory usage is O(1) per track.
+        /// Stream allTracks to disk using Utf8JsonWriter — writes UTF-8 directly to FileStream.
+        /// No intermediate strings, no StreamWriter. Memory usage is O(1) per track.
         /// </summary>
         static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
             var tmpPath = moodsPath + ".tmp";
-            try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+            try { File.Delete(tmpPath); } catch { }
 
             using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-            using (var sw = new StreamWriter(fs, new UTF8Encoding(false), 65536))
-            using (var jw = new JsonTextWriter(sw) { Formatting = Formatting.Indented })
+            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
             {
                 jw.WriteStartObject();
-                jw.WritePropertyName("version"); jw.WriteValue("1.0");
-                jw.WritePropertyName("generatedAt"); jw.WriteValue(DateTime.UtcNow.ToString("o"));
-                jw.WritePropertyName("trackCount"); jw.WriteValue(allTracks.Count);
+                jw.WriteString("version", "1.0");
+                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+                jw.WriteNumber("trackCount", allTracks.Count);
                 jw.WritePropertyName("tracks");
                 jw.WriteStartObject();
                 foreach (var kvp in allTracks)
@@ -573,67 +1385,73 @@ namespace Truedat
                 jw.WriteEndObject();
             }
 
-            if (File.Exists(moodsPath)) File.Delete(moodsPath);
-            File.Move(tmpPath, moodsPath);
+            AtomicReplace(tmpPath, moodsPath);
         }
 
-        static void WriteTrackEntry(JsonTextWriter jw, string path, TrackEntry entry)
+        static void WriteTrackEntry(Utf8JsonWriter jw, string path, TrackEntry entry)
         {
             var f = entry.Features;
             jw.WritePropertyName(path);
             jw.WriteStartObject();
-            jw.WritePropertyName("trackId"); jw.WriteValue(f.TrackId);
-            jw.WritePropertyName("artist"); jw.WriteValue(f.Artist);
-            jw.WritePropertyName("title"); jw.WriteValue(f.Title);
-            jw.WritePropertyName("album"); jw.WriteValue(f.Album);
-            jw.WritePropertyName("genre"); jw.WriteValue(f.Genre);
-            jw.WritePropertyName("bpm"); jw.WriteValue(f.Bpm);
-            jw.WritePropertyName("key"); jw.WriteValue(f.Key);
-            jw.WritePropertyName("mode"); jw.WriteValue(f.Mode);
-            jw.WritePropertyName("spectralCentroid"); jw.WriteValue(f.SpectralCentroid);
-            jw.WritePropertyName("spectralFlux"); jw.WriteValue(f.SpectralFlux);
-            jw.WritePropertyName("loudness"); jw.WriteValue(f.Loudness);
-            jw.WritePropertyName("danceability"); jw.WriteValue(f.Danceability);
-            jw.WritePropertyName("onsetRate"); jw.WriteValue(f.OnsetRate);
-            jw.WritePropertyName("zeroCrossingRate"); jw.WriteValue(f.ZeroCrossingRate);
-            jw.WritePropertyName("spectralRms"); jw.WriteValue(f.SpectralRms);
-            jw.WritePropertyName("spectralFlatness"); jw.WriteValue(f.SpectralFlatness);
-            jw.WritePropertyName("dissonance"); jw.WriteValue(f.Dissonance);
-            jw.WritePropertyName("pitchSalience"); jw.WriteValue(f.PitchSalience);
-            jw.WritePropertyName("chordsChangesRate"); jw.WriteValue(f.ChordsChangesRate);
+            jw.WriteNumber("trackId", f.TrackId);
+            jw.WriteString("artist", f.Artist);
+            jw.WriteString("title", f.Title);
+            jw.WriteString("album", f.Album);
+            jw.WriteString("genre", f.Genre);
+            jw.WriteNumber("bpm", f.Bpm);
+            jw.WriteString("key", f.Key);
+            jw.WriteString("mode", f.Mode);
+            jw.WriteNumber("spectralCentroid", f.SpectralCentroid);
+            jw.WriteNumber("spectralFlux", f.SpectralFlux);
+            jw.WriteNumber("loudness", f.Loudness);
+            jw.WriteNumber("danceability", f.Danceability);
+            jw.WriteNumber("onsetRate", f.OnsetRate);
+            jw.WriteNumber("zeroCrossingRate", f.ZeroCrossingRate);
+            jw.WriteNumber("spectralRms", f.SpectralRms);
+            jw.WriteNumber("spectralFlatness", f.SpectralFlatness);
+            jw.WriteNumber("dissonance", f.Dissonance);
+            jw.WriteNumber("pitchSalience", f.PitchSalience);
+            jw.WriteNumber("chordsChangesRate", f.ChordsChangesRate);
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
                 jw.WriteStartArray();
-                foreach (var v in f.Mfcc) jw.WriteValue(v);
+                foreach (var v in f.Mfcc) jw.WriteNumberValue(v);
                 jw.WriteEndArray();
             }
-            jw.WritePropertyName("lastModified"); jw.WriteValue(entry.LastModified.ToString("o"));
+            jw.WriteString("lastModified", entry.LastModified.ToString("o"));
             if (entry.AnalysisDurationSecs.HasValue)
             {
-                jw.WritePropertyName("analysisDuration"); jw.WriteValue(Math.Round(entry.AnalysisDurationSecs.Value, 1));
+                jw.WriteNumber("analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, 1));
             }
             jw.WriteEndObject();
         }
 
+        /// <summary>
+        /// Load moods file using JsonDocument — compact read-only DOM, much more
+        /// memory-efficient than Newtonsoft's JObject tree. All data is extracted
+        /// into allTracks before the document is disposed.
+        /// </summary>
         static int LoadExistingMoods(string path, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
             if (!File.Exists(path)) return 0;
             try
             {
-                var json = File.ReadAllText(path);
-                var root = JObject.Parse(json);
-                var tracks = root["tracks"] as JObject;
-                if (tracks == null) return 0;
+                var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                using var doc = JsonDocument.Parse(fs, docOptions);
+                var root = doc.RootElement;
 
-                foreach (var prop in tracks.Properties())
+                if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
+                    return 0;
+
+                foreach (var prop in tracks.EnumerateObject())
                 {
-                    var filePath = prop.Name.Replace('/', '\\');
-                    var track = prop.Value as JObject;
-                    if (track == null) continue;
+                    var filePath = PathHelper.NormalizeSeparators(prop.Name);
+                    var track = prop.Value;
 
                     DateTime lastMod;
-                    var lastModStr = track["lastModified"]?.Value<string>();
+                    var lastModStr = GetStr(track, "lastModified");
                     if (string.IsNullOrEmpty(lastModStr))
                     {
                         try { lastMod = File.GetLastWriteTimeUtc(filePath); }
@@ -643,9 +1461,13 @@ namespace Truedat
                         continue;
 
                     double[]? mfcc = null;
-                    var mfccToken = track["mfcc"];
-                    if (mfccToken != null && mfccToken.Type == JTokenType.Array)
-                        mfcc = mfccToken.Values<double>().ToArray();
+                    if (track.TryGetProperty("mfcc", out var mfccEl) && mfccEl.ValueKind == JsonValueKind.Array)
+                    {
+                        mfcc = new double[mfccEl.GetArrayLength()];
+                        int idx = 0;
+                        foreach (var v in mfccEl.EnumerateArray())
+                            mfcc[idx++] = v.GetDouble();
+                    }
 
                     allTracks[filePath] = new TrackEntry
                     {
@@ -653,38 +1475,45 @@ namespace Truedat
                         Features = new TrackFeatures
                         {
                             FilePath = filePath,
-                            TrackId = track["trackId"]?.Value<int>() ?? 0,
-                            Artist = track["artist"]?.Value<string>() ?? "",
-                            Title = track["title"]?.Value<string>() ?? "",
-                            Album = track["album"]?.Value<string>() ?? "",
-                            Genre = track["genre"]?.Value<string>() ?? "",
-                            Bpm = track["bpm"]?.Value<double>() ?? 0,
-                            Key = track["key"]?.Value<string>() ?? "",
-                            Mode = track["mode"]?.Value<string>() ?? "",
-                            SpectralCentroid = track["spectralCentroid"]?.Value<double>() ?? 0,
-                            SpectralFlux = track["spectralFlux"]?.Value<double>() ?? 0,
-                            Loudness = track["loudness"]?.Value<double>() ?? 0,
-                            Danceability = track["danceability"]?.Value<double>() ?? 0,
-                            OnsetRate = track["onsetRate"]?.Value<double>() ?? 0,
-                            ZeroCrossingRate = track["zeroCrossingRate"]?.Value<double>() ?? 0,
-                            SpectralRms = track["spectralRms"]?.Value<double>() ?? 0,
-                            SpectralFlatness = track["spectralFlatness"]?.Value<double>() ?? 0,
-                            Dissonance = track["dissonance"]?.Value<double>() ?? 0,
-                            PitchSalience = track["pitchSalience"]?.Value<double>() ?? 0,
-                            ChordsChangesRate = track["chordsChangesRate"]?.Value<double>() ?? 0,
+                            TrackId = GetInt(track, "trackId"),
+                            Artist = GetStr(track, "artist"),
+                            Title = GetStr(track, "title"),
+                            Album = GetStr(track, "album"),
+                            Genre = GetStr(track, "genre"),
+                            Bpm = GetDbl(track, "bpm"),
+                            Key = GetStr(track, "key"),
+                            Mode = GetStr(track, "mode"),
+                            SpectralCentroid = GetDbl(track, "spectralCentroid"),
+                            SpectralFlux = GetDbl(track, "spectralFlux"),
+                            Loudness = GetDbl(track, "loudness"),
+                            Danceability = GetDbl(track, "danceability"),
+                            OnsetRate = GetDbl(track, "onsetRate"),
+                            ZeroCrossingRate = GetDbl(track, "zeroCrossingRate"),
+                            SpectralRms = GetDbl(track, "spectralRms"),
+                            SpectralFlatness = GetDbl(track, "spectralFlatness"),
+                            Dissonance = GetDbl(track, "dissonance"),
+                            PitchSalience = GetDbl(track, "pitchSalience"),
+                            ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
                             Mfcc = mfcc
                         },
-                        AnalysisDurationSecs = track["analysisDuration"]?.Value<double>()
+                        AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration")
                     };
                 }
                 return allTracks.Count;
             }
-            catch (JsonReaderException ex)
+            catch (JsonException ex)
             {
                 var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
-                try { File.Copy(path, bakPath); } catch { }
+                try
+                {
+                    File.Copy(path, bakPath);
+                    Console.WriteLine($"Backup saved to: {bakPath}");
+                }
+                catch (Exception bakEx)
+                {
+                    Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
+                }
                 Console.WriteLine($"WARNING: Existing moods file is corrupt ({ex.Message})");
-                Console.WriteLine($"Backup saved to: {bakPath}");
                 Console.WriteLine($"Starting fresh - tracks will be re-analyzed.");
                 return 0;
             }
@@ -699,24 +1528,30 @@ namespace Truedat
         {
             if (string.IsNullOrWhiteSpace(stderr)) return $"Exit code {exitCode}";
             var lines = stderr.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var errorLines = lines.Where(line =>
-                !line.TrimStart().StartsWith("[   INFO   ]") &&
-                !line.TrimStart().StartsWith("[  DEBUG  ]") &&
-                !line.TrimStart().StartsWith("[  INFO  ]") &&
-                !string.IsNullOrWhiteSpace(line)
-            ).ToList();
+            var errorLines = new List<string>();
+            foreach (var line in lines)
+            {
+                var trimmed = line.TrimStart();
+                if (!trimmed.StartsWith("[   INFO   ]") &&
+                    !trimmed.StartsWith("[  DEBUG  ]") &&
+                    !trimmed.StartsWith("[  INFO  ]") &&
+                    !string.IsNullOrWhiteSpace(line))
+                {
+                    errorLines.Add(line);
+                }
+            }
 
             if (errorLines.Count > 0)
             {
-                var relevant = errorLines.Skip(Math.Max(0, errorLines.Count - 3)).ToList();
-                return string.Join(" | ", relevant);
+                int start = Math.Max(0, errorLines.Count - 3);
+                return string.Join(" | ", errorLines.GetRange(start, errorLines.Count - start));
             }
             return $"Exit code {exitCode} (stderr: {lines.Last()})";
         }
 
         /// <summary>
         /// Run Essentia extractor on an audio file. Uses async stderr read so the
-        /// 2-minute timeout actually fires if the process hangs.
+        /// timeout actually fires if the process hangs. Uses SafePath for non-ASCII filenames.
         /// </summary>
         static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes)
         {
@@ -729,7 +1564,7 @@ namespace Truedat
                 var psi = new ProcessStartInfo
                 {
                     FileName = essentiaExe,
-                    Arguments = $"\"{audioPath}\" \"{tempJson}\"",
+                    Arguments = $"\"{SafePath(audioPath)}\" \"{tempJson}\"",
                     RedirectStandardOutput = false,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -738,6 +1573,7 @@ namespace Truedat
 
                 var timer = Stopwatch.StartNew();
                 using var proc = Process.Start(psi);
+                if (proc == null) return (null, "Failed to start Essentia process");
                 var pid = proc.Id;
 
                 // Async stderr — ReadToEnd() blocks forever if process hangs, preventing the timeout
@@ -792,30 +1628,38 @@ namespace Truedat
         {
             try
             {
-                var root = JObject.Parse(json);
-                var bpm = root.SelectToken("rhythm.bpm")?.Value<double>() ?? 0;
-                var key = root.SelectToken("tonal.key_edma.key")?.Value<string>()
-                       ?? root.SelectToken("tonal.key_krumhansl.key")?.Value<string>()
-                       ?? root.SelectToken("tonal.chords_key")?.Value<string>() ?? "";
-                var scale = root.SelectToken("tonal.key_edma.scale")?.Value<string>()
-                         ?? root.SelectToken("tonal.key_krumhansl.scale")?.Value<string>()
-                         ?? root.SelectToken("tonal.chords_scale")?.Value<string>() ?? "";
-                var loudness = root.SelectToken("lowlevel.loudness_ebu128.integrated")?.Value<double>()
-                            ?? root.SelectToken("lowlevel.average_loudness")?.Value<double>() ?? -20;
-                var spectralCentroidMean = root.SelectToken("lowlevel.spectral_centroid.mean")?.Value<double>() ?? 2000;
-                var spectralFluxMean = root.SelectToken("lowlevel.spectral_flux.mean")?.Value<double>() ?? 0.1;
-                var danceability = root.SelectToken("rhythm.danceability")?.Value<double>() ?? 0.5;
-                var onsetRate = root.SelectToken("rhythm.onset_rate")?.Value<double>() ?? 0;
-                var zeroCrossingRate = root.SelectToken("lowlevel.zerocrossingrate.mean")?.Value<double>() ?? 0;
-                var spectralRms = root.SelectToken("lowlevel.spectral_rms.mean")?.Value<double>() ?? 0;
-                var spectralFlatness = root.SelectToken("lowlevel.spectral_flatness_db.mean")?.Value<double>() ?? 0;
-                var dissonance = root.SelectToken("lowlevel.dissonance.mean")?.Value<double>() ?? 0;
-                var pitchSalience = root.SelectToken("lowlevel.pitch_salience.mean")?.Value<double>() ?? 0;
-                var chordsChangesRate = root.SelectToken("tonal.chords_changes_rate")?.Value<double>() ?? 0;
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                var bpm = NavDbl(root, "rhythm.bpm");
+                var key = NavStr(root, "tonal.key_edma.key");
+                if (key == "") key = NavStr(root, "tonal.key_krumhansl.key");
+                if (key == "") key = NavStr(root, "tonal.chords_key");
+                var scale = NavStr(root, "tonal.key_edma.scale");
+                if (scale == "") scale = NavStr(root, "tonal.key_krumhansl.scale");
+                if (scale == "") scale = NavStr(root, "tonal.chords_scale");
+                var loudness = NavDbl(root, "lowlevel.loudness_ebu128.integrated", double.NaN);
+                if (double.IsNaN(loudness)) loudness = NavDbl(root, "lowlevel.average_loudness", -20);
+                var spectralCentroidMean = NavDbl(root, "lowlevel.spectral_centroid.mean", 2000);
+                var spectralFluxMean = NavDbl(root, "lowlevel.spectral_flux.mean", 0.1);
+                var danceability = NavDbl(root, "rhythm.danceability", 0.5);
+                var onsetRate = NavDbl(root, "rhythm.onset_rate");
+                var zeroCrossingRate = NavDbl(root, "lowlevel.zerocrossingrate.mean");
+                var spectralRms = NavDbl(root, "lowlevel.spectral_rms.mean");
+                var spectralFlatness = NavDbl(root, "lowlevel.spectral_flatness_db.mean");
+                var dissonance = NavDbl(root, "lowlevel.dissonance.mean");
+                var pitchSalience = NavDbl(root, "lowlevel.pitch_salience.mean");
+                var chordsChangesRate = NavDbl(root, "tonal.chords_changes_rate");
                 double[]? mfcc = null;
-                var mfccToken = root.SelectToken("lowlevel.mfcc.mean");
-                if (mfccToken != null && mfccToken.Type == JTokenType.Array)
-                    mfcc = mfccToken.Values<double>().ToArray();
+                var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
+                if (mfccEl.HasValue && mfccEl.Value.ValueKind == JsonValueKind.Array)
+                {
+                    var arr = mfccEl.Value;
+                    mfcc = new double[arr.GetArrayLength()];
+                    int idx = 0;
+                    foreach (var v in arr.EnumerateArray())
+                        mfcc[idx++] = v.GetDouble();
+                }
 
                 return new TrackFeatures
                 {
@@ -837,23 +1681,70 @@ namespace Truedat
             catch { return null; }
         }
 
+        // -- JSON helpers -----------------------------------------------------
+
+        /// <summary>Navigate a dot-separated path like "rhythm.bpm" through nested JSON objects.</summary>
+        static JsonElement? NavigatePath(JsonElement root, string dottedPath)
+        {
+            var current = root;
+            foreach (var part in dottedPath.Split('.'))
+            {
+                if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(part, out var next))
+                    return null;
+                current = next;
+            }
+            return current;
+        }
+
+        static double NavDbl(JsonElement root, string path, double def = 0)
+        {
+            var el = NavigatePath(root, path);
+            return el.HasValue && el.Value.ValueKind == JsonValueKind.Number ? el.Value.GetDouble() : def;
+        }
+
+        static string NavStr(JsonElement root, string path)
+        {
+            var el = NavigatePath(root, path);
+            return el.HasValue && el.Value.ValueKind == JsonValueKind.String ? el.Value.GetString() ?? "" : "";
+        }
+
+        static string GetStr(JsonElement el, string name)
+        {
+            return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        }
+
+        static double GetDbl(JsonElement el, string name, double def = 0)
+        {
+            return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : def;
+        }
+
+        static int GetInt(JsonElement el, string name, int def = 0)
+        {
+            return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : def;
+        }
+
+        static double? GetNullableDbl(JsonElement el, string name)
+        {
+            return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : (double?)null;
+        }
+
+        // -- Utility helpers --------------------------------------------------
+
+        static TimeSpan StopwatchTicksToTimeSpan(long stopwatchTicks)
+        {
+            return TimeSpan.FromSeconds((double)stopwatchTicks / Stopwatch.Frequency);
+        }
+
         static DateTime TruncateToSeconds(DateTime dt)
         {
             return new DateTime(dt.Ticks - dt.Ticks % TimeSpan.TicksPerSecond, dt.Kind);
         }
 
+        /// <summary>Wall-clock ETA — naturally accounts for parallelism, cache hits, failures, and varying track sizes.</summary>
         static string FormatEta(TimeSpan elapsed, int done, int total)
         {
             if (done < 10 || total <= done) return "";
             var remaining = total - done;
-            var analyzeCount = Volatile.Read(ref _analyzeCount);
-            if (analyzeCount >= 3)
-            {
-                var analyzeTicks = Volatile.Read(ref _analyzeTicksTotal);
-                var avgAnalyzeSecs = TimeSpan.FromTicks(analyzeTicks / analyzeCount).TotalSeconds;
-                var analyzeRatio = (double)analyzeCount / done;
-                return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(remaining * analyzeRatio * avgAnalyzeSecs))}";
-            }
             return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(elapsed.TotalSeconds / done * remaining))}";
         }
 
@@ -870,6 +1761,38 @@ namespace Truedat
             value = value.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
             if (value.Contains(",") || value.Contains("\"")) return "\"" + value.Replace("\"", "\"\"") + "\"";
             return value;
+        }
+
+        /// <summary>
+        /// Atomic file replacement — uses File.Replace on Windows (ReplaceFile API) which
+        /// ensures either the old or new file exists, never neither.
+        /// </summary>
+        static void AtomicReplace(string tmpPath, string targetPath)
+        {
+            if (File.Exists(targetPath))
+                File.Replace(tmpPath, targetPath, null);
+            else
+                File.Move(tmpPath, targetPath);
+        }
+
+        /// <summary>Warn if the output drive has low free space before starting a long operation.</summary>
+        static void WarnLowDiskSpace(string dir)
+        {
+            try
+            {
+                var root = Path.GetPathRoot(Path.GetFullPath(dir));
+                if (root != null)
+                {
+                    var drive = new DriveInfo(root);
+                    if (drive.IsReady)
+                    {
+                        var freeMb = drive.AvailableFreeSpace / (1024.0 * 1024.0);
+                        if (freeMb < 500)
+                            Console.WriteLine($"WARNING: Low disk space ({freeMb:F0} MB free on {drive.Name})");
+                    }
+                }
+            }
+            catch { }
         }
     }
 }
