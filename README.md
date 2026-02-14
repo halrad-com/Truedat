@@ -3,6 +3,7 @@
 Audio feature extraction tool that generates mood vectors (valence/arousal) and audio fingerprints for music libraries using [Essentia](https://essentia.upf.edu/). Extracts 15 audio features per track, maps every song onto a 2D emotion space, and optionally generates perceptual fingerprints and audio-data hashes.
 
 **Output:**
+
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxhub-fingerprints.json` - Chromaprint perceptual fingerprints and audio MD5 hashes
 
@@ -11,6 +12,7 @@ Audio feature extraction tool that generates mood vectors (valence/arousal) and 
 Truedat reads an iTunes Music Library XML file and runs each audio file through Essentia tools:
 
 ### Mood Analysis (default mode)
+
 - **Valence** (0-1): Sad ← → Happy (8 input features)
 - **Arousal** (0-1): Calm ← → Energetic (7 input features)
 - **15 raw Essentia features** stored per track for runtime recomputation
@@ -18,11 +20,14 @@ Truedat reads an iTunes Music Library XML file and runs each audio file through 
 This enables mood-based selection in MBXHub - pick a vibe like "Energetic" or "Chill" and the AutoQ engine filters your library accordingly.
 
 ### Fingerprint Mode (`--fingerprint`)
+
 - **Chromaprint** - Perceptual audio fingerprint (AcoustID). Identifies the same *song* regardless of encoding, bitrate, or format.
 - **Audio MD5** - Hash of raw decoded audio data (ignores metadata tags). Identifies the exact same *audio data*.
 
 ### Filename Check (`--check-filenames`)
+
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
+
 - **Errors** - Fullwidth Unicode substitution characters (e.g. `⧸` `：` `＂`) that are known to break Essentia's ANSI argv parsing. These files will always fail analysis.
 - **Warnings** - Other non-ASCII characters where 8.3 short path fallback is unavailable. These files may fail depending on system configuration.
 - **Suspects** - Audio files under 50 KB that may be corrupt or truncated.
@@ -51,9 +56,12 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --fingerprint           Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json
   --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
   --md5-only              Fingerprint mode: only run audio md5 (skip chromaprint)
+  --details               Use ffprobe → mbxhub-details.json (implies --fingerprint)
   --audit                 Write all console output to truedat.log (for debugging)
   --check-filenames       Scan for filenames with characters that break Essentia tools
 ```
+
+**Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable auto-downmix of multi-channel (5.1+) audio files and the `--details` probe mode. Without ffmpeg, multi-channel files are skipped with a warning.
 
 ### Large Libraries
 
@@ -82,20 +90,28 @@ truedat.exe "iTunes Music Library.xml" --chromaprint-only
 
 REM Check for problematic filenames before scanning
 truedat.exe "iTunes Music Library.xml" --check-filenames
+
+REM Probe audio details (codec, bitrate, sample rate, etc.)
+truedat.exe "iTunes Music Library.xml" --details
 ```
 
 ## Installation
 
-Copy all files to the same folder and run. No additional runtime needed on Windows 10+.
+Place `truedat.exe` and the required tools in the same folder. No additional runtime needed on Windows 10+.
 
-| File | Description |
-| ---- | ----------- |
-| `truedat.exe` | Main scanner (.NET Framework 4.8, built into Windows 10/11) |
-| `essentia_streaming_extractor_music.exe` | Essentia extractor for mood analysis (x64, custom build) |
-| `essentia_standard_chromaprinter.exe` | Chromaprint/AcoustID fingerprinter (x64, custom build) |
-| `essentia_streaming_md5.exe` | Audio payload MD5 hasher (x64, custom build) |
+### Dependencies
 
-The fingerprint tools are optional - only needed for `--fingerprint` mode. The mood extractor is only needed for the default mood analysis mode.
+Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or on PATH.
+
+| Tool | Enables | License | Source |
+| ---- | ------- | ------- | ------ |
+| [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
+| [Essentia](https://essentia.upf.edu/) `essentia_standard_chromaprinter.exe` | `--fingerprint` (chromaprint) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
+| [Essentia](https://essentia.upf.edu/) `essentia_streaming_md5.exe` | `--fingerprint` (md5) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
+| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) |
+| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) |
+
+All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. Custom x64 Essentia builds are available via [`essentia-build/`](essentia-build/).
 
 ### Essentia Builds
 
@@ -267,9 +283,9 @@ Place `mbxmoods.json` in your MusicBee Library folder (sibling to `AppData`) or 
 ## License
 
 - **truedat.exe**: MIT - Copyright (c) 2026 Halrad LLC
-- **System.Text.Json**: MIT - Copyright (c) .NET Foundation (bundled)
-
-The Essentia extractor (`essentia_streaming_extractor_music.exe`) is built from [Essentia](https://github.com/MTG/essentia) source, licensed under AGPL-3.0 by the Music Technology Group.
+- **System.Text.Json**: MIT - Copyright (c) .NET Foundation (merged into exe)
+- **Essentia tools**: AGPL-3.0 - [Essentia](https://github.com/MTG/essentia) by Music Technology Group, Universitat Pompeu Fabra
+- **FFmpeg tools**: GPL-3.0+ - [FFmpeg](https://ffmpeg.org/) (optional dependency)
 
 See [LICENSE](LICENSE) for details.
 

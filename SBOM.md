@@ -72,6 +72,22 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 
 All Essentia tools share the same dependency tree above. The fingerprint tools (`essentia_standard_chromaprinter.exe`, `essentia_streaming_md5.exe`) are placed in the same folder as `truedat.exe`.
 
+### FFmpeg (Optional Dependency)
+
+Truedat can optionally use FFmpeg for multi-channel audio downmixing and audio stream probing (`--details` mode). FFmpeg is a separate download, not built or distributed by this project. Pre-built Windows binaries are available from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/).
+
+Source: [FFmpeg](https://ffmpeg.org/)
+
+| Component | Version | License | Purpose |
+|-----------|---------|---------|---------|
+| ffmpeg.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio downmixing (multi-channel → stereo) |
+| ffprobe.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio stream probing (`--details` mode) |
+| ffplay.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Not used by truedat (bundled with FFmpeg distribution) |
+
+**Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
+
+**Note:** FFmpeg is an optional external dependency. Without it, multi-channel audio files are skipped with a warning and `--details` mode is unavailable. Truedat itself (MIT) does not link against FFmpeg — it invokes the executables as subprocesses.
+
 ## Output Files
 
 | File | Description |
@@ -80,6 +96,7 @@ All Essentia tools share the same dependency tree above. The fingerprint tools (
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
 | `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
+| `mbxhub-details.json` | Audio stream details: codec, bitrate, sample rate, channels per track (requires ffprobe) |
 | `truedat.log` | Console output log (when `--audit` is used) |
 
 ## Platform Support
