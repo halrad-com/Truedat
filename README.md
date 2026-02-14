@@ -193,6 +193,10 @@ This is a standard XML format originally from iTunes/Apple Music that many music
 
 ## Integration with MBXHub
 
+[Features - MBXHub](https://mbxhub.com/features.html#autoq)
+
+[Download - MBXHub](https://mbxhub.com/download.html)
+
 Truedat generates the mood data that MBXHub's AutoQ engine consumes. The workflow:
 
 1. **Truedat** scans your library using the iTunes XML export and produces `mbxmoods.json`

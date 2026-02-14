@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build Essentia streaming_extractor_music for Windows x64
-# Run from WSL: cd /mnt/c/Users/scott/source/repos/MBX/truedat/essentia-build && bash build_essentia.sh
+# Run from WSL: cd /mnt/c/Users/builder/source/repos/MBX/truedat/essentia-build && bash build_essentia.sh
 #
 # Prerequisites:
 #   1. Run build_3rdparty.sh first

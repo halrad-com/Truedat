@@ -24,7 +24,7 @@ sudo apt-get install -y curl
 
 ```bash
 # From WSL, navigate to the build directory
-cd /mnt/c/Users/scott/source/repos/MBX/truedat/essentia-build
+cd /mnt/c/Users/builder/source/repos/MBX/truedat/essentia-build
 
 # Step 1: Build all 9 third-party dependencies (~30-60 min)
 bash build_3rdparty.sh

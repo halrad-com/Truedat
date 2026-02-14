@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build all Essentia x64 third-party dependencies
-# Run from WSL: cd /mnt/c/Users/scott/source/repos/MBX/truedat/essentia-build && bash build_3rdparty.sh
+# Run from WSL: cd /mnt/c/Users/builder/source/repos/MBX/truedat/essentia-build && bash build_3rdparty.sh
 set -e
 
 BASEDIR=$(dirname $0)

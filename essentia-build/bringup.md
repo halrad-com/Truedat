@@ -55,7 +55,7 @@ nasm --version                       # NASM assembler (for FFmpeg SIMD)
 **Important**: Building on NTFS (`/mnt/c/`) causes `tar` failures ("Cannot utime: Operation not permitted") and is significantly slower. Always build on the native Linux filesystem.
 
 ```bash
-cp -r /mnt/c/Users/scott/source/repos/MBX/truedat/essentia-build ~/essentia-build
+cp -r /mnt/c/Users/builder/source/repos/MBX/truedat/essentia-build ~/essentia-build
 cd ~/essentia-build
 ```
 
@@ -116,20 +116,20 @@ Output: `output-x64/*.exe` (53 tools including `essentia_streaming_extractor_mus
 ## Step 5: Copy Output Back to Windows
 
 ```bash
-cp ~/essentia-build/output-x64/*.exe /mnt/c/Users/scott/source/repos/MBX/truedat/essentia-build/output-x64/
+cp ~/essentia-build/output-x64/*.exe /mnt/c/Users/builder/source/repos/MBX/truedat/essentia-build/output-x64/
 ```
 
 ## Step 6: Verify the Binary
 
 ```powershell
 # From PowerShell — confirm x64 PE header
-$pe = [IO.File]::ReadAllBytes("C:\Users\scott\source\repos\MBX\truedat\essentia-build\output\essentia_streaming_extractor_music.exe"); $off = [BitConverter]::ToInt32($pe, 60); $m = [BitConverter]::ToUInt16($pe, $off + 4); if ($m -eq 0x8664) { "x64 - SUCCESS" } elseif ($m -eq 0x14c) { "x86 - WRONG" }
+$pe = [IO.File]::ReadAllBytes("C:\Users\builder\source\repos\MBX\truedat\essentia-build\output\essentia_streaming_extractor_music.exe"); $off = [BitConverter]::ToInt32($pe, 60); $m = [BitConverter]::ToUInt16($pe, $off + 4); if ($m -eq 0x8664) { "x64 - SUCCESS" } elseif ($m -eq 0x14c) { "x86 - WRONG" }
 ```
 
 Test with a real audio file:
 
 ```cmd
-essentia-build\output\essentia_streaming_extractor_music.exe "test.mp3" "C:\Users\scott\test_output.json"
+essentia-build\output\essentia_streaming_extractor_music.exe "test.mp3" "C:\Users\builder\test_output.json"
 ```
 
 Output files are written with `_statistics` and `_frames` suffixes appended to the base name.
