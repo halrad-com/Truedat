@@ -19,9 +19,9 @@ namespace Truedat
 
     public static class ITunesParser
     {
-        public static List<ITunesTrack> Parse(string xmlPath)
+        public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues)
         {
-            var xml = SanitizeXml(File.ReadAllText(xmlPath, Encoding.UTF8));
+            var xml = SanitizeXml(File.ReadAllText(xmlPath, Encoding.UTF8), out xmlIssues);
             var doc = XDocument.Parse(xml);
 
             var root = doc.Root;
@@ -107,27 +107,58 @@ namespace Truedat
             }
         }
 
-        private static string SanitizeXml(string xml)
+        private static string SanitizeXml(string xml, out List<string>? issues)
         {
+            issues = null;
+
             // Fast path: scan for invalid XML 1.0 characters; if none, return input with zero allocation
+            // Valid XML 1.0: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+            // UTF-16 surrogate pairs (D800-DFFF) encode codepoints U+10000+ and are valid when paired
             for (int i = 0; i < xml.Length; i++)
             {
                 var c = xml[i];
                 if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
                     continue;
+                if (char.IsHighSurrogate(c) && i + 1 < xml.Length && char.IsLowSurrogate(xml[i + 1]))
+                    { i++; continue; }
                 goto needsSanitization;
             }
             return xml;
 
             needsSanitization:
             int stripped = 0;
+            issues = new List<string>();
             var sb = new StringBuilder(xml.Length);
-            foreach (var c in xml)
+            int line = 1;
+            for (int j = 0; j < xml.Length; j++)
             {
+                var c = xml[j];
                 if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
+                {
                     sb.Append(c);
+                    if (c == 0xA) line++;
+                }
+                else if (char.IsHighSurrogate(c) && j + 1 < xml.Length && char.IsLowSurrogate(xml[j + 1]))
+                {
+                    // Valid surrogate pair — emoji and other U+10000+ codepoints
+                    sb.Append(c);
+                    sb.Append(xml[++j]);
+                }
                 else
+                {
                     stripped++;
+                    var start = Math.Max(0, j - 40);
+                    var end = Math.Min(xml.Length, j + 40);
+                    var snippet = new StringBuilder(end - start + 10);
+                    for (int k = start; k < end; k++)
+                    {
+                        var sc = xml[k];
+                        if (sc < 0x20 && sc != 0x9 && sc != 0xA && sc != 0xD) snippet.Append($"[U+{(int)sc:X4}]");
+                        else if (sc == '\r' || sc == '\n') snippet.Append(' ');
+                        else snippet.Append(sc);
+                    }
+                    issues.Add($"  Line {line}: U+{(int)c:X4} in ...{snippet}...");
+                }
             }
             Console.WriteLine($"WARNING: Stripped {stripped} invalid XML character(s) from library file");
             return sb.ToString();

@@ -21,7 +21,8 @@ if errorlevel 1 (
 REM Build C# console app (ILRepack merges System.Text.Json)
 echo Building C# scanner...
 if not exist dist\truedat mkdir dist\truedat
-dotnet build Truedat/Truedat.csproj -c Release -f net48 --no-incremental
+dotnet clean Truedat/Truedat.csproj -c Release -f net48 >nul 2>&1
+dotnet build Truedat/Truedat.csproj -c Release -f net48
 if errorlevel 1 (
     echo ERROR: Build failed
     pause

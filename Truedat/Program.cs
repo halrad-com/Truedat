@@ -178,6 +178,7 @@ namespace Truedat
         static long _analyzeTicksTotal;
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
+        static bool _audit;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
@@ -301,6 +302,8 @@ namespace Truedat
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
+            _audit = auditLog;
+
             if (showHelp)
             {
                 Console.WriteLine("Usage: truedat.exe <path-to-iTunes-Music-Library.xml> [options]");
@@ -358,6 +361,15 @@ namespace Truedat
                 Console.SetOut(tee);
             }
 
+            var modeList = new List<string>();
+            if (checkFilenames) modeList.Add("check-filenames");
+            if (migrateMode) modeList.Add("migrate");
+            if (fixupMode) modeList.Add("fixup");
+            if (fingerprintMode) modeList.Add(chromaprintOnly ? "chromaprint-only" : md5Only ? "md5-only" : "fingerprint");
+            if (detailsMode) modeList.Add("details");
+            if (analyzeMode || (!checkFilenames && !migrateMode && !fixupMode && !fingerprintMode)) modeList.Add("analyze");
+            Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}");
+
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
 
@@ -392,7 +404,9 @@ namespace Truedat
             var errorsPath = Path.Combine(outputDir, "mbxmoods-errors.csv");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var tracks = ITunesParser.Parse(xmlPath);
+            var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues);
+            if (_audit && xmlIssues != null)
+                foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
 
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
@@ -502,8 +516,9 @@ namespace Truedat
                                     Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
                                     return;
                                 }
+                                if (_audit) Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
                             }
-                            catch { }
+                            catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
                         }
 
                         long fileSizeBytes = 0;
@@ -672,7 +687,7 @@ namespace Truedat
             Console.WriteLine();
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var tracks = ITunesParser.Parse(xmlPath);
+            var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
             Console.WriteLine();
 
@@ -811,7 +826,7 @@ namespace Truedat
             Console.WriteLine($"Moods entries: {tracks.Count}");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var library = ITunesParser.Parse(xmlPath);
+            var library = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Library tracks: {library.Count}");
 
             var byFilename = new Dictionary<string, List<ITunesTrack>>(StringComparer.OrdinalIgnoreCase);
@@ -1027,7 +1042,9 @@ namespace Truedat
             var errorsPath = Path.Combine(outputDir, "mbxhub-fingerprints-errors.csv");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var tracks = ITunesParser.Parse(xmlPath);
+            var tracks = ITunesParser.Parse(xmlPath, out var fpXmlIssues);
+            if (_audit && fpXmlIssues != null)
+                foreach (var issue in fpXmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
@@ -1165,9 +1182,20 @@ namespace Truedat
                                         }
                                         return;
                                     }
+                                    if (_audit)
+                                    {
+                                        var missing = new List<string>();
+                                        if (runChromaprint && !hasChromaprint) missing.Add("chromaprint");
+                                        if (runMd5 && !hasMd5) missing.Add("md5");
+                                        Console.WriteLine($"  DEBUG cache: incomplete ({string.Join("+", missing)} missing)");
+                                    }
+                                }
+                                else if (_audit)
+                                {
+                                    Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
                                 }
                             }
-                            catch { }
+                            catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
                         }
 
                         long fileSizeBytes = 0;
@@ -1384,6 +1412,8 @@ namespace Truedat
                 pathMethod = method;
                 if (link != null) { toolPath = link; tempLink = link; }
             }
+            if (_audit && pathMethod == "8.3")
+                Console.WriteLine($"  DEBUG path: 8.3 -> {toolPath}");
 
             try
             {
@@ -1575,7 +1605,16 @@ namespace Truedat
                 }
                 proc.WaitForExit(); // flush async I/O buffers
                 stdoutTask.Wait(5000);
-                if (proc.ExitCode == 0 && File.Exists(tempPath)) return tempPath;
+                if (proc.ExitCode == 0 && File.Exists(tempPath))
+                {
+                    if (_audit)
+                    {
+                        var srcMb = 0.0; try { srcMb = new FileInfo(audioPath).Length / (1024.0 * 1024.0); } catch { }
+                        var tmpMb = new FileInfo(tempPath).Length / (1024.0 * 1024.0);
+                        Console.WriteLine($"  DEBUG downmix: {srcMb:F1} MB -> {tmpMb:F1} MB stereo WAV");
+                    }
+                    return tempPath;
+                }
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
                 Console.WriteLine($"  DEBUG downmix failed (exit {proc.ExitCode}): {stderr.Substring(0, Math.Min(200, stderr.Length))}");
                 try { File.Delete(tempPath); } catch { }
@@ -1688,18 +1727,23 @@ namespace Truedat
                     CreateNoWindow = true
                 };
                 using var proc = Process.Start(psi);
-                if (proc == null) return null;
+                if (proc == null) { if (_audit) Console.WriteLine($"  DEBUG probe: failed to start: {audioPath}"); return null; }
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(30000))
                 {
                     try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                    if (_audit) Console.WriteLine($"  DEBUG probe: timeout after 30s: {audioPath}");
                     return null;
                 }
                 proc.WaitForExit(); // flush async I/O buffers
                 var stdout = stdoutTask.Wait(5000) ? stdoutTask.Result : "";
                 stderrTask.Wait(5000);
-                if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout)) return null;
+                if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
+                {
+                    if (_audit) Console.WriteLine($"  DEBUG probe: exit {proc.ExitCode}{(string.IsNullOrWhiteSpace(stdout) ? " (no output)" : "")}: {audioPath}");
+                    return null;
+                }
 
                 using var doc = JsonDocument.Parse(stdout);
                 var root = doc.RootElement;
@@ -1729,6 +1773,8 @@ namespace Truedat
                         }
                     }
                 }
+                if (_audit && string.IsNullOrEmpty(codec))
+                    Console.WriteLine($"  DEBUG probe: no audio stream found: {audioPath}");
 
                 if (root.TryGetProperty("format", out var fmt))
                 {
@@ -1760,8 +1806,9 @@ namespace Truedat
                     LastProbed = DateTime.UtcNow
                 };
             }
-            catch
+            catch (Exception ex)
             {
+                if (_audit) Console.WriteLine($"  DEBUG probe: parse error: {ex.Message}: {audioPath}");
                 return null;
             }
         }
@@ -1807,6 +1854,7 @@ namespace Truedat
             }
 
             AtomicReplace(tmpPath, path);
+            if (_audit) { try { Console.WriteLine($"  DEBUG save: {path} ({new FileInfo(path).Length / 1024} KB, {allFp.Count} tracks)"); } catch { } }
         }
 
         static int LoadExistingFingerprints(string path, ConcurrentDictionary<string, FingerprintEntry> allFp)
@@ -1919,6 +1967,7 @@ namespace Truedat
             }
 
             AtomicReplace(tmpPath, path);
+            if (_audit) { try { Console.WriteLine($"  DEBUG save: {path} ({new FileInfo(path).Length / 1024} KB, {allDetails.Count} tracks)"); } catch { } }
         }
 
         static int LoadExistingDetails(string path, ConcurrentDictionary<string, AudioDetails> allDetails)
@@ -2045,7 +2094,11 @@ namespace Truedat
                         }
                         return;
                     }
-                    catch (IOException) when (attempt < 4) { Thread.Sleep(200 * (attempt + 1)); }
+                    catch (IOException) when (attempt < 4)
+                    {
+                        if (_audit) Console.WriteLine($"  DEBUG errors-csv: retry {attempt + 1}/5 for {filePath}");
+                        Thread.Sleep(200 * (attempt + 1));
+                    }
                     catch (Exception ex) { Console.WriteLine($"  Warning: Could not write to errors CSV: {ex.Message}"); return; }
                 }
             }
@@ -2076,6 +2129,7 @@ namespace Truedat
             }
 
             AtomicReplace(tmpPath, moodsPath);
+            if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {allTracks.Count} tracks)"); } catch { } }
         }
 
         static void WriteTrackEntry(Utf8JsonWriter jw, string path, TrackEntry entry)
@@ -2291,6 +2345,8 @@ namespace Truedat
                 pathMethod = method;
                 if (link != null) { toolPath = link; tempLink = link; }
             }
+            if (_audit && pathMethod == "8.3")
+                Console.WriteLine($"  DEBUG path: 8.3 -> {toolPath}");
 
             var tempJson = Path.GetTempFileName();
             try
@@ -2418,13 +2474,18 @@ namespace Truedat
 
                 var bpm = NavDbl(root, "rhythm.bpm");
                 var key = NavStr(root, "tonal.key_edma.key");
-                if (key == "") key = NavStr(root, "tonal.key_krumhansl.key");
-                if (key == "") key = NavStr(root, "tonal.chords_key");
+                var keySource = "edma";
+                if (key == "") { key = NavStr(root, "tonal.key_krumhansl.key"); keySource = "krumhansl"; }
+                if (key == "") { key = NavStr(root, "tonal.chords_key"); keySource = "chords"; }
+                if (key == "") keySource = "missing";
                 var scale = NavStr(root, "tonal.key_edma.scale");
-                if (scale == "") scale = NavStr(root, "tonal.key_krumhansl.scale");
-                if (scale == "") scale = NavStr(root, "tonal.chords_scale");
+                var scaleSource = "edma";
+                if (scale == "") { scale = NavStr(root, "tonal.key_krumhansl.scale"); scaleSource = "krumhansl"; }
+                if (scale == "") { scale = NavStr(root, "tonal.chords_scale"); scaleSource = "chords"; }
+                if (scale == "") scaleSource = "missing";
                 var loudness = NavDbl(root, "lowlevel.loudness_ebu128.integrated", double.NaN);
-                if (double.IsNaN(loudness)) loudness = NavDbl(root, "lowlevel.average_loudness", -20);
+                var loudnessSource = "ebu128";
+                if (double.IsNaN(loudness)) { loudness = NavDbl(root, "lowlevel.average_loudness", -20); loudnessSource = "average fallback"; }
                 var spectralCentroidMean = NavDbl(root, "lowlevel.spectral_centroid.mean", 2000);
                 var spectralFluxMean = NavDbl(root, "lowlevel.spectral_flux.mean", 0.1);
                 var danceability = NavDbl(root, "rhythm.danceability", 0.5);
@@ -2446,6 +2507,18 @@ namespace Truedat
                         mfcc[idx++] = v.GetDouble();
                 }
 
+                if (_audit)
+                {
+                    var notes = new List<string>();
+                    if (keySource != "edma") notes.Add($"key: {keySource} fallback");
+                    if (scaleSource != "edma") notes.Add($"scale: {scaleSource} fallback");
+                    if (loudnessSource != "ebu128") notes.Add($"loudness: {loudnessSource}");
+                    if (mfcc != null && mfcc.Length > 0) notes.Add($"mfcc: {mfcc.Length} coefficients");
+                    else notes.Add("mfcc: missing");
+                    var notesStr = notes.Count > 0 ? " " + string.Join(" ", notes.Select(n => $"[{n}]")) : "";
+                    Console.WriteLine($"  DEBUG extract: bpm={Math.Round(bpm, 1)} key={key}{scale}{notesStr}");
+                }
+
                 return new TrackFeatures
                 {
                     Bpm = Math.Round(bpm, 1), Key = key, Mode = scale,
@@ -2463,7 +2536,11 @@ namespace Truedat
                     Mfcc = mfcc?.Select(v => Math.Round(v, 4)).ToArray()
                 };
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                if (_audit) Console.WriteLine($"  DEBUG extract: parse failed: {ex.Message}");
+                return null;
+            }
         }
 
         // -- JSON helpers -----------------------------------------------------
