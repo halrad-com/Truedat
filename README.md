@@ -127,7 +127,7 @@ All Essentia tools are custom 64-bit builds from source. See [`essentia-build/`]
 build-all.cmd
 ```
 
-Creates `dist/truedat/truedat.exe` (694 KB single file). Requires .NET SDK 6.0+.
+Creates `dist/truedat/truedat.exe` (single file, ~1 MB). Requires .NET SDK 8.0+.
 
 ## Extracted Features
 

@@ -1406,14 +1406,17 @@ namespace Truedat
             string? tempLink = null;
             string pathMethod = toolPath == audioPath ? "original" : "8.3";
 
-            if (HasNonAscii(toolPath))
+            // Hardlink fallback: needed when 8.3 still has non-ASCII, OR when 8.3
+            // truncated the extension (e.g. .flac -> .FLA breaks Essentia format detection)
+            if (HasNonAscii(toolPath) ||
+                !string.Equals(Path.GetExtension(toolPath), Path.GetExtension(audioPath), StringComparison.OrdinalIgnoreCase))
             {
                 var (link, method) = TryCreateHardlink(audioPath);
                 pathMethod = method;
                 if (link != null) { toolPath = link; tempLink = link; }
             }
-            if (_audit && pathMethod == "8.3")
-                Console.WriteLine($"  DEBUG path: 8.3 -> {toolPath}");
+            if (_audit && pathMethod != "original")
+                Console.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             try
             {
@@ -1509,7 +1512,7 @@ namespace Truedat
             {
                 if (tempLink != null)
                 {
-                    try { File.Delete(tempLink); }
+                    try { RetryDelete(tempLink); }
                     catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
             }
@@ -1580,10 +1583,9 @@ namespace Truedat
             var ffmpeg = _ffmpegPath.Value;
             if (ffmpeg == null) return null;
 
-            string? tempPath = null;
+            string tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
             try
             {
-                tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
                 var psi = new ProcessStartInfo
                 {
                     FileName = ffmpeg,
@@ -1622,8 +1624,7 @@ namespace Truedat
             catch (Exception ex)
             {
                 Console.WriteLine($"  DEBUG downmix exception: {ex.Message}");
-                if (tempPath != null)
-                    try { File.Delete(tempPath); } catch { }
+                try { File.Delete(tempPath); } catch { }
             }
             return null;
         }
@@ -2338,15 +2339,17 @@ namespace Truedat
             string? tempLink = null;
             string pathMethod = toolPath == audioPath ? "original" : "8.3";
 
-            // Hardlink fallback for non-ASCII paths where 8.3 isn't available
-            if (HasNonAscii(toolPath))
+            // Hardlink fallback: needed when 8.3 still has non-ASCII, OR when 8.3
+            // truncated the extension (e.g. .flac -> .FLA breaks Essentia format detection)
+            if (HasNonAscii(toolPath) ||
+                !string.Equals(Path.GetExtension(toolPath), Path.GetExtension(audioPath), StringComparison.OrdinalIgnoreCase))
             {
                 var (link, method) = TryCreateHardlink(audioPath);
                 pathMethod = method;
                 if (link != null) { toolPath = link; tempLink = link; }
             }
-            if (_audit && pathMethod == "8.3")
-                Console.WriteLine($"  DEBUG path: 8.3 -> {toolPath}");
+            if (_audit && pathMethod != "original")
+                Console.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             var tempJson = Path.GetTempFileName();
             try
@@ -2459,7 +2462,7 @@ namespace Truedat
                 try { File.Delete(tempJson); } catch { }
                 if (tempLink != null)
                 {
-                    try { File.Delete(tempLink); }
+                    try { RetryDelete(tempLink); }
                     catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
             }
@@ -2615,6 +2618,16 @@ namespace Truedat
             if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h{ts.Minutes:D2}m";
             if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m{ts.Seconds:D2}s";
             return $"{ts.TotalSeconds:F1}s";
+        }
+
+        static void RetryDelete(string path)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                try { File.Delete(path); return; }
+                catch (IOException) when (i < 3) { Thread.Sleep(50 * (i + 1)); }
+                catch (UnauthorizedAccessException) when (i < 3) { Thread.Sleep(50 * (i + 1)); }
+            }
         }
 
         static string CsvEscape(string value)
