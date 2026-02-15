@@ -217,9 +217,9 @@ namespace Truedat
             return path;
         }
 
-        static void CleanupOrphanedHardlinks()
+        static void CleanupOrphanedFiles()
         {
-            // Check all drive roots for .truedat-tmp directories left behind by crashed runs
+            // Clean up orphaned hardlinks from .truedat-tmp directories on all drives
             try
             {
                 foreach (var drive in DriveInfo.GetDrives())
@@ -236,11 +236,24 @@ namespace Truedat
                             foreach (var f in files)
                                 try { File.Delete(f); } catch { }
                         }
-                        // Remove the directory itself if now empty
                         if (Directory.GetFiles(tmpDir).Length == 0)
                             try { Directory.Delete(tmpDir); } catch { }
                     }
                     catch { }
+                }
+            }
+            catch { }
+
+            // Clean up orphaned downmix WAV files from temp directory
+            try
+            {
+                var tempDir = Path.GetTempPath();
+                var orphans = Directory.GetFiles(tempDir, "truedat_stereo_*.wav");
+                if (orphans.Length > 0)
+                {
+                    Console.WriteLine($"  Cleaning {orphans.Length} orphaned downmix file(s) from {tempDir}");
+                    foreach (var f in orphans)
+                        try { File.Delete(f); } catch { }
                 }
             }
             catch { }
@@ -346,7 +359,7 @@ namespace Truedat
             }
 
             // Clean up orphaned hardlinks from previous crashed runs
-            CleanupOrphanedHardlinks();
+            CleanupOrphanedFiles();
 
             if (checkFilenames) { RunCheckFilenames(xmlPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
@@ -602,6 +615,9 @@ namespace Truedat
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
+
+            if (failed > 0)
+                Environment.ExitCode = 1;
         }
 
         // Known-bad: fullwidth Unicode substitutions for OS-illegal filename characters.
@@ -1132,13 +1148,13 @@ namespace Truedat
                                                     det.LastModified = currentLastMod;
                                                     allDetails[t.Location] = det;
                                                     var np = Interlocked.Increment(ref probed);
-                                                    if (np - lastProbeSaveCount >= SaveInterval)
+                                                    if (np - Volatile.Read(ref lastProbeSaveCount) >= SaveInterval)
                                                     {
                                                         lock (saveLock)
                                                         {
-                                                            if (Volatile.Read(ref probed) - lastProbeSaveCount >= SaveInterval)
+                                                            if (probed - lastProbeSaveCount >= SaveInterval)
                                                             {
-                                                                lastProbeSaveCount = Volatile.Read(ref probed);
+                                                                lastProbeSaveCount = probed;
                                                                 SaveDetails(detailsPath, allDetails);
                                                                 Console.WriteLine($"  [Saved {allDetails.Count} details]");
                                                             }
@@ -1232,7 +1248,7 @@ namespace Truedat
                         }
                         var newCount = Interlocked.Increment(ref fingerprinted);
 
-                        if (newCount - lastSaveCount >= SaveInterval)
+                        if (newCount - Volatile.Read(ref lastSaveCount) >= SaveInterval)
                         {
                             lock (saveLock)
                             {
@@ -1302,6 +1318,49 @@ namespace Truedat
             Console.WriteLine();
             Console.WriteLine($"Output: {fingerprintsPath}");
             if (detailsMode) Console.WriteLine($"Output: {detailsPath}");
+
+            if (failed > 0)
+                Environment.ExitCode = 1;
+        }
+
+        // -- Path resolution helpers -------------------------------------------
+
+        static bool HasNonAscii(string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] > 127) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Try to create a hardlink with an ASCII name for a non-ASCII audio path.
+        /// Tries the file's own drive root first, then falls back to temp directory.
+        /// Returns (linkPath, "hardlink") on success, or (null, description) on failure.
+        /// </summary>
+        static (string? LinkPath, string Method) TryCreateHardlink(string audioPath)
+        {
+            var ext = Path.GetExtension(audioPath);
+            var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
+            string[] candidates = { Path.Combine(root, ".truedat-tmp"), Path.Combine(Path.GetTempPath(), ".truedat-tmp") };
+
+            foreach (var tempDir in candidates)
+            {
+                try
+                {
+                    Directory.CreateDirectory(tempDir);
+                    var linkPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}{ext}");
+                    if (CreateHardLink(linkPath, audioPath, IntPtr.Zero))
+                    {
+                        Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {linkPath}");
+                        return (linkPath, "hardlink");
+                    }
+                }
+                catch { }
+            }
+
+            var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={err}): {audioPath}");
+            return (null, "original (hardlink failed)");
         }
 
         // -- External tool runner (shared by chromaprinter and md5) ----------
@@ -1319,40 +1378,11 @@ namespace Truedat
             string? tempLink = null;
             string pathMethod = toolPath == audioPath ? "original" : "8.3";
 
-            // If SafePath couldn't produce an ASCII path (8.3 not available),
-            // create a hardlink on the same volume with an ASCII name.
-            bool stillNonAscii = false;
-            for (int i = 0; i < toolPath.Length; i++)
-                if (toolPath[i] > 127) { stillNonAscii = true; break; }
-
-            if (stillNonAscii)
+            if (HasNonAscii(toolPath))
             {
-                try
-                {
-                    var ext = Path.GetExtension(audioPath);
-                    var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
-                    var tempDir = Path.Combine(root, ".truedat-tmp");
-                    Directory.CreateDirectory(tempDir);
-                    tempLink = Path.Combine(tempDir, $"{Guid.NewGuid():N}{ext}");
-                    if (CreateHardLink(tempLink, audioPath, IntPtr.Zero))
-                    {
-                        toolPath = tempLink;
-                        pathMethod = "hardlink";
-                        Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {tempLink}");
-                    }
-                    else
-                    {
-                        pathMethod = "original (hardlink failed)";
-                        Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}), falling through: {audioPath}");
-                        tempLink = null;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    pathMethod = "original (hardlink error)";
-                    Console.WriteLine($"  DEBUG: hardlink exception for non-ASCII path: {ex.Message}");
-                    tempLink = null;
-                }
+                var (link, method) = TryCreateHardlink(audioPath);
+                pathMethod = method;
+                if (link != null) { toolPath = link; tempLink = link; }
             }
 
             try
@@ -1520,9 +1550,10 @@ namespace Truedat
             var ffmpeg = _ffmpegPath.Value;
             if (ffmpeg == null) return null;
 
+            string? tempPath = null;
             try
             {
-                var tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
+                tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
                 var psi = new ProcessStartInfo
                 {
                     FileName = ffmpeg,
@@ -1552,6 +1583,8 @@ namespace Truedat
             catch (Exception ex)
             {
                 Console.WriteLine($"  DEBUG downmix exception: {ex.Message}");
+                if (tempPath != null)
+                    try { File.Delete(tempPath); } catch { }
             }
             return null;
         }
@@ -1826,17 +1859,19 @@ namespace Truedat
             catch (JsonException ex)
             {
                 var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
-                try
-                {
-                    File.Copy(path, bakPath);
-                    Console.WriteLine($"Backup saved to: {bakPath}");
-                }
+                try { File.Copy(path, bakPath); }
                 catch (Exception bakEx)
                 {
                     Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
                 }
-                Console.WriteLine($"WARNING: Existing fingerprints file is corrupt ({ex.Message})");
-                return 0;
+                Console.WriteLine();
+                Console.WriteLine($"ERROR: Existing fingerprints file is corrupt: {ex.Message}");
+                Console.WriteLine($"Backup: {bakPath}");
+                Console.WriteLine();
+                Console.WriteLine("To start fresh, delete or rename the corrupt file and re-run:");
+                Console.WriteLine($"  del \"{path}\"");
+                Environment.Exit(1);
+                return 0; // unreachable, satisfies compiler
             }
             catch (Exception ex)
             {
@@ -1936,17 +1971,19 @@ namespace Truedat
             catch (JsonException ex)
             {
                 var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
-                try
-                {
-                    File.Copy(path, bakPath);
-                    Console.WriteLine($"Backup saved to: {bakPath}");
-                }
+                try { File.Copy(path, bakPath); }
                 catch (Exception bakEx)
                 {
                     Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
                 }
-                Console.WriteLine($"WARNING: Existing details file is corrupt ({ex.Message})");
-                return 0;
+                Console.WriteLine();
+                Console.WriteLine($"ERROR: Existing details file is corrupt: {ex.Message}");
+                Console.WriteLine($"Backup: {bakPath}");
+                Console.WriteLine();
+                Console.WriteLine("To start fresh, delete or rename the corrupt file and re-run:");
+                Console.WriteLine($"  del \"{path}\"");
+                Environment.Exit(1);
+                return 0; // unreachable, satisfies compiler
             }
             catch (Exception ex)
             {
@@ -2157,18 +2194,19 @@ namespace Truedat
             catch (JsonException ex)
             {
                 var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
-                try
-                {
-                    File.Copy(path, bakPath);
-                    Console.WriteLine($"Backup saved to: {bakPath}");
-                }
+                try { File.Copy(path, bakPath); }
                 catch (Exception bakEx)
                 {
                     Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
                 }
-                Console.WriteLine($"WARNING: Existing moods file is corrupt ({ex.Message})");
-                Console.WriteLine($"Starting fresh - tracks will be re-analyzed.");
-                return 0;
+                Console.WriteLine();
+                Console.WriteLine($"ERROR: Existing moods file is corrupt: {ex.Message}");
+                Console.WriteLine($"Backup: {bakPath}");
+                Console.WriteLine();
+                Console.WriteLine("To start fresh, delete or rename the corrupt file and re-run:");
+                Console.WriteLine($"  del \"{path}\"");
+                Environment.Exit(1);
+                return 0; // unreachable, satisfies compiler
             }
             catch (Exception ex)
             {
@@ -2247,38 +2285,11 @@ namespace Truedat
             string pathMethod = toolPath == audioPath ? "original" : "8.3";
 
             // Hardlink fallback for non-ASCII paths where 8.3 isn't available
-            bool stillNonAscii = false;
-            for (int i = 0; i < toolPath.Length; i++)
-                if (toolPath[i] > 127) { stillNonAscii = true; break; }
-
-            if (stillNonAscii)
+            if (HasNonAscii(toolPath))
             {
-                try
-                {
-                    var ext = Path.GetExtension(audioPath);
-                    var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
-                    var tempDir = Path.Combine(root, ".truedat-tmp");
-                    Directory.CreateDirectory(tempDir);
-                    tempLink = Path.Combine(tempDir, $"{Guid.NewGuid():N}{ext}");
-                    if (CreateHardLink(tempLink, audioPath, IntPtr.Zero))
-                    {
-                        toolPath = tempLink;
-                        pathMethod = "hardlink";
-                        Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {tempLink}");
-                    }
-                    else
-                    {
-                        pathMethod = "original (hardlink failed)";
-                        Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={System.Runtime.InteropServices.Marshal.GetLastWin32Error()}), falling through: {audioPath}");
-                        tempLink = null;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    pathMethod = "original (hardlink error)";
-                    Console.WriteLine($"  DEBUG: hardlink exception for non-ASCII path: {ex.Message}");
-                    tempLink = null;
-                }
+                var (link, method) = TryCreateHardlink(audioPath);
+                pathMethod = method;
+                if (link != null) { toolPath = link; tempLink = link; }
             }
 
             var tempJson = Path.GetTempFileName();
