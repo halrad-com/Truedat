@@ -109,13 +109,13 @@ Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or
 
 | Tool | Enables | License | Source |
 | ---- | ------- | ------- | ------ |
-| [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
-| [Essentia](https://essentia.upf.edu/) `essentia_standard_chromaprinter.exe` | `--fingerprint` (chromaprint) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
-| [Essentia](https://essentia.upf.edu/) `essentia_streaming_md5.exe` | `--fingerprint` (md5) | AGPL-3.0 | [GitHub](https://github.com/MTG/essentia) / [`essentia-build/`](essentia-build/) |
-| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases) |
-| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [BtbN](https://github.com/BtbN/FFmpeg-Builds/releases) |
+| [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
+| [Essentia](https://essentia.upf.edu/) `essentia_standard_chromaprinter.exe` | `--fingerprint` (chromaprint) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
+| [Essentia](https://essentia.upf.edu/) `essentia_streaming_md5.exe` | `--fingerprint` (md5) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
+| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
+| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 
-All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. Custom x64 Essentia builds are available via [`essentia-build/`](essentia-build/).
+All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
 
 ### Essentia Builds
 
