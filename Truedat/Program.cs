@@ -261,6 +261,7 @@ namespace Truedat
             bool auditLog = false;
             bool checkFilenames = false;
             bool detailsMode = false;
+            bool analyzeMode = false;
 
             bool showHelp = false;
 
@@ -279,6 +280,8 @@ namespace Truedat
                 else if (arg == "--chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
                 else if (arg == "--md5-only") { fingerprintMode = true; md5Only = true; }
                 else if (arg == "--details") { fingerprintMode = true; detailsMode = true; }
+                else if (arg == "--analyze") analyzeMode = true;
+                else if (arg == "--all") { fingerprintMode = true; detailsMode = true; analyzeMode = true; }
                 else if (arg == "--audit") auditLog = true;
                 else if (arg == "--check-filenames") checkFilenames = true;
                 else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
@@ -298,6 +301,8 @@ namespace Truedat
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
                 Console.WriteLine("  --details           Probe audio files with ffprobe -> mbxhub-details.json (implies --fingerprint)");
+                Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
+                Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -322,6 +327,8 @@ namespace Truedat
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
                 Console.WriteLine("  --details           Probe audio files with ffprobe -> mbxhub-details.json (implies --fingerprint)");
+                Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
+                Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -344,7 +351,12 @@ namespace Truedat
             if (checkFilenames) { RunCheckFilenames(xmlPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
-            if (fingerprintMode) { RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only, detailsMode); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (fingerprintMode)
+            {
+                RunFingerprint(xmlPath, outputDir, parallelism, retryErrors, chromaprintOnly, md5Only, detailsMode);
+                if (!analyzeMode) { if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+                Console.WriteLine();
+            }
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
@@ -522,7 +534,7 @@ namespace Truedat
                         allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
-                        if (newAnalyzed - lastSaveAnalyzed >= SaveInterval)
+                        if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
                         {
                             lock (saveLock)
                             {
@@ -1521,9 +1533,17 @@ namespace Truedat
                     CreateNoWindow = true
                 };
                 using var proc = Process.Start(psi)!;
-                proc.StandardOutput.ReadToEndAsync();
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                proc.WaitForExit();
+                if (!proc.WaitForExit(300000)) // 5 min timeout
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    Console.WriteLine($"  DEBUG downmix timed out (300s)");
+                    try { File.Delete(tempPath); } catch { }
+                    return null;
+                }
+                proc.WaitForExit(); // flush async I/O buffers
+                stdoutTask.Wait(5000);
                 if (proc.ExitCode == 0 && File.Exists(tempPath)) return tempPath;
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
                 Console.WriteLine($"  DEBUG downmix failed (exit {proc.ExitCode}): {stderr.Substring(0, Math.Min(200, stderr.Length))}");
@@ -1636,13 +1656,16 @@ namespace Truedat
                 };
                 using var proc = Process.Start(psi);
                 if (proc == null) return null;
-                var stdout = proc.StandardOutput.ReadToEnd();
-                proc.StandardError.ReadToEnd();
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(30000))
                 {
-                    try { proc.Kill(); } catch { }
+                    try { proc.Kill(); proc.WaitForExit(3000); } catch { }
                     return null;
                 }
+                proc.WaitForExit(); // flush async I/O buffers
+                var stdout = stdoutTask.Wait(5000) ? stdoutTask.Result : "";
+                stderrTask.Wait(5000);
                 if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout)) return null;
 
                 using var doc = JsonDocument.Parse(stdout);
@@ -2323,6 +2346,9 @@ namespace Truedat
                     }
                     catch { break; }
                 }
+
+                // Flush async stderr read buffer (matches RunTool pattern).
+                proc.WaitForExit();
 
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
                 timer.Stop();
