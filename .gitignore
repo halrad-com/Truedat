@@ -1,3 +1,8 @@
 .claude/
 bin/
 obj/
+
+# External dependencies — not built by this project (see DEPS.md for provenance)
+dist/truedat/ffmpeg.exe
+dist/truedat/ffprobe.exe
+dist/truedat/ffplay.exe
