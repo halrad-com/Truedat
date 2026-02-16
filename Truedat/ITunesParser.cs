@@ -15,6 +15,8 @@ namespace Truedat
         public string Album { get; set; } = "";
         public string Genre { get; set; } = "";
         public string Location { get; set; } = "";
+        /// <summary>Duration in milliseconds from iTunes XML (Total Time). 0 if unavailable.</summary>
+        public int TotalTimeMs { get; set; }
     }
 
     public static class ITunesParser
@@ -74,6 +76,7 @@ namespace Truedat
                     case "Album": track.Album = valElem.Value; break;
                     case "Genre": track.Genre = valElem.Value; break;
                     case "Location": track.Location = ParseLocation(valElem.Value); break;
+                    case "Total Time": int.TryParse(valElem.Value, out var ms); track.TotalTimeMs = ms; break;
                 }
             }
 
