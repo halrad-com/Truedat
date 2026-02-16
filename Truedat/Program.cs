@@ -180,6 +180,11 @@ namespace Truedat
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
         static bool _audit;
 
+        // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
+        // At 44100 Hz / 2048 hop size = ~21.53 frames/sec -> max ~12172s before buffer overflow.
+        // Use 12000s (200 min) as safe limit with margin.
+        const int MaxEssentiaDurationSecs = 12000;
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
 
@@ -531,6 +536,20 @@ namespace Truedat
                         }
                         catch { }
                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
+
+                        // Pre-flight: skip files that exceed Essentia's ChordsDetection buffer
+                        var trackDurationSecs = t.TotalTimeMs / 1000;
+                        if (trackDurationSecs > MaxEssentiaDurationSecs)
+                        {
+                            var durationMin = trackDurationSecs / 60.0;
+                            var limitMin = MaxEssentiaDurationSecs / 60.0;
+                            var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
+                            var msg = $"Skipped: duration {durationMin:F0} min exceeds Essentia ChordsDetection buffer limit ({limitMin:F0} min)";
+                            Console.WriteLine($"  WARNING: {msg}");
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, msg, sizeMb, 0, saveLock);
+                            Interlocked.Increment(ref failed);
+                            return;
+                        }
 
                         var analyzeStart = Stopwatch.GetTimestamp();
                         var (feat, errorReason) = AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token);
