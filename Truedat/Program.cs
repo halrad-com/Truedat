@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -50,6 +51,7 @@ namespace Truedat
         public TrackFeatures Features = null!;
         public DateTime LastModified;
         public double? AnalysisDurationSecs;
+        public string? FileMd5;
     }
 
     public class TrackFingerprint
@@ -69,6 +71,7 @@ namespace Truedat
     {
         public TrackFingerprint Fp = null!;
         public DateTime LastModified;
+        public string? FileMd5;
     }
 
     class AudioDetails
@@ -84,6 +87,7 @@ namespace Truedat
         public double SizeMb;
         public DateTime LastProbed;
         public DateTime LastModified;
+        public string? FileMd5;
     }
 
     /// <summary>
@@ -420,6 +424,11 @@ namespace Truedat
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
 
+            var moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
+            if (moodMd5Index != null)
+                Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
+            int crossPathMoods = 0;
+
             Dictionary<string, string> existingErrors;
             if (retryErrors)
             {
@@ -515,7 +524,8 @@ namespace Truedat
                                             ChordsChangesRate = updatedFeatures.ChordsChangesRate, Mfcc = updatedFeatures.Mfcc
                                         },
                                         LastModified = currentLastMod,
-                                        AnalysisDurationSecs = existing.AnalysisDurationSecs
+                                        AnalysisDurationSecs = existing.AnalysisDurationSecs,
+                                        FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location)
                                     };
                                     Interlocked.Increment(ref cachedCount);
                                     Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
@@ -524,6 +534,41 @@ namespace Truedat
                                 if (_audit) Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
                             }
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
+                        }
+
+                        // Cross-machine MD5 fallback — same file at a different path
+                        if (moodMd5Index != null)
+                        {
+                            var localMd5 = ComputeFileMd5(t.Location);
+                            if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
+                            {
+                                var currentLastMod = DateTime.MinValue;
+                                try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                var xf = xp.Entry.Features;
+                                allTracks[t.Location] = new TrackEntry
+                                {
+                                    Features = new TrackFeatures
+                                    {
+                                        TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                        Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                        Bpm = xf.Bpm, Key = xf.Key, Mode = xf.Mode,
+                                        SpectralCentroid = xf.SpectralCentroid, SpectralFlux = xf.SpectralFlux,
+                                        Loudness = xf.Loudness, Danceability = xf.Danceability,
+                                        OnsetRate = xf.OnsetRate, ZeroCrossingRate = xf.ZeroCrossingRate,
+                                        SpectralRms = xf.SpectralRms, SpectralFlatness = xf.SpectralFlatness,
+                                        Dissonance = xf.Dissonance, PitchSalience = xf.PitchSalience,
+                                        ChordsChangesRate = xf.ChordsChangesRate, Mfcc = xf.Mfcc
+                                    },
+                                    LastModified = currentLastMod,
+                                    AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
+                                    FileMd5 = localMd5
+                                };
+                                allTracks.TryRemove(xp.OldKey, out _);
+                                Interlocked.Increment(ref crossPathMoods);
+                                Interlocked.Increment(ref cachedCount);
+                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5)");
+                                return;
+                            }
                         }
 
                         long fileSizeBytes = 0;
@@ -578,7 +623,8 @@ namespace Truedat
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                        allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds };
+                        var fileMd5 = ComputeFileMd5(t.Location);
+                        allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5 };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
                         if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
@@ -626,6 +672,8 @@ namespace Truedat
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
             Console.WriteLine();
             Console.WriteLine($"  Cached:     {cachedCount}");
+            if (crossPathMoods > 0)
+                Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
@@ -1077,6 +1125,17 @@ namespace Truedat
                 Console.WriteLine($"Existing details: {existingDetails}");
             }
 
+            var fpMd5Index = BuildMd5Index(allFp, e => e.FileMd5);
+            if (fpMd5Index != null)
+                Console.WriteLine($"  File MD5 index:  {fpMd5Index.Count} entries available for cross-machine matching");
+            var audioMd5Index = BuildMd5Index(allFp, e => string.IsNullOrEmpty(e.Fp.Md5) ? null : e.Fp.Md5);
+            if (audioMd5Index != null)
+                Console.WriteLine($"  Audio MD5 index: {audioMd5Index.Count} entries (from fingerprint data)");
+            var detMd5Index = detailsMode ? BuildMd5Index(allDetails, e => e.FileMd5) : null;
+            if (detMd5Index != null)
+                Console.WriteLine($"  Details MD5 index: {detMd5Index.Count} entries");
+            int crossPathFp = 0;
+
             Dictionary<string, string> existingErrors;
             if (retryErrors)
             {
@@ -1160,7 +1219,8 @@ namespace Truedat
                                                 Album = t.Album, Genre = t.Genre, FilePath = t.Location,
                                                 Chromaprint = existing.Fp.Chromaprint, Duration = existing.Fp.Duration,
                                                 Md5 = existing.Fp.Md5
-                                            }
+                                            },
+                                            FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location)
                                         };
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
@@ -1172,6 +1232,7 @@ namespace Truedat
                                                 existingDet.TrackId = t.TrackId;
                                                 existingDet.Artist = t.Artist;
                                                 existingDet.Title = t.Name;
+                                                existingDet.FileMd5 ??= existing.FileMd5 ?? ComputeFileMd5(t.Location);
                                             }
                                             else
                                             {
@@ -1182,6 +1243,7 @@ namespace Truedat
                                                     det.Artist = t.Artist;
                                                     det.Title = t.Name;
                                                     det.LastModified = currentLastMod;
+                                                    det.FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location);
                                                     allDetails[t.Location] = det;
                                                     var np = Interlocked.Increment(ref probed);
                                                     if (np - Volatile.Read(ref lastProbeSaveCount) >= SaveInterval)
@@ -1215,6 +1277,145 @@ namespace Truedat
                                 }
                             }
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
+                        }
+
+                        // Cross-machine MD5 fallback — same file at a different path
+                        if (fpMd5Index != null)
+                        {
+                            var localMd5 = ComputeFileMd5(t.Location);
+                            if (localMd5 != null && fpMd5Index.TryGetValue(localMd5, out var xp))
+                            {
+                                var xFp = xp.Entry.Fp;
+                                bool hasChromaprint = !string.IsNullOrEmpty(xFp.Chromaprint);
+                                bool hasMd5 = !string.IsNullOrEmpty(xFp.Md5);
+                                if ((!runChromaprint || hasChromaprint) && (!runMd5 || hasMd5))
+                                {
+                                    var currentLastMod = DateTime.MinValue;
+                                    try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                    allFp[t.Location] = new FingerprintEntry
+                                    {
+                                        LastModified = currentLastMod,
+                                        Fp = new TrackFingerprint
+                                        {
+                                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                            Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                            Chromaprint = xFp.Chromaprint, Duration = xFp.Duration,
+                                            Md5 = xFp.Md5
+                                        },
+                                        FileMd5 = localMd5
+                                    };
+                                    allFp.TryRemove(xp.OldKey, out _);
+                                    Interlocked.Increment(ref crossPathFp);
+                                    Interlocked.Increment(ref cachedCount);
+                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5)");
+
+                                    if (detailsMode)
+                                    {
+                                        if (detMd5Index != null && detMd5Index.TryGetValue(localMd5, out var xd))
+                                        {
+                                            var d = xd.Entry;
+                                            allDetails[t.Location] = new AudioDetails
+                                            {
+                                                TrackId = t.TrackId, Artist = t.Artist, Title = d.Title,
+                                                Codec = d.Codec, Format = d.Format, Channels = d.Channels,
+                                                SampleRate = d.SampleRate, BitRate = d.BitRate, BitDepth = d.BitDepth,
+                                                Duration = d.Duration, SizeMb = d.SizeMb,
+                                                LastProbed = d.LastProbed, LastModified = currentLastMod,
+                                                FileMd5 = localMd5
+                                            };
+                                            allDetails.TryRemove(xd.OldKey, out _);
+                                        }
+                                        else
+                                        {
+                                            var det = ProbeAudio(ffprobePath!, t.Location);
+                                            if (det != null)
+                                            {
+                                                det.TrackId = t.TrackId;
+                                                det.Artist = t.Artist;
+                                                det.Title = t.Name;
+                                                det.LastModified = currentLastMod;
+                                                det.FileMd5 = localMd5;
+                                                allDetails[t.Location] = det;
+                                                Interlocked.Increment(ref probed);
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Audio MD5 cross-machine fallback — match via existing fingerprint audio hash
+                        string? earlyAudioMd5 = null;
+                        bool earlyAudioMd5Attempted = false;
+                        if (runMd5 && audioMd5Index != null)
+                        {
+                            var (md5Result, md5Err) = RunMd5(md5Exe!, t.Location, cts.Token);
+                            earlyAudioMd5Attempted = true;
+                            if (md5Err == null)
+                            {
+                                earlyAudioMd5 = md5Result;
+                                if (audioMd5Index.TryGetValue(md5Result, out var xp))
+                                {
+                                    var xFp = xp.Entry.Fp;
+                                    bool hasChromaprint = !string.IsNullOrEmpty(xFp.Chromaprint);
+                                    if (!runChromaprint || hasChromaprint)
+                                    {
+                                        var currentLastMod = DateTime.MinValue;
+                                        try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                        var localFileMd5 = ComputeFileMd5(t.Location);
+                                        allFp[t.Location] = new FingerprintEntry
+                                        {
+                                            LastModified = currentLastMod,
+                                            Fp = new TrackFingerprint
+                                            {
+                                                TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                                Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                                Chromaprint = xFp.Chromaprint, Duration = xFp.Duration,
+                                                Md5 = md5Result
+                                            },
+                                            FileMd5 = localFileMd5
+                                        };
+                                        allFp.TryRemove(xp.OldKey, out _);
+                                        Interlocked.Increment(ref crossPathFp);
+                                        Interlocked.Increment(ref cachedCount);
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7fp)");
+
+                                        if (detailsMode)
+                                        {
+                                            if (detMd5Index != null && localFileMd5 != null && detMd5Index.TryGetValue(localFileMd5, out var xd))
+                                            {
+                                                var d = xd.Entry;
+                                                allDetails[t.Location] = new AudioDetails
+                                                {
+                                                    TrackId = t.TrackId, Artist = t.Artist, Title = d.Title,
+                                                    Codec = d.Codec, Format = d.Format, Channels = d.Channels,
+                                                    SampleRate = d.SampleRate, BitRate = d.BitRate, BitDepth = d.BitDepth,
+                                                    Duration = d.Duration, SizeMb = d.SizeMb,
+                                                    LastProbed = d.LastProbed, LastModified = currentLastMod,
+                                                    FileMd5 = localFileMd5
+                                                };
+                                                allDetails.TryRemove(xd.OldKey, out _);
+                                            }
+                                            else
+                                            {
+                                                var det = ProbeAudio(ffprobePath!, t.Location);
+                                                if (det != null)
+                                                {
+                                                    det.TrackId = t.TrackId;
+                                                    det.Artist = t.Artist;
+                                                    det.Title = t.Name;
+                                                    det.LastModified = currentLastMod;
+                                                    det.FileMd5 = localFileMd5;
+                                                    allDetails[t.Location] = det;
+                                                    Interlocked.Increment(ref probed);
+                                                }
+                                            }
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
                         }
 
                         long fileSizeBytes = 0;
@@ -1260,9 +1461,20 @@ namespace Truedat
 
                         if (runMd5 && errorMsg == null)
                         {
-                            var (md5, md5Err) = RunMd5(md5Exe!, t.Location, cts.Token);
-                            if (md5Err != null) errorMsg = $"md5: {md5Err}";
-                            else fp.Md5 = md5;
+                            if (earlyAudioMd5 != null)
+                            {
+                                fp.Md5 = earlyAudioMd5;
+                            }
+                            else if (!earlyAudioMd5Attempted)
+                            {
+                                var (md5, md5Err) = RunMd5(md5Exe!, t.Location, cts.Token);
+                                if (md5Err != null) errorMsg = $"md5: {md5Err}";
+                                else fp.Md5 = md5;
+                            }
+                            else
+                            {
+                                errorMsg = "md5: failed in earlier cross-machine check";
+                            }
                         }
 
                         var fpTicks = Stopwatch.GetTimestamp() - fpStart;
@@ -1279,7 +1491,8 @@ namespace Truedat
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                        allFp[t.Location] = new FingerprintEntry { Fp = fp, LastModified = lastMod };
+                        var fileMd5 = ComputeFileMd5(t.Location);
+                        allFp[t.Location] = new FingerprintEntry { Fp = fp, LastModified = lastMod, FileMd5 = fileMd5 };
                         if (detailsMode)
                         {
                             var det = ProbeAudio(ffprobePath!, t.Location);
@@ -1289,6 +1502,7 @@ namespace Truedat
                                 det.Artist = t.Artist;
                                 det.Title = t.Name;
                                 det.LastModified = lastMod;
+                                det.FileMd5 = fileMd5;
                                 allDetails[t.Location] = det;
                                 Interlocked.Increment(ref probed);
                             }
@@ -1339,6 +1553,8 @@ namespace Truedat
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
             Console.WriteLine();
             Console.WriteLine($"  Cached:        {cachedCount}");
+            if (crossPathFp > 0)
+                Console.WriteLine($"  Cross-MD5:     {crossPathFp}  (of {cachedCount} cached)");
             Console.WriteLine($"  Fingerprinted: {fingerprinted}");
             Console.WriteLine($"  Skipped:       {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:        {failed}");
@@ -1867,6 +2083,8 @@ namespace Truedat
                         jw.WriteString("md5", fp.Md5);
                     }
                     jw.WriteString("lastModified", kvp.Value.LastModified.ToString("o"));
+                    if (!string.IsNullOrEmpty(kvp.Value.FileMd5))
+                        jw.WriteString("fileMd5", kvp.Value.FileMd5);
                     jw.WriteEndObject();
                 }
                 jw.WriteEndObject();
@@ -1919,7 +2137,8 @@ namespace Truedat
                             Chromaprint = GetStr(track, "chromaprint"),
                             Duration = GetInt(track, "duration"),
                             Md5 = GetStr(track, "md5")
-                        }
+                        },
+                        FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
                     };
                 }
                 return allFp.Count;
@@ -1980,6 +2199,8 @@ namespace Truedat
                     jw.WriteNumber("sizeMb", d.SizeMb);
                     jw.WriteString("lastProbed", d.LastProbed.ToString("o"));
                     jw.WriteString("lastModified", d.LastModified.ToString("o"));
+                    if (!string.IsNullOrEmpty(d.FileMd5))
+                        jw.WriteString("fileMd5", d.FileMd5);
                     jw.WriteEndObject();
                 }
                 jw.WriteEndObject();
@@ -2032,7 +2253,8 @@ namespace Truedat
                         Format = GetStr(t, "format"),
                         SizeMb = GetDbl(t, "sizeMb"),
                         LastProbed = lastProbed,
-                        LastModified = lastMod
+                        LastModified = lastMod,
+                        FileMd5 = GetStr(t, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
                     };
                 }
                 return allDetails.Count;
@@ -2188,6 +2410,8 @@ namespace Truedat
             {
                 jw.WriteNumber("analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, 1));
             }
+            if (!string.IsNullOrEmpty(entry.FileMd5))
+                jw.WriteString("fileMd5", entry.FileMd5);
             jw.WriteEndObject();
         }
 
@@ -2260,7 +2484,8 @@ namespace Truedat
                             ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
                             Mfcc = mfcc
                         },
-                        AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration")
+                        AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
+                        FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
                     };
                 }
                 return allTracks.Count;
@@ -2613,6 +2838,34 @@ namespace Truedat
         }
 
         // -- Utility helpers --------------------------------------------------
+
+        static string? ComputeFileMd5(string path)
+        {
+            try
+            {
+                using var md5 = MD5.Create();
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                var hash = md5.ComputeHash(fs);
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
+            catch { return null; }
+        }
+
+        static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
+            ConcurrentDictionary<string, T> cache,
+            Func<T, string?> getMd5) where T : class
+        {
+            Dictionary<string, (T, string)>? index = null;
+            foreach (var kvp in cache)
+            {
+                var md5 = getMd5(kvp.Value);
+                if (string.IsNullOrEmpty(md5)) continue;
+                index ??= new Dictionary<string, (T, string)>(StringComparer.OrdinalIgnoreCase);
+                if (!index.ContainsKey(md5!))
+                    index[md5!] = (kvp.Value, kvp.Key);
+            }
+            return index;
+        }
 
         static TimeSpan StopwatchTicksToTimeSpan(long stopwatchTicks)
         {
