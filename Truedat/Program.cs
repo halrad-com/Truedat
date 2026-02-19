@@ -283,6 +283,7 @@ namespace Truedat
             bool md5Only = false;
             bool auditLog = false;
             bool checkFilenames = false;
+            bool duplicatesMode = false;
             bool detailsMode = false;
             bool analyzeMode = false;
 
@@ -307,6 +308,7 @@ namespace Truedat
                 else if (arg == "--all") { fingerprintMode = true; detailsMode = true; analyzeMode = true; }
                 else if (arg == "--audit") auditLog = true;
                 else if (arg == "--check-filenames") checkFilenames = true;
+                else if (arg == "--duplicates") duplicatesMode = true;
                 else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
@@ -329,7 +331,8 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
-                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
+                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
+                Console.WriteLine("  --duplicates        Find duplicate files by MD5 hash -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
@@ -355,7 +358,8 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
-                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools");
+                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
+                Console.WriteLine("  --duplicates        Find duplicate files by MD5 hash -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
                 return;
             }
@@ -372,17 +376,19 @@ namespace Truedat
 
             var modeList = new List<string>();
             if (checkFilenames) modeList.Add("check-filenames");
+            if (duplicatesMode) modeList.Add("duplicates");
             if (migrateMode) modeList.Add("migrate");
             if (fixupMode) modeList.Add("fixup");
             if (fingerprintMode) modeList.Add(chromaprintOnly ? "chromaprint-only" : md5Only ? "md5-only" : "fingerprint");
             if (detailsMode) modeList.Add("details");
-            if (analyzeMode || (!checkFilenames && !migrateMode && !fixupMode && !fingerprintMode)) modeList.Add("analyze");
+            if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode && !fingerprintMode)) modeList.Add("analyze");
             Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}");
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
 
-            if (checkFilenames) { RunCheckFilenames(xmlPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (checkFilenames) { RunCheckFilenames(xmlPath, outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (duplicatesMode) { RunDuplicates(xmlPath, outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fingerprintMode)
@@ -748,7 +754,7 @@ namespace Truedat
             }
         }
 
-        static void RunCheckFilenames(string xmlPath)
+        static void RunCheckFilenames(string xmlPath, string outputDir)
         {
             Console.WriteLine("=== Check Filenames ===");
             Console.WriteLine();
@@ -874,6 +880,239 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine("Rename files listed as ERRORS to remove fullwidth Unicode characters.");
             }
+
+            // Write JSON report
+            var reportPath = Path.Combine(outputDir, "mbxhub-filenames.json");
+            var tmpPath = reportPath + ".tmp";
+            try { File.Delete(tmpPath); } catch { }
+
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            {
+                jw.WriteStartObject();
+                jw.WriteString("version", "1.0");
+                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+
+                jw.WriteStartObject("summary");
+                jw.WriteNumber("totalTracks", tracks.Count);
+                jw.WriteNumber("errors", errors.Count);
+                jw.WriteNumber("warningsNo83", warnsNo83.Count);
+                jw.WriteNumber("warnings83Ok", warnsOk.Count);
+                jw.WriteNumber("suspectFiles", smallFiles.Count);
+                jw.WriteNumber("clean", tracks.Count - errors.Count - warnings.Count);
+                jw.WriteEndObject();
+
+                if (errors.Count > 0)
+                {
+                    jw.WriteStartArray("errors");
+                    foreach (var (t, chars) in errors)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteStartArray("chars");
+                        foreach (var c in chars)
+                        {
+                            jw.WriteStartObject();
+                            jw.WriteString("char", c.ToString());
+                            jw.WriteString("codepoint", $"U+{(int)c:X4}");
+                            jw.WriteString("description", DescribeChar(c));
+                            jw.WriteEndObject();
+                        }
+                        jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                if (warnsNo83.Count > 0)
+                {
+                    jw.WriteStartArray("warningsNo83");
+                    foreach (var (t, chars, _) in warnsNo83)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteStartArray("chars");
+                        foreach (var c in chars)
+                        {
+                            jw.WriteStartObject();
+                            jw.WriteString("char", c.ToString());
+                            jw.WriteString("codepoint", $"U+{(int)c:X4}");
+                            jw.WriteString("description", DescribeChar(c));
+                            jw.WriteEndObject();
+                        }
+                        jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                if (warnsOk.Count > 0)
+                {
+                    jw.WriteStartArray("warnings83Ok");
+                    foreach (var (t, chars, _) in warnsOk)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteStartArray("chars");
+                        foreach (var c in chars)
+                        {
+                            jw.WriteStartObject();
+                            jw.WriteString("char", c.ToString());
+                            jw.WriteString("codepoint", $"U+{(int)c:X4}");
+                            jw.WriteString("description", DescribeChar(c));
+                            jw.WriteEndObject();
+                        }
+                        jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                if (smallFiles.Count > 0)
+                {
+                    jw.WriteStartArray("suspectFiles");
+                    foreach (var (t, bytes) in smallFiles)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteNumber("bytes", bytes);
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                jw.WriteEndObject();
+            }
+
+            AtomicReplace(tmpPath, reportPath);
+            Console.WriteLine();
+            Console.WriteLine($"Output: {reportPath}");
+        }
+
+        static void RunDuplicates(string xmlPath, string outputDir)
+        {
+            Console.WriteLine("=== Duplicate Detection ===");
+            Console.WriteLine();
+
+            Console.WriteLine($"Loading iTunes library: {xmlPath}");
+            var tracks = ITunesParser.Parse(xmlPath, out _);
+            Console.WriteLine($"Found {tracks.Count} tracks");
+            Console.WriteLine();
+
+            Console.WriteLine("Hashing files...");
+            var hashGroups = new Dictionary<string, List<ITunesTrack>>(StringComparer.Ordinal);
+            int hashed = 0, hashFailed = 0;
+            var sw = Stopwatch.StartNew();
+            foreach (var t in tracks)
+            {
+                if (string.IsNullOrEmpty(t.Location)) continue;
+                var md5 = ComputeFileMd5(t.Location);
+                if (md5 == null) { hashFailed++; continue; }
+                hashed++;
+                if (!hashGroups.TryGetValue(md5, out var list))
+                {
+                    list = new List<ITunesTrack>();
+                    hashGroups[md5] = list;
+                }
+                list.Add(t);
+                if (hashed % 500 == 0)
+                    Console.WriteLine($"  {hashed}/{tracks.Count} hashed...");
+            }
+            sw.Stop();
+            Console.WriteLine($"  Hashed {hashed} files in {sw.Elapsed.TotalSeconds:F1}s ({hashFailed} failed)");
+            Console.WriteLine();
+
+            var duplicates = hashGroups
+                .Where(kv => kv.Value.Count > 1)
+                .OrderByDescending(kv => kv.Value.Count)
+                .ToList();
+            int dupFileCount = duplicates.Sum(kv => kv.Value.Count);
+
+            if (duplicates.Count > 0)
+            {
+                Console.WriteLine($"DUPLICATES: {duplicates.Count} set(s), {dupFileCount} files with identical content:");
+                Console.WriteLine();
+                foreach (var kv in duplicates)
+                {
+                    Console.WriteLine($"  MD5 {kv.Key}  ({kv.Value.Count} copies):");
+                    foreach (var t in kv.Value)
+                        Console.WriteLine($"    {t.Artist} - {t.Name}  |  {t.Location}");
+                    Console.WriteLine();
+                }
+            }
+
+            Console.WriteLine("=== Summary ===");
+            Console.WriteLine($"  Total tracks:     {tracks.Count}");
+            Console.WriteLine($"  Hashed:           {hashed}");
+            Console.WriteLine($"  Hash failures:    {hashFailed}");
+            Console.WriteLine($"  Duplicate sets:   {duplicates.Count}");
+            Console.WriteLine($"  Duplicate files:  {dupFileCount}");
+            Console.WriteLine($"  Unique:           {hashGroups.Count(kv => kv.Value.Count == 1)}");
+
+            // Write JSON report
+            var reportPath = Path.Combine(outputDir, "mbxhub-duplicates.json");
+            var tmpPath = reportPath + ".tmp";
+            try { File.Delete(tmpPath); } catch { }
+
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            {
+                jw.WriteStartObject();
+                jw.WriteString("version", "1.0");
+                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+
+                jw.WriteStartObject("summary");
+                jw.WriteNumber("totalTracks", tracks.Count);
+                jw.WriteNumber("hashed", hashed);
+                jw.WriteNumber("hashFailures", hashFailed);
+                jw.WriteNumber("duplicateSets", duplicates.Count);
+                jw.WriteNumber("duplicateFiles", dupFileCount);
+                jw.WriteNumber("unique", hashGroups.Count(kv => kv.Value.Count == 1));
+                jw.WriteEndObject();
+
+                if (duplicates.Count > 0)
+                {
+                    jw.WriteStartArray("duplicates");
+                    foreach (var kv in duplicates)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteString("md5", kv.Key);
+                        jw.WriteNumber("count", kv.Value.Count);
+                        jw.WriteStartArray("files");
+                        foreach (var t in kv.Value)
+                        {
+                            jw.WriteStartObject();
+                            jw.WriteNumber("trackId", t.TrackId);
+                            jw.WriteString("artist", t.Artist);
+                            jw.WriteString("title", t.Name);
+                            jw.WriteString("album", t.Album);
+                            jw.WriteString("path", t.Location);
+                            jw.WriteEndObject();
+                        }
+                        jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                jw.WriteEndObject();
+            }
+
+            AtomicReplace(tmpPath, reportPath);
+            Console.WriteLine();
+            Console.WriteLine($"Output: {reportPath}");
         }
 
         static void RunFixup(string xmlPath, string moodsPath)
