@@ -332,7 +332,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
-                Console.WriteLine("  --duplicates        Find duplicate files by MD5 hash -> mbxhub-duplicates.json");
+                Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
@@ -359,7 +359,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
-                Console.WriteLine("  --duplicates        Find duplicate files by MD5 hash -> mbxhub-duplicates.json");
+                Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
                 return;
             }
@@ -388,7 +388,7 @@ namespace Truedat
             CleanupOrphanedFiles();
 
             if (checkFilenames) { RunCheckFilenames(xmlPath, outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
-            if (duplicatesMode) { RunDuplicates(xmlPath, outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (duplicatesMode) { RunDuplicates(outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (fingerprintMode)
@@ -1001,37 +1001,61 @@ namespace Truedat
             Console.WriteLine($"Output: {reportPath}");
         }
 
-        static void RunDuplicates(string xmlPath, string outputDir)
+        static void RunDuplicates(string outputDir)
         {
             Console.WriteLine("=== Duplicate Detection ===");
             Console.WriteLine();
 
-            Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var tracks = ITunesParser.Parse(xmlPath, out _);
-            Console.WriteLine($"Found {tracks.Count} tracks");
-            Console.WriteLine();
-
-            Console.WriteLine("Hashing files...");
-            var hashGroups = new Dictionary<string, List<ITunesTrack>>(StringComparer.Ordinal);
-            int hashed = 0, hashFailed = 0;
-            var sw = Stopwatch.StartNew();
-            foreach (var t in tracks)
+            var fpPath = Path.Combine(outputDir, "mbxhub-fingerprints.json");
+            if (!File.Exists(fpPath))
             {
-                if (string.IsNullOrEmpty(t.Location)) continue;
-                var md5 = ComputeFileMd5(t.Location);
-                if (md5 == null) { hashFailed++; continue; }
-                hashed++;
-                if (!hashGroups.TryGetValue(md5, out var list))
-                {
-                    list = new List<ITunesTrack>();
-                    hashGroups[md5] = list;
-                }
-                list.Add(t);
-                if (hashed % 500 == 0)
-                    Console.WriteLine($"  {hashed}/{tracks.Count} hashed...");
+                Console.WriteLine($"Fingerprints file not found: {fpPath}");
+                Console.WriteLine("Run --fingerprint first to generate file hashes.");
+                return;
             }
-            sw.Stop();
-            Console.WriteLine($"  Hashed {hashed} files in {sw.Elapsed.TotalSeconds:F1}s ({hashFailed} failed)");
+
+            Console.WriteLine($"Loading: {fpPath}");
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            using var fs = new FileStream(fpPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+            using var doc = JsonDocument.Parse(fs, docOptions);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
+            {
+                Console.WriteLine("No tracks found in fingerprints file.");
+                return;
+            }
+
+            // Group by fileMd5
+            var hashGroups = new Dictionary<string, List<(string Path, int TrackId, string Artist, string Title, string Album)>>(StringComparer.Ordinal);
+            int total = 0, withHash = 0, noHash = 0;
+
+            foreach (var prop in tracks.EnumerateObject())
+            {
+                total++;
+                var filePath = PathHelper.NormalizeSeparators(prop.Name);
+                var track = prop.Value;
+                var fileMd5 = GetStr(track, "fileMd5");
+                if (string.IsNullOrEmpty(fileMd5)) { noHash++; continue; }
+                withHash++;
+
+                var entry = (
+                    Path: filePath,
+                    TrackId: GetInt(track, "trackId"),
+                    Artist: GetStr(track, "artist"),
+                    Title: GetStr(track, "title"),
+                    Album: GetStr(track, "album")
+                );
+
+                if (!hashGroups.TryGetValue(fileMd5, out var list))
+                {
+                    list = new List<(string, int, string, string, string)>();
+                    hashGroups[fileMd5] = list;
+                }
+                list.Add(entry);
+            }
+
+            Console.WriteLine($"  Tracks: {total}  (with fileMd5: {withHash}, missing: {noHash})");
             Console.WriteLine();
 
             var duplicates = hashGroups
@@ -1047,16 +1071,21 @@ namespace Truedat
                 foreach (var kv in duplicates)
                 {
                     Console.WriteLine($"  MD5 {kv.Key}  ({kv.Value.Count} copies):");
-                    foreach (var t in kv.Value)
-                        Console.WriteLine($"    {t.Artist} - {t.Name}  |  {t.Location}");
+                    foreach (var f in kv.Value)
+                        Console.WriteLine($"    {f.Artist} - {f.Title}  |  {f.Path}");
                     Console.WriteLine();
                 }
             }
+            else
+            {
+                Console.WriteLine("No duplicates found.");
+                Console.WriteLine();
+            }
 
             Console.WriteLine("=== Summary ===");
-            Console.WriteLine($"  Total tracks:     {tracks.Count}");
-            Console.WriteLine($"  Hashed:           {hashed}");
-            Console.WriteLine($"  Hash failures:    {hashFailed}");
+            Console.WriteLine($"  Total tracks:     {total}");
+            Console.WriteLine($"  With fileMd5:     {withHash}");
+            Console.WriteLine($"  Missing fileMd5:  {noHash}");
             Console.WriteLine($"  Duplicate sets:   {duplicates.Count}");
             Console.WriteLine($"  Duplicate files:  {dupFileCount}");
             Console.WriteLine($"  Unique:           {hashGroups.Count(kv => kv.Value.Count == 1)}");
@@ -1066,17 +1095,17 @@ namespace Truedat
             var tmpPath = reportPath + ".tmp";
             try { File.Delete(tmpPath); } catch { }
 
-            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+            using (var ofs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            using (var jw = new Utf8JsonWriter(ofs, new JsonWriterOptions { Indented = true }))
             {
                 jw.WriteStartObject();
                 jw.WriteString("version", "1.0");
                 jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
 
                 jw.WriteStartObject("summary");
-                jw.WriteNumber("totalTracks", tracks.Count);
-                jw.WriteNumber("hashed", hashed);
-                jw.WriteNumber("hashFailures", hashFailed);
+                jw.WriteNumber("totalTracks", total);
+                jw.WriteNumber("withFileMd5", withHash);
+                jw.WriteNumber("missingFileMd5", noHash);
                 jw.WriteNumber("duplicateSets", duplicates.Count);
                 jw.WriteNumber("duplicateFiles", dupFileCount);
                 jw.WriteNumber("unique", hashGroups.Count(kv => kv.Value.Count == 1));
@@ -1091,14 +1120,14 @@ namespace Truedat
                         jw.WriteString("md5", kv.Key);
                         jw.WriteNumber("count", kv.Value.Count);
                         jw.WriteStartArray("files");
-                        foreach (var t in kv.Value)
+                        foreach (var f in kv.Value)
                         {
                             jw.WriteStartObject();
-                            jw.WriteNumber("trackId", t.TrackId);
-                            jw.WriteString("artist", t.Artist);
-                            jw.WriteString("title", t.Name);
-                            jw.WriteString("album", t.Album);
-                            jw.WriteString("path", t.Location);
+                            jw.WriteNumber("trackId", f.TrackId);
+                            jw.WriteString("artist", f.Artist);
+                            jw.WriteString("title", f.Title);
+                            jw.WriteString("album", f.Album);
+                            jw.WriteString("path", f.Path);
                             jw.WriteEndObject();
                         }
                         jw.WriteEndArray();
