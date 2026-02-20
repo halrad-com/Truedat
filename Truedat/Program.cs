@@ -1874,6 +1874,7 @@ namespace Truedat
             var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
             string[] candidates = { Path.Combine(root, ".truedat-tmp"), Path.Combine(Path.GetTempPath(), ".truedat-tmp") };
 
+            int lastErr = 0;
             foreach (var tempDir in candidates)
             {
                 try
@@ -1885,12 +1886,12 @@ namespace Truedat
                         Console.WriteLine($"  DEBUG: hardlink created for non-ASCII path: {audioPath} -> {linkPath}");
                         return (linkPath, "hardlink");
                     }
+                    lastErr = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
                 }
                 catch { }
             }
 
-            var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={err}): {audioPath}");
+            Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={lastErr}): {audioPath}");
             return (null, "original (hardlink failed)");
         }
 
