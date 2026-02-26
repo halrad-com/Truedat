@@ -296,6 +296,10 @@ namespace Truedat
             int synthSeed = 42;
             bool synthDryRun = false;
 
+            bool seedMoods = false;
+            string? seedCatalog = null;
+            string? seedTarget = null;
+
             bool showHelp = false;
 
             for (int i = 0; i < args.Length; i++)
@@ -330,6 +334,9 @@ namespace Truedat
                 else if (arg == "--seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
                     { synthSeed = sd; i++; }
                 else if (arg == "--dry-run") synthDryRun = true;
+                else if (arg == "--seed-moods") seedMoods = true;
+                else if (arg == "--seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
+                else if (arg == "--seed-target" && i + 1 < args.Length) seedTarget = args[++i];
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
@@ -365,7 +372,34 @@ namespace Truedat
                 Console.WriteLine("  --seed <n>          Random seed for reproducibility (default: 42)");
                 Console.WriteLine("  --dry-run           Preview without writing files");
                 Console.WriteLine();
+                Console.WriteLine("Mood Seeding:");
+                Console.WriteLine("  --seed-moods        Seed mbxmoods.json from AcousticBrainz catalog");
+                Console.WriteLine("  --seed-catalog <path> Path to synthlib-catalog.jsonl.gz");
+                Console.WriteLine("  --seed-target <path>  Target mbxmoods.json path (default: next to library XML)");
+                Console.WriteLine("  <library.xml>       iTunes XML library file (positional)");
+                Console.WriteLine();
                 Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
+                return;
+            }
+
+            // --seed-moods is independent of the XML-based modes
+            if (seedMoods)
+            {
+                if (string.IsNullOrEmpty(seedCatalog))
+                {
+                    Console.WriteLine("Error: --seed-moods requires --seed-catalog <path>");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (xmlPath == null)
+                {
+                    Console.WriteLine("Error: --seed-moods requires an iTunes XML library path");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                string targetMoods = seedTarget ?? Path.Combine(
+                    Path.GetDirectoryName(Path.GetFullPath(xmlPath)) ?? ".", "mbxmoods.json");
+                Environment.ExitCode = new SeedCommand(seedCatalog!, xmlPath, targetMoods).Run();
                 return;
             }
 
@@ -421,6 +455,12 @@ namespace Truedat
                 Console.WriteLine("  --synth-moods <path> Path to existing mbxmoods.json to merge into");
                 Console.WriteLine("  --seed <n>          Random seed for reproducibility (default: 42)");
                 Console.WriteLine("  --dry-run           Preview without writing files");
+                Console.WriteLine();
+                Console.WriteLine("Mood Seeding:");
+                Console.WriteLine("  --seed-moods        Seed mbxmoods.json from AcousticBrainz catalog");
+                Console.WriteLine("  --seed-catalog <path> Path to synthlib-catalog.jsonl.gz");
+                Console.WriteLine("  --seed-target <path>  Target mbxmoods.json path (default: next to library XML)");
+                Console.WriteLine("  <library.xml>       iTunes XML library file (positional)");
                 return;
             }
 

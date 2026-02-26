@@ -92,6 +92,12 @@ namespace Truedat
 
         [JsonPropertyName("mfcc0")]
         public double Mfcc0 { get; set; }
+
+        [JsonPropertyName("normalizedArtist")]
+        public string NormalizedArtist { get; set; } = "";
+
+        [JsonPropertyName("normalizedTitle")]
+        public string NormalizedTitle { get; set; } = "";
     }
 
     class SynthTrack
