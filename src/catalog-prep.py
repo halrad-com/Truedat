@@ -19,6 +19,7 @@ import argparse
 import gzip
 import json
 import logging
+import lzma
 import os
 import re
 import sys
@@ -316,6 +317,244 @@ def load_ab_features():
         skipped,
     )
     return features
+
+
+# ---------------------------------------------------------------------------
+# MusicBrainz metadata extraction
+# ---------------------------------------------------------------------------
+
+_YEAR_RE = re.compile(r"(\d{4})")
+_TRACK_NUM_RE = re.compile(r"(\d+)")
+
+
+def _extract_genre_from_tags(tags_list):
+    """Return the highest-count tag name, title-cased, from a list of tag dicts.
+
+    Args:
+        tags_list: List of dicts like [{"name": "rock", "count": 15}, ...].
+
+    Returns:
+        Title-cased genre string, or "" if the list is empty or None.
+    """
+    if not tags_list:
+        return ""
+    best = max(tags_list, key=lambda t: t.get("count", 0))
+    name = best.get("name", "")
+    return name.title() if name else ""
+
+
+def _extract_year(date_str):
+    """Extract a 4-digit year from a date string.
+
+    Args:
+        date_str: Date string like "1975-10-31", "1975", or "".
+
+    Returns:
+        Year as int, or 0 if missing or unparseable.
+    """
+    if not date_str:
+        return 0
+    m = _YEAR_RE.search(str(date_str))
+    return int(m.group(1)) if m else 0
+
+
+def _parse_track_number(num_str):
+    """Parse a track number string to int.
+
+    Args:
+        num_str: Track number string (could be "1", "A1", "").
+
+    Returns:
+        Integer track number, defaulting to 1 if unparseable.
+    """
+    if not num_str:
+        return 1
+    m = _TRACK_NUM_RE.search(str(num_str))
+    return int(m.group(1)) if m else 1
+
+
+def _load_release_group_genres():
+    """Parse the release-group tar.xz dump to build release_group MBID → genre mapping.
+
+    Returns:
+        dict mapping release_group MBID (str) → genre (str).
+    """
+    archive_path = MB_DIR / "release-group.tar.xz"
+    if not archive_path.exists():
+        log.error("Release-group archive not found: %s", archive_path)
+        log.error("Run with --download first.")
+        return {}
+
+    log.info("Loading release-group genres from %s", archive_path.name)
+
+    rg_genres = {}
+
+    with lzma.open(archive_path, "rb") as xz:
+        tar = tarfile.open(fileobj=xz, mode="r|")
+
+        for member in tar:
+            if not member.isfile():
+                continue
+
+            f = tar.extractfile(member)
+            if f is None:
+                continue
+
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    rg = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                rg_id = rg.get("id")
+                if not rg_id:
+                    continue
+
+                # Try "genres" first (newer dumps), then "tags" as fallback
+                genre = _extract_genre_from_tags(rg.get("genres"))
+                if not genre:
+                    genre = _extract_genre_from_tags(rg.get("tags"))
+
+                if genre:
+                    rg_genres[rg_id] = genre
+
+        tar.close()
+
+    log.info("Release-group genres loaded: %d entries", len(rg_genres))
+    return rg_genres
+
+
+def load_mb_metadata():
+    """Parse the MusicBrainz release dump to build recording → metadata mapping.
+
+    Streams through the release tar.xz archive (17GB compressed) one line at a
+    time to avoid loading the entire dump into memory.
+
+    Returns:
+        dict mapping recording MBID (str) → metadata dict with keys:
+            title, artist, artistMbid, albumArtist, album, releaseMbid,
+            releaseGroupMbid, genre, year, trackNo, totalTracks
+    """
+    archive_path = MB_DIR / "release.tar.xz"
+    if not archive_path.exists():
+        log.error("Release archive not found: %s", archive_path)
+        log.error("Run with --download first.")
+        return {}
+
+    # Load release-group genres first
+    rg_genres = _load_release_group_genres()
+
+    log.info("Loading MusicBrainz release metadata from %s", archive_path.name)
+
+    recordings = {}
+    release_count = 0
+    skipped = 0
+
+    with lzma.open(archive_path, "rb") as xz:
+        tar = tarfile.open(fileobj=xz, mode="r|")
+
+        for member in tar:
+            if not member.isfile():
+                continue
+
+            f = tar.extractfile(member)
+            if f is None:
+                continue
+
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    release = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    skipped += 1
+                    continue
+
+                release_count += 1
+                if release_count % 100_000 == 0:
+                    log.info(
+                        "Processed %dk releases, %d recordings so far",
+                        release_count // 1000,
+                        len(recordings),
+                    )
+
+                # Extract release-level fields
+                release_mbid = release.get("id", "")
+                album = release.get("title", "")
+                year = _extract_year(release.get("date", ""))
+
+                # Artist credit — take first entry
+                artist_credit = release.get("artist-credit", [])
+                if not artist_credit:
+                    skipped += 1
+                    continue
+                first_credit = artist_credit[0]
+                artist_obj = first_credit.get("artist", {})
+                artist_name = artist_obj.get("name", "")
+                artist_mbid = artist_obj.get("id", "")
+
+                # Skip releases missing required fields
+                if not album or not artist_name or not year:
+                    skipped += 1
+                    continue
+
+                # Release group and genre
+                rg_obj = release.get("release-group", {}) or {}
+                rg_mbid = rg_obj.get("id", "")
+                genre = rg_genres.get(rg_mbid, "") if rg_mbid else ""
+
+                # Fallback: try genre/tags on the release itself
+                if not genre:
+                    genre = _extract_genre_from_tags(release.get("genres"))
+                if not genre:
+                    genre = _extract_genre_from_tags(release.get("tags"))
+
+                # Process each medium and track
+                for medium in release.get("media", []):
+                    total_tracks = medium.get("track-count", 0)
+
+                    for track in medium.get("tracks", []):
+                        recording = track.get("recording", {}) or {}
+                        recording_mbid = recording.get("id", "")
+                        if not recording_mbid:
+                            continue
+
+                        # Skip recordings already seen (keep first occurrence)
+                        if recording_mbid in recordings:
+                            continue
+
+                        title = track.get("title") or recording.get("title", "")
+                        track_no = _parse_track_number(track.get("number", ""))
+
+                        recordings[recording_mbid] = {
+                            "title": title,
+                            "artist": artist_name,
+                            "artistMbid": artist_mbid,
+                            "albumArtist": artist_name,
+                            "album": album,
+                            "releaseMbid": release_mbid,
+                            "releaseGroupMbid": rg_mbid,
+                            "genre": genre,
+                            "year": year,
+                            "trackNo": track_no,
+                            "totalTracks": total_tracks,
+                        }
+
+        tar.close()
+
+    log.info(
+        "MusicBrainz: %d recordings from %d releases (%d skipped)",
+        len(recordings),
+        release_count,
+        skipped,
+    )
+    return recordings
 
 
 def build_catalog():
