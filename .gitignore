@@ -7,3 +7,6 @@ obj/
 dist/truedat/ffmpeg.exe
 dist/truedat/ffprobe.exe
 dist/truedat/ffplay.exe
+
+# Synthetic library data (large downloads)
+data/
