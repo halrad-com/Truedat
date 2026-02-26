@@ -287,6 +287,15 @@ namespace Truedat
             bool detailsMode = false;
             bool analyzeMode = false;
 
+            bool synthesize = false;
+            string? synthCatalog = null;
+            string? synthOutput = null;
+            int synthCount = 430_000;
+            double synthAlbumRatio = 0.5;
+            string? synthMoods = null;
+            int synthSeed = 42;
+            bool synthDryRun = false;
+
             bool showHelp = false;
 
             for (int i = 0; i < args.Length; i++)
@@ -310,6 +319,17 @@ namespace Truedat
                 else if (arg == "--check-filenames") checkFilenames = true;
                 else if (arg == "--duplicates") duplicatesMode = true;
                 else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
+                else if (arg == "--synthesize") synthesize = true;
+                else if (arg == "--catalog" && i + 1 < args.Length) synthCatalog = args[++i];
+                else if (arg == "--synth-output" && i + 1 < args.Length) synthOutput = args[++i];
+                else if (arg == "--count" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cnt) && cnt > 0)
+                    { synthCount = cnt; i++; }
+                else if (arg == "--album-ratio" && i + 1 < args.Length && double.TryParse(args[i + 1], out var ar))
+                    { synthAlbumRatio = Math.Max(0, Math.Min(1, ar)); i++; }
+                else if (arg == "--synth-moods" && i + 1 < args.Length) synthMoods = args[++i];
+                else if (arg == "--seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
+                    { synthSeed = sd; i++; }
+                else if (arg == "--dry-run") synthDryRun = true;
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
@@ -335,7 +355,37 @@ namespace Truedat
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
+                Console.WriteLine("Synthesize mode:");
+                Console.WriteLine("  --synthesize        Generate a synthetic MusicBee library from a catalog");
+                Console.WriteLine("  --catalog <path>    Path to catalog JSONL (.jsonl or .jsonl.gz)");
+                Console.WriteLine("  --synth-output <dir> Output directory for synthesized library");
+                Console.WriteLine("  --count <n>         Number of tracks to generate (default: 430000)");
+                Console.WriteLine("  --album-ratio <r>   Fraction of tracks in albums vs singles (default: 0.5)");
+                Console.WriteLine("  --synth-moods <path> Path to existing mbxmoods.json to merge into");
+                Console.WriteLine("  --seed <n>          Random seed for reproducibility (default: 42)");
+                Console.WriteLine("  --dry-run           Preview without writing files");
+                Console.WriteLine();
                 Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
+                return;
+            }
+
+            // --synthesize is independent of the XML-based modes
+            if (synthesize)
+            {
+                if (string.IsNullOrEmpty(synthCatalog))
+                {
+                    Console.WriteLine("Error: --synthesize requires --catalog <path>");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (string.IsNullOrEmpty(synthOutput) && !synthDryRun)
+                {
+                    Console.WriteLine("Error: --synthesize requires --synth-output <path> (or --dry-run)");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = new SynthesizeCommand(synthCatalog!, synthOutput ?? "", synthCount,
+                    synthAlbumRatio, synthMoods, synthSeed, synthDryRun).Run();
                 return;
             }
 
@@ -361,6 +411,16 @@ namespace Truedat
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  -?, --help          Show this help");
+                Console.WriteLine();
+                Console.WriteLine("Synthesize mode:");
+                Console.WriteLine("  --synthesize        Generate a synthetic MusicBee library from a catalog");
+                Console.WriteLine("  --catalog <path>    Path to catalog JSONL (.jsonl or .jsonl.gz)");
+                Console.WriteLine("  --synth-output <dir> Output directory for synthesized library");
+                Console.WriteLine("  --count <n>         Number of tracks to generate (default: 430000)");
+                Console.WriteLine("  --album-ratio <r>   Fraction of tracks in albums vs singles (default: 0.5)");
+                Console.WriteLine("  --synth-moods <path> Path to existing mbxmoods.json to merge into");
+                Console.WriteLine("  --seed <n>          Random seed for reproducibility (default: 42)");
+                Console.WriteLine("  --dry-run           Preview without writing files");
                 return;
             }
 
