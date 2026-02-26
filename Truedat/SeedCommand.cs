@@ -99,6 +99,10 @@ namespace Truedat
                 }
                 else
                 {
+                    if (noMatch < 5)
+                        Console.WriteLine($"  No match: {track.Artist} - {track.Name}");
+                    else if (noMatch == 5)
+                        Console.WriteLine("  (suppressing further no-match messages)");
                     noMatch++;
                 }
             }

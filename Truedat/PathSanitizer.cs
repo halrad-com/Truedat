@@ -132,7 +132,10 @@ namespace Truedat
                 }
                 if (!resolved)
                 {
-                    // Fallback: use a hash suffix to guarantee uniqueness
+                    // Fallback: use a hash suffix to guarantee uniqueness.
+                    // Note: string.GetHashCode() is deterministic on .NET Framework 4.8
+                    // but randomized per-process on .NET 6+. If retargeting, replace with
+                    // a stable hash (e.g. SHA-256 truncated).
                     string hash = title.GetHashCode().ToString("x8");
                     string altFilename = trackPrefix + " " + safeTitle.Substring(0, Math.Min(safeTitle.Length, 40)) + "_" + hash + ".mp3";
                     path = Path.Combine(outputDir, safeArtist, safeAlbum, altFilename);
@@ -177,7 +180,10 @@ namespace Truedat
             }
 
             string result = sb.ToString().ToLowerInvariant();
-            result = Regex.Replace(result, @"[^\w\s]", "");
+            // Strip non-ASCII-alphanumeric (keep a-z, 0-9, whitespace).
+            // Using explicit ASCII range instead of \w to ensure identical behavior
+            // between Python and C# (Unicode \w semantics differ between runtimes).
+            result = Regex.Replace(result, @"[^a-z0-9\s]", "");
             result = Regex.Replace(result, @"\s+", " ").Trim();
             return result;
         }

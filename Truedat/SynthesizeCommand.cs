@@ -308,7 +308,7 @@ namespace Truedat
                         if (entry != null && !string.IsNullOrEmpty(entry.Mbid))
                             entries.Add(entry);
                     }
-                    catch
+                    catch (JsonException)
                     {
                         // Skip malformed lines
                     }

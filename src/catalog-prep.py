@@ -754,8 +754,10 @@ def _normalize_text(text):
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     # Lowercase
     text = text.lower()
-    # Strip punctuation (keep word chars and whitespace)
-    text = re.sub(r"[^\w\s]", "", text)
+    # Strip non-ASCII-alphanumeric (keep a-z, 0-9, whitespace).
+    # Using explicit ASCII range instead of \w to ensure identical behavior
+    # between Python and C# (Unicode \w semantics differ between runtimes).
+    text = re.sub(r"[^a-z0-9\s]", "", text)
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
