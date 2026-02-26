@@ -116,6 +116,7 @@ namespace Truedat
             string normalizedPath = path.Replace('/', '\\').ToLowerInvariant();
             if (existingPaths.Contains(normalizedPath))
             {
+                bool resolved = false;
                 for (int i = 2; i < 1000; i++)
                 {
                     string altFilename = trackPrefix + " " + safeTitle + " (" + i + ").mp3";
@@ -125,9 +126,32 @@ namespace Truedat
                     {
                         path = altPath;
                         normalizedPath = altNorm;
+                        resolved = true;
                         break;
                     }
                 }
+                if (!resolved)
+                {
+                    // Fallback: use a hash suffix to guarantee uniqueness
+                    string hash = title.GetHashCode().ToString("x8");
+                    string altFilename = trackPrefix + " " + safeTitle.Substring(0, Math.Min(safeTitle.Length, 40)) + "_" + hash + ".mp3";
+                    path = Path.Combine(outputDir, safeArtist, safeAlbum, altFilename);
+                    normalizedPath = path.Replace('/', '\\').ToLowerInvariant();
+                }
+            }
+
+            // Final guard: if path still exceeds limit (e.g. outputDir is very long),
+            // truncate artist to keep path under MAX_PATH
+            if (path.Length > MaxTotalPathLength)
+            {
+                int excess = path.Length - MaxTotalPathLength;
+                if (safeArtist.Length > excess + 5)
+                    safeArtist = safeArtist.Substring(0, safeArtist.Length - excess).TrimEnd('.', ' ');
+                else
+                    safeArtist = safeArtist.Length > 5 ? safeArtist.Substring(0, 5) : safeArtist;
+                filename = trackPrefix + " " + safeTitle + ".mp3";
+                path = Path.Combine(outputDir, safeArtist, safeAlbum, filename);
+                normalizedPath = path.Replace('/', '\\').ToLowerInvariant();
             }
 
             existingPaths.Add(normalizedPath);

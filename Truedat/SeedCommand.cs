@@ -136,37 +136,40 @@ namespace Truedat
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
             using var fs = File.OpenRead(_catalogPath);
-            Stream stream = _catalogPath.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)
+            Stream decompressed = _catalogPath.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)
                 ? (Stream)new GZipStream(fs, CompressionMode.Decompress)
                 : fs;
-            using var reader = new StreamReader(stream, Encoding.UTF8);
 
-            string line;
-            while ((line = reader.ReadLine()) != null)
+            using (decompressed)
+            using (var reader = new StreamReader(decompressed, Encoding.UTF8))
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                try
+                string line;
+                while ((line = reader.ReadLine()) != null)
                 {
-                    var entry = JsonSerializer.Deserialize<CatalogEntry>(line, options);
-                    if (entry == null || string.IsNullOrEmpty(entry.Artist)
-                        || string.IsNullOrEmpty(entry.Title))
-                        continue;
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    try
+                    {
+                        var entry = JsonSerializer.Deserialize<CatalogEntry>(line, options);
+                        if (entry == null || string.IsNullOrEmpty(entry.Artist)
+                            || string.IsNullOrEmpty(entry.Title))
+                            continue;
 
-                    // Build lookup key from pre-normalized fields if available,
-                    // otherwise normalize on the fly
-                    string normArtist = !string.IsNullOrEmpty(entry.NormalizedArtist)
-                        ? entry.NormalizedArtist
-                        : PathSanitizer.NormalizeForLookup(entry.Artist);
-                    string normTitle = !string.IsNullOrEmpty(entry.NormalizedTitle)
-                        ? entry.NormalizedTitle
-                        : PathSanitizer.NormalizeForLookup(entry.Title);
+                        // Build lookup key from pre-normalized fields if available,
+                        // otherwise normalize on the fly
+                        string normArtist = !string.IsNullOrEmpty(entry.NormalizedArtist)
+                            ? entry.NormalizedArtist
+                            : PathSanitizer.NormalizeForLookup(entry.Artist);
+                        string normTitle = !string.IsNullOrEmpty(entry.NormalizedTitle)
+                            ? entry.NormalizedTitle
+                            : PathSanitizer.NormalizeForLookup(entry.Title);
 
-                    string key = normArtist + "|" + normTitle;
-                    // Keep first occurrence (don't overwrite)
-                    if (!index.ContainsKey(key))
-                        index[key] = entry;
+                        string key = normArtist + "|" + normTitle;
+                        // Keep first occurrence (don't overwrite)
+                        if (!index.ContainsKey(key))
+                            index[key] = entry;
+                    }
+                    catch (JsonException) { /* Skip malformed lines */ }
                 }
-                catch (JsonException) { /* Skip malformed lines */ }
             }
 
             return index;
@@ -260,7 +263,7 @@ namespace Truedat
                 ["dissonance"] = entry.Dissonance,
                 ["pitchSalience"] = entry.PitchSalience,
                 ["chordsChangesRate"] = entry.ChordsChangesRate,
-                ["mfcc"] = new JsonArray(entry.Mfcc0),
+                ["mfcc"] = new JsonArray(entry.Mfcc0, entry.Mfcc1),
                 ["_source"] = SeedSource,
                 ["_confidence"] = SeedConfidence,
             };
@@ -301,12 +304,13 @@ namespace Truedat
             var options = new JsonSerializerOptions { WriteIndented = true };
             var json = root.ToJsonString(options);
 
-            // Atomic write: write to temp, then move
+            // Atomic write: write to temp, then replace
             var tmpPath = _moodsPath + ".tmp";
             File.WriteAllText(tmpPath, json, Encoding.UTF8);
             if (File.Exists(_moodsPath))
-                File.Delete(_moodsPath);
-            File.Move(tmpPath, _moodsPath);
+                File.Replace(tmpPath, _moodsPath, null);
+            else
+                File.Move(tmpPath, _moodsPath);
         }
     }
 }

@@ -371,7 +371,8 @@ _AB_FEATURE_MAP = [
     ("dissonance", "lowlevel.dissonance.mean", None, 4),
     ("pitchSalience", "lowlevel.pitch_salience.mean", None, 4),
     ("chordsChangesRate", "tonal.chords_changes_rate", None, 4),
-    ("mfcc0", "lowlevel.mfcc.mean", None, 4),  # first element of array
+    ("mfcc0", "lowlevel.mfcc.mean", None, 4),  # first element of array (energy)
+    ("mfcc1", "lowlevel.mfcc.mean", None, 4),  # second element of array (timbre/spectral slope)
 ]
 
 # Sane numeric ranges for feature validation — rejects NaN, Inf, and out-of-range values.
@@ -389,6 +390,7 @@ FEATURE_RANGES = {
     "pitchSalience": (0.0, 1.0),
     "chordsChangesRate": (0.0, 5.0),
     "mfcc0": (-1000.0, 1000.0),
+    "mfcc1": (-500.0, 500.0),
 }
 
 
@@ -417,12 +419,17 @@ def extract_ab_features(json_obj):
             _rejection_counts[f"{out_key} missing"] += 1
             return None
 
-        # Special case: mfcc0 is the first element of the MFCC array
+        # Special case: mfcc0/mfcc1 are elements of the MFCC array
         if out_key == "mfcc0":
             if not isinstance(value, list) or len(value) == 0:
                 _rejection_counts[f"{out_key} empty array"] += 1
                 return None
             value = value[0]
+        elif out_key == "mfcc1":
+            if not isinstance(value, list) or len(value) < 2:
+                _rejection_counts[f"{out_key} array too short"] += 1
+                return None
+            value = value[1]
 
         # String features (key, mode) — must not be empty
         if out_key in ("key", "mode"):
@@ -965,7 +972,7 @@ def _write_seed_index(entries):
             danceability REAL, onset_rate REAL, zero_crossing_rate REAL,
             spectral_rms REAL, spectral_flatness REAL,
             dissonance REAL, pitch_salience REAL, chords_changes_rate REAL,
-            mfcc0 REAL, genre TEXT
+            mfcc0 REAL, mfcc1 REAL, genre TEXT
         );
 
         CREATE TABLE recordings (
@@ -996,7 +1003,7 @@ def _write_seed_index(entries):
             entry.get("onsetRate"), entry.get("zeroCrossingRate"),
             entry.get("spectralRms"), entry.get("spectralFlatness"),
             entry.get("dissonance"), entry.get("pitchSalience"),
-            entry.get("chordsChangesRate"), entry.get("mfcc0"),
+            entry.get("chordsChangesRate"), entry.get("mfcc0"), entry.get("mfcc1"),
             entry.get("genre"),
         ))
         recordings_batch.append((
@@ -1012,7 +1019,7 @@ def _write_seed_index(entries):
         ))
 
     conn.executemany(
-        "INSERT OR IGNORE INTO features VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO features VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         features_batch
     )
     conn.executemany(

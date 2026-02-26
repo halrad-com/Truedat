@@ -93,6 +93,9 @@ namespace Truedat
         [JsonPropertyName("mfcc0")]
         public double Mfcc0 { get; set; }
 
+        [JsonPropertyName("mfcc1")]
+        public double Mfcc1 { get; set; }
+
         [JsonPropertyName("normalizedArtist")]
         public string NormalizedArtist { get; set; } = "";
 
@@ -562,18 +565,16 @@ namespace Truedat
             var options = new JsonSerializerOptions { WriteIndented = true };
             var json = manifest.ToJsonString(options);
 
-            // Atomic write: write to temp, then move
+            // Atomic write: write to temp, then replace
             var tmpPath = manifestPath + ".tmp";
             File.WriteAllText(tmpPath, json, System.Text.Encoding.UTF8);
-            if (File.Exists(manifestPath))
-                File.Delete(manifestPath);
-            File.Move(tmpPath, manifestPath);
+            AtomicReplace(tmpPath, manifestPath);
         }
 
         void WriteMoods(List<SynthTrack> allTracks)
         {
-            var moodsOutputPath = !string.IsNullOrEmpty(_moodsPath)
-                ? _moodsPath
+            string moodsOutputPath = !string.IsNullOrEmpty(_moodsPath)
+                ? _moodsPath!
                 : Path.Combine(_outputDir, "mbxmoods.json");
 
             // Build moods data — keyed by output path
@@ -622,7 +623,7 @@ namespace Truedat
                     ["dissonance"] = c.Dissonance,
                     ["pitchSalience"] = c.PitchSalience,
                     ["chordsChangesRate"] = c.ChordsChangesRate,
-                    ["mfcc"] = new JsonArray(c.Mfcc0),
+                    ["mfcc"] = new JsonArray(c.Mfcc0, c.Mfcc1),
                 };
                 moodsDict[normalizedPath] = obj;
             }
@@ -638,9 +639,7 @@ namespace Truedat
             // Atomic write
             var tmpPath = moodsOutputPath + ".tmp";
             File.WriteAllText(tmpPath, json, System.Text.Encoding.UTF8);
-            if (File.Exists(moodsOutputPath))
-                File.Delete(moodsOutputPath);
-            File.Move(tmpPath, moodsOutputPath);
+            AtomicReplace(tmpPath, moodsOutputPath);
 
             Console.WriteLine($"  Wrote {allTracks.Count:N0} mood entries to {moodsOutputPath}");
         }
@@ -699,6 +698,14 @@ namespace Truedat
 
             if (allTracks.Count > 10)
                 Console.WriteLine($"    ... and {allTracks.Count - 10:N0} more");
+        }
+
+        static void AtomicReplace(string tmpPath, string targetPath)
+        {
+            if (File.Exists(targetPath))
+                File.Replace(tmpPath, targetPath, null);
+            else
+                File.Move(tmpPath, targetPath);
         }
     }
 }
