@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import lzma
+import math
 import os
 import random
 import re
@@ -369,6 +370,23 @@ _AB_FEATURE_MAP = [
     ("mfcc0", "lowlevel.mfcc.mean", None, 4),  # first element of array
 ]
 
+# Sane numeric ranges for feature validation — rejects NaN, Inf, and out-of-range values.
+FEATURE_RANGES = {
+    "bpm": (20.0, 300.0),
+    "loudness": (-70.0, 0.0),
+    "spectralCentroid": (0.0, 22050.0),
+    "spectralFlux": (0.0, 10.0),
+    "danceability": (0.0, 3.0),
+    "onsetRate": (0.0, 50.0),
+    "zeroCrossingRate": (0.0, 1.0),
+    "spectralRms": (0.0, 1.0),
+    "spectralFlatness": (-100.0, 0.0),
+    "dissonance": (0.0, 1.0),
+    "pitchSalience": (0.0, 1.0),
+    "chordsChangesRate": (0.0, 5.0),
+    "mfcc0": (-1000.0, 1000.0),
+}
+
 
 _rejection_counts = Counter()
 
@@ -417,6 +435,18 @@ def extract_ab_features(json_obj):
         if precision is not None:
             value = round(value, precision)
         result[out_key] = value
+
+    # Validate numeric features are within sane ranges (reject NaN, Inf, out-of-range)
+    for key, (lo, hi) in FEATURE_RANGES.items():
+        val = result.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+            _rejection_counts[f"{key} nan/inf"] += 1
+            return None
+        if val < lo or val > hi:
+            _rejection_counts[f"{key} out of range"] += 1
+            return None
 
     return result
 
