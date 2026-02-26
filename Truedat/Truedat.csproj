@@ -15,7 +15,12 @@
 
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.5" PrivateAssets="all" />
+    <PackageReference Include="TagLibSharp" Version="2.3.0" PrivateAssets="all" />
     <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\stub.mp3" />
   </ItemGroup>
 
 </Project>
