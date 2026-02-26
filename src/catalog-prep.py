@@ -212,7 +212,7 @@ def download_file(url, dest, description=None):
             return
         except requests.RequestException as exc:
             if attempt < MAX_RETRIES:
-                delay = RETRY_DELAYS[attempt]
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
                 log.warning(
                     "Attempt %d/%d failed for %s: %s — retrying in %ds",
                     attempt + 1, MAX_RETRIES + 1, label, exc, delay,
@@ -237,7 +237,10 @@ def _download_file_once(url, dest, label):
     Raises:
         requests.RequestException: On any HTTP or connection error.
     """
-    head = requests.head(url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True)
+    # HEAD is used for progress display and skip-if-complete heuristic.
+    # The SHA-256 manifest check in download_all() is the authoritative integrity gate.
+    head = requests.head(url, timeout=(DOWNLOAD_TIMEOUT, DOWNLOAD_TIMEOUT),
+                         allow_redirects=True)
     head.raise_for_status()
     remote_size = int(head.headers.get("content-length", 0))
 
@@ -257,8 +260,11 @@ def _download_file_once(url, dest, label):
         log.info("Downloading %s (%s)", label,
                  f"{remote_size:,} bytes" if remote_size else "unknown size")
 
+    # Use tuple timeout: (connect_timeout, read_timeout) to bound both
+    # phases. A scalar only bounds the connect; read can hang indefinitely.
     resp = requests.get(
-        url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT,
+        url, headers=headers, stream=True,
+        timeout=(DOWNLOAD_TIMEOUT, DOWNLOAD_TIMEOUT),
     )
     resp.raise_for_status()
 
@@ -270,21 +276,26 @@ def _download_file_once(url, dest, label):
 
     mode = "ab" if resp.status_code == 206 else "wb"
 
-    with (
-        open(dest, mode) as f,
-        tqdm(
-            total=total or None,
-            initial=local_size,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=label,
-        ) as bar,
-    ):
-        for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-            if chunk:
-                f.write(chunk)
-                bar.update(len(chunk))
+    # Use try/finally to ensure response stream is closed on any error,
+    # preventing leaked sockets in CLOSE_WAIT during multi-GB downloads.
+    try:
+        with (
+            open(dest, mode) as f,
+            tqdm(
+                total=total or None,
+                initial=local_size,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=label,
+            ) as bar,
+        ):
+            for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    f.write(chunk)
+                    bar.update(len(chunk))
+    finally:
+        resp.close()
 
     final_size = dest.stat().st_size
     log.info("Completed: %s (%d bytes)", label, final_size)
