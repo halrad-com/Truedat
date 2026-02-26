@@ -266,6 +266,13 @@ namespace Truedat
 
         List<CatalogEntry> LoadCatalog()
         {
+            if (!File.Exists(_catalogPath))
+            {
+                Console.WriteLine($"Error: catalog not found: {_catalogPath}");
+                Console.WriteLine("Run: python src/catalog-prep.py --build");
+                return new List<CatalogEntry>();
+            }
+
             var entries = new List<CatalogEntry>();
             var options = new JsonSerializerOptions
             {
