@@ -25,6 +25,7 @@ import math
 import os
 import random
 import re
+import sqlite3
 import sys
 import tarfile
 import time
@@ -48,6 +49,7 @@ DATA_DIR = SCRIPT_DIR.parent / "data"
 AB_DIR = DATA_DIR / "acousticbrainz"
 MB_DIR = DATA_DIR / "musicbrainz"
 CATALOG_PATH = DATA_DIR / "synthlib-catalog.jsonl.gz"
+SEED_INDEX_PATH = DATA_DIR / "ab-seed-index.sqlite"
 RECORDINGS_CACHE = DATA_DIR / ".mb-recordings-cache.pickle"
 
 # AcousticBrainz sample dump (100k full Essentia JSON documents, 2 GB)
@@ -931,6 +933,108 @@ def write_catalog(entries, path=CATALOG_PATH):
     log.info("Wrote %d entries to %s (%.1f MB)", len(entries), path.name, size_mb)
 
 
+def _write_seed_index(entries):
+    """Write SQLite seed index for fast seeding lookup.
+
+    Creates two tables: features (keyed by recording MBID with all 15 acoustic
+    features) and recordings (keyed by MBID with normalized artist+title for
+    metadata matching).
+
+    Atomic: writes to .tmp, renames on success.
+
+    Args:
+        entries: List of catalog entry dicts.
+    """
+    SEED_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SEED_INDEX_PATH.with_suffix(".sqlite.tmp")
+
+    if tmp.exists():
+        tmp.unlink()
+
+    log.info("Building seed index: %s", SEED_INDEX_PATH.name)
+
+    conn = sqlite3.connect(str(tmp))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+
+    conn.executescript("""
+        CREATE TABLE features (
+            recording_mbid TEXT PRIMARY KEY,
+            bpm REAL, key TEXT, mode TEXT,
+            loudness REAL, spectral_centroid REAL, spectral_flux REAL,
+            danceability REAL, onset_rate REAL, zero_crossing_rate REAL,
+            spectral_rms REAL, spectral_flatness REAL,
+            dissonance REAL, pitch_salience REAL, chords_changes_rate REAL,
+            mfcc0 REAL, genre TEXT
+        );
+
+        CREATE TABLE recordings (
+            recording_mbid TEXT PRIMARY KEY,
+            normalized_artist TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            artist TEXT, title TEXT, album TEXT,
+            year INTEGER, artist_mbid TEXT, release_mbid TEXT
+        );
+
+        CREATE INDEX idx_recordings_artist_title
+            ON recordings(normalized_artist, normalized_title);
+
+        CREATE INDEX idx_recordings_artist_mbid
+            ON recordings(artist_mbid);
+    """)
+
+    features_batch = []
+    recordings_batch = []
+
+    for entry in entries:
+        mbid = entry.get("mbid", "")
+        features_batch.append((
+            mbid,
+            entry.get("bpm"), entry.get("key"), entry.get("mode"),
+            entry.get("loudness"), entry.get("spectralCentroid"),
+            entry.get("spectralFlux"), entry.get("danceability"),
+            entry.get("onsetRate"), entry.get("zeroCrossingRate"),
+            entry.get("spectralRms"), entry.get("spectralFlatness"),
+            entry.get("dissonance"), entry.get("pitchSalience"),
+            entry.get("chordsChangesRate"), entry.get("mfcc0"),
+            entry.get("genre"),
+        ))
+        recordings_batch.append((
+            mbid,
+            entry.get("normalizedArtist", ""),
+            entry.get("normalizedTitle", ""),
+            entry.get("artist", ""),
+            entry.get("title", ""),
+            entry.get("album", ""),
+            entry.get("year", 0),
+            entry.get("artistMbid", ""),
+            entry.get("releaseMbid", ""),
+        ))
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO features VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        features_batch
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO recordings VALUES (?,?,?,?,?,?,?,?,?)",
+        recordings_batch
+    )
+    conn.commit()
+
+    feat_count = conn.execute("SELECT COUNT(*) FROM features").fetchone()[0]
+    rec_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+    conn.close()
+
+    # Atomic rename
+    if SEED_INDEX_PATH.exists():
+        SEED_INDEX_PATH.unlink()
+    tmp.rename(SEED_INDEX_PATH)
+
+    size_mb = SEED_INDEX_PATH.stat().st_size / (1024 * 1024)
+    log.info("Seed index: %s (%.1f MB, %d features, %d recordings)",
+             SEED_INDEX_PATH.name, size_mb, feat_count, rec_count)
+
+
 def build_catalog(target=430_000):
     """Build the synthetic library catalog.
 
@@ -1031,6 +1135,7 @@ def build_catalog(target=430_000):
 
     # 5. Write catalog
     write_catalog(entries)
+    _write_seed_index(entries)
 
 
 def show_stats():
@@ -1096,6 +1201,19 @@ def show_stats():
         pct = count / total * 100 if total else 0
         print(f"  {decade}s{'':<26} {count:>10,} {pct:>6.1f}%")
     print()
+
+    # Seed index stats
+    if SEED_INDEX_PATH.exists():
+        conn = sqlite3.connect(str(SEED_INDEX_PATH))
+        feat_count = conn.execute("SELECT COUNT(*) FROM features").fetchone()[0]
+        rec_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+        conn.close()
+        size_mb = SEED_INDEX_PATH.stat().st_size / (1024 * 1024)
+        print(f"  Seed Index: {SEED_INDEX_PATH.name} ({size_mb:.1f} MB)")
+        print(f"  Features:  {feat_count:>10,}")
+        print(f"  Recordings: {rec_count:>10,}")
+    else:
+        print(f"\n  Seed index not found: {SEED_INDEX_PATH}")
 
 
 def main():
