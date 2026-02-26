@@ -18,6 +18,7 @@
 |-----------|---------|---------|---------|
 | .NET Framework | 4.8 | MIT | Runtime (ships with Windows 10/11) |
 | System.Text.Json | 8.0.5 | MIT | JSON serialization (merged into exe via ILRepack) |
+| TagLibSharp | 2.3.0 | LGPL-2.1 | ID3 tag writing for synthetic library generation (merged into exe via ILRepack) |
 
 **Build tools:**
 
@@ -87,6 +88,8 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 ## Output Files
 
+### Analysis Mode
+
 | File | Description |
 |------|-------------|
 | `mbxmoods.json` | Mood vectors and 15 raw Essentia features per track |
@@ -95,6 +98,21 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
 | `mbxhub-details.json` | Audio stream details: codec, bitrate, sample rate, channels per track (requires ffprobe) |
 | `truedat.log` | Console output log (when `--audit` is used) |
+
+### Synthetic Library Mode (`--synthesize`)
+
+| File | Description |
+|------|-------------|
+| `{output}/**/*.mp3` | Stub MP3 files with real ID3 metadata (artist, album, genre, year, BPM) |
+| `{output}/mbxmoods.json` | Mood entries with 15 Essentia features for all generated tracks |
+| `{output}/.synthetic-manifest.json` | Manifest for idempotent reruns (tracks generated, seed, settings) |
+
+### Catalog Prep (`src/catalog-prep.py`, developer tool)
+
+| File | Description |
+|------|-------------|
+| `data/synthlib-catalog.jsonl.gz` | Gzipped JSON Lines catalog of track metadata + acoustic features |
+| `data/downloads.json` | Download manifest with SHA-256 integrity hashes |
 
 ## Platform Support
 

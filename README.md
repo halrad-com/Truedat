@@ -1,6 +1,14 @@
-# Truedat - Music Mood Extractor & Fingerprinter
+# Truedat - Music Mood Extractor, Fingerprinter & Test Toolkit
 
-Audio feature extraction tool that generates mood vectors (valence/arousal) and audio fingerprints for music libraries using [Essentia](https://essentia.upf.edu/). Extracts 15 audio features per track, maps every song onto a 2D emotion space, and optionally generates perceptual fingerprints and audio-data hashes.
+Truedat serves two purposes:
+
+### 1. Production: Audio Analysis for MBXHub
+
+Runs [Essentia](https://essentia.upf.edu/) against your music library to extract 15 acoustic features per track, maps every song onto a 2D emotion space (valence/arousal), and optionally generates perceptual fingerprints and audio-data hashes. The output (`mbxmoods.json`) is the mood data file that MBXHub's AutoQ engine uses for mood-aware shuffle.
+
+### 2. Test Tooling: Synthetic Library Generation & Mood Seeding
+
+Generates large synthetic libraries (100k-500k+ tracks) with real metadata from [MusicBrainz](https://musicbrainz.org/) and real acoustic features from [AcousticBrainz](https://acousticbrainz.org/). Used to test MBXHub at scale — exercising AutoQ scoring, mood channels, diversity quotas, and performance — before real users with large libraries report issues. Can also seed `mbxmoods.json` from the AcousticBrainz catalog, providing instant mood data for tracks that match by artist+title without running Essentia.
 
 **Output:**
 
@@ -98,6 +106,78 @@ truedat.exe "iTunes Music Library.xml" --check-filenames
 REM Probe audio details (codec, bitrate, sample rate, etc.)
 truedat.exe "iTunes Music Library.xml" --details
 ```
+
+## Synthetic Library Generation (Test Tooling)
+
+Generate a synthetic MusicBee library from a prepared catalog of real MusicBrainz metadata and AcousticBrainz acoustic features:
+
+```cmd
+REM Dry run — preview what would be created
+truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --count 100 --dry-run
+
+REM Generate 430,000 synthetic tracks
+truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --count 430000
+
+REM Generate and merge mood data into an existing mbxmoods.json
+truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --synth-moods C:\path\to\mbxmoods.json
+```
+
+### Synthesize Options
+
+```
+  --synthesize            Generate a synthetic MusicBee library from a catalog
+  --catalog <path>        Path to catalog JSONL (.jsonl or .jsonl.gz)
+  --synth-output <dir>    Output directory for synthesized library
+  --count <n>             Number of tracks to generate (default: 430000)
+  --album-ratio <r>       Fraction of tracks in albums vs singles (default: 0.5)
+  --synth-moods <path>    Path to existing mbxmoods.json to merge into
+  --seed <n>              Random seed for reproducibility (default: 42)
+  --dry-run               Preview without writing files
+```
+
+Each generated track is a stub MP3 (~12 KB, 3 seconds of silence) with real ID3 metadata (Title, Artist, Album, Genre, Year, BPM) written via TagLib#. Tracks are organized as `{output}\{Artist}\{Album}\{NN} {Title}.mp3`.
+
+### Identifying Synthetic Tracks
+
+All synthetic tracks are marked for easy identification:
+
+- **ID3 Grouping tag** = `Synthetic` — filterable in MusicBee column browser
+- **ID3 Comment tag** = `SYNTH:{seed}:{mbid}` — searchable, links to source recording MBID
+- **File path** — all generated files live under the `--synth-output` directory
+
+### Building the Catalog
+
+The catalog is built using a developer-only Python script that joins AcousticBrainz acoustic features with MusicBrainz metadata. This downloads ~21 GB of data dumps:
+
+```cmd
+cd src
+pip install -r requirements-catalog.txt
+python catalog-prep.py --download --build --stats
+```
+
+Output: `data/synthlib-catalog.jsonl.gz` — a gzipped JSON Lines file where each line contains one track with full metadata and 15 Essentia acoustic features.
+
+## Mood Seeding from AcousticBrainz
+
+Seed `mbxmoods.json` with pre-computed acoustic features from the AcousticBrainz catalog, matched by normalized artist+title. Faster than running Essentia on every file — instant mood data for matched tracks.
+
+```cmd
+REM Seed moods for your library from the AcousticBrainz catalog
+truedat.exe "iTunes Music Library.xml" --seed-moods --seed-catalog data\synthlib-catalog.jsonl.gz
+
+REM Specify a target moods file
+truedat.exe "iTunes Music Library.xml" --seed-moods --seed-catalog data\synthlib-catalog.jsonl.gz --seed-target C:\path\to\mbxmoods.json
+```
+
+### Seed Options
+
+```
+  --seed-moods              Seed mbxmoods.json from AcousticBrainz catalog
+  --seed-catalog <path>     Path to synthlib-catalog.jsonl.gz
+  --seed-target <path>      Target mbxmoods.json path (default: next to library XML)
+```
+
+Seeded entries have `_confidence: 0.6` and `_source: "ab-metadata"`. Local Essentia analysis (confidence 1.0) is never overwritten — seeding only adds new entries or upgrades lower-confidence data.
 
 ## Installation
 
@@ -316,6 +396,7 @@ Place `mbxmoods.json` in your MusicBee Library folder (sibling to `AppData`) or 
 
 - **truedat.exe**: MIT - Copyright (c) 2026 Halrad LLC
 - **System.Text.Json**: MIT - Copyright (c) .NET Foundation (merged into exe)
+- **TagLibSharp**: LGPL-2.1 - [TagLibSharp](https://github.com/mono/taglib-sharp) (merged into exe, used for synthetic track metadata)
 - **Essentia tools**: AGPL-3.0 - [Essentia](https://github.com/MTG/essentia) by Music Technology Group, Universitat Pompeu Fabra
 - **FFmpeg tools**: GPL-3.0+ - [FFmpeg](https://ffmpeg.org/) (optional dependency)
 
