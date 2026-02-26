@@ -20,10 +20,13 @@ import gzip
 import json
 import logging
 import os
+import re
 import sys
+import tarfile
 from pathlib import Path
 
 import requests
+import zstandard as zstd
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -140,6 +143,179 @@ def download_all():
         mb_filename = url.rsplit("/", 1)[-1]
         mb_dest = MB_DIR / mb_filename
         download_file(url, mb_dest, description=f"MusicBrainz {name}")
+
+
+def nav_path(obj, dotpath, default=None):
+    """Navigate nested dicts by dot-separated path.
+
+    Args:
+        obj: Root dict to navigate.
+        dotpath: Dot-separated key path (e.g. "rhythm.bpm").
+        default: Value to return if any key is missing.
+
+    Returns:
+        The value at the path, or default if any key is missing.
+    """
+    current = obj
+    for key in dotpath.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+# Essentia JSON paths → camelCase output keys, with rounding precision.
+# Each entry: (output_key, primary_path, fallback_path_or_None, round_digits_or_None)
+_AB_FEATURE_MAP = [
+    ("bpm", "rhythm.bpm", None, 1),
+    ("key", "tonal.key_edma.key", "tonal.key_krumhansl.key", None),
+    ("mode", "tonal.key_edma.scale", "tonal.key_krumhansl.scale", None),
+    ("loudness", "lowlevel.loudness_ebu128.integrated", "lowlevel.average_loudness", 2),
+    ("spectralCentroid", "lowlevel.spectral_centroid.mean", None, 1),
+    ("spectralFlux", "lowlevel.spectral_flux.mean", None, 4),
+    ("danceability", "rhythm.danceability", None, 4),
+    ("onsetRate", "rhythm.onset_rate", None, 2),
+    ("zeroCrossingRate", "lowlevel.zerocrossingrate.mean", None, 6),
+    ("spectralRms", "lowlevel.spectral_rms.mean", None, 6),
+    ("spectralFlatness", "lowlevel.spectral_flatness_db.mean", None, 6),
+    ("dissonance", "lowlevel.dissonance.mean", None, 4),
+    ("pitchSalience", "lowlevel.pitch_salience.mean", None, 4),
+    ("chordsChangesRate", "tonal.chords_changes_rate", None, 4),
+    ("mfcc0", "lowlevel.mfcc.mean", None, 4),  # first element of array
+]
+
+
+def extract_ab_features(json_obj):
+    """Extract the 15 Essentia features that MBXHub's MoodEstimator uses.
+
+    Args:
+        json_obj: Parsed Essentia JSON document.
+
+    Returns:
+        Dict with camelCase keys matching mbxmoods.json format, or None
+        if any required feature is missing.
+    """
+    result = {}
+
+    for out_key, primary, fallback, precision in _AB_FEATURE_MAP:
+        value = nav_path(json_obj, primary)
+        if value is None and fallback:
+            value = nav_path(json_obj, fallback)
+
+        if value is None:
+            return None
+
+        # Special case: mfcc0 is the first element of the MFCC array
+        if out_key == "mfcc0":
+            if not isinstance(value, list) or len(value) == 0:
+                return None
+            value = value[0]
+
+        # String features (key, mode) — must not be empty
+        if out_key in ("key", "mode"):
+            if not isinstance(value, str) or value == "":
+                return None
+            result[out_key] = value
+            continue
+
+        # Numeric features — must be a number
+        if not isinstance(value, (int, float)):
+            return None
+        if precision is not None:
+            value = round(value, precision)
+        result[out_key] = value
+
+    return result
+
+
+# Regex to extract MBID from AcousticBrainz archive filenames.
+# Format: lowlevel/ab/c/abcdef01-2345-6789-abcd-ef0123456789-N.json
+_MBID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
+
+
+def load_ab_features():
+    """Load AcousticBrainz features from the downloaded sample tar.zst archive.
+
+    Decompresses the zstandard-compressed tar archive in streaming mode,
+    parses each Essentia JSON document, and extracts the 15 features
+    needed by MBXHub's MoodEstimator.
+
+    Returns:
+        dict mapping recording MBID (str) → feature dict.
+    """
+    archive_path = AB_DIR / "acousticbrainz-lowlevel-sample-json-20220623-0.tar.zst"
+    if not archive_path.exists():
+        log.error("AcousticBrainz archive not found: %s", archive_path)
+        log.error("Run with --download first.")
+        return {}
+
+    log.info("Loading AcousticBrainz features from %s", archive_path.name)
+
+    features = {}
+    seen_mbids = set()
+    skipped = 0
+
+    dctx = zstd.ZstdDecompressor()
+
+    with open(archive_path, "rb") as fh:
+        reader = dctx.stream_reader(fh)
+        tar = tarfile.open(fileobj=reader, mode="r|")
+
+        with tqdm(desc="AcousticBrainz features", unit=" docs") as bar:
+            for member in tar:
+                if not member.isfile() or not member.name.endswith(".json"):
+                    continue
+
+                # Extract MBID from filename
+                basename = os.path.basename(member.name)
+                match = _MBID_RE.search(basename)
+                if not match:
+                    skipped += 1
+                    bar.update(1)
+                    continue
+
+                mbid = match.group(1)
+
+                # Skip duplicates (keep first per MBID)
+                if mbid in seen_mbids:
+                    skipped += 1
+                    bar.update(1)
+                    continue
+                seen_mbids.add(mbid)
+
+                # Parse JSON and extract features
+                try:
+                    f = tar.extractfile(member)
+                    if f is None:
+                        skipped += 1
+                        bar.update(1)
+                        continue
+                    raw = f.read()
+                    doc = json.loads(raw)
+                except (json.JSONDecodeError, OSError) as exc:
+                    log.debug("Skipping %s: %s", basename, exc)
+                    skipped += 1
+                    bar.update(1)
+                    continue
+
+                extracted = extract_ab_features(doc)
+                if extracted is not None:
+                    features[mbid] = extracted
+                else:
+                    skipped += 1
+
+                bar.update(1)
+
+        tar.close()
+
+    log.info(
+        "AcousticBrainz: %d features extracted, %d skipped",
+        len(features),
+        skipped,
+    )
+    return features
 
 
 def build_catalog():
