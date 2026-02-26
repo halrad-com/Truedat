@@ -28,6 +28,7 @@ import re
 import sys
 import tarfile
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -47,6 +48,7 @@ DATA_DIR = SCRIPT_DIR.parent / "data"
 AB_DIR = DATA_DIR / "acousticbrainz"
 MB_DIR = DATA_DIR / "musicbrainz"
 CATALOG_PATH = DATA_DIR / "synthlib-catalog.jsonl.gz"
+RECORDINGS_CACHE = DATA_DIR / ".mb-recordings-cache.pickle"
 
 # AcousticBrainz sample dump (100k full Essentia JSON documents, 2 GB)
 AB_SAMPLE_URL = (
@@ -680,6 +682,76 @@ def _load_release_group_genres():
     return rg_genres
 
 
+def _recordings_cache_valid():
+    """Check if MB recordings cache exists and matches current release archive."""
+    archive = MB_DIR / "release.tar.xz"
+    if not RECORDINGS_CACHE.exists() or not archive.exists():
+        return False
+    try:
+        import pickle
+        with open(RECORDINGS_CACHE, "rb") as f:
+            header = pickle.load(f)  # first object is metadata
+        return (header.get("archive_size") == archive.stat().st_size and
+                header.get("archive_mtime") == archive.stat().st_mtime)
+    except Exception:
+        return False
+
+
+def _load_recordings_cache():
+    """Load cached recordings from pickle file."""
+    import pickle
+    with open(RECORDINGS_CACHE, "rb") as f:
+        _header = pickle.load(f)  # metadata header
+        recordings = pickle.load(f)  # actual data
+    return recordings
+
+
+def _save_recordings_cache(recordings):
+    """Save recordings to pickle cache with archive metadata."""
+    import pickle
+    archive = MB_DIR / "release.tar.xz"
+    header = {
+        "archive_size": archive.stat().st_size,
+        "archive_mtime": archive.stat().st_mtime,
+        "recording_count": len(recordings),
+    }
+    tmp = RECORDINGS_CACHE.with_suffix(".pickle.tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(header, f)
+        pickle.dump(recordings, f)
+    os.replace(tmp, RECORDINGS_CACHE)
+    log.info("Saved recordings cache: %d entries", len(recordings))
+
+
+def _normalize_text(text):
+    """Normalize text for seeding lookup matching.
+
+    Lowercase, strip accents (NFD decomposition + remove combining marks),
+    strip punctuation, collapse whitespace.
+
+    IMPORTANT: Must produce identical results to PathSanitizer.NormalizeForLookup()
+    in C# for cross-language matching.
+
+    Args:
+        text: Input string.
+
+    Returns:
+        Normalized string.
+    """
+    if not text:
+        return ""
+    # NFD decompose, remove combining marks (accents)
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    # Lowercase
+    text = text.lower()
+    # Strip punctuation (keep word chars and whitespace)
+    text = re.sub(r"[^\w\s]", "", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def load_mb_metadata(ab_mbids=None):
     """Parse the MusicBrainz release dump to build recording → metadata mapping.
 
@@ -701,6 +773,13 @@ def load_mb_metadata(ab_mbids=None):
         log.error("Release archive not found: %s", archive_path)
         log.error("Run with --download first.")
         return {}
+
+    # Check cache first
+    if _recordings_cache_valid():
+        log.info("Loading MB recordings from cache...")
+        recordings = _load_recordings_cache()
+        log.info("Loaded %d recordings from cache", len(recordings))
+        return recordings
 
     # Load release-group genres first
     rg_genres = _load_release_group_genres()
@@ -808,6 +887,8 @@ def load_mb_metadata(ab_mbids=None):
                                 "year": year,
                                 "trackNo": track_no,
                                 "totalTracks": total_tracks,
+                                "normalizedArtist": _normalize_text(artist_name),
+                                "normalizedTitle": _normalize_text(title),
                             }
 
             tar.close()
@@ -822,6 +903,7 @@ def load_mb_metadata(ab_mbids=None):
         release_count,
         skipped,
     )
+    _save_recordings_cache(recordings)
     return recordings
 
 
