@@ -1,14 +1,17 @@
 # Truedat Backlog
 
-## Seed mbxmoods.json from AcousticBrainz/MusicBrainz
+## ~~Seed mbxmoods.json from AcousticBrainz/MusicBrainz~~ DONE
 
-Instead of scanning every file with Essentia (hours for large libraries), match tracks
-against AcousticBrainz by MusicBrainz Recording ID (via Chromaprint fingerprint or
-metadata lookup) and pull pre-computed Essentia features. Only scan files that don't
-match. Could seed on first run, then do lazy background verification/update via MBXHub
-Shell.
+Implemented `--seed-moods` command: bulk seeds mbxmoods.json from AcousticBrainz
+pre-computed features via normalized artist+title matching (confidence 0.6). Tiered
+confidence model never downgrades existing data. Also implemented `--synthesize` for
+generating 430k-track synthetic test libraries. Python pipeline (`catalog-prep.py`)
+handles download with SHA-256 manifest, retry/backoff, and atomic outputs.
 
-**Depends on:** Synthetic library catalog infrastructure (same data source).
+Design: `docs/plans/2026-02-26-ab-seeding-and-robustness-design.md`
+
+**Future:** MBXHub Shell integration for background incremental seeding (.6 sprint),
+MBID tag lookup (tier 2), Chromaprint fingerprint matching (tier 3).
 
 ## DSD / Non-PCM Format Support
 
