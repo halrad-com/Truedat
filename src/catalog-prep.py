@@ -25,7 +25,7 @@ import random
 import re
 import sys
 import tarfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import requests
@@ -52,15 +52,18 @@ AB_SAMPLE_URL = (
     "acousticbrainz-lowlevel-sample-json-20220623-0.tar.zst"
 )
 
-# MusicBrainz JSON dumps (latest as of 2026-02-25)
-MB_BASE_URL = (
-    "https://data.metabrainz.org/pub/musicbrainz/data/json-dumps/20260225-001001"
-)
-MB_DUMPS = {
-    "release": f"{MB_BASE_URL}/release.tar.xz",
-    "artist": f"{MB_BASE_URL}/artist.tar.xz",
-    "release-group": f"{MB_BASE_URL}/release-group.tar.xz",
-}
+# MusicBrainz JSON dumps — date set via --mb-date CLI arg
+MB_DEFAULT_DATE = "20260225-001001"
+
+
+def _mb_dump_urls(mb_date):
+    """Build MusicBrainz dump URLs for the given date string."""
+    base = f"https://data.metabrainz.org/pub/musicbrainz/data/json-dumps/{mb_date}"
+    return {
+        "release": f"{base}/release.tar.xz",
+        "artist": f"{base}/artist.tar.xz",
+        "release-group": f"{base}/release-group.tar.xz",
+    }
 
 
 def download_file(url: str, dest: Path, description: str = None):
@@ -132,7 +135,7 @@ def download_file(url: str, dest: Path, description: str = None):
     log.info("Completed: %s (%s bytes)", label, final_size)
 
 
-def download_all():
+def download_all(mb_date=MB_DEFAULT_DATE):
     """Download all required data dumps."""
     log.info("Download directory: %s", DATA_DIR)
 
@@ -142,7 +145,8 @@ def download_all():
     download_file(AB_SAMPLE_URL, ab_dest, description="AcousticBrainz sample")
 
     # MusicBrainz JSON dumps
-    for name, url in MB_DUMPS.items():
+    mb_dumps = _mb_dump_urls(mb_date)
+    for name, url in mb_dumps.items():
         mb_filename = url.rsplit("/", 1)[-1]
         mb_dest = MB_DIR / mb_filename
         download_file(url, mb_dest, description=f"MusicBrainz {name}")
@@ -188,6 +192,9 @@ _AB_FEATURE_MAP = [
 ]
 
 
+_rejection_counts = Counter()
+
+
 def extract_ab_features(json_obj):
     """Extract the 15 Essentia features that MBXHub's MoodEstimator uses.
 
@@ -196,7 +203,8 @@ def extract_ab_features(json_obj):
 
     Returns:
         Dict with camelCase keys matching mbxmoods.json format, or None
-        if any required feature is missing.
+        if any required feature is missing. Rejection reasons are tracked
+        in _rejection_counts for observability.
     """
     result = {}
 
@@ -206,23 +214,27 @@ def extract_ab_features(json_obj):
             value = nav_path(json_obj, fallback)
 
         if value is None:
+            _rejection_counts[f"{out_key} missing"] += 1
             return None
 
         # Special case: mfcc0 is the first element of the MFCC array
         if out_key == "mfcc0":
             if not isinstance(value, list) or len(value) == 0:
+                _rejection_counts[f"{out_key} empty array"] += 1
                 return None
             value = value[0]
 
         # String features (key, mode) — must not be empty
         if out_key in ("key", "mode"):
             if not isinstance(value, str) or value == "":
+                _rejection_counts[f"{out_key} invalid"] += 1
                 return None
             result[out_key] = value
             continue
 
         # Numeric features — must be a number
         if not isinstance(value, (int, float)):
+            _rejection_counts[f"{out_key} not numeric"] += 1
             return None
         if precision is not None:
             value = round(value, precision)
@@ -262,62 +274,71 @@ def load_ab_features():
 
     dctx = zstd.ZstdDecompressor()
 
-    with open(archive_path, "rb") as fh:
-        reader = dctx.stream_reader(fh)
-        tar = tarfile.open(fileobj=reader, mode="r|")
+    try:
+        with open(archive_path, "rb") as fh:
+            reader = dctx.stream_reader(fh)
+            tar = tarfile.open(fileobj=reader, mode="r|")
 
-        with tqdm(desc="AcousticBrainz features", unit=" docs") as bar:
-            for member in tar:
-                if not member.isfile() or not member.name.endswith(".json"):
-                    continue
+            with tqdm(desc="AcousticBrainz features", unit=" docs") as bar:
+                for member in tar:
+                    if not member.isfile() or not member.name.endswith(".json"):
+                        continue
 
-                # Extract MBID from filename
-                basename = os.path.basename(member.name)
-                match = _MBID_RE.search(basename)
-                if not match:
-                    skipped += 1
-                    bar.update(1)
-                    continue
-
-                mbid = match.group(1)
-
-                # Skip duplicates (keep first per MBID)
-                if mbid in seen_mbids:
-                    skipped += 1
-                    bar.update(1)
-                    continue
-                seen_mbids.add(mbid)
-
-                # Parse JSON and extract features
-                try:
-                    f = tar.extractfile(member)
-                    if f is None:
+                    # Extract MBID from filename
+                    basename = os.path.basename(member.name)
+                    match = _MBID_RE.search(basename)
+                    if not match:
                         skipped += 1
                         bar.update(1)
                         continue
-                    raw = f.read()
-                    doc = json.loads(raw)
-                except (json.JSONDecodeError, OSError) as exc:
-                    log.debug("Skipping %s: %s", basename, exc)
-                    skipped += 1
+
+                    mbid = match.group(1)
+
+                    # Skip duplicates (keep first per MBID)
+                    if mbid in seen_mbids:
+                        skipped += 1
+                        bar.update(1)
+                        continue
+                    seen_mbids.add(mbid)
+
+                    # Parse JSON and extract features
+                    try:
+                        f = tar.extractfile(member)
+                        if f is None:
+                            skipped += 1
+                            bar.update(1)
+                            continue
+                        raw = f.read()
+                        doc = json.loads(raw)
+                    except (json.JSONDecodeError, OSError) as exc:
+                        log.debug("Skipping %s: %s", basename, exc)
+                        skipped += 1
+                        bar.update(1)
+                        continue
+
+                    extracted = extract_ab_features(doc)
+                    if extracted is not None:
+                        features[mbid] = extracted
+                    else:
+                        skipped += 1
+
                     bar.update(1)
-                    continue
 
-                extracted = extract_ab_features(doc)
-                if extracted is not None:
-                    features[mbid] = extracted
-                else:
-                    skipped += 1
-
-                bar.update(1)
-
-        tar.close()
+            tar.close()
+    except (zstd.ZstdError, tarfile.ReadError) as exc:
+        log.error("Archive may be corrupt or incomplete: %s", exc)
+        log.error("Delete %s and re-run with --download", archive_path)
+        return {}
 
     log.info(
         "AcousticBrainz: %d features extracted, %d skipped",
         len(features),
         skipped,
     )
+    if _rejection_counts:
+        top_reasons = _rejection_counts.most_common(5)
+        reasons_str = ", ".join(f"{reason} ({count:,})" for reason, count in top_reasons)
+        log.info("Top rejection reasons: %s", reasons_str)
     return features
 
 
@@ -329,18 +350,34 @@ _YEAR_RE = re.compile(r"(\d{4})")
 _TRACK_NUM_RE = re.compile(r"(\d+)")
 
 
+_NON_GENRE_TAGS = frozenset({
+    "seen live", "favorites", "favourite", "favourites", "check out",
+    "female vocalists", "male vocalists", "my collection", "albums i own",
+    "under 2000 listeners", "beautiful", "awesome", "cool", "love",
+    "spotify", "todo", "to listen", "want to hear", "wish list",
+    "own it", "i own this", "vinyl", "cd", "lp",
+})
+
+
 def _extract_genre_from_tags(tags_list):
-    """Return the highest-count tag name, title-cased, from a list of tag dicts.
+    """Return the highest-count genre tag name, title-cased, from a list of tag dicts.
+
+    Filters out common MusicBrainz non-genre tags (personal tags, format tags, etc.)
+    before selecting the highest-count tag.
 
     Args:
         tags_list: List of dicts like [{"name": "rock", "count": 15}, ...].
 
     Returns:
-        Title-cased genre string, or "" if the list is empty or None.
+        Title-cased genre string, or "" if the list is empty/None or all tags
+        are non-genre.
     """
     if not tags_list:
         return ""
-    best = max(tags_list, key=lambda t: t.get("count", 0))
+    filtered = [t for t in tags_list if t.get("name", "").lower() not in _NON_GENRE_TAGS]
+    if not filtered:
+        return ""
+    best = max(filtered, key=lambda t: t.get("count", 0))
     name = best.get("name", "")
     return name.title() if name else ""
 
@@ -391,50 +428,60 @@ def _load_release_group_genres():
 
     rg_genres = {}
 
-    with lzma.open(archive_path, "rb") as xz:
-        tar = tarfile.open(fileobj=xz, mode="r|")
+    try:
+        with lzma.open(archive_path, "rb") as xz:
+            tar = tarfile.open(fileobj=xz, mode="r|")
 
-        for member in tar:
-            if not member.isfile():
-                continue
-
-            f = tar.extractfile(member)
-            if f is None:
-                continue
-
-            for line in f:
-                line = line.strip()
-                if not line:
+            for member in tar:
+                if not member.isfile():
                     continue
 
-                try:
-                    rg = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                f = tar.extractfile(member)
+                if f is None:
                     continue
 
-                rg_id = rg.get("id")
-                if not rg_id:
-                    continue
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                # Try "genres" first (newer dumps), then "tags" as fallback
-                genre = _extract_genre_from_tags(rg.get("genres"))
-                if not genre:
-                    genre = _extract_genre_from_tags(rg.get("tags"))
+                    try:
+                        rg = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
 
-                if genre:
-                    rg_genres[rg_id] = genre
+                    rg_id = rg.get("id")
+                    if not rg_id:
+                        continue
 
-        tar.close()
+                    # Try "genres" first (newer dumps), then "tags" as fallback
+                    genre = _extract_genre_from_tags(rg.get("genres"))
+                    if not genre:
+                        genre = _extract_genre_from_tags(rg.get("tags"))
+
+                    if genre:
+                        rg_genres[rg_id] = genre
+
+            tar.close()
+    except (lzma.LZMAError, tarfile.ReadError) as exc:
+        log.error("Archive may be corrupt or incomplete: %s", exc)
+        log.error("Delete %s and re-run with --download", archive_path)
+        return {}
 
     log.info("Release-group genres loaded: %d entries", len(rg_genres))
     return rg_genres
 
 
-def load_mb_metadata():
+def load_mb_metadata(ab_mbids=None):
     """Parse the MusicBrainz release dump to build recording → metadata mapping.
 
     Streams through the release tar.xz archive (17GB compressed) one line at a
     time to avoid loading the entire dump into memory.
+
+    Args:
+        ab_mbids: Optional set of recording MBIDs from AcousticBrainz. When
+            provided, recordings with no genre AND no AB match are skipped
+            to reduce memory usage.
 
     Returns:
         dict mapping recording MBID (str) → metadata dict with keys:
@@ -456,99 +503,110 @@ def load_mb_metadata():
     release_count = 0
     skipped = 0
 
-    with lzma.open(archive_path, "rb") as xz:
-        tar = tarfile.open(fileobj=xz, mode="r|")
+    try:
+        with lzma.open(archive_path, "rb") as xz:
+            tar = tarfile.open(fileobj=xz, mode="r|")
 
-        for member in tar:
-            if not member.isfile():
-                continue
-
-            f = tar.extractfile(member)
-            if f is None:
-                continue
-
-            for line in f:
-                line = line.strip()
-                if not line:
+            for member in tar:
+                if not member.isfile():
                     continue
 
-                try:
-                    release = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    skipped += 1
+                f = tar.extractfile(member)
+                if f is None:
                     continue
 
-                release_count += 1
-                if release_count % 100_000 == 0:
-                    log.info(
-                        "Processed %dk releases, %d recordings so far",
-                        release_count // 1000,
-                        len(recordings),
-                    )
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                # Extract release-level fields
-                release_mbid = release.get("id", "")
-                album = release.get("title", "")
-                year = _extract_year(release.get("date", ""))
+                    try:
+                        release = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        skipped += 1
+                        continue
 
-                # Artist credit — take first entry
-                artist_credit = release.get("artist-credit", [])
-                if not artist_credit:
-                    skipped += 1
-                    continue
-                first_credit = artist_credit[0]
-                artist_obj = first_credit.get("artist", {})
-                artist_name = artist_obj.get("name", "")
-                artist_mbid = artist_obj.get("id", "")
+                    release_count += 1
+                    if release_count % 100_000 == 0:
+                        log.info(
+                            "Processed %dk releases, %d recordings so far",
+                            release_count // 1000,
+                            len(recordings),
+                        )
 
-                # Skip releases missing required fields
-                if not album or not artist_name or not year:
-                    skipped += 1
-                    continue
+                    # Extract release-level fields
+                    release_mbid = release.get("id", "")
+                    album = release.get("title", "")
+                    year = _extract_year(release.get("date", ""))
 
-                # Release group and genre
-                rg_obj = release.get("release-group", {}) or {}
-                rg_mbid = rg_obj.get("id", "")
-                genre = rg_genres.get(rg_mbid, "") if rg_mbid else ""
+                    # Artist credit — take first entry
+                    artist_credit = release.get("artist-credit", [])
+                    if not artist_credit:
+                        skipped += 1
+                        continue
+                    first_credit = artist_credit[0]
+                    artist_obj = first_credit.get("artist", {})
+                    artist_name = artist_obj.get("name", "")
+                    artist_mbid = artist_obj.get("id", "")
 
-                # Fallback: try genre/tags on the release itself
-                if not genre:
-                    genre = _extract_genre_from_tags(release.get("genres"))
-                if not genre:
-                    genre = _extract_genre_from_tags(release.get("tags"))
+                    # Skip releases missing required fields
+                    if not album or not artist_name or not year:
+                        skipped += 1
+                        continue
 
-                # Process each medium and track
-                for medium in release.get("media", []):
-                    total_tracks = medium.get("track-count", 0)
+                    # Release group and genre
+                    rg_obj = release.get("release-group", {}) or {}
+                    rg_mbid = rg_obj.get("id", "")
+                    genre = rg_genres.get(rg_mbid, "") if rg_mbid else ""
 
-                    for track in medium.get("tracks", []):
-                        recording = track.get("recording", {}) or {}
-                        recording_mbid = recording.get("id", "")
-                        if not recording_mbid:
-                            continue
+                    # Fallback: try genre/tags on the release itself
+                    if not genre:
+                        genre = _extract_genre_from_tags(release.get("genres"))
+                    if not genre:
+                        genre = _extract_genre_from_tags(release.get("tags"))
 
-                        # Skip recordings already seen (keep first occurrence)
-                        if recording_mbid in recordings:
-                            continue
+                    # Process each medium and track
+                    for medium in release.get("media", []):
+                        total_tracks = medium.get("track-count", 0)
 
-                        title = track.get("title") or recording.get("title", "")
-                        track_no = _parse_track_number(track.get("number", ""))
+                        for track in medium.get("tracks", []):
+                            recording = track.get("recording", {}) or {}
+                            recording_mbid = recording.get("id", "")
+                            if not recording_mbid:
+                                continue
 
-                        recordings[recording_mbid] = {
-                            "title": title,
-                            "artist": artist_name,
-                            "artistMbid": artist_mbid,
-                            "albumArtist": artist_name,
-                            "album": album,
-                            "releaseMbid": release_mbid,
-                            "releaseGroupMbid": rg_mbid,
-                            "genre": genre,
-                            "year": year,
-                            "trackNo": track_no,
-                            "totalTracks": total_tracks,
-                        }
+                            # Skip recordings already seen (keep first occurrence)
+                            if recording_mbid in recordings:
+                                continue
 
-        tar.close()
+                            # Memory optimization: skip recordings with no genre
+                            # and no AB match — they're useless to the catalog.
+                            if ab_mbids is not None:
+                                if not genre and recording_mbid not in ab_mbids:
+                                    continue
+
+                            title = track.get("title") or recording.get("title", "")
+                            track_no = _parse_track_number(track.get("number", ""))
+
+                            recordings[recording_mbid] = {
+                                "title": title,
+                                "artist": artist_name,
+                                "artistMbid": artist_mbid,
+                                "albumArtist": artist_name,
+                                "album": album,
+                                "releaseMbid": release_mbid,
+                                "releaseGroupMbid": rg_mbid,
+                                "genre": genre,
+                                "year": year,
+                                "trackNo": track_no,
+                                "totalTracks": total_tracks,
+                            }
+
+            tar.close()
+    except (lzma.LZMAError, tarfile.ReadError) as exc:
+        log.error("Archive may be corrupt or incomplete: %s", exc)
+        log.error("Delete %s and re-run with --download", archive_path)
+        return {}
 
     log.info(
         "MusicBrainz: %d recordings from %d releases (%d skipped)",
@@ -560,18 +618,24 @@ def load_mb_metadata():
 
 
 def write_catalog(entries, path=CATALOG_PATH):
-    """Write catalog entries to a gzipped JSONL file.
+    """Write catalog entries to a gzipped JSONL file (atomic).
+
+    Writes to a .tmp file first, then atomically replaces the target —
+    mirrors the AtomicReplace pattern from Program.cs.
 
     Args:
         entries: List of catalog entry dicts to write.
         path: Output path (default: CATALOG_PATH).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
 
-    with gzip.open(path, "wt", encoding="utf-8") as f:
+    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
         for entry in entries:
             f.write(json.dumps(entry, ensure_ascii=False))
             f.write("\n")
+
+    os.replace(tmp_path, path)
 
     size_mb = path.stat().st_size / (1024 * 1024)
     log.info("Wrote %d entries to %s (%.1f MB)", len(entries), path.name, size_mb)
@@ -587,9 +651,9 @@ def build_catalog(target=430_000):
     Args:
         target: Target number of catalog entries (default: 430,000).
     """
-    # 1. Load both datasets
+    # 1. Load both datasets (AB first so we can filter MB by matched MBIDs)
     ab_features = load_ab_features()
-    mb_metadata = load_mb_metadata()
+    mb_metadata = load_mb_metadata(ab_mbids=set(ab_features.keys()) if ab_features else None)
 
     if not ab_features or not mb_metadata:
         log.error("Cannot build catalog — missing data. Run with --download first.")
@@ -759,14 +823,24 @@ def main():
         "--target", type=int, default=430_000,
         help="Target catalog size (default: 430000)"
     )
+    parser.add_argument(
+        "--mb-date", default=MB_DEFAULT_DATE,
+        help=f"MusicBrainz dump date (default: {MB_DEFAULT_DATE})"
+    )
     args = parser.parse_args()
 
     if not (args.download or args.build or args.stats):
         parser.print_help()
         return 1
 
+    if args.build and args.target <= 0:
+        log.error("--target must be > 0, got %d", args.target)
+        return 1
+
+    log.info("MusicBrainz dump date: %s", args.mb_date)
+
     if args.download:
-        download_all()
+        download_all(mb_date=args.mb_date)
     if args.build:
         build_catalog(target=args.target)
     if args.stats:
