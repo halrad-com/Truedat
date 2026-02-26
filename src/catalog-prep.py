@@ -21,9 +21,11 @@ import json
 import logging
 import lzma
 import os
+import random
 import re
 import sys
 import tarfile
+from collections import defaultdict
 from pathlib import Path
 
 import requests
@@ -557,14 +559,189 @@ def load_mb_metadata():
     return recordings
 
 
-def build_catalog():
-    """Build the synthetic library catalog."""
-    raise NotImplementedError("Task 5")
+def write_catalog(entries, path=CATALOG_PATH):
+    """Write catalog entries to a gzipped JSONL file.
+
+    Args:
+        entries: List of catalog entry dicts to write.
+        path: Output path (default: CATALOG_PATH).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False))
+            f.write("\n")
+
+    size_mb = path.stat().st_size / (1024 * 1024)
+    log.info("Wrote %d entries to %s (%.1f MB)", len(entries), path.name, size_mb)
+
+
+def build_catalog(target=430_000):
+    """Build the synthetic library catalog.
+
+    Joins AcousticBrainz features with MusicBrainz metadata by recording MBID,
+    then extends the catalog to the target size by assigning genre-matched
+    feature sets from the AB pool to unmatched MB recordings.
+
+    Args:
+        target: Target number of catalog entries (default: 430,000).
+    """
+    # 1. Load both datasets
+    ab_features = load_ab_features()
+    mb_metadata = load_mb_metadata()
+
+    if not ab_features or not mb_metadata:
+        log.error("Cannot build catalog — missing data. Run with --download first.")
+        return
+
+    # 2. Join — match AB recording MBIDs to MB metadata
+    matched = []
+    for mbid, features in ab_features.items():
+        meta = mb_metadata.get(mbid)
+        if meta is None:
+            continue
+        # Require genre to be non-empty
+        if not meta.get("genre"):
+            continue
+        entry = {**meta, **features, "mbid": mbid}
+        matched.append(entry)
+
+    log.info("Matched %d recordings (AB features + MB metadata with genre)", len(matched))
+
+    # 3. Build per-genre feature pools from matched entries
+    feature_keys = [key for key, _, _, _ in _AB_FEATURE_MAP]
+    genre_pools = defaultdict(list)
+
+    for entry in matched:
+        genre = entry["genre"]
+        pool_entry = {k: entry[k] for k in feature_keys}
+        genre_pools[genre].append(pool_entry)
+
+    # Log top 10 genres by count
+    top_genres = sorted(genre_pools.items(), key=lambda x: len(x[1]), reverse=True)[:10]
+    log.info("Top 10 genres in feature pool:")
+    for genre, pool in top_genres:
+        log.info("  %-25s %d", genre, len(pool))
+
+    # Build a flat list of all pool entries for fallback
+    all_pool_entries = []
+    for pool in genre_pools.values():
+        all_pool_entries.extend(pool)
+
+    # 4. Extend catalog to target size
+    entries = list(matched)
+    needed = target - len(entries)
+
+    if needed <= 0:
+        log.info("Matched entries (%d) already meet target (%d)", len(entries), target)
+    else:
+        log.info("Need %d more entries to reach target %d", needed, target)
+
+        # Collect unmatched MB recordings that have genre but no AB features
+        matched_mbids = set(ab_features.keys())
+        unmatched = []
+        for mbid, meta in mb_metadata.items():
+            if mbid in matched_mbids:
+                continue
+            if not meta.get("genre"):
+                continue
+            unmatched.append((mbid, meta))
+
+        log.info("Unmatched MB recordings with genre: %d", len(unmatched))
+
+        # Shuffle with fixed seed for reproducibility
+        rng = random.Random(42)
+        rng.shuffle(unmatched)
+
+        # Assign features from same-genre pool (or any pool as fallback)
+        added = 0
+        for mbid, meta in unmatched:
+            if added >= needed:
+                break
+
+            genre = meta["genre"]
+            pool = genre_pools.get(genre, all_pool_entries)
+            if not pool:
+                pool = all_pool_entries
+
+            feature_set = rng.choice(pool)
+            entry = {**meta, **feature_set, "mbid": mbid}
+            entries.append(entry)
+            added += 1
+
+            if added % 50_000 == 0:
+                log.info("  Extended: %dk / %dk", added // 1000, needed // 1000)
+
+        log.info("Extended catalog by %d entries (total: %d)", added, len(entries))
+
+    # 5. Write catalog
+    write_catalog(entries)
 
 
 def show_stats():
     """Show statistics about an existing catalog."""
-    raise NotImplementedError("Task 5")
+    if not CATALOG_PATH.exists():
+        log.error("Catalog not found: %s", CATALOG_PATH)
+        log.error("Run with --build first.")
+        return
+
+    total = 0
+    artists = set()
+    albums = set()  # (artist, album) pairs
+    genre_counts = defaultdict(int)
+    decade_counts = defaultdict(int)
+
+    with gzip.open(CATALOG_PATH, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            total += 1
+
+            artist = entry.get("artist", "")
+            album = entry.get("album", "")
+            genre = entry.get("genre", "")
+            year = entry.get("year", 0)
+
+            if artist:
+                artists.add(artist)
+            if artist and album:
+                albums.add((artist, album))
+            if genre:
+                genre_counts[genre] += 1
+            if year:
+                decade = (year // 10) * 10
+                decade_counts[decade] += 1
+
+    # Print report
+    print(f"\n{'=' * 60}")
+    print(f"  Catalog: {CATALOG_PATH.name}")
+    print(f"  Size:    {CATALOG_PATH.stat().st_size / (1024 * 1024):.1f} MB")
+    print(f"{'=' * 60}")
+    print(f"  Total entries:   {total:>10,}")
+    print(f"  Unique artists:  {len(artists):>10,}")
+    print(f"  Unique albums:   {len(albums):>10,}")
+    print()
+
+    # Top 20 genres
+    print(f"  {'Genre':<30} {'Count':>10} {'%':>7}")
+    print(f"  {'-' * 30} {'-' * 10} {'-' * 7}")
+    top_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+    for genre, count in top_genres:
+        pct = count / total * 100 if total else 0
+        print(f"  {genre:<30} {count:>10,} {pct:>6.1f}%")
+    print()
+
+    # Decade distribution
+    print(f"  {'Decade':<30} {'Count':>10} {'%':>7}")
+    print(f"  {'-' * 30} {'-' * 10} {'-' * 7}")
+    for decade in sorted(decade_counts.keys()):
+        count = decade_counts[decade]
+        pct = count / total * 100 if total else 0
+        print(f"  {decade}s{'':<26} {count:>10,} {pct:>6.1f}%")
+    print()
 
 
 def main():
@@ -578,6 +755,10 @@ def main():
     parser.add_argument(
         "--stats", action="store_true", help="Show catalog statistics"
     )
+    parser.add_argument(
+        "--target", type=int, default=430_000,
+        help="Target catalog size (default: 430000)"
+    )
     args = parser.parse_args()
 
     if not (args.download or args.build or args.stats):
@@ -587,7 +768,7 @@ def main():
     if args.download:
         download_all()
     if args.build:
-        build_catalog()
+        build_catalog(target=args.target)
     if args.stats:
         show_stats()
     return 0
