@@ -17,6 +17,7 @@ Data is cached in ../data/ (relative to this script).
 
 import argparse
 import gzip
+import hashlib
 import json
 import logging
 import lzma
@@ -25,6 +26,7 @@ import random
 import re
 import sys
 import tarfile
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -55,6 +57,123 @@ AB_SAMPLE_URL = (
 # MusicBrainz JSON dumps — date set via --mb-date CLI arg
 MB_DEFAULT_DATE = "20260225-001001"
 
+# Download infrastructure constants
+MANIFEST_PATH = DATA_DIR / ".download-manifest.json"
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 45]
+DOWNLOAD_CHUNK_SIZE = 1 << 16  # 64 KB
+DOWNLOAD_TIMEOUT = 30
+
+
+def _compute_sha256(path, chunk_size=1 << 20):
+    """Compute SHA-256 hash of a file by streaming in chunks.
+
+    Args:
+        path: Path to the file to hash.
+        chunk_size: Read buffer size in bytes (default: 1 MB).
+
+    Returns:
+        Hex-encoded SHA-256 digest string.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk_size)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _load_manifest():
+    """Load the download manifest from disk.
+
+    Returns:
+        Dict mapping file paths (relative to DATA_DIR) to their recorded
+        metadata (sha256, size). Returns an empty dict if the manifest
+        is missing, empty, or corrupt.
+    """
+    if not MANIFEST_PATH.exists():
+        return {}
+    try:
+        text = MANIFEST_PATH.read_text(encoding="utf-8")
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            log.warning("Manifest is not a dict, ignoring: %s", MANIFEST_PATH)
+            return {}
+        return data
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Manifest corrupt or unreadable, starting fresh: %s", exc)
+        return {}
+
+
+def _save_manifest(manifest):
+    """Atomically save the download manifest (write to temp, then rename).
+
+    Args:
+        manifest: Dict to serialize as JSON.
+    """
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = MANIFEST_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, MANIFEST_PATH)
+
+
+def _verify_download(dest, manifest):
+    """Check whether a downloaded file matches its manifest entry.
+
+    Verifies both file size and SHA-256 hash. Returns True only if the
+    file exists on disk, appears in the manifest, and both size and hash
+    match the recorded values.
+
+    Args:
+        dest: Path to the downloaded file.
+        manifest: Current manifest dict.
+
+    Returns:
+        True if the file is verified intact, False otherwise.
+    """
+    if not dest.exists():
+        return False
+
+    key = dest.relative_to(DATA_DIR).as_posix()
+    entry = manifest.get(key)
+    if not entry:
+        return False
+
+    local_size = dest.stat().st_size
+    if local_size != entry.get("size"):
+        log.info("Size mismatch for %s: local=%d, manifest=%d",
+                 dest.name, local_size, entry.get("size", -1))
+        return False
+
+    local_hash = _compute_sha256(dest)
+    if local_hash != entry.get("sha256"):
+        log.warning("Hash mismatch for %s — will re-download", dest.name)
+        return False
+
+    return True
+
+
+def _record_download(dest, manifest):
+    """Compute hash of a downloaded file and record it in the manifest.
+
+    Args:
+        dest: Path to the downloaded file.
+        manifest: Manifest dict to update (mutated in place).
+    """
+    key = dest.relative_to(DATA_DIR).as_posix()
+    sha256 = _compute_sha256(dest)
+    manifest[key] = {
+        "sha256": sha256,
+        "size": dest.stat().st_size,
+    }
+    _save_manifest(manifest)
+    log.info("Recorded in manifest: %s (%s)", dest.name, sha256[:12])
+
 
 def _mb_dump_urls(mb_date):
     """Build MusicBrainz dump URLs for the given date string."""
@@ -66,51 +185,83 @@ def _mb_dump_urls(mb_date):
     }
 
 
-def download_file(url: str, dest: Path, description: str = None):
-    """Download a file with resume support and progress bar.
+def download_file(url, dest, description=None):
+    """Download a file with resume support, progress bar, and retry.
+
+    Retries up to MAX_RETRIES times with exponential backoff on failure.
+    Supports HTTP Range headers for resuming partial downloads.
 
     Args:
         url: URL to download from.
         dest: Local path to save the file.
         description: Label for the progress bar (defaults to filename).
-    """
-    CHUNK_SIZE = 8192
-    TIMEOUT = 30
 
+    Raises:
+        requests.RequestException: If all retry attempts are exhausted.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     label = description or dest.name
 
-    # Check remote file size via HEAD request
-    head = requests.head(url, timeout=TIMEOUT, allow_redirects=True)
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            _download_file_once(url, dest, label)
+            return
+        except requests.RequestException as exc:
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAYS[attempt]
+                log.warning(
+                    "Attempt %d/%d failed for %s: %s — retrying in %ds",
+                    attempt + 1, MAX_RETRIES + 1, label, exc, delay,
+                )
+                time.sleep(delay)
+            else:
+                log.error(
+                    "All %d attempts failed for %s: %s",
+                    MAX_RETRIES + 1, label, exc,
+                )
+                raise
+
+
+def _download_file_once(url, dest, label):
+    """Execute a single download attempt with resume support and progress bar.
+
+    Args:
+        url: URL to download from.
+        dest: Local path to save the file.
+        label: Display label for logging and progress bar.
+
+    Raises:
+        requests.RequestException: On any HTTP or connection error.
+    """
+    head = requests.head(url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True)
     head.raise_for_status()
     remote_size = int(head.headers.get("content-length", 0))
 
-    # Skip if already fully downloaded
     if dest.exists():
         local_size = dest.stat().st_size
         if remote_size and local_size >= remote_size:
-            log.info("Already downloaded: %s (%s bytes)", label, local_size)
+            log.info("Already downloaded: %s (%d bytes)", label, local_size)
             return
     else:
         local_size = 0
 
-    # Resume support: start from where we left off
     headers = {}
     if local_size > 0:
         headers["Range"] = f"bytes={local_size}-"
-        log.info("Resuming %s from %s bytes", label, local_size)
+        log.info("Resuming %s from %d bytes", label, local_size)
     else:
-        log.info("Downloading %s (%s bytes)", label, remote_size or "unknown size")
+        log.info("Downloading %s (%s)", label,
+                 f"{remote_size:,} bytes" if remote_size else "unknown size")
 
-    resp = requests.get(url, headers=headers, stream=True, timeout=TIMEOUT)
+    resp = requests.get(
+        url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT,
+    )
     resp.raise_for_status()
 
-    # If server honored Range request, content-length is the remaining bytes
     if resp.status_code == 206:
         total = local_size + int(resp.headers.get("content-length", 0))
     else:
         total = int(resp.headers.get("content-length", 0))
-        # Server didn't honor Range — start from scratch
         local_size = 0
 
     mode = "ab" if resp.status_code == 206 else "wb"
@@ -126,30 +277,42 @@ def download_file(url: str, dest: Path, description: str = None):
             desc=label,
         ) as bar,
     ):
-        for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+        for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
             if chunk:
                 f.write(chunk)
                 bar.update(len(chunk))
 
     final_size = dest.stat().st_size
-    log.info("Completed: %s (%s bytes)", label, final_size)
+    log.info("Completed: %s (%d bytes)", label, final_size)
 
 
 def download_all(mb_date=MB_DEFAULT_DATE):
-    """Download all required data dumps."""
+    """Download all required data dumps with manifest-based integrity tracking.
+
+    Loads the SHA-256 manifest, checks each file against it, skips verified
+    downloads, and records new downloads after each success.
+    """
     log.info("Download directory: %s", DATA_DIR)
+    manifest = _load_manifest()
 
-    # AcousticBrainz sample archive
+    # Build the list of (url, dest, label) for all downloads
     ab_filename = AB_SAMPLE_URL.rsplit("/", 1)[-1]
-    ab_dest = AB_DIR / ab_filename
-    download_file(AB_SAMPLE_URL, ab_dest, description="AcousticBrainz sample")
+    downloads = [
+        (AB_SAMPLE_URL, AB_DIR / ab_filename, "AcousticBrainz sample"),
+    ]
 
-    # MusicBrainz JSON dumps
     mb_dumps = _mb_dump_urls(mb_date)
     for name, url in mb_dumps.items():
         mb_filename = url.rsplit("/", 1)[-1]
-        mb_dest = MB_DIR / mb_filename
-        download_file(url, mb_dest, description=f"MusicBrainz {name}")
+        downloads.append((url, MB_DIR / mb_filename, f"MusicBrainz {name}"))
+
+    for url, dest, label in downloads:
+        if _verify_download(dest, manifest):
+            log.info("Verified (skipping): %s", label)
+            continue
+
+        download_file(url, dest, description=label)
+        _record_download(dest, manifest)
 
 
 def nav_path(obj, dotpath, default=None):
