@@ -158,18 +158,22 @@ def _verify_download(dest, manifest):
     return True
 
 
-def _record_download(dest, manifest):
+def _record_download(url, dest, manifest):
     """Compute hash of a downloaded file and record it in the manifest.
 
     Args:
+        url: Source URL the file was downloaded from.
         dest: Path to the downloaded file.
         manifest: Manifest dict to update (mutated in place).
     """
     key = dest.relative_to(DATA_DIR).as_posix()
     sha256 = _compute_sha256(dest)
     manifest[key] = {
+        "url": url,
+        "filename": dest.name,
         "sha256": sha256,
         "size": dest.stat().st_size,
+        "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     _save_manifest(manifest)
     log.info("Recorded in manifest: %s (%s)", dest.name, sha256[:12])
@@ -312,7 +316,7 @@ def download_all(mb_date=MB_DEFAULT_DATE):
             continue
 
         download_file(url, dest, description=label)
-        _record_download(dest, manifest)
+        _record_download(url, dest, manifest)
 
 
 def nav_path(obj, dotpath, default=None):
