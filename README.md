@@ -157,6 +157,40 @@ python catalog-prep.py --download --build --stats
 
 Output: `data/synthlib-catalog.jsonl.gz` — a gzipped JSON Lines file where each line contains one track with full metadata and 15 Essentia acoustic features.
 
+### Playbook: Expanding a Real Library for Scale Testing
+
+End-to-end steps to combine your real library with synthetic tracks for testing MBXHub at scale.
+
+**1. Build the catalog** (one-time, ~21 GB download):
+
+```cmd
+cd src
+pip install -r requirements-catalog.txt
+python catalog-prep.py --download --build --stats
+```
+
+**2. Generate synthetic tracks with mood data merged into your existing moods file:**
+
+```cmd
+truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --count 100000 --synth-moods C:\MusicBee\mbxmoods.json
+```
+
+This creates 100k stub MP3s with real metadata and writes their acoustic features directly into your `mbxmoods.json`. Real analysis data is preserved — synthetic entries are added alongside existing entries in a single file.
+
+**3. Add the synthetic folder to MusicBee:**
+
+In MusicBee, go to **Edit > Preferences > Library** and add `D:\synthlib` as a monitored folder. MusicBee scans it and includes synthetic tracks in your unified library and iTunes XML export.
+
+**4. Test at scale:**
+
+MBXHub loads one `mbxmoods.json` containing both real and synthetic tracks. AutoQ, mood channels, diversity quotas, and performance can now be exercised against a much larger library.
+
+**5. Clean up when done:**
+
+Remove `D:\synthlib` from MusicBee's monitored folders. Orphaned synthetic entries in `mbxmoods.json` are harmless (MBXHub ignores paths not in the XML), or delete `D:\synthlib` and restore your moods file from backup.
+
+Synthetic tracks are identifiable by their `Grouping = Synthetic` ID3 tag — use MusicBee's column browser or a smart playlist (`Grouping IS Synthetic`) to filter them.
+
 ## Mood Seeding from AcousticBrainz
 
 Seed `mbxmoods.json` with pre-computed acoustic features from the AcousticBrainz catalog, matched by normalized artist+title. Faster than running Essentia on every file — instant mood data for matched tracks.

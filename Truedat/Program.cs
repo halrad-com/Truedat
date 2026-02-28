@@ -500,12 +500,15 @@ namespace Truedat
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
+            var catalogPath = FindCatalog(baseDir, Environment.CurrentDirectory,
+                Path.GetDirectoryName(Path.GetDirectoryName(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))) ?? "");
 
             Console.WriteLine("=== Tool Check ===");
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
+            Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found (run: python src/catalog-prep.py --download --build)")}");
             Console.WriteLine();
 
             if (essentiaExe == null)
@@ -1412,6 +1415,27 @@ namespace Truedat
                 if (string.IsNullOrEmpty(dir)) continue;
                 var path = Path.Combine(dir, exeName);
                 if (File.Exists(path)) return path;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Search for the MusicBrainz/AcousticBrainz catalog file in standard locations.
+        /// Checks data/ subdirectory and root of each search dir, for both .jsonl.gz and .jsonl.
+        /// </summary>
+        static string? FindCatalog(params string[] searchDirs)
+        {
+            var names = new[] { "synthlib-catalog.jsonl.gz", "synthlib-catalog.jsonl" };
+            foreach (var dir in searchDirs)
+            {
+                if (string.IsNullOrEmpty(dir)) continue;
+                foreach (var name in names)
+                {
+                    var dataPath = Path.Combine(dir, "data", name);
+                    if (File.Exists(dataPath)) return dataPath;
+                    var rootPath = Path.Combine(dir, name);
+                    if (File.Exists(rootPath)) return rootPath;
+                }
             }
             return null;
         }
