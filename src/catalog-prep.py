@@ -356,10 +356,14 @@ def nav_path(obj, dotpath, default=None):
 
 # Essentia JSON paths → camelCase output keys, with rounding precision.
 # Each entry: (output_key, primary_path, fallback_path_or_None, round_digits_or_None)
+# The AB sample dump uses old Essentia format (pre-music_extractor 2.0):
+#   - tonal.key_key / tonal.key_scale  (not tonal.key_edma.*)
+#   - lowlevel.average_loudness        (not lowlevel.loudness_ebu128.integrated)
+#   - lowlevel.spectral_flatness_db    missing entirely → optional
 _AB_FEATURE_MAP = [
     ("bpm", "rhythm.bpm", None, 1),
-    ("key", "tonal.key_edma.key", "tonal.key_krumhansl.key", None),
-    ("mode", "tonal.key_edma.scale", "tonal.key_krumhansl.scale", None),
+    ("key", "tonal.key_edma.key", "tonal.key_key", None),
+    ("mode", "tonal.key_edma.scale", "tonal.key_scale", None),
     ("loudness", "lowlevel.loudness_ebu128.integrated", "lowlevel.average_loudness", 2),
     ("spectralCentroid", "lowlevel.spectral_centroid.mean", None, 1),
     ("spectralFlux", "lowlevel.spectral_flux.mean", None, 4),
@@ -375,10 +379,18 @@ _AB_FEATURE_MAP = [
     ("mfcc1", "lowlevel.mfcc.mean", None, 4),  # second element of array (timbre/spectral slope)
 ]
 
+# Features that can be absent (old AB format lacks spectral_flatness_db entirely).
+# Missing optional features get a neutral default instead of rejecting the whole entry.
+_OPTIONAL_FEATURES = {"spectralFlatness"}
+_OPTIONAL_DEFAULTS = {"spectralFlatness": -20.0}  # mid-range for dB flatness
+
 # Sane numeric ranges for feature validation — rejects NaN, Inf, and out-of-range values.
+# Note: loudness range covers both old AB format (average_loudness: 0–1)
+# and new Essentia format (loudness_ebu128.integrated: -70–0 LUFS).
+# MoodEstimator rank-normalizes, so absolute scale doesn't matter.
 FEATURE_RANGES = {
     "bpm": (20.0, 300.0),
-    "loudness": (-70.0, 0.0),
+    "loudness": (-70.0, 1.0),
     "spectralCentroid": (0.0, 22050.0),
     "spectralFlux": (0.0, 10.0),
     "danceability": (0.0, 3.0),
@@ -416,6 +428,9 @@ def extract_ab_features(json_obj):
             value = nav_path(json_obj, fallback)
 
         if value is None:
+            if out_key in _OPTIONAL_FEATURES:
+                result[out_key] = _OPTIONAL_DEFAULTS[out_key]
+                continue
             _rejection_counts[f"{out_key} missing"] += 1
             return None
 
@@ -669,6 +684,9 @@ def _load_release_group_genres():
                     except (json.JSONDecodeError, ValueError):
                         continue
 
+                    if not isinstance(rg, dict):
+                        continue
+
                     rg_id = rg.get("id")
                     if not rg_id:
                         continue
@@ -822,6 +840,9 @@ def load_mb_metadata(ab_mbids=None):
                         release = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         skipped += 1
+                        continue
+
+                    if not isinstance(release, dict):
                         continue
 
                     release_count += 1

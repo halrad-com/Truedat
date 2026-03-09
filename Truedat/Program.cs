@@ -195,6 +195,64 @@ namespace Truedat
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
+        // Job Object APIs for CPU rate limiting child processes
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string? lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+        const int JobObjectCpuRateControlInformation = 15;
+        const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
+        const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+        {
+            public uint ControlFlags;
+            public uint CpuRate; // in hundredths of a percent (e.g. 2000 = 20%)
+        }
+
+        static IntPtr _jobHandle = IntPtr.Zero;
+
+        /// <summary>
+        /// Create a Job Object with a hard CPU rate cap. Call once during init.
+        /// cpuPercent: 1-100, e.g. 20 means child processes share 20% of total CPU.
+        /// </summary>
+        static void InitCpuLimitJob(int cpuPercent)
+        {
+            _jobHandle = CreateJobObject(IntPtr.Zero, null);
+            if (_jobHandle == IntPtr.Zero) return;
+
+            var info = new JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
+            {
+                ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                CpuRate = (uint)(cpuPercent * 100) // convert percent to hundredths-of-percent
+            };
+            int size = Marshal.SizeOf<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>();
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(info, ptr, false);
+                if (!SetInformationJobObject(_jobHandle, JobObjectCpuRateControlInformation, ptr, (uint)size))
+                {
+                    Console.WriteLine($"  Warning: Failed to set CPU rate limit (error {Marshal.GetLastWin32Error()})");
+                    _jobHandle = IntPtr.Zero;
+                }
+            }
+            finally { Marshal.FreeHGlobal(ptr); }
+        }
+
+        /// <summary>Assign a process to the CPU-limited job. No-op if no job configured.</summary>
+        static void ApplyCpuLimit(Process proc)
+        {
+            if (_jobHandle != IntPtr.Zero)
+                AssignProcessToJobObject(_jobHandle, proc.Handle);
+        }
+
         /// <summary>
         /// Convert non-ASCII paths to 8.3 short form for Essentia compatibility.
         /// Essentia's C++ main() receives paths in the system ANSI code page, which
@@ -300,7 +358,12 @@ namespace Truedat
             string? seedCatalog = null;
             string? seedTarget = null;
 
+            bool mergeMode = false;
+            var mergeSources = new List<string>();
+            string? mergeOutput = null;
+
             bool showHelp = false;
+            int cpuLimit = 0; // 0 = no limit
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -337,10 +400,22 @@ namespace Truedat
                 else if (arg == "--seed-moods") seedMoods = true;
                 else if (arg == "--seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
                 else if (arg == "--seed-target" && i + 1 < args.Length) seedTarget = args[++i];
+                else if (arg == "--merge-moods") mergeMode = true;
+                else if (arg == "--merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
+                else if (arg == "--merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
+                else if (arg == "--background") cpuLimit = 25;
+                else if (arg == "--cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
             _audit = auditLog;
+
+            if (cpuLimit > 0)
+            {
+                InitCpuLimitJob(cpuLimit);
+                if (_jobHandle != IntPtr.Zero)
+                    Console.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
+            }
 
             if (showHelp)
             {
@@ -360,6 +435,8 @@ namespace Truedat
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
+                Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
+                Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
@@ -377,6 +454,11 @@ namespace Truedat
                 Console.WriteLine("  --seed-catalog <path> Path to synthlib-catalog.jsonl.gz");
                 Console.WriteLine("  --seed-target <path>  Target mbxmoods.json path (default: next to library XML)");
                 Console.WriteLine("  <library.xml>       iTunes XML library file (positional)");
+                Console.WriteLine();
+                Console.WriteLine("Merge Moods:");
+                Console.WriteLine("  --merge-moods       Merge multiple mbxmoods.json files into one");
+                Console.WriteLine("  --merge-source <path> Source moods file (repeatable, at least 2)");
+                Console.WriteLine("  --merge-output <path> Output moods file path");
                 Console.WriteLine();
                 Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
                 return;
@@ -423,6 +505,25 @@ namespace Truedat
                 return;
             }
 
+            // --merge-moods is independent of the XML-based modes
+            if (mergeMode)
+            {
+                if (mergeSources.Count < 2)
+                {
+                    Console.WriteLine("Error: --merge-moods requires at least 2 --merge-source <path> arguments");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (string.IsNullOrEmpty(mergeOutput))
+                {
+                    Console.WriteLine("Error: --merge-moods requires --merge-output <path>");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunMergeMoods(mergeSources, mergeOutput!);
+                return;
+            }
+
             xmlPath = xmlPath ?? "iTunes Music Library.xml";
 
             if (!File.Exists(xmlPath))
@@ -444,6 +545,8 @@ namespace Truedat
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
+                Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
+                Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
@@ -461,6 +564,11 @@ namespace Truedat
                 Console.WriteLine("  --seed-catalog <path> Path to synthlib-catalog.jsonl.gz");
                 Console.WriteLine("  --seed-target <path>  Target mbxmoods.json path (default: next to library XML)");
                 Console.WriteLine("  <library.xml>       iTunes XML library file (positional)");
+                Console.WriteLine();
+                Console.WriteLine("Merge Moods:");
+                Console.WriteLine("  --merge-moods       Merge multiple mbxmoods.json files into one");
+                Console.WriteLine("  --merge-source <path> Source moods file (repeatable, at least 2)");
+                Console.WriteLine("  --merge-output <path> Output moods file path");
                 return;
             }
 
@@ -1361,6 +1469,83 @@ namespace Truedat
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
         }
 
+        static int RunMergeMoods(List<string> sources, string outputPath)
+        {
+            Console.WriteLine("=== Merge Moods ===");
+            Console.WriteLine();
+
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            var mergedTracks = new JsonObject();
+            int totalLoaded = 0;
+            int duplicatesOverwritten = 0;
+
+            foreach (var source in sources)
+            {
+                if (!File.Exists(source))
+                {
+                    Console.WriteLine($"Source not found: {source}");
+                    return 1;
+                }
+
+                Console.WriteLine($"Loading: {source}");
+                var json = File.ReadAllText(source);
+                var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+                if (root == null)
+                {
+                    Console.WriteLine($"  Invalid JSON: {source}");
+                    return 1;
+                }
+
+                var tracks = root["tracks"]?.AsObject();
+                if (tracks == null)
+                {
+                    Console.WriteLine($"  No tracks object: {source}");
+                    return 1;
+                }
+
+                int count = 0;
+                foreach (var kvp in tracks)
+                {
+                    if (mergedTracks.ContainsKey(kvp.Key))
+                        duplicatesOverwritten++;
+                    mergedTracks[kvp.Key] = kvp.Value?.DeepClone();
+                    count++;
+                }
+                totalLoaded += count;
+                Console.WriteLine($"  {count:N0} entries");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"Total loaded:    {totalLoaded:N0}");
+            Console.WriteLine($"Duplicates:      {duplicatesOverwritten:N0} (later source wins)");
+            Console.WriteLine($"Merged entries:  {mergedTracks.Count:N0}");
+
+            // Backup if output already exists
+            if (File.Exists(outputPath))
+            {
+                var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+                var bakPath = $"{outputPath}.bak.{timestamp}";
+                File.Copy(outputPath, bakPath);
+                Console.WriteLine($"Backup: {bakPath}");
+            }
+
+            var result = new JsonObject
+            {
+                ["tracks"] = mergedTracks,
+                ["trackCount"] = mergedTracks.Count,
+                ["generatedAt"] = DateTime.UtcNow.ToString("o"),
+                ["mergedFrom"] = new JsonArray(sources.Select(s => (JsonNode)JsonValue.Create(s)!).ToArray())
+            };
+
+            var tmpPath = outputPath + ".tmp";
+            File.WriteAllText(tmpPath, result.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            AtomicReplace(tmpPath, outputPath);
+
+            Console.WriteLine($"Written: {outputPath}");
+            Console.WriteLine();
+            return 0;
+        }
+
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
@@ -2056,6 +2241,7 @@ namespace Truedat
                 };
 
                 using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
@@ -2224,6 +2410,7 @@ namespace Truedat
                     CreateNoWindow = true
                 };
                 using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(300000)) // 5 min timeout
@@ -2357,6 +2544,7 @@ namespace Truedat
                 };
                 using var proc = Process.Start(psi);
                 if (proc == null) { if (_audit) Console.WriteLine($"  DEBUG probe: failed to start: {audioPath}"); return null; }
+                ApplyCpuLimit(proc);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(30000))
@@ -3004,6 +3192,7 @@ namespace Truedat
                 var timer = Stopwatch.StartNew();
                 using var proc = Process.Start(psi);
                 if (proc == null) return (null, "Failed to start Essentia process");
+                ApplyCpuLimit(proc);
                 var pid = proc.Id;
 
                 var stderrTask = proc.StandardError.ReadToEndAsync();
