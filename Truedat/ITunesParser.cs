@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
-using System.Xml.Linq;
+using System.Xml;
 
 namespace Truedat
 {
@@ -19,68 +18,297 @@ namespace Truedat
         public int TotalTimeMs { get; set; }
     }
 
+    /// <summary>
+    /// TextReader wrapper that strips invalid XML 1.0 characters on the fly,
+    /// avoiding the need to load the entire file into memory for sanitization.
+    /// Valid XML 1.0: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    /// UTF-16 surrogate pairs (D800-DFFF) encode codepoints U+10000+ and are valid when paired.
+    /// </summary>
+    sealed class SanitizingTextReader : TextReader
+    {
+        private readonly StreamReader _inner;
+        private int _stripped;
+        private int _line = 1;
+        private List<string>? _issues;
+
+        // Pending low surrogate from a valid pair split across Read() calls
+        private int _pending = -1;
+
+        public int StrippedCount => _stripped;
+        public List<string>? Issues => _issues;
+
+        public SanitizingTextReader(StreamReader inner)
+        {
+            _inner = inner;
+        }
+
+        public override int Read()
+        {
+            if (_pending >= 0)
+            {
+                int p = _pending;
+                _pending = -1;
+                return p;
+            }
+
+            while (true)
+            {
+                int raw = _inner.Read();
+                if (raw < 0) return -1;
+
+                char c = (char)raw;
+
+                if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
+                {
+                    if (c == 0xA) _line++;
+                    return c;
+                }
+
+                if (char.IsHighSurrogate(c))
+                {
+                    int next = _inner.Read();
+                    if (next >= 0 && char.IsLowSurrogate((char)next))
+                    {
+                        _pending = next;
+                        return c;
+                    }
+                    // Unpaired high surrogate — strip it (and put back next if valid)
+                    RecordStripped(c);
+                    if (next >= 0)
+                    {
+                        // Re-evaluate 'next' on the next iteration by recursing
+                        char nc = (char)next;
+                        if (nc == 0x9 || nc == 0xA || nc == 0xD || (nc >= 0x20 && nc <= 0xD7FF) || (nc >= 0xE000 && nc <= 0xFFFD))
+                        {
+                            if (nc == 0xA) _line++;
+                            return nc;
+                        }
+                        RecordStripped(nc);
+                    }
+                    continue;
+                }
+
+                RecordStripped(c);
+            }
+        }
+
+        public override int Read(char[] buffer, int index, int count)
+        {
+            int filled = 0;
+            while (filled < count)
+            {
+                int ch = Read();
+                if (ch < 0) break;
+                buffer[index + filled] = (char)ch;
+                filled++;
+            }
+            return filled;
+        }
+
+        private void RecordStripped(char c)
+        {
+            _stripped++;
+            _issues ??= new List<string>();
+            _issues.Add($"  Line {_line}: U+{(int)c:X4}");
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
     public static class ITunesParser
     {
         public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues)
         {
-            var xml = SanitizeXml(File.ReadAllText(xmlPath, Encoding.UTF8), out xmlIssues);
-            var doc = XDocument.Parse(xml);
+            // Stream the XML through a sanitizing reader — never loads the full file into memory.
+            // Previous approach used File.ReadAllText + XDocument.Parse which required ~10x the
+            // file size in memory (UTF-16 string + sanitization copy + DOM tree).
+            using var sr = new StreamReader(xmlPath, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 65536);
+            using var sanitizer = new SanitizingTextReader(sr);
 
-            var root = doc.Root;
-            if (root == null)
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Ignore,
+                IgnoreWhitespace = true,
+                IgnoreComments = true,
+            };
+            using var reader = XmlReader.Create(sanitizer, settings);
+
+            // Navigate to root <plist> element
+            if (!reader.ReadToFollowing("plist"))
                 throw new InvalidOperationException("Invalid iTunes library XML: missing root element.");
 
-            var plistDict = root.Element("dict");
-            if (plistDict == null)
+            // Find the root <dict> inside <plist>
+            if (!reader.ReadToDescendant("dict"))
                 throw new InvalidOperationException("Invalid iTunes library XML: missing root <dict>.");
 
-            var tracksKey = plistDict.Elements("key").FirstOrDefault(k => k.Value == "Tracks");
-            if (tracksKey == null)
+            // Scan keys in the root dict to find "Tracks"
+            if (!AdvanceToKey(reader, "Tracks"))
                 throw new InvalidOperationException("Invalid iTunes library XML: no 'Tracks' key found. Is this a valid iTunes Music Library.xml file?");
 
-            var tracksDict = tracksKey.ElementsAfterSelf("dict").FirstOrDefault();
-            if (tracksDict == null)
+            // AdvanceToKey leaves reader on the node right after <key>Tracks</key>,
+            // which should be the tracks <dict> element itself. Don't use ReadToNextSibling
+            // here — that would skip past it looking for the *next* dict sibling.
+            if (reader.NodeType != XmlNodeType.Element || reader.Name != "dict")
                 throw new InvalidOperationException("Invalid iTunes library XML: no tracks dictionary found after 'Tracks' key.");
 
+            // Now inside the tracks dict — read track entries
             var result = new List<ITunesTrack>();
-            var elements = tracksDict.Elements().ToList();
-            for (int i = 0; i < elements.Count - 1; i++)
+            int depth = reader.Depth;
+
+            if (!reader.Read()) { FinalizeIssues(sanitizer, out xmlIssues); return result; }
+
+            while (reader.Depth > depth)
             {
-                if (elements[i].Name != "key") continue;
-                if (!int.TryParse(elements[i].Value, out var id)) continue;
-                var dict = elements[i + 1];
-                if (dict.Name != "dict") continue;
-                var track = ParseTrackDict(id, dict);
-                if (!string.IsNullOrEmpty(track.Location))
-                    result.Add(track);
-            }
-
-            return result;
-        }
-
-        private static ITunesTrack ParseTrackDict(int id, XElement dict)
-        {
-            var track = new ITunesTrack { TrackId = id };
-
-            var elems = dict.Elements().ToList();
-            for (int i = 0; i < elems.Count - 1; i++)
-            {
-                if (elems[i].Name != "key") continue;
-                var key = elems[i].Value;
-                var valElem = elems[i + 1];
-
-                switch (key)
+                if (reader.NodeType == XmlNodeType.Element && reader.Name == "key")
                 {
-                    case "Name": track.Name = valElem.Value; break;
-                    case "Artist": track.Artist = valElem.Value; break;
-                    case "Album": track.Album = valElem.Value; break;
-                    case "Genre": track.Genre = valElem.Value; break;
-                    case "Location": track.Location = ParseLocation(valElem.Value); break;
-                    case "Total Time": int.TryParse(valElem.Value, out var ms); track.TotalTimeMs = ms; break;
+                    var idText = reader.ReadElementContentAsString();
+                    if (!int.TryParse(idText, out var id))
+                    {
+                        // Skip whatever follows this non-numeric key
+                        if (reader.NodeType == XmlNodeType.Element) SkipElement(reader); else reader.Read();
+                        continue;
+                    }
+
+                    // Next element should be this track's <dict>
+                    if (reader.NodeType == XmlNodeType.Element && reader.Name == "dict")
+                    {
+                        var track = ReadTrackDict(reader, id);
+                        if (!string.IsNullOrEmpty(track.Location))
+                            result.Add(track);
+                    }
+                    else
+                    {
+                        // Unexpected element — skip it
+                        if (reader.NodeType == XmlNodeType.Element) SkipElement(reader); else reader.Read();
+                    }
+                }
+                else
+                {
+                    reader.Read();
                 }
             }
 
+            FinalizeIssues(sanitizer, out xmlIssues);
+            return result;
+        }
+
+        private static void FinalizeIssues(SanitizingTextReader sanitizer, out List<string>? xmlIssues)
+        {
+            xmlIssues = sanitizer.Issues;
+            if (sanitizer.StrippedCount > 0)
+                Console.WriteLine($"WARNING: Stripped {sanitizer.StrippedCount} invalid XML character(s) from library file");
+        }
+
+        /// <summary>
+        /// Scan sibling key elements looking for one with the given value.
+        /// Leaves reader positioned just after that key's content.
+        /// </summary>
+        private static bool AdvanceToKey(XmlReader reader, string targetKey)
+        {
+            int depth = reader.Depth;
+            if (!reader.Read()) return false;
+
+            while (reader.Depth > depth)
+            {
+                if (reader.NodeType == XmlNodeType.Element && reader.Name == "key")
+                {
+                    var keyValue = reader.ReadElementContentAsString();
+                    if (keyValue == targetKey)
+                        return true;
+                    // Skip the value element that follows this key
+                    if (reader.NodeType == XmlNodeType.Element)
+                        SkipElement(reader);
+                }
+                else
+                {
+                    reader.Read();
+                }
+            }
+            return false;
+        }
+
+        private static ITunesTrack ReadTrackDict(XmlReader reader, int id)
+        {
+            var track = new ITunesTrack { TrackId = id };
+            int depth = reader.Depth;
+
+            reader.Read(); // move inside the <dict>
+
+            while (reader.Depth > depth)
+            {
+                if (reader.NodeType == XmlNodeType.Element && reader.Name == "key")
+                {
+                    var key = reader.ReadElementContentAsString();
+
+                    // reader is now on the value element (string, integer, true, false, etc.)
+                    if (reader.NodeType != XmlNodeType.Element)
+                    {
+                        reader.Read();
+                        continue;
+                    }
+
+                    switch (key)
+                    {
+                        case "Name":
+                            track.Name = reader.ReadElementContentAsString();
+                            break;
+                        case "Artist":
+                            track.Artist = reader.ReadElementContentAsString();
+                            break;
+                        case "Album":
+                            track.Album = reader.ReadElementContentAsString();
+                            break;
+                        case "Genre":
+                            track.Genre = reader.ReadElementContentAsString();
+                            break;
+                        case "Location":
+                            track.Location = ParseLocation(reader.ReadElementContentAsString());
+                            break;
+                        case "Total Time":
+                            var val = reader.ReadElementContentAsString();
+                            if (int.TryParse(val, out var ms))
+                                track.TotalTimeMs = ms;
+                            break;
+                        default:
+                            // Skip value elements we don't care about
+                            SkipElement(reader);
+                            break;
+                    }
+                }
+                else
+                {
+                    reader.Read();
+                }
+            }
+
+            // Consume the end element of this track's <dict>
+            if (reader.NodeType == XmlNodeType.EndElement)
+                reader.Read();
+
             return track;
+        }
+
+        /// <summary>
+        /// Skip the current element and all its children, leaving the reader
+        /// positioned on the next sibling node.
+        /// </summary>
+        private static void SkipElement(XmlReader reader)
+        {
+            if (reader.NodeType == XmlNodeType.Element)
+            {
+                if (reader.IsEmptyElement)
+                    reader.Read();
+                else
+                    reader.Skip();
+            }
+            else
+            {
+                reader.Read();
+            }
         }
 
         private static string ParseLocation(string location)
@@ -108,63 +336,6 @@ namespace Truedat
                 path = Uri.UnescapeDataString(path);
                 return PathHelper.NormalizeSeparators(path);
             }
-        }
-
-        private static string SanitizeXml(string xml, out List<string>? issues)
-        {
-            issues = null;
-
-            // Fast path: scan for invalid XML 1.0 characters; if none, return input with zero allocation
-            // Valid XML 1.0: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
-            // UTF-16 surrogate pairs (D800-DFFF) encode codepoints U+10000+ and are valid when paired
-            for (int i = 0; i < xml.Length; i++)
-            {
-                var c = xml[i];
-                if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
-                    continue;
-                if (char.IsHighSurrogate(c) && i + 1 < xml.Length && char.IsLowSurrogate(xml[i + 1]))
-                    { i++; continue; }
-                goto needsSanitization;
-            }
-            return xml;
-
-            needsSanitization:
-            int stripped = 0;
-            issues = new List<string>();
-            var sb = new StringBuilder(xml.Length);
-            int line = 1;
-            for (int j = 0; j < xml.Length; j++)
-            {
-                var c = xml[j];
-                if (c == 0x9 || c == 0xA || c == 0xD || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD))
-                {
-                    sb.Append(c);
-                    if (c == 0xA) line++;
-                }
-                else if (char.IsHighSurrogate(c) && j + 1 < xml.Length && char.IsLowSurrogate(xml[j + 1]))
-                {
-                    // Valid surrogate pair — emoji and other U+10000+ codepoints
-                    sb.Append(c);
-                    sb.Append(xml[++j]);
-                }
-                else
-                {
-                    stripped++;
-                    var start = Math.Max(0, j - 40);
-                    var end = Math.Min(xml.Length, j + 40);
-                    var snippet = new StringBuilder(end - start + 10);
-                    for (int k = start; k < end; k++)
-                    {
-                        var sc = xml[k];
-                        if (sc < 0x20 && sc != 0x9 && sc != 0xA && sc != 0xD) snippet.Append($"[U+{(int)sc:X4}]");
-                        else if (sc == '\r' || sc == '\n') snippet.Append(' ');
-                        else snippet.Append(sc);
-                    }
-                    issues.Add($"  Line {line}: U+{(int)c:X4} in ...{snippet}...");
-                }
-            }
-            Console.WriteLine($"WARNING: Stripped {stripped} invalid XML character(s) from library file");
-            return sb.ToString();
         }
     }
 }
