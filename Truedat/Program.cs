@@ -342,6 +342,7 @@ namespace Truedat
             bool auditLog = false;
             bool checkFilenames = false;
             bool duplicatesMode = false;
+            bool quickFingerprintMode = false;
             bool detailsMode = false;
             bool analyzeMode = false;
 
@@ -385,6 +386,7 @@ namespace Truedat
                 else if (arg == "--audit") auditLog = true;
                 else if (arg == "--check-filenames") checkFilenames = true;
                 else if (arg == "--duplicates") duplicatesMode = true;
+                else if (arg == "--quick-fingerprint") quickFingerprintMode = true;
                 else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
                 else if (arg == "--synthesize") synthesize = true;
                 else if (arg == "--catalog" && i + 1 < args.Length) synthCatalog = args[++i];
@@ -435,6 +437,7 @@ namespace Truedat
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
+                Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -545,6 +548,7 @@ namespace Truedat
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
+                Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -606,6 +610,13 @@ namespace Truedat
                 Console.WriteLine();
             }
 
+            if (quickFingerprintMode)
+            {
+                RunQuickFingerprint(xmlPath, outputDir, parallelism, retryErrors);
+                if (!analyzeMode && !fingerprintMode) { if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+                Console.WriteLine();
+            }
+
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
             var catalogPath = FindCatalog(baseDir, Environment.CurrentDirectory,
@@ -616,6 +627,8 @@ namespace Truedat
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
+            var fpcalcExe = FindTool("fpcalc.exe", baseDir, outputDir, Environment.CurrentDirectory);
+            Console.WriteLine($"  fpcalc:     {fpcalcExe ?? "not found"}");
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found (run: python src/catalog-prep.py --download --build)")}");
             Console.WriteLine();
 
@@ -1625,6 +1638,166 @@ namespace Truedat
             return null;
         }
 
+        static void RunQuickFingerprint(string xmlPath, string outputDir, int parallelism, bool retryErrors)
+        {
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var cwd = Environment.CurrentDirectory;
+            var fpcalcExe = FindTool("fpcalc.exe", baseDir, outputDir, cwd);
+            if (fpcalcExe == null)
+            {
+                Console.WriteLine("fpcalc not found. --quick-fingerprint requires fpcalc.exe next to truedat.exe or in the library directory.");
+                return;
+            }
+
+            Console.WriteLine("=== Quick Fingerprint Mode (fpcalc, 30s) ===");
+            Console.WriteLine();
+            Console.WriteLine($"  fpcalc: {fpcalcExe}");
+            Console.WriteLine();
+
+            var quickFpPath = Path.Combine(outputDir, "mbxhub-quickfp.json");
+            var errorsPath = Path.Combine(outputDir, "mbxhub-quickfp-errors.csv");
+
+            Console.WriteLine($"Loading iTunes library: {xmlPath}");
+            var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues);
+            if (_audit && xmlIssues != null)
+                foreach (var issue in xmlIssues) Console.WriteLine(issue);
+            Console.WriteLine($"Found {tracks.Count} tracks");
+
+            var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
+            int existingCount = LoadExistingFingerprints(quickFpPath, allFp);
+            Console.WriteLine($"Existing quick fingerprints: {existingCount}");
+
+            Dictionary<string, string> existingErrors;
+            if (!retryErrors)
+            {
+                existingErrors = LoadExistingErrors(errorsPath);
+            }
+            else
+            {
+                existingErrors = new Dictionary<string, string>(PathComparer.Instance);
+                if (File.Exists(errorsPath)) { File.Delete(errorsPath); Console.WriteLine("Errors CSV cleared (--retry-errors)"); }
+            }
+            if (existingErrors.Count > 0)
+                Console.WriteLine($"Previous errors: {existingErrors.Count} (use --retry-errors to re-attempt)");
+            Console.WriteLine();
+
+            var saveLock = new object();
+            using var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
+
+            int total = tracks.Count;
+            int processed = 0, fingerprinted = 0, cachedCount = 0, skipped = 0, failed = 0;
+            var sw = Stopwatch.StartNew();
+
+            WarnLowDiskSpace(outputDir);
+            Console.WriteLine($"Started:     {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Parallelism: {parallelism} threads");
+            Console.WriteLine();
+            try
+            {
+                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
+                {
+                    if (cts.IsCancellationRequested) return;
+                    var current = Interlocked.Increment(ref processed);
+
+                    try
+                    {
+                        var pct = (current * 100) / total;
+                        var eta = FormatEta(sw.Elapsed, current, total);
+
+                        if (existingErrors.TryGetValue(t.Location, out var prevError))
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
+                            Interlocked.Increment(ref skipped);
+                            return;
+                        }
+
+                        // Cache check
+                        if (allFp.TryGetValue(t.Location, out var existing))
+                        {
+                            try
+                            {
+                                var fileInfo = new FileInfo(t.Location);
+                                if (fileInfo.Exists && Math.Abs((fileInfo.LastWriteTimeUtc - existing.LastModified).TotalSeconds) < 2
+                                    && !string.IsNullOrEmpty(existing.Fp.Chromaprint))
+                                {
+                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
+                                    Interlocked.Increment(ref cachedCount);
+                                    return;
+                                }
+                            }
+                            catch { }
+                        }
+
+                        if (!File.Exists(t.Location))
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (file not found)");
+                            Interlocked.Increment(ref skipped);
+                            return;
+                        }
+
+                        var timer = Stopwatch.StartNew();
+                        var (fingerprint, duration, error) = RunFpcalc(fpcalcExe, t.Location, cts.Token);
+                        timer.Stop();
+
+                        if (error != null)
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} FAILED: {error}");
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, error, 0, 0, saveLock);
+                            Interlocked.Increment(ref failed);
+                            return;
+                        }
+
+                        var lastMod = DateTime.MinValue;
+                        try { lastMod = new FileInfo(t.Location).LastWriteTimeUtc; } catch { }
+
+                        allFp[t.Location] = new FingerprintEntry
+                        {
+                            LastModified = lastMod,
+                            Fp = new TrackFingerprint
+                            {
+                                TrackId = t.TrackId,
+                                Artist = t.Artist ?? "",
+                                Title = t.Name ?? "",
+                                Album = t.Album ?? "",
+                                Genre = t.Genre ?? "",
+                                FilePath = t.Location,
+                                Chromaprint = fingerprint,
+                                Duration = duration
+                            }
+                        };
+
+                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} ({timer.Elapsed.TotalSeconds:F1}s)");
+                        var count = Interlocked.Increment(ref fingerprinted);
+
+                        if (count % 200 == 0)
+                            SaveFingerprints(quickFpPath, allFp);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[{current}/{total}] {t.Artist} - {t.Name} ERROR: {ex.Message}");
+                        Interlocked.Increment(ref failed);
+                    }
+                });
+            }
+            catch (OperationCanceledException) { Console.WriteLine("Cancelled."); }
+
+            SaveFingerprints(quickFpPath, allFp);
+            sw.Stop();
+
+            Console.WriteLine();
+            Console.WriteLine($"=== Quick Fingerprint Complete ===");
+            Console.WriteLine($"  Total:        {total}");
+            Console.WriteLine($"  Cached:       {cachedCount}");
+            Console.WriteLine($"  Fingerprinted:{fingerprinted}");
+            Console.WriteLine($"  Skipped:      {skipped}");
+            Console.WriteLine($"  Failed:       {failed}");
+            Console.WriteLine($"  Elapsed:      {sw.Elapsed:hh\\:mm\\:ss}");
+            Console.WriteLine($"  Output:       {quickFpPath}");
+            if (fingerprinted > 0)
+                Console.WriteLine($"  Avg:          {sw.Elapsed.TotalSeconds / fingerprinted:F1}s per track");
+        }
+
         static void RunFingerprint(string xmlPath, string outputDir, int parallelism, bool retryErrors, bool chromaprintOnly, bool md5Only, bool detailsMode)
         {
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -1642,6 +1815,8 @@ namespace Truedat
             Console.WriteLine($"  MD5:          {md5Exe ?? "NOT FOUND"}");
             Console.WriteLine($"  ffmpeg:       {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
             if (detailsMode) Console.WriteLine($"  ffprobe:      {_ffprobePath.Value ?? "not found (--details will be skipped)"}");
+            var fpcalcExe = FindTool("fpcalc.exe", baseDir, outputDir, cwd);
+            Console.WriteLine($"  fpcalc:       {fpcalcExe ?? "not found (--quick-fingerprint unavailable)"}");
             Console.WriteLine();
 
             if (runChromaprint && chromaprintExe == null)
@@ -2486,6 +2661,76 @@ namespace Truedat
                 return ("", 0, "No FINGERPRINT in output");
             }
             return (fingerprint, duration, null);
+        }
+
+        static (string Fingerprint, int Duration, string? Error) RunFpcalc(string fpcalcExe, string audioPath, CancellationToken ct = default)
+        {
+            string toolPath = SafePath(audioPath);
+            string? tempLink = null;
+            string pathMethod = toolPath == audioPath ? "original" : "8.3";
+
+            if (HasNonAscii(toolPath) ||
+                !string.Equals(Path.GetExtension(toolPath), Path.GetExtension(audioPath), StringComparison.OrdinalIgnoreCase))
+            {
+                var (link, method) = TryCreateHardlink(audioPath);
+                pathMethod = method;
+                if (link != null) { toolPath = link; tempLink = link; }
+            }
+            if (_audit && pathMethod != "original")
+                Console.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = fpcalcExe, Arguments = $"-length 30 \"{toolPath}\"",
+                    RedirectStandardOutput = true, RedirectStandardError = true,
+                    UseShellExecute = false, CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
+                if (!proc.WaitForExit(120000)) // 2 min timeout (30s of audio + overhead)
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    return ("", 0, "fpcalc timed out (120s)");
+                }
+                proc.WaitForExit();
+
+                var stdout = stdoutTask.Wait(10000) ? stdoutTask.Result : "";
+                var stderr = stderrTask.Wait(10000) ? stderrTask.Result : "";
+
+                if (proc.ExitCode != 0)
+                {
+                    var err = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim().Split('\n').Last().Trim() : $"Exit code {proc.ExitCode}";
+                    return ("", 0, err);
+                }
+
+                string fingerprint = "";
+                int duration = 0;
+                foreach (var line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (line.StartsWith("DURATION=")) int.TryParse(line.Substring("DURATION=".Length).Trim(), out duration);
+                    else if (line.StartsWith("FINGERPRINT=")) fingerprint = line.Substring("FINGERPRINT=".Length).Trim();
+                }
+
+                if (string.IsNullOrEmpty(fingerprint))
+                {
+                    if (_audit) Console.WriteLine($"  DEBUG fpcalc: exit 0 but no FINGERPRINT. stdout={stdout.Length} chars");
+                    return ("", 0, "No FINGERPRINT in fpcalc output");
+                }
+                return (fingerprint, duration, null);
+            }
+            catch (Exception ex) { return ("", 0, ex.Message); }
+            finally
+            {
+                if (tempLink != null)
+                    try { File.Delete(tempLink); }
+                    catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+            }
         }
 
         static (string Md5, string? Error) RunMd5(string exe, string audioPath, CancellationToken ct = default)
