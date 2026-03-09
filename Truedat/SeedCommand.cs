@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -64,6 +65,9 @@ namespace Truedat
             Console.Write("Parsing iTunes library...");
             var library = ITunesParser.Parse(_xmlPath, out _);
             Console.WriteLine($" {library.Count:N0} tracks");
+            int podcastCount = library.RemoveAll(t => t.IsPodcast);
+            if (podcastCount > 0)
+                Console.WriteLine($"  Skipped {podcastCount} podcast episode(s)");
 
             // 3. Load existing moods to check confidence
             var existingMoods = LoadExistingMoods();

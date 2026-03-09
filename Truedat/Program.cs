@@ -327,6 +327,17 @@ namespace Truedat
             catch { }
         }
 
+        /// <summary>Remove podcast episodes from a parsed track list and log the count.</summary>
+        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks)
+        {
+            int before = tracks.Count;
+            var filtered = tracks.Where(t => !t.IsPodcast).ToList();
+            int removed = before - filtered.Count;
+            if (removed > 0)
+                Console.WriteLine($"  Skipped {removed} podcast episode(s)");
+            return filtered;
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -427,7 +438,7 @@ namespace Truedat
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --migrate           Strip legacy valence/arousal fields from mbxmoods.json (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -538,7 +549,7 @@ namespace Truedat
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --migrate           Strip legacy valence/arousal fields from mbxmoods.json (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -647,6 +658,7 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            tracks = FilterPodcasts(tracks);
 
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
@@ -986,6 +998,7 @@ namespace Truedat
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            tracks = FilterPodcasts(tracks);
             Console.WriteLine();
 
             var errors = new List<(ITunesTrack Track, List<char> Chars)>();
@@ -1562,7 +1575,7 @@ namespace Truedat
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Strips legacy valence/arousal fields from mbxmoods.json");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields, removes podcast entries");
             Console.WriteLine();
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
@@ -1586,10 +1599,27 @@ namespace Truedat
                 if (changed) stripped++;
             }
 
-            Console.WriteLine($"Tracks: {total}");
-            Console.WriteLine($"Stripped valence/arousal from: {stripped}");
-            if (stripped == 0) { Console.WriteLine(); Console.WriteLine("No legacy fields found, nothing to do."); return; }
+            // Remove podcast entries (identified by genre)
+            var podcastKeys = tracks
+                .Where(kv => string.Equals(kv.Value?["genre"]?.GetValue<string>(), "Podcast", StringComparison.OrdinalIgnoreCase))
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var key in podcastKeys) tracks.Remove(key);
 
+            Console.WriteLine($"Tracks: {total}");
+            if (stripped > 0)
+                Console.WriteLine($"Stripped valence/arousal from: {stripped}");
+            if (podcastKeys.Count > 0)
+                Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
+
+            if (stripped == 0 && podcastKeys.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Nothing to migrate.");
+                return;
+            }
+
+            root["trackCount"] = tracks.Count;
             var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
             var bakPath = $"{moodsPath}.bak.{timestamp}";
             File.Copy(moodsPath, bakPath);
@@ -1598,7 +1628,7 @@ namespace Truedat
             var tmpPath = moodsPath + ".tmp";
             File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             AtomicReplace(tmpPath, moodsPath);
-            Console.WriteLine($"Updated: {moodsPath}");
+            Console.WriteLine($"Updated: {moodsPath} ({tracks.Count} tracks)");
         }
 
         // -- Fingerprint mode ------------------------------------------------
@@ -1662,6 +1692,7 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            tracks = FilterPodcasts(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(quickFpPath, allFp);
@@ -1865,6 +1896,7 @@ namespace Truedat
             if (_audit && fpXmlIssues != null)
                 foreach (var issue in fpXmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            tracks = FilterPodcasts(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(fingerprintsPath, allFp);

@@ -16,6 +16,8 @@ namespace Truedat
         public string Location { get; set; } = "";
         /// <summary>Duration in milliseconds from iTunes XML (Total Time). 0 if unavailable.</summary>
         public int TotalTimeMs { get; set; }
+        /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
+        public bool IsPodcast { get; set; }
     }
 
     /// <summary>
@@ -272,6 +274,16 @@ namespace Truedat
                             var val = reader.ReadElementContentAsString();
                             if (int.TryParse(val, out var ms))
                                 track.TotalTimeMs = ms;
+                            break;
+                        case "Podcast":
+                            // iTunes/Apple Music writes <key>Podcast</key><true/>
+                            track.IsPodcast = reader.Name == "true";
+                            SkipElement(reader);
+                            break;
+                        case "Episode Date":
+                            // MusicBee writes <key>Episode Date</key> for podcast episodes
+                            track.IsPodcast = true;
+                            SkipElement(reader);
                             break;
                         default:
                             // Skip value elements we don't care about
