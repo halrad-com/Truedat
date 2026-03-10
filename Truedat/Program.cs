@@ -338,6 +338,25 @@ namespace Truedat
             return filtered;
         }
 
+        /// <summary>Video file extensions that should not be analyzed as audio.</summary>
+        internal static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp4", ".m4v", ".mkv", ".avi", ".wmv", ".mov", ".webm", ".flv", ".mpg", ".mpeg", ".vob", ".ts"
+        };
+
+        /// <summary>Remove video files from a parsed track list and log the count.</summary>
+        static List<ITunesTrack> FilterVideoFiles(List<ITunesTrack> tracks)
+        {
+            int before = tracks.Count;
+            var filtered = tracks.Where(t =>
+                string.IsNullOrEmpty(t.Location) ||
+                !VideoExtensions.Contains(Path.GetExtension(t.Location))).ToList();
+            int removed = before - filtered.Count;
+            if (removed > 0)
+                Console.WriteLine($"  Skipped {removed} video file(s)");
+            return filtered;
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -659,6 +678,7 @@ namespace Truedat
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
+            tracks = FilterVideoFiles(tracks);
 
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
@@ -999,6 +1019,7 @@ namespace Truedat
             var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
+            tracks = FilterVideoFiles(tracks);
             Console.WriteLine();
 
             var errors = new List<(ITunesTrack Track, List<char> Chars)>();
@@ -1693,6 +1714,7 @@ namespace Truedat
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
+            tracks = FilterVideoFiles(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(quickFpPath, allFp);
@@ -1897,6 +1919,7 @@ namespace Truedat
                 foreach (var issue in fpXmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
+            tracks = FilterVideoFiles(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(fingerprintsPath, allFp);

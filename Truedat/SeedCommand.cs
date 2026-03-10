@@ -68,6 +68,11 @@ namespace Truedat
             int podcastCount = library.RemoveAll(t => t.IsPodcast);
             if (podcastCount > 0)
                 Console.WriteLine($"  Skipped {podcastCount} podcast episode(s)");
+            int videoCount = library.RemoveAll(t =>
+                !string.IsNullOrEmpty(t.Location) &&
+                Program.VideoExtensions.Contains(Path.GetExtension(t.Location)));
+            if (videoCount > 0)
+                Console.WriteLine($"  Skipped {videoCount} video file(s)");
 
             // 3. Load existing moods to check confidence
             var existingMoods = LoadExistingMoods();
