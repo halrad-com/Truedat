@@ -393,6 +393,11 @@ namespace Truedat
             var mergeSources = new List<string>();
             string? mergeOutput = null;
 
+            bool analyzeFileMode = false;
+            string? analyzeFilePath = null;
+            string? analyzeFileMoods = null;
+            bool jsonOutput = false;
+
             bool showHelp = false;
             int cpuLimit = 0; // 0 = no limit
 
@@ -435,6 +440,9 @@ namespace Truedat
                 else if (arg == "--merge-moods") mergeMode = true;
                 else if (arg == "--merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
                 else if (arg == "--merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
+                else if (arg == "--analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
+                else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
+                else if (arg == "--json-output") jsonOutput = true;
                 else if (arg == "--background") cpuLimit = 25;
                 else if (arg == "--cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -554,6 +562,81 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunMergeMoods(mergeSources, mergeOutput!);
+                return;
+            }
+
+            // --analyze-file: single file Essentia analysis (no iTunes XML needed)
+            if (analyzeFileMode)
+            {
+                if (string.IsNullOrEmpty(analyzeFilePath) || !File.Exists(analyzeFilePath))
+                {
+                    Console.Error.WriteLine($"Error: File not found: {analyzeFilePath}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
+                var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
+
+                if (afEssentiaExe == null)
+                {
+                    Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+
+                if (cpuLimit > 0) InitCpuLimitJob(cpuLimit);
+
+                Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
+                var afSw = System.Diagnostics.Stopwatch.StartNew();
+
+                var (features, error) = AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath,
+                    new FileInfo(analyzeFilePath).Length, CancellationToken.None);
+
+                afSw.Stop();
+
+                if (features == null)
+                {
+                    Console.Error.WriteLine($"Error: {error}");
+                    Environment.ExitCode = 3;
+                    return;
+                }
+
+                var trackEntry = new TrackEntry
+                {
+                    Features = features,
+                    LastModified = File.GetLastWriteTimeUtc(analyzeFilePath),
+                    AnalysisDurationSecs = afSw.Elapsed.TotalSeconds
+                };
+
+                // Output features as JSON to stdout
+                if (jsonOutput)
+                {
+                    using var ms = new MemoryStream();
+                    using (var jw = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+                    {
+                        jw.WriteStartObject();
+                        WriteTrackEntry(jw, Path.GetFullPath(analyzeFilePath), trackEntry);
+                        jw.WriteEndObject();
+                    }
+                    Console.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
+                }
+
+                // Merge into moods file if --moods specified
+                if (!string.IsNullOrEmpty(analyzeFileMoods))
+                {
+                    var moodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    if (File.Exists(analyzeFileMoods))
+                        LoadExistingMoods(analyzeFileMoods, moodsTracks);
+
+                    moodsTracks[Path.GetFullPath(analyzeFilePath)] = trackEntry;
+                    SaveResults(analyzeFileMoods, moodsTracks);
+                    Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
+                }
+
+                Console.Error.WriteLine($"Done in {afSw.Elapsed.TotalSeconds:F1}s");
+                Environment.ExitCode = 0;
                 return;
             }
 
