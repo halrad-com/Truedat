@@ -69,6 +69,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
   --md5-only              Fingerprint mode: only run audio md5 (skip chromaprint)
   --details               Use ffprobe → mbxhub-details.json (implies --fingerprint)
+  --meta-server <url>     POST features to MetaServer instead of writing mbxmoods.json
+  --output                Also write mbxmoods.json when using --meta-server (dual output)
   --audit                 Write all console output to truedat.log (for debugging)
   --check-filenames       Scan for filenames with characters that break Essentia tools
 ```

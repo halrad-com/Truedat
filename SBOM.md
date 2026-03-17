@@ -17,6 +17,7 @@
 | Component | Version | License | Purpose |
 |-----------|---------|---------|---------|
 | .NET Framework | 4.8 | MIT | Runtime (ships with Windows 10/11) |
+| System.Net.Http | 4.8 (BCL) | MIT | HTTP client for MetaServer integration (framework assembly reference) |
 | System.Text.Json | 8.0.5 | MIT | JSON serialization (merged into exe via ILRepack) |
 | TagLibSharp | 2.3.0 | LGPL-2.1 | ID3 tag writing for synthetic library generation (merged into exe via ILRepack) |
 
@@ -140,7 +141,7 @@ Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt
 
 ## Security Considerations
 
-- No network access required (runtime)
+- No network access required (runtime) unless `--meta-server` is used, which POSTs features to a local network MetaServer
 - Reads audio files (read-only) and iTunes Music Library XML
 - Writes JSON output next to input XML file
 - No telemetry or external services
