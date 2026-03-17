@@ -1041,7 +1041,7 @@ namespace Truedat
                         // POST to MetaServer if configured (fire per-track, not buffered)
                         if (metaServerUrl != null)
                         {
-                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, fileSizeBytes, t);
+                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, null, fileSizeBytes, t);
                         }
 
                         if (writeFile)
@@ -3910,7 +3910,7 @@ namespace Truedat
         /// Returns true on success, false on failure (logs warning).
         /// </summary>
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
-            string? fileMd5, long fileSize, ITunesTrack track)
+            string? fileMd5, string? audioMd5, long fileSize, ITunesTrack track)
         {
             try
             {
@@ -3940,6 +3940,8 @@ namespace Truedat
                     jw.WriteStartObject();
                     if (!string.IsNullOrEmpty(fileMd5))
                         jw.WriteString("fileMd5", fileMd5);
+                    if (!string.IsNullOrEmpty(audioMd5))
+                        jw.WriteString("audioMd5", audioMd5);
                     jw.WriteEndObject();
 
                     // features
