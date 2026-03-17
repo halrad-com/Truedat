@@ -641,8 +641,6 @@ namespace Truedat
                     return;
                 }
 
-                if (cpuLimit > 0) InitCpuLimitJob(cpuLimit);
-
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
