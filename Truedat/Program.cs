@@ -646,8 +646,8 @@ namespace Truedat
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
-                var (features, error) = AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath,
-                    new FileInfo(analyzeFilePath).Length, CancellationToken.None);
+                var (features, error) = AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!,
+                    new FileInfo(analyzeFilePath!).Length, CancellationToken.None);
 
                 afSw.Stop();
 
@@ -683,10 +683,10 @@ namespace Truedat
                 {
                     var moodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     if (File.Exists(analyzeFileMoods))
-                        LoadExistingMoods(analyzeFileMoods, moodsTracks);
+                        LoadExistingMoods(analyzeFileMoods!, moodsTracks);
 
-                    moodsTracks[Path.GetFullPath(analyzeFilePath)] = trackEntry;
-                    SaveResults(analyzeFileMoods, moodsTracks);
+                    moodsTracks[Path.GetFullPath(analyzeFilePath!)] = trackEntry;
+                    SaveResults(analyzeFileMoods!, moodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                 }
 
