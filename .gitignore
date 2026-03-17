@@ -10,3 +10,9 @@ dist/truedat/ffplay.exe
 
 # Synthetic library data (large downloads)
 data/
+
+# Internal docs (_ prefix = not published)
+_docs/
+
+# Python cache
+src/__pycache__/
