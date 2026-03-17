@@ -107,12 +107,29 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | `{output}/mbxmoods.json` | Mood entries with 15 Essentia features for all generated tracks |
 | `{output}/.synthetic-manifest.json` | Manifest for idempotent reruns (tracks generated, seed, settings) |
 
+### Analyze Mode (`--analyze-file`, single-track)
+
+| File | Description |
+|------|-------------|
+| stdout (JSON) | Single track's 15 Essentia features as JSON (consumed by MBXHub ScanWorker) |
+
 ### Catalog Prep (`src/catalog-prep.py`, developer tool)
 
 | File | Description |
 |------|-------------|
 | `data/synthlib-catalog.jsonl.gz` | Gzipped JSON Lines catalog of track metadata + acoustic features |
 | `data/downloads.json` | Download manifest with SHA-256 integrity hashes |
+
+## Developer Tools (Python, not shipped)
+
+| Script | Purpose | Dependencies |
+|--------|---------|-------------|
+| `src/catalog-prep.py` | Build synthetic library catalog from MusicBrainz + AcousticBrainz data dumps | zstandard, requests, tqdm |
+| `src/analyze.py` | Direct Essentia analysis via Python bindings | essentia, numpy |
+| `src/visualize.py` | Scatter plot of mood distribution from mbxmoods.json | matplotlib |
+| `src/libscan.py` | Library scanning and statistics | (stdlib only) |
+
+Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt`.
 
 ## Platform Support
 
@@ -123,7 +140,10 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 ## Security Considerations
 
-- No network access required
-- Reads audio files (read-only)
+- No network access required (runtime)
+- Reads audio files (read-only) and iTunes Music Library XML
 - Writes JSON output next to input XML file
 - No telemetry or external services
+- Child process arguments (ffmpeg, ffprobe, fpcalc, Essentia) are sanitized via `PathHelper.QuoteArg()` to prevent command injection from malicious file paths in the iTunes XML
+- iTunes XML parser uses `DtdProcessing.Ignore` to prevent XXE entity expansion
+- Podcast episodes and video files are filtered out before processing

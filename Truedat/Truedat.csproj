@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Resources\stub.mp3" />
   </ItemGroup>
 

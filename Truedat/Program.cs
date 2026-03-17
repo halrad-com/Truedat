@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Security.Cryptography;
@@ -101,6 +102,51 @@ namespace Truedat
         {
             return path.Replace('/', '\\');
         }
+
+        /// <summary>
+        /// Quote a single argument for Windows CreateProcess argument string.
+        /// Handles embedded double-quotes and trailing backslashes per the
+        /// CommandLineToArgvW parsing rules.
+        /// </summary>
+        public static string QuoteArg(string arg)
+        {
+            // Fast path: no special characters — just wrap in quotes
+            if (arg.IndexOf('"') < 0 && arg.IndexOf('\\') < 0)
+                return $"\"{arg}\"";
+
+            var sb = new StringBuilder(arg.Length + 4);
+            sb.Append('"');
+            for (int i = 0; i < arg.Length; i++)
+            {
+                // Count consecutive backslashes
+                int backslashes = 0;
+                while (i < arg.Length && arg[i] == '\\')
+                {
+                    backslashes++;
+                    i++;
+                }
+
+                if (i == arg.Length)
+                {
+                    // Trailing backslashes: double them (they precede the closing quote)
+                    sb.Append('\\', backslashes * 2);
+                }
+                else if (arg[i] == '"')
+                {
+                    // Backslashes before a quote: double them + escape the quote
+                    sb.Append('\\', backslashes * 2 + 1);
+                    sb.Append('"');
+                }
+                else
+                {
+                    // Backslashes not before a quote: leave them as-is
+                    sb.Append('\\', backslashes);
+                    sb.Append(arg[i]);
+                }
+            }
+            sb.Append('"');
+            return sb.ToString();
+        }
     }
 
     /// <summary>
@@ -183,6 +229,8 @@ namespace Truedat
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
         static bool _audit;
+
+        static readonly HttpClient _metaClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
 
         // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
         // At 44100 Hz / 2048 hop size = ~21.53 frames/sec -> max ~12172s before buffer overflow.
@@ -398,6 +446,9 @@ namespace Truedat
             string? analyzeFileMoods = null;
             bool jsonOutput = false;
 
+            string? metaServerUrl = null;
+            bool outputFlag = false;
+
             bool showHelp = false;
             int cpuLimit = 0; // 0 = no limit
 
@@ -443,6 +494,8 @@ namespace Truedat
                 else if (arg == "--analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
                 else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (arg == "--json-output") jsonOutput = true;
+                else if (arg == "--meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
+                else if (arg == "--output") outputFlag = true;
                 else if (arg == "--background") cpuLimit = 25;
                 else if (arg == "--cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -476,6 +529,8 @@ namespace Truedat
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
+                Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
+                Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -662,6 +717,8 @@ namespace Truedat
                 Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
+                Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
+                Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -707,7 +764,12 @@ namespace Truedat
             if (fingerprintMode) modeList.Add(chromaprintOnly ? "chromaprint-only" : md5Only ? "md5-only" : "fingerprint");
             if (detailsMode) modeList.Add("details");
             if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode && !fingerprintMode)) modeList.Add("analyze");
+            if (metaServerUrl != null) modeList.Add("meta-server");
+            if (metaServerUrl != null && outputFlag) modeList.Add("output");
             Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}");
+
+            // When --meta-server is set, only write mbxmoods.json if --output is also specified
+            bool writeFile = metaServerUrl == null || outputFlag;
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
@@ -766,12 +828,18 @@ namespace Truedat
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            int existingCount = LoadExistingMoods(moodsPath, allTracks);
-            Console.WriteLine($"Existing moods: {existingCount}");
-
-            var moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
-            if (moodMd5Index != null)
-                Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
+            int existingCount = 0;
+            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodMd5Index = null;
+            if (writeFile)
+            {
+                existingCount = LoadExistingMoods(moodsPath, allTracks);
+                Console.WriteLine($"Existing moods: {existingCount}");
+                moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
+                if (moodMd5Index != null)
+                    Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
+            }
+            if (metaServerUrl != null)
+                Console.WriteLine($"  MetaServer: {metaServerUrl}");
             int crossPathMoods = 0;
 
             Dictionary<string, string> existingErrors;
@@ -969,10 +1037,20 @@ namespace Truedat
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                         var fileMd5 = ComputeFileMd5(t.Location);
-                        allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5 };
+
+                        // POST to MetaServer if configured (fire per-track, not buffered)
+                        if (metaServerUrl != null)
+                        {
+                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, fileSizeBytes, t);
+                        }
+
+                        if (writeFile)
+                        {
+                            allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5 };
+                        }
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
-                        if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
+                        if (writeFile && newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
                         {
                             lock (saveLock)
                             {
@@ -1005,9 +1083,13 @@ namespace Truedat
             var endTime = DateTime.Now;
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
 
-            var finalSaveSw = Stopwatch.StartNew();
-            SaveResults(moodsPath, allTracks);
-            finalSaveSw.Stop();
+            Stopwatch? finalSaveSw = null;
+            if (writeFile)
+            {
+                finalSaveSw = Stopwatch.StartNew();
+                SaveResults(moodsPath, allTracks);
+                finalSaveSw.Stop();
+            }
 
             Console.WriteLine();
             if (wasCancelled)
@@ -1024,13 +1106,17 @@ namespace Truedat
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + failed}");
-            Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
+            if (writeFile)
+                Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
+            if (metaServerUrl != null)
+                Console.WriteLine($"  MetaServer: {analyzed} tracks posted to {metaServerUrl}");
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
                 Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only)");
             }
-            Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
+            if (finalSaveSw != null)
+                Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
             try
             {
                 using var currentProcess = Process.GetCurrentProcess();
@@ -1039,7 +1125,10 @@ namespace Truedat
             }
             catch { }
             Console.WriteLine();
-            Console.WriteLine($"Output: {moodsPath}");
+            if (writeFile)
+                Console.WriteLine($"Output: {moodsPath}");
+            if (metaServerUrl != null)
+                Console.WriteLine($"MetaServer: {metaServerUrl}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
 
@@ -2548,7 +2637,7 @@ namespace Truedat
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = exe, Arguments = $"\"{toolPath}\"",
+                    FileName = exe, Arguments = PathHelper.QuoteArg(toolPath),
                     RedirectStandardOutput = true, RedirectStandardError = true,
                     UseShellExecute = false, CreateNoWindow = true
                 };
@@ -2716,7 +2805,7 @@ namespace Truedat
                 var psi = new ProcessStartInfo
                 {
                     FileName = ffmpeg,
-                    Arguments = $"-i \"{audioPath}\" -ac 2 -y \"{tempPath}\"",
+                    Arguments = $"-i {PathHelper.QuoteArg(audioPath)} -ac 2 -y {PathHelper.QuoteArg(tempPath)}",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -2821,7 +2910,7 @@ namespace Truedat
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = fpcalcExe, Arguments = $"-length 30 \"{toolPath}\"",
+                    FileName = fpcalcExe, Arguments = $"-length 30 {PathHelper.QuoteArg(toolPath)}",
                     RedirectStandardOutput = true, RedirectStandardError = true,
                     UseShellExecute = false, CreateNoWindow = true
                 };
@@ -2919,7 +3008,7 @@ namespace Truedat
                 var psi = new ProcessStartInfo
                 {
                     FileName = ffprobe,
-                    Arguments = $"-v quiet -print_format json -show_streams -show_format \"{audioPath}\"",
+                    Arguments = $"-v quiet -print_format json -show_streams -show_format {PathHelper.QuoteArg(audioPath)}",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -3565,7 +3654,7 @@ namespace Truedat
                 var psi = new ProcessStartInfo
                 {
                     FileName = essentiaExe,
-                    Arguments = $"\"{toolPath}\" \"{tempJson}\"",
+                    Arguments = $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)}",
                     RedirectStandardOutput = false,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -3814,6 +3903,97 @@ namespace Truedat
                 return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// POST track features to MetaServer's /meta/ingest endpoint.
+        /// Returns true on success, false on failure (logs warning).
+        /// </summary>
+        static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
+            string? fileMd5, long fileSize, ITunesTrack track)
+        {
+            try
+            {
+                var url = baseUrl.TrimEnd('/') + "/meta/ingest";
+                var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
+
+                using var ms = new MemoryStream();
+                using (var jw = new Utf8JsonWriter(ms))
+                {
+                    jw.WriteStartObject();
+
+                    jw.WriteString("path", filePath);
+
+                    // metadata
+                    jw.WritePropertyName("metadata");
+                    jw.WriteStartObject();
+                    jw.WriteString("artist", feat.Artist);
+                    jw.WriteString("title", feat.Title);
+                    jw.WriteString("album", feat.Album);
+                    jw.WriteString("genre", feat.Genre);
+                    jw.WriteNumber("duration", track.TotalTimeMs / 1000.0);
+                    jw.WriteNumber("fileSize", fileSize);
+                    jw.WriteEndObject();
+
+                    // identity
+                    jw.WritePropertyName("identity");
+                    jw.WriteStartObject();
+                    if (!string.IsNullOrEmpty(fileMd5))
+                        jw.WriteString("fileMd5", fileMd5);
+                    jw.WriteEndObject();
+
+                    // features
+                    jw.WritePropertyName("features");
+                    jw.WriteStartObject();
+                    jw.WriteNumber("bpm", feat.Bpm);
+                    jw.WriteString("key", feat.Key);
+                    jw.WriteString("mode", feat.Mode);
+                    jw.WriteNumber("spectralCentroid", feat.SpectralCentroid);
+                    jw.WriteNumber("spectralFlux", feat.SpectralFlux);
+                    jw.WriteNumber("loudness", feat.Loudness);
+                    jw.WriteNumber("danceability", feat.Danceability);
+                    jw.WriteNumber("onsetRate", feat.OnsetRate);
+                    jw.WriteNumber("zeroCrossingRate", feat.ZeroCrossingRate);
+                    jw.WriteNumber("spectralRms", feat.SpectralRms);
+                    jw.WriteNumber("spectralFlatness", feat.SpectralFlatness);
+                    jw.WriteNumber("dissonance", feat.Dissonance);
+                    jw.WriteNumber("pitchSalience", feat.PitchSalience);
+                    jw.WriteNumber("chordsChangesRate", feat.ChordsChangesRate);
+                    if (feat.Mfcc != null)
+                    {
+                        // MFCC as JSON string (array of doubles) per spec
+                        jw.WriteString("mfcc", JsonSerializer.Serialize(feat.Mfcc));
+                    }
+                    jw.WriteEndObject();
+
+                    // provenance
+                    jw.WritePropertyName("provenance");
+                    jw.WriteStartObject();
+                    jw.WriteString("scannedBy", Environment.MachineName);
+                    jw.WriteString("tool", "essentia");
+                    jw.WriteString("toolVersion", version);
+                    jw.WriteString("scannedAt", DateTime.UtcNow.ToString("o"));
+                    jw.WriteEndObject();
+
+                    jw.WriteEndObject();
+                }
+
+                var content = new ByteArrayContent(ms.ToArray());
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"  WARNING: MetaServer POST failed: {(int)response.StatusCode} {response.ReasonPhrase}");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
+                return false;
+            }
         }
 
         static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
