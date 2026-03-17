@@ -3961,8 +3961,10 @@ namespace Truedat
                     jw.WriteNumber("chordsChangesRate", feat.ChordsChangesRate);
                     if (feat.Mfcc != null)
                     {
-                        // MFCC as JSON string (array of doubles) per spec
-                        jw.WriteString("mfcc", JsonSerializer.Serialize(feat.Mfcc));
+                        jw.WritePropertyName("mfcc");
+                        jw.WriteStartArray();
+                        foreach (var v in feat.Mfcc) jw.WriteNumberValue(v);
+                        jw.WriteEndArray();
                     }
                     jw.WriteEndObject();
 
@@ -3980,7 +3982,7 @@ namespace Truedat
 
                 var content = new ByteArrayContent(ms.ToArray());
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
+                using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
 
                 if (!response.IsSuccessStatusCode)
                 {
