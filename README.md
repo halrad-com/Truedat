@@ -72,6 +72,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --meta-server <url>     POST features to MetaServer instead of writing mbxmoods.json
   --output                Also write mbxmoods.json when using --meta-server (dual output)
   --audit                 Write all console output to truedat.log (for debugging)
+  --analyze-file <path> Analyze a single audio file with Essentia (no iTunes XML needed)
+  --file-list <path>    Analyze files listed in a text file (one path per line, UTF-8, # comments)
+                        Use with --meta-server to POST results, -p for parallelism
+                        Mutually exclusive with --analyze-file
   --check-filenames       Scan for filenames with characters that break Essentia tools
 ```
 
@@ -107,6 +111,12 @@ truedat.exe "iTunes Music Library.xml" --check-filenames
 
 REM Probe audio details (codec, bitrate, sample rate, etc.)
 truedat.exe "iTunes Music Library.xml" --details
+
+REM Analyze a single file (no iTunes XML needed)
+truedat.exe --analyze-file "C:\Music\song.mp3" --json-output
+
+REM Batch analyze files from a list, POST results to MetaServer
+truedat.exe --file-list files.txt --meta-server http://localhost:5000 -p 4
 ```
 
 ## Synthetic Library Generation (Test Tooling)

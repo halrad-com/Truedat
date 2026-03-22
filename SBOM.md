@@ -114,6 +114,12 @@ Source: [FFmpeg](https://ffmpeg.org/)
 |------|-------------|
 | stdout (JSON) | Single track's 15 Essentia features as JSON (consumed by MBXHub ScanWorker) |
 
+### Batch Mode (`--file-list`)
+
+| File | Description |
+|------|-------------|
+| stdout (JSON) | Summary with processed/failed counts, elapsed time, and error details (when `--json-output` or failures) |
+
 ### Catalog Prep (`src/catalog-prep.py`, developer tool)
 
 | File | Description |
