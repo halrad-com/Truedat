@@ -446,6 +446,9 @@ namespace Truedat
             string? analyzeFileMoods = null;
             bool jsonOutput = false;
 
+            bool fileListMode = false;
+            string? fileListPath = null;
+
             string? metaServerUrl = null;
             bool outputFlag = false;
 
@@ -492,6 +495,7 @@ namespace Truedat
                 else if (arg == "--merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
                 else if (arg == "--merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
                 else if (arg == "--analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
+                else if (arg == "--file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
                 else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (arg == "--json-output") jsonOutput = true;
                 else if (arg == "--meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
@@ -502,6 +506,13 @@ namespace Truedat
             }
 
             _audit = auditLog;
+
+            if (fileListMode && analyzeFileMode)
+            {
+                Console.Error.WriteLine("Error: Cannot use --file-list and --analyze-file together.");
+                Environment.ExitCode = 1;
+                return;
+            }
 
             if (cpuLimit > 0)
             {
