@@ -786,7 +786,7 @@ namespace Truedat
                         // POST to MetaServer if configured
                         if (!string.IsNullOrEmpty(metaServerUrl))
                         {
-                            PostToMetaServer(metaServerUrl, filePath, features, fileSize);
+                            PostToMetaServer(metaServerUrl!, filePath, features, fileSize);
                         }
 
                         // Accumulate for moods file
