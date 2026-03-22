@@ -704,6 +704,137 @@ namespace Truedat
                 return;
             }
 
+            // --file-list mode: batch analysis from a text file
+            if (fileListMode)
+            {
+                if (!File.Exists(fileListPath!))
+                {
+                    Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                // Read paths, skip empty lines and comments
+                var filePaths = File.ReadAllLines(fileListPath!, Encoding.UTF8)
+                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                    .Select(line => line.Trim())
+                    .ToList();
+
+                if (filePaths.Count == 0)
+                {
+                    Console.Error.WriteLine("Error: File list is empty.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
+
+                // Find Essentia
+                var flBaseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var flEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", flBaseDir, Environment.CurrentDirectory);
+                if (flEssentiaExe == null)
+                {
+                    Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+
+                var flProcessed = 0;
+                var flFailed = 0;
+                var flErrors = new ConcurrentBag<string>();
+                var flSw = System.Diagnostics.Stopwatch.StartNew();
+
+                // Accumulate for moods file (optional)
+                var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
+                    LoadExistingMoods(analyzeFileMoods!, flMoodsTracks);
+
+                Parallel.ForEach(filePaths, new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = parallelism,
+                    CancellationToken = CancellationToken.None
+                }, filePath =>
+                {
+                    if (!File.Exists(filePath))
+                    {
+                        Interlocked.Increment(ref flFailed);
+                        flErrors.Add($"{filePath}: file not found");
+                        Console.Error.WriteLine($"[SKIP] {filePath}: file not found");
+                        return;
+                    }
+
+                    try
+                    {
+                        var fileSize = new FileInfo(filePath).Length;
+                        var (features, error) = AnalyzeWithEssentia(flEssentiaExe, filePath, fileSize, CancellationToken.None);
+
+                        if (features == null)
+                        {
+                            Interlocked.Increment(ref flFailed);
+                            flErrors.Add($"{filePath}: {error}");
+                            Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {error}");
+                            return;
+                        }
+
+                        var trackEntry = new TrackEntry
+                        {
+                            Features = features,
+                            LastModified = File.GetLastWriteTimeUtc(filePath),
+                            AnalysisDurationSecs = 0 // individual timing not tracked in batch
+                        };
+
+                        // POST to MetaServer if configured
+                        if (!string.IsNullOrEmpty(metaServerUrl))
+                        {
+                            PostToMetaServer(metaServerUrl, filePath, features, fileSize);
+                        }
+
+                        // Accumulate for moods file
+                        if (!string.IsNullOrEmpty(analyzeFileMoods) || outputFlag)
+                        {
+                            flMoodsTracks[Path.GetFullPath(filePath)] = trackEntry;
+                        }
+
+                        Interlocked.Increment(ref flProcessed);
+                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref flFailed);
+                        flErrors.Add($"{filePath}: {ex.Message}");
+                        Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
+                    }
+                });
+
+                flSw.Stop();
+
+                // Save moods file if --moods specified
+                if (!string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
+                {
+                    SaveResults(analyzeFileMoods!, flMoodsTracks);
+                    Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
+                }
+
+                // Summary JSON on stdout
+                if (jsonOutput || flFailed > 0)
+                {
+                    var summary = new
+                    {
+                        processed = flProcessed,
+                        failed = flFailed,
+                        elapsed = flSw.Elapsed.TotalSeconds,
+                        errors = flErrors.ToArray()
+                    };
+                    var summaryJson = System.Text.Json.JsonSerializer.Serialize(summary,
+                        new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                    Console.WriteLine(summaryJson);
+                }
+
+                Console.Error.WriteLine($"Done: {flProcessed} processed, {flFailed} failed in {flSw.Elapsed.TotalSeconds:F1}s");
+                Environment.ExitCode = flFailed > 0 ? 1 : 0;
+                return;
+            }
+
             xmlPath = xmlPath ?? "iTunes Music Library.xml";
 
             if (!File.Exists(xmlPath))
@@ -4007,6 +4138,15 @@ namespace Truedat
                 Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// PostToMetaServer overload for file-list mode (no iTunes metadata available).
+        /// </summary>
+        static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat, long fileSize)
+        {
+            var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
+            return PostToMetaServer(baseUrl, filePath, feat, null, null, fileSize, stub);
         }
 
         static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
