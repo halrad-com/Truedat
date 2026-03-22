@@ -546,6 +546,11 @@ namespace Truedat
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
+                Console.WriteLine("Batch mode:");
+                Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
+                Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file");
+                Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
                 Console.WriteLine("  --synthesize        Generate a synthetic MusicBee library from a catalog");
                 Console.WriteLine("  --catalog <path>    Path to catalog JSONL (.jsonl or .jsonl.gz)");
@@ -862,6 +867,11 @@ namespace Truedat
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
+                Console.WriteLine();
+                Console.WriteLine("Batch mode:");
+                Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
+                Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file");
                 Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
                 Console.WriteLine("  --synthesize        Generate a synthetic MusicBee library from a catalog");
