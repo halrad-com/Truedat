@@ -22,6 +22,23 @@ failures with JSON summary on stdout.
 
 Plan: `docs/plans/2026-03-22-file-list-flag.md`
 
+## ~~Concurrent fileMd5 + audioMd5 + chromaprint in Mood Analysis~~ DONE
+
+Mood analysis now runs Essentia extraction, file MD5, audio MD5
+(`essentia_streaming_md5.exe`), and chromaprint (`fpcalc.exe`)
+concurrently per track via `Task.WaitAll`, so wall-clock is
+`max(analysis, slowest-hash)` rather than sum. `TrackEntry` gains an
+`AudioMd5` field; `mbxmoods.json` now emits `audioMd5` alongside
+`fileMd5` (omitted when the MD5 tool is absent). MetaServer receives
+all three identity tiers in one pass (`fileMd5`, `audioMd5`,
+`chromaprint` + `chromaprintDuration`), satisfying its path → fileMd5 →
+audioMd5 → chromaprint → metadataKey lookup walk without requiring a
+separate `--fingerprint` run. Cache re-extract gate requires `audioMd5`
+when `md5Exe` is available so rescans backfill it on pre-hash entries.
+
+Commits: `a4424fe` (extended features), `e7cc22a` (review + fixes),
+`e24a4d9` (inline fileMd5 + audioMd5 + chromaprint).
+
 ## ~~Extended Essentia Feature Set~~ DONE
 
 Added 40 extended acoustic descriptors to `TrackFeatures` and `mbxmoods.json`:

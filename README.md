@@ -391,13 +391,19 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
       "melCrest": 10.6, "melFlatness": -8.4, "melKurtosis": 6.1, "melSkewness": 2.0, "melSpread": 19.5,
       "beatsLoudness": -14.1, "chordsStrength": 0.61, "hpcpCrest": 6.2, "hpcpEntropy": 2.87,
       "lastModified": "2025-12-01T00:00:00.0000000Z",
-      "analysisDuration": 4.2
+      "analysisDuration": 4.2,
+      "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
+      "audioMd5": "8a7d9c0b1e2f3a4b5c6d7e8f9a0b1c2d"
     }
   }
 }
 ```
 
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
+
+`fileMd5` (MD5 of the file bytes) and `audioMd5` (MD5 of the decoded audio payload via `essentia_streaming_md5.exe`) are computed in the same analysis pass as the Essentia feature extraction — each worker fires Essentia, file hash, audio hash, and chromaprint (via `fpcalc.exe`) concurrently, so wall-clock per track is roughly `max(analysis, hash, chromaprint)` rather than the sum. `audioMd5` and `fileMd5` are persisted in `mbxmoods.json`; chromaprint flows through the MetaServer identity bag (`chromaprint` + `chromaprintDuration`) but is not persisted to `mbxmoods.json` — the dedicated `--fingerprint` pass produces `mbxhub-fingerprints.json` if you want chromaprint on disk. Any tool that's missing from the truedat directory is skipped cleanly — the corresponding field stays `null` rather than blocking extraction.
+
+With all three identity tiers populated in one pass, a single scan produces everything MetaServer needs to satisfy its lookup walk (path → fileMd5 → audioMd5 → chromaprint → metadataKey) without requiring a separate `--fingerprint` run over the library.
 
 ### Fingerprint Output
 
