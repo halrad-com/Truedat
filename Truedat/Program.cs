@@ -45,6 +45,13 @@ namespace Truedat
         public double PitchSalience { get; set; }
         public double ChordsChangesRate { get; set; }
         public double[]? Mfcc { get; set; }
+
+        /// <summary>BS.1770 Loudness Range (LRA) in LU from Essentia's loudness_ebu128.loudness_range.
+        /// Null when the streaming-extractor output didn't include the EBU R128 block.</summary>
+        public double? DynamicRange { get; set; }
+        /// <summary>Origin tag for DynamicRange: "essentia-lra" for streaming-extractor reads,
+        /// null when DynamicRange is null.</summary>
+        public string? DynamicRangeSource { get; set; }
     }
 
     class TrackEntry
@@ -3599,6 +3606,14 @@ namespace Truedat
             jw.WriteNumber("dissonance", f.Dissonance);
             jw.WriteNumber("pitchSalience", f.PitchSalience);
             jw.WriteNumber("chordsChangesRate", f.ChordsChangesRate);
+            // DR is emitted only when present — old entries pass through without gaining empty keys.
+            // MBXHub plugin treats missing as null and falls back to loudness-derived / genre-default.
+            if (f.DynamicRange.HasValue)
+            {
+                jw.WriteNumber("dynamicRange", f.DynamicRange.Value);
+                if (!string.IsNullOrEmpty(f.DynamicRangeSource))
+                    jw.WriteString("dynamicRangeSource", f.DynamicRangeSource);
+            }
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -3683,7 +3698,9 @@ namespace Truedat
                             Dissonance = GetDbl(track, "dissonance"),
                             PitchSalience = GetDbl(track, "pitchSalience"),
                             ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
-                            Mfcc = mfcc
+                            Mfcc = mfcc,
+                            DynamicRange = GetNullableDbl(track, "dynamicRange"),
+                            DynamicRangeSource = track.TryGetProperty("dynamicRangeSource", out var drs) && drs.ValueKind == JsonValueKind.String ? drs.GetString() : null
                         },
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
                         FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
@@ -3945,6 +3962,10 @@ namespace Truedat
                 var dissonance = NavDbl(root, "lowlevel.dissonance.mean");
                 var pitchSalience = NavDbl(root, "lowlevel.pitch_salience.mean");
                 var chordsChangesRate = NavDbl(root, "tonal.chords_changes_rate");
+                // EBU R128 Loudness Range (LRA in LU). Essentia's streaming extractor emits
+                // this alongside `integrated` in the `lowlevel.loudness_ebu128` block when the
+                // preset has it enabled. NaN signals "block absent"; plugin side falls back.
+                var loudnessRange = NavDbl(root, "lowlevel.loudness_ebu128.loudness_range", double.NaN);
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
                 if (mfccEl.HasValue && mfccEl.Value.ValueKind == JsonValueKind.Array)
@@ -3982,7 +4003,9 @@ namespace Truedat
                     Dissonance = Math.Round(dissonance, 4),
                     PitchSalience = Math.Round(pitchSalience, 4),
                     ChordsChangesRate = Math.Round(chordsChangesRate, 4),
-                    Mfcc = mfcc?.Select(v => Math.Round(v, 4)).ToArray()
+                    Mfcc = mfcc?.Select(v => Math.Round(v, 4)).ToArray(),
+                    DynamicRange = double.IsNaN(loudnessRange) ? (double?)null : Math.Round(loudnessRange, 2),
+                    DynamicRangeSource = double.IsNaN(loudnessRange) ? null : "essentia-lra"
                 };
             }
             catch (Exception ex)
@@ -4109,6 +4132,14 @@ namespace Truedat
                     jw.WriteNumber("dissonance", feat.Dissonance);
                     jw.WriteNumber("pitchSalience", feat.PitchSalience);
                     jw.WriteNumber("chordsChangesRate", feat.ChordsChangesRate);
+                    // DR emitted only when present; MBXHub's MetaService ingest maps it into
+                    // MoodFeatures.DynamicRange + DynamicRangeSource.
+                    if (feat.DynamicRange.HasValue)
+                    {
+                        jw.WriteNumber("dynamicRange", feat.DynamicRange.Value);
+                        if (!string.IsNullOrEmpty(feat.DynamicRangeSource))
+                            jw.WriteString("dynamicRangeSource", feat.DynamicRangeSource);
+                    }
                     if (feat.Mfcc != null)
                     {
                         jw.WritePropertyName("mfcc");
