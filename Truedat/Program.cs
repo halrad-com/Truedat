@@ -52,6 +52,64 @@ namespace Truedat
         /// <summary>Origin tag for DynamicRange: "essentia-lra" for streaming-extractor reads,
         /// null when DynamicRange is null.</summary>
         public string? DynamicRangeSource { get; set; }
+
+        // Extended Essentia features — all nullable for back-compat with older mbxmoods.json.
+        // Source paths documented per field; all *.mean unless noted.
+
+        // Loudness dynamics
+        public double? LoudnessMomentary { get; set; }        // lowlevel.loudness_ebu128.momentary.mean
+        public double? LoudnessShortTerm { get; set; }        // lowlevel.loudness_ebu128.short_term.mean
+        public double? ReplayGain { get; set; }               // metadata.audio_properties.replay_gain
+
+        // Silence profile
+        public double? SilenceRate20dB { get; set; }          // lowlevel.silence_rate_20dB.mean
+        public double? SilenceRate30dB { get; set; }          // lowlevel.silence_rate_30dB.mean
+        public double? SilenceRate60dB { get; set; }          // lowlevel.silence_rate_60dB.mean
+
+        // Spectral shape
+        public double? SpectralRolloff { get; set; }          // lowlevel.spectral_rolloff.mean
+        public double? SpectralComplexity { get; set; }       // lowlevel.spectral_complexity.mean
+        public double? SpectralEntropy { get; set; }          // lowlevel.spectral_entropy.mean
+        public double? SpectralKurtosis { get; set; }         // lowlevel.spectral_kurtosis.mean
+        public double? SpectralSkewness { get; set; }         // lowlevel.spectral_skewness.mean
+        public double? SpectralSpread { get; set; }           // lowlevel.spectral_spread.mean
+        public double? SpectralStrongPeak { get; set; }       // lowlevel.spectral_strongpeak.mean
+        public double? SpectralDecrease { get; set; }         // lowlevel.spectral_decrease.mean
+        public double? SpectralEnergy { get; set; }           // lowlevel.spectral_energy.mean
+        public double? SpectralEnergyLow { get; set; }        // lowlevel.spectral_energyband_low.mean
+        public double? SpectralEnergyMidLow { get; set; }     // lowlevel.spectral_energyband_middle_low.mean
+        public double? SpectralEnergyMidHigh { get; set; }    // lowlevel.spectral_energyband_middle_high.mean
+        public double? SpectralEnergyHigh { get; set; }       // lowlevel.spectral_energyband_high.mean
+
+        // High-frequency content
+        public double? Hfc { get; set; }                      // lowlevel.hfc.mean
+
+        // Psychoacoustic bands — Bark
+        public double? BarkCrest { get; set; }                // lowlevel.barkbands_crest.mean
+        public double? BarkFlatness { get; set; }             // lowlevel.barkbands_flatness_db.mean
+        public double? BarkKurtosis { get; set; }             // lowlevel.barkbands_kurtosis.mean
+        public double? BarkSkewness { get; set; }             // lowlevel.barkbands_skewness.mean
+        public double? BarkSpread { get; set; }               // lowlevel.barkbands_spread.mean
+
+        // Psychoacoustic bands — ERB
+        public double? ErbCrest { get; set; }                 // lowlevel.erbbands_crest.mean
+        public double? ErbFlatness { get; set; }              // lowlevel.erbbands_flatness_db.mean
+        public double? ErbKurtosis { get; set; }              // lowlevel.erbbands_kurtosis.mean
+        public double? ErbSkewness { get; set; }              // lowlevel.erbbands_skewness.mean
+        public double? ErbSpread { get; set; }                // lowlevel.erbbands_spread.mean
+
+        // Psychoacoustic bands — Mel
+        public double? MelCrest { get; set; }                 // lowlevel.melbands_crest.mean
+        public double? MelFlatness { get; set; }              // lowlevel.melbands_flatness_db.mean
+        public double? MelKurtosis { get; set; }              // lowlevel.melbands_kurtosis.mean
+        public double? MelSkewness { get; set; }              // lowlevel.melbands_skewness.mean
+        public double? MelSpread { get; set; }                // lowlevel.melbands_spread.mean
+
+        // Rhythm / tonal
+        public double? BeatsLoudness { get; set; }            // rhythm.beats_loudness.mean
+        public double? ChordsStrength { get; set; }           // tonal.chords_strength.mean
+        public double? HpcpCrest { get; set; }                // tonal.hpcp_crest.mean
+        public double? HpcpEntropy { get; set; }              // tonal.hpcp_entropy.mean
     }
 
     class TrackEntry
@@ -1075,29 +1133,82 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    // Update metadata atomically — replace the entire entry
-                                    var updatedFeatures = existing.Features;
-                                    allTracks[t.Location] = new TrackEntry
+                                    // Re-extract when DR is missing — older mbxmoods.json entries from
+                                    // pre-LRA truedat builds need an Essentia pass to backfill DR.
+                                    // Without this, the cache-reuse branch perpetuates the missing field
+                                    // across every subsequent run.
+                                    if (!existing.Features.DynamicRange.HasValue)
                                     {
-                                        Features = new TrackFeatures
+                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR missing)");
+                                    }
+                                    else
+                                    {
+                                        // Update metadata atomically — replace the entire entry
+                                        var updatedFeatures = existing.Features;
+                                        allTracks[t.Location] = new TrackEntry
                                         {
-                                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
-                                            Album = t.Album, Genre = t.Genre, FilePath = t.Location,
-                                            Bpm = updatedFeatures.Bpm, Key = updatedFeatures.Key, Mode = updatedFeatures.Mode,
-                                            SpectralCentroid = updatedFeatures.SpectralCentroid, SpectralFlux = updatedFeatures.SpectralFlux,
-                                            Loudness = updatedFeatures.Loudness, Danceability = updatedFeatures.Danceability,
-                                            OnsetRate = updatedFeatures.OnsetRate, ZeroCrossingRate = updatedFeatures.ZeroCrossingRate,
-                                            SpectralRms = updatedFeatures.SpectralRms, SpectralFlatness = updatedFeatures.SpectralFlatness,
-                                            Dissonance = updatedFeatures.Dissonance, PitchSalience = updatedFeatures.PitchSalience,
-                                            ChordsChangesRate = updatedFeatures.ChordsChangesRate, Mfcc = updatedFeatures.Mfcc
-                                        },
-                                        LastModified = currentLastMod,
-                                        AnalysisDurationSecs = existing.AnalysisDurationSecs,
-                                        FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location)
-                                    };
-                                    Interlocked.Increment(ref cachedCount);
-                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
-                                    return;
+                                            Features = new TrackFeatures
+                                            {
+                                                TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                                Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                                Bpm = updatedFeatures.Bpm, Key = updatedFeatures.Key, Mode = updatedFeatures.Mode,
+                                                SpectralCentroid = updatedFeatures.SpectralCentroid, SpectralFlux = updatedFeatures.SpectralFlux,
+                                                Loudness = updatedFeatures.Loudness, Danceability = updatedFeatures.Danceability,
+                                                OnsetRate = updatedFeatures.OnsetRate, ZeroCrossingRate = updatedFeatures.ZeroCrossingRate,
+                                                SpectralRms = updatedFeatures.SpectralRms, SpectralFlatness = updatedFeatures.SpectralFlatness,
+                                                Dissonance = updatedFeatures.Dissonance, PitchSalience = updatedFeatures.PitchSalience,
+                                                ChordsChangesRate = updatedFeatures.ChordsChangesRate, Mfcc = updatedFeatures.Mfcc,
+                                                // Preserve DR + extended features through cache copy so they stick across reruns.
+                                                DynamicRange = updatedFeatures.DynamicRange,
+                                                DynamicRangeSource = updatedFeatures.DynamicRangeSource,
+                                                LoudnessMomentary = updatedFeatures.LoudnessMomentary,
+                                                LoudnessShortTerm = updatedFeatures.LoudnessShortTerm,
+                                                ReplayGain = updatedFeatures.ReplayGain,
+                                                SilenceRate20dB = updatedFeatures.SilenceRate20dB,
+                                                SilenceRate30dB = updatedFeatures.SilenceRate30dB,
+                                                SilenceRate60dB = updatedFeatures.SilenceRate60dB,
+                                                SpectralRolloff = updatedFeatures.SpectralRolloff,
+                                                SpectralComplexity = updatedFeatures.SpectralComplexity,
+                                                SpectralEntropy = updatedFeatures.SpectralEntropy,
+                                                SpectralKurtosis = updatedFeatures.SpectralKurtosis,
+                                                SpectralSkewness = updatedFeatures.SpectralSkewness,
+                                                SpectralSpread = updatedFeatures.SpectralSpread,
+                                                SpectralStrongPeak = updatedFeatures.SpectralStrongPeak,
+                                                SpectralDecrease = updatedFeatures.SpectralDecrease,
+                                                SpectralEnergy = updatedFeatures.SpectralEnergy,
+                                                SpectralEnergyLow = updatedFeatures.SpectralEnergyLow,
+                                                SpectralEnergyMidLow = updatedFeatures.SpectralEnergyMidLow,
+                                                SpectralEnergyMidHigh = updatedFeatures.SpectralEnergyMidHigh,
+                                                SpectralEnergyHigh = updatedFeatures.SpectralEnergyHigh,
+                                                Hfc = updatedFeatures.Hfc,
+                                                BarkCrest = updatedFeatures.BarkCrest,
+                                                BarkFlatness = updatedFeatures.BarkFlatness,
+                                                BarkKurtosis = updatedFeatures.BarkKurtosis,
+                                                BarkSkewness = updatedFeatures.BarkSkewness,
+                                                BarkSpread = updatedFeatures.BarkSpread,
+                                                ErbCrest = updatedFeatures.ErbCrest,
+                                                ErbFlatness = updatedFeatures.ErbFlatness,
+                                                ErbKurtosis = updatedFeatures.ErbKurtosis,
+                                                ErbSkewness = updatedFeatures.ErbSkewness,
+                                                ErbSpread = updatedFeatures.ErbSpread,
+                                                MelCrest = updatedFeatures.MelCrest,
+                                                MelFlatness = updatedFeatures.MelFlatness,
+                                                MelKurtosis = updatedFeatures.MelKurtosis,
+                                                MelSkewness = updatedFeatures.MelSkewness,
+                                                MelSpread = updatedFeatures.MelSpread,
+                                                BeatsLoudness = updatedFeatures.BeatsLoudness,
+                                                ChordsStrength = updatedFeatures.ChordsStrength,
+                                                HpcpCrest = updatedFeatures.HpcpCrest,
+                                                HpcpEntropy = updatedFeatures.HpcpEntropy
+                                            },
+                                            LastModified = currentLastMod,
+                                            AnalysisDurationSecs = existing.AnalysisDurationSecs,
+                                            FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location)
+                                        };
+                                        Interlocked.Increment(ref cachedCount);
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
+                                        return;
+                                    }
                                 }
                                 if (_audit) Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
                             }
@@ -1110,32 +1221,83 @@ namespace Truedat
                             var localMd5 = ComputeFileMd5(t.Location);
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
-                                var currentLastMod = DateTime.MinValue;
-                                try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                                 var xf = xp.Entry.Features;
-                                allTracks[t.Location] = new TrackEntry
+                                // Same DR-missing fall-through as the path-cache branch — without DR
+                                // there's nothing to gain from MD5 reuse, fresh Essentia is required.
+                                if (!xf.DynamicRange.HasValue)
                                 {
-                                    Features = new TrackFeatures
+                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR missing)");
+                                }
+                                else
+                                {
+                                    var currentLastMod = DateTime.MinValue;
+                                    try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                    allTracks[t.Location] = new TrackEntry
                                     {
-                                        TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
-                                        Album = t.Album, Genre = t.Genre, FilePath = t.Location,
-                                        Bpm = xf.Bpm, Key = xf.Key, Mode = xf.Mode,
-                                        SpectralCentroid = xf.SpectralCentroid, SpectralFlux = xf.SpectralFlux,
-                                        Loudness = xf.Loudness, Danceability = xf.Danceability,
-                                        OnsetRate = xf.OnsetRate, ZeroCrossingRate = xf.ZeroCrossingRate,
-                                        SpectralRms = xf.SpectralRms, SpectralFlatness = xf.SpectralFlatness,
-                                        Dissonance = xf.Dissonance, PitchSalience = xf.PitchSalience,
-                                        ChordsChangesRate = xf.ChordsChangesRate, Mfcc = xf.Mfcc
-                                    },
-                                    LastModified = currentLastMod,
-                                    AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
-                                    FileMd5 = localMd5
-                                };
-                                allTracks.TryRemove(xp.OldKey, out _);
-                                Interlocked.Increment(ref crossPathMoods);
-                                Interlocked.Increment(ref cachedCount);
-                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5)");
-                                return;
+                                        Features = new TrackFeatures
+                                        {
+                                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                                            Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                                            Bpm = xf.Bpm, Key = xf.Key, Mode = xf.Mode,
+                                            SpectralCentroid = xf.SpectralCentroid, SpectralFlux = xf.SpectralFlux,
+                                            Loudness = xf.Loudness, Danceability = xf.Danceability,
+                                            OnsetRate = xf.OnsetRate, ZeroCrossingRate = xf.ZeroCrossingRate,
+                                            SpectralRms = xf.SpectralRms, SpectralFlatness = xf.SpectralFlatness,
+                                            Dissonance = xf.Dissonance, PitchSalience = xf.PitchSalience,
+                                            ChordsChangesRate = xf.ChordsChangesRate, Mfcc = xf.Mfcc,
+                                            DynamicRange = xf.DynamicRange,
+                                            DynamicRangeSource = xf.DynamicRangeSource,
+                                            // Extended features carried through the cross-MD5 cache copy.
+                                            LoudnessMomentary = xf.LoudnessMomentary,
+                                            LoudnessShortTerm = xf.LoudnessShortTerm,
+                                            ReplayGain = xf.ReplayGain,
+                                            SilenceRate20dB = xf.SilenceRate20dB,
+                                            SilenceRate30dB = xf.SilenceRate30dB,
+                                            SilenceRate60dB = xf.SilenceRate60dB,
+                                            SpectralRolloff = xf.SpectralRolloff,
+                                            SpectralComplexity = xf.SpectralComplexity,
+                                            SpectralEntropy = xf.SpectralEntropy,
+                                            SpectralKurtosis = xf.SpectralKurtosis,
+                                            SpectralSkewness = xf.SpectralSkewness,
+                                            SpectralSpread = xf.SpectralSpread,
+                                            SpectralStrongPeak = xf.SpectralStrongPeak,
+                                            SpectralDecrease = xf.SpectralDecrease,
+                                            SpectralEnergy = xf.SpectralEnergy,
+                                            SpectralEnergyLow = xf.SpectralEnergyLow,
+                                            SpectralEnergyMidLow = xf.SpectralEnergyMidLow,
+                                            SpectralEnergyMidHigh = xf.SpectralEnergyMidHigh,
+                                            SpectralEnergyHigh = xf.SpectralEnergyHigh,
+                                            Hfc = xf.Hfc,
+                                            BarkCrest = xf.BarkCrest,
+                                            BarkFlatness = xf.BarkFlatness,
+                                            BarkKurtosis = xf.BarkKurtosis,
+                                            BarkSkewness = xf.BarkSkewness,
+                                            BarkSpread = xf.BarkSpread,
+                                            ErbCrest = xf.ErbCrest,
+                                            ErbFlatness = xf.ErbFlatness,
+                                            ErbKurtosis = xf.ErbKurtosis,
+                                            ErbSkewness = xf.ErbSkewness,
+                                            ErbSpread = xf.ErbSpread,
+                                            MelCrest = xf.MelCrest,
+                                            MelFlatness = xf.MelFlatness,
+                                            MelKurtosis = xf.MelKurtosis,
+                                            MelSkewness = xf.MelSkewness,
+                                            MelSpread = xf.MelSpread,
+                                            BeatsLoudness = xf.BeatsLoudness,
+                                            ChordsStrength = xf.ChordsStrength,
+                                            HpcpCrest = xf.HpcpCrest,
+                                            HpcpEntropy = xf.HpcpEntropy
+                                        },
+                                        LastModified = currentLastMod,
+                                        AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
+                                        FileMd5 = localMd5
+                                    };
+                                    allTracks.TryRemove(xp.OldKey, out _);
+                                    Interlocked.Increment(ref crossPathMoods);
+                                    Interlocked.Increment(ref cachedCount);
+                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5)");
+                                    return;
+                                }
                             }
                         }
 
@@ -3614,6 +3776,47 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(f.DynamicRangeSource))
                     jw.WriteString("dynamicRangeSource", f.DynamicRangeSource);
             }
+            // Extended features — same omit-when-null pattern.
+            static void WriteOpt(Utf8JsonWriter w, string name, double? v) { if (v.HasValue) w.WriteNumber(name, v.Value); }
+            WriteOpt(jw, "loudnessMomentary", f.LoudnessMomentary);
+            WriteOpt(jw, "loudnessShortTerm", f.LoudnessShortTerm);
+            WriteOpt(jw, "replayGain", f.ReplayGain);
+            WriteOpt(jw, "silenceRate20dB", f.SilenceRate20dB);
+            WriteOpt(jw, "silenceRate30dB", f.SilenceRate30dB);
+            WriteOpt(jw, "silenceRate60dB", f.SilenceRate60dB);
+            WriteOpt(jw, "spectralRolloff", f.SpectralRolloff);
+            WriteOpt(jw, "spectralComplexity", f.SpectralComplexity);
+            WriteOpt(jw, "spectralEntropy", f.SpectralEntropy);
+            WriteOpt(jw, "spectralKurtosis", f.SpectralKurtosis);
+            WriteOpt(jw, "spectralSkewness", f.SpectralSkewness);
+            WriteOpt(jw, "spectralSpread", f.SpectralSpread);
+            WriteOpt(jw, "spectralStrongPeak", f.SpectralStrongPeak);
+            WriteOpt(jw, "spectralDecrease", f.SpectralDecrease);
+            WriteOpt(jw, "spectralEnergy", f.SpectralEnergy);
+            WriteOpt(jw, "spectralEnergyLow", f.SpectralEnergyLow);
+            WriteOpt(jw, "spectralEnergyMidLow", f.SpectralEnergyMidLow);
+            WriteOpt(jw, "spectralEnergyMidHigh", f.SpectralEnergyMidHigh);
+            WriteOpt(jw, "spectralEnergyHigh", f.SpectralEnergyHigh);
+            WriteOpt(jw, "hfc", f.Hfc);
+            WriteOpt(jw, "barkCrest", f.BarkCrest);
+            WriteOpt(jw, "barkFlatness", f.BarkFlatness);
+            WriteOpt(jw, "barkKurtosis", f.BarkKurtosis);
+            WriteOpt(jw, "barkSkewness", f.BarkSkewness);
+            WriteOpt(jw, "barkSpread", f.BarkSpread);
+            WriteOpt(jw, "erbCrest", f.ErbCrest);
+            WriteOpt(jw, "erbFlatness", f.ErbFlatness);
+            WriteOpt(jw, "erbKurtosis", f.ErbKurtosis);
+            WriteOpt(jw, "erbSkewness", f.ErbSkewness);
+            WriteOpt(jw, "erbSpread", f.ErbSpread);
+            WriteOpt(jw, "melCrest", f.MelCrest);
+            WriteOpt(jw, "melFlatness", f.MelFlatness);
+            WriteOpt(jw, "melKurtosis", f.MelKurtosis);
+            WriteOpt(jw, "melSkewness", f.MelSkewness);
+            WriteOpt(jw, "melSpread", f.MelSpread);
+            WriteOpt(jw, "beatsLoudness", f.BeatsLoudness);
+            WriteOpt(jw, "chordsStrength", f.ChordsStrength);
+            WriteOpt(jw, "hpcpCrest", f.HpcpCrest);
+            WriteOpt(jw, "hpcpEntropy", f.HpcpEntropy);
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -3700,7 +3903,47 @@ namespace Truedat
                             ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
                             Mfcc = mfcc,
                             DynamicRange = GetNullableDbl(track, "dynamicRange"),
-                            DynamicRangeSource = track.TryGetProperty("dynamicRangeSource", out var drs) && drs.ValueKind == JsonValueKind.String ? drs.GetString() : null
+                            DynamicRangeSource = track.TryGetProperty("dynamicRangeSource", out var drs) && drs.ValueKind == JsonValueKind.String ? drs.GetString() : null,
+                            // Extended features — every one nullable; missing → null, not 0.
+                            LoudnessMomentary = GetNullableDbl(track, "loudnessMomentary"),
+                            LoudnessShortTerm = GetNullableDbl(track, "loudnessShortTerm"),
+                            ReplayGain = GetNullableDbl(track, "replayGain"),
+                            SilenceRate20dB = GetNullableDbl(track, "silenceRate20dB"),
+                            SilenceRate30dB = GetNullableDbl(track, "silenceRate30dB"),
+                            SilenceRate60dB = GetNullableDbl(track, "silenceRate60dB"),
+                            SpectralRolloff = GetNullableDbl(track, "spectralRolloff"),
+                            SpectralComplexity = GetNullableDbl(track, "spectralComplexity"),
+                            SpectralEntropy = GetNullableDbl(track, "spectralEntropy"),
+                            SpectralKurtosis = GetNullableDbl(track, "spectralKurtosis"),
+                            SpectralSkewness = GetNullableDbl(track, "spectralSkewness"),
+                            SpectralSpread = GetNullableDbl(track, "spectralSpread"),
+                            SpectralStrongPeak = GetNullableDbl(track, "spectralStrongPeak"),
+                            SpectralDecrease = GetNullableDbl(track, "spectralDecrease"),
+                            SpectralEnergy = GetNullableDbl(track, "spectralEnergy"),
+                            SpectralEnergyLow = GetNullableDbl(track, "spectralEnergyLow"),
+                            SpectralEnergyMidLow = GetNullableDbl(track, "spectralEnergyMidLow"),
+                            SpectralEnergyMidHigh = GetNullableDbl(track, "spectralEnergyMidHigh"),
+                            SpectralEnergyHigh = GetNullableDbl(track, "spectralEnergyHigh"),
+                            Hfc = GetNullableDbl(track, "hfc"),
+                            BarkCrest = GetNullableDbl(track, "barkCrest"),
+                            BarkFlatness = GetNullableDbl(track, "barkFlatness"),
+                            BarkKurtosis = GetNullableDbl(track, "barkKurtosis"),
+                            BarkSkewness = GetNullableDbl(track, "barkSkewness"),
+                            BarkSpread = GetNullableDbl(track, "barkSpread"),
+                            ErbCrest = GetNullableDbl(track, "erbCrest"),
+                            ErbFlatness = GetNullableDbl(track, "erbFlatness"),
+                            ErbKurtosis = GetNullableDbl(track, "erbKurtosis"),
+                            ErbSkewness = GetNullableDbl(track, "erbSkewness"),
+                            ErbSpread = GetNullableDbl(track, "erbSpread"),
+                            MelCrest = GetNullableDbl(track, "melCrest"),
+                            MelFlatness = GetNullableDbl(track, "melFlatness"),
+                            MelKurtosis = GetNullableDbl(track, "melKurtosis"),
+                            MelSkewness = GetNullableDbl(track, "melSkewness"),
+                            MelSpread = GetNullableDbl(track, "melSpread"),
+                            BeatsLoudness = GetNullableDbl(track, "beatsLoudness"),
+                            ChordsStrength = GetNullableDbl(track, "chordsStrength"),
+                            HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
+                            HpcpEntropy = GetNullableDbl(track, "hpcpEntropy")
                         },
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
                         FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
@@ -3966,6 +4209,53 @@ namespace Truedat
                 // this alongside `integrated` in the `lowlevel.loudness_ebu128` block when the
                 // preset has it enabled. NaN signals "block absent"; plugin side falls back.
                 var loudnessRange = NavDbl(root, "lowlevel.loudness_ebu128.loudness_range", double.NaN);
+
+                // Extended features — all nullable, propagate NaN/missing as null so legacy
+                // consumers don't see bogus zeros. OptDbl returns null when the value is NaN
+                // (per NavDbl default) or absent.
+                static double? Opt(double v) => double.IsNaN(v) ? (double?)null : Math.Round(v, 6);
+                static double? OptN(JsonElement r, string p) => Opt(NavDbl(r, p, double.NaN));
+
+                var loudnessMomentary = OptN(root, "lowlevel.loudness_ebu128.momentary.mean");
+                var loudnessShortTerm = OptN(root, "lowlevel.loudness_ebu128.short_term.mean");
+                var replayGain = OptN(root, "metadata.audio_properties.replay_gain");
+                var silenceRate20dB = OptN(root, "lowlevel.silence_rate_20dB.mean");
+                var silenceRate30dB = OptN(root, "lowlevel.silence_rate_30dB.mean");
+                var silenceRate60dB = OptN(root, "lowlevel.silence_rate_60dB.mean");
+                var spectralRolloff = OptN(root, "lowlevel.spectral_rolloff.mean");
+                var spectralComplexity = OptN(root, "lowlevel.spectral_complexity.mean");
+                var spectralEntropy = OptN(root, "lowlevel.spectral_entropy.mean");
+                var spectralKurtosis = OptN(root, "lowlevel.spectral_kurtosis.mean");
+                var spectralSkewness = OptN(root, "lowlevel.spectral_skewness.mean");
+                var spectralSpread = OptN(root, "lowlevel.spectral_spread.mean");
+                var spectralStrongPeak = OptN(root, "lowlevel.spectral_strongpeak.mean");
+                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean");
+                var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean");
+                var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean");
+                var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean");
+                var spectralEnergyMidHigh = OptN(root, "lowlevel.spectral_energyband_middle_high.mean");
+                var spectralEnergyHigh = OptN(root, "lowlevel.spectral_energyband_high.mean");
+                var hfc = OptN(root, "lowlevel.hfc.mean");
+                var barkCrest = OptN(root, "lowlevel.barkbands_crest.mean");
+                var barkFlatness = OptN(root, "lowlevel.barkbands_flatness_db.mean");
+                var barkKurtosis = OptN(root, "lowlevel.barkbands_kurtosis.mean");
+                var barkSkewness = OptN(root, "lowlevel.barkbands_skewness.mean");
+                var barkSpread = OptN(root, "lowlevel.barkbands_spread.mean");
+                var erbCrest = OptN(root, "lowlevel.erbbands_crest.mean");
+                var erbFlatness = OptN(root, "lowlevel.erbbands_flatness_db.mean");
+                var erbKurtosis = OptN(root, "lowlevel.erbbands_kurtosis.mean");
+                var erbSkewness = OptN(root, "lowlevel.erbbands_skewness.mean");
+                var erbSpread = OptN(root, "lowlevel.erbbands_spread.mean");
+                var melCrest = OptN(root, "lowlevel.melbands_crest.mean");
+                var melFlatness = OptN(root, "lowlevel.melbands_flatness_db.mean");
+                var melKurtosis = OptN(root, "lowlevel.melbands_kurtosis.mean");
+                var melSkewness = OptN(root, "lowlevel.melbands_skewness.mean");
+                var melSpread = OptN(root, "lowlevel.melbands_spread.mean");
+                var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean");
+                var chordsStrength = OptN(root, "tonal.chords_strength.mean");
+                var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean");
+                var hpcpEntropy = OptN(root, "tonal.hpcp_entropy.mean");
+
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
                 if (mfccEl.HasValue && mfccEl.Value.ValueKind == JsonValueKind.Array)
@@ -4005,7 +4295,47 @@ namespace Truedat
                     ChordsChangesRate = Math.Round(chordsChangesRate, 4),
                     Mfcc = mfcc?.Select(v => Math.Round(v, 4)).ToArray(),
                     DynamicRange = double.IsNaN(loudnessRange) ? (double?)null : Math.Round(loudnessRange, 2),
-                    DynamicRangeSource = double.IsNaN(loudnessRange) ? null : "essentia-lra"
+                    DynamicRangeSource = double.IsNaN(loudnessRange) ? null : "essentia-lra",
+                    // Extended fields
+                    LoudnessMomentary = loudnessMomentary,
+                    LoudnessShortTerm = loudnessShortTerm,
+                    ReplayGain = replayGain,
+                    SilenceRate20dB = silenceRate20dB,
+                    SilenceRate30dB = silenceRate30dB,
+                    SilenceRate60dB = silenceRate60dB,
+                    SpectralRolloff = spectralRolloff,
+                    SpectralComplexity = spectralComplexity,
+                    SpectralEntropy = spectralEntropy,
+                    SpectralKurtosis = spectralKurtosis,
+                    SpectralSkewness = spectralSkewness,
+                    SpectralSpread = spectralSpread,
+                    SpectralStrongPeak = spectralStrongPeak,
+                    SpectralDecrease = spectralDecrease,
+                    SpectralEnergy = spectralEnergy,
+                    SpectralEnergyLow = spectralEnergyLow,
+                    SpectralEnergyMidLow = spectralEnergyMidLow,
+                    SpectralEnergyMidHigh = spectralEnergyMidHigh,
+                    SpectralEnergyHigh = spectralEnergyHigh,
+                    Hfc = hfc,
+                    BarkCrest = barkCrest,
+                    BarkFlatness = barkFlatness,
+                    BarkKurtosis = barkKurtosis,
+                    BarkSkewness = barkSkewness,
+                    BarkSpread = barkSpread,
+                    ErbCrest = erbCrest,
+                    ErbFlatness = erbFlatness,
+                    ErbKurtosis = erbKurtosis,
+                    ErbSkewness = erbSkewness,
+                    ErbSpread = erbSpread,
+                    MelCrest = melCrest,
+                    MelFlatness = melFlatness,
+                    MelKurtosis = melKurtosis,
+                    MelSkewness = melSkewness,
+                    MelSpread = melSpread,
+                    BeatsLoudness = beatsLoudness,
+                    ChordsStrength = chordsStrength,
+                    HpcpCrest = hpcpCrest,
+                    HpcpEntropy = hpcpEntropy
                 };
             }
             catch (Exception ex)
@@ -4140,6 +4470,47 @@ namespace Truedat
                         if (!string.IsNullOrEmpty(feat.DynamicRangeSource))
                             jw.WriteString("dynamicRangeSource", feat.DynamicRangeSource);
                     }
+                    // Extended features — same omit-when-null contract.
+                    static void WriteOpt2(Utf8JsonWriter w, string name, double? v) { if (v.HasValue) w.WriteNumber(name, v.Value); }
+                    WriteOpt2(jw, "loudnessMomentary", feat.LoudnessMomentary);
+                    WriteOpt2(jw, "loudnessShortTerm", feat.LoudnessShortTerm);
+                    WriteOpt2(jw, "replayGain", feat.ReplayGain);
+                    WriteOpt2(jw, "silenceRate20dB", feat.SilenceRate20dB);
+                    WriteOpt2(jw, "silenceRate30dB", feat.SilenceRate30dB);
+                    WriteOpt2(jw, "silenceRate60dB", feat.SilenceRate60dB);
+                    WriteOpt2(jw, "spectralRolloff", feat.SpectralRolloff);
+                    WriteOpt2(jw, "spectralComplexity", feat.SpectralComplexity);
+                    WriteOpt2(jw, "spectralEntropy", feat.SpectralEntropy);
+                    WriteOpt2(jw, "spectralKurtosis", feat.SpectralKurtosis);
+                    WriteOpt2(jw, "spectralSkewness", feat.SpectralSkewness);
+                    WriteOpt2(jw, "spectralSpread", feat.SpectralSpread);
+                    WriteOpt2(jw, "spectralStrongPeak", feat.SpectralStrongPeak);
+                    WriteOpt2(jw, "spectralDecrease", feat.SpectralDecrease);
+                    WriteOpt2(jw, "spectralEnergy", feat.SpectralEnergy);
+                    WriteOpt2(jw, "spectralEnergyLow", feat.SpectralEnergyLow);
+                    WriteOpt2(jw, "spectralEnergyMidLow", feat.SpectralEnergyMidLow);
+                    WriteOpt2(jw, "spectralEnergyMidHigh", feat.SpectralEnergyMidHigh);
+                    WriteOpt2(jw, "spectralEnergyHigh", feat.SpectralEnergyHigh);
+                    WriteOpt2(jw, "hfc", feat.Hfc);
+                    WriteOpt2(jw, "barkCrest", feat.BarkCrest);
+                    WriteOpt2(jw, "barkFlatness", feat.BarkFlatness);
+                    WriteOpt2(jw, "barkKurtosis", feat.BarkKurtosis);
+                    WriteOpt2(jw, "barkSkewness", feat.BarkSkewness);
+                    WriteOpt2(jw, "barkSpread", feat.BarkSpread);
+                    WriteOpt2(jw, "erbCrest", feat.ErbCrest);
+                    WriteOpt2(jw, "erbFlatness", feat.ErbFlatness);
+                    WriteOpt2(jw, "erbKurtosis", feat.ErbKurtosis);
+                    WriteOpt2(jw, "erbSkewness", feat.ErbSkewness);
+                    WriteOpt2(jw, "erbSpread", feat.ErbSpread);
+                    WriteOpt2(jw, "melCrest", feat.MelCrest);
+                    WriteOpt2(jw, "melFlatness", feat.MelFlatness);
+                    WriteOpt2(jw, "melKurtosis", feat.MelKurtosis);
+                    WriteOpt2(jw, "melSkewness", feat.MelSkewness);
+                    WriteOpt2(jw, "melSpread", feat.MelSpread);
+                    WriteOpt2(jw, "beatsLoudness", feat.BeatsLoudness);
+                    WriteOpt2(jw, "chordsStrength", feat.ChordsStrength);
+                    WriteOpt2(jw, "hpcpCrest", feat.HpcpCrest);
+                    WriteOpt2(jw, "hpcpEntropy", feat.HpcpEntropy);
                     if (feat.Mfcc != null)
                     {
                         jw.WritePropertyName("mfcc");
