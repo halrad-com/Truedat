@@ -118,6 +118,7 @@ namespace Truedat
         public DateTime LastModified;
         public double? AnalysisDurationSecs;
         public string? FileMd5;
+        public string? AudioMd5;
     }
 
     public class TrackFingerprint
@@ -1007,6 +1008,7 @@ namespace Truedat
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
+            var md5Exe = FindTool("essentia_streaming_md5.exe", baseDir, outputDir, Environment.CurrentDirectory);
             var catalogPath = FindCatalog(baseDir, Environment.CurrentDirectory,
                 Path.GetDirectoryName(Path.GetDirectoryName(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))) ?? "");
 
@@ -1014,6 +1016,7 @@ namespace Truedat
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
+            Console.WriteLine($"  MD5:        {md5Exe ?? "not found (audioMd5 will be skipped)"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
             var fpcalcExe = FindTool("fpcalc.exe", baseDir, outputDir, Environment.CurrentDirectory);
             Console.WriteLine($"  fpcalc:     {fpcalcExe ?? "not found"}");
@@ -1133,14 +1136,16 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    // Re-extract when DR or the extended-feature canary is missing — older
-                                    // entries from pre-LRA or pre-extended-feature builds need a fresh
-                                    // Essentia pass to backfill the current schema. LoudnessMomentary is
-                                    // written by every post-extended extraction, so its absence reliably
-                                    // signals an entry produced before the 39 extended features were added.
-                                    if (!existing.Features.DynamicRange.HasValue || !existing.Features.LoudnessMomentary.HasValue)
+                                    // Re-extract when DR, the extended-feature canary, or — if the MD5
+                                    // tool is present — AudioMd5 is missing. Older entries from pre-LRA,
+                                    // pre-extended-feature, or pre-audioMd5 builds need a fresh Essentia
+                                    // pass to backfill the current schema. The md5Exe guard prevents
+                                    // infinite re-extraction when the user hasn't installed the MD5 tool.
+                                    if (!existing.Features.DynamicRange.HasValue
+                                        || !existing.Features.LoudnessMomentary.HasValue
+                                        || (md5Exe != null && string.IsNullOrEmpty(existing.AudioMd5)))
                                     {
-                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR or extended missing)");
+                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR / extended / audioMd5 missing)");
                                     }
                                     else
                                     {
@@ -1204,7 +1209,8 @@ namespace Truedat
                                             },
                                             LastModified = currentLastMod,
                                             AnalysisDurationSecs = existing.AnalysisDurationSecs,
-                                            FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location)
+                                            FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location),
+                                            AudioMd5 = existing.AudioMd5
                                         };
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
@@ -1226,11 +1232,14 @@ namespace Truedat
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
                                 var xf = xp.Entry.Features;
-                                // Same fall-through as the path-cache branch — missing DR or the extended
-                                // canary means we can't reuse the MD5-matched entry; fresh Essentia needed.
-                                if (!xf.DynamicRange.HasValue || !xf.LoudnessMomentary.HasValue)
+                                // Same fall-through as the path-cache branch — missing DR, extended
+                                // canary, or (when md5Exe is present) audioMd5 means we can't reuse
+                                // the MD5-matched entry; fresh Essentia needed.
+                                if (!xf.DynamicRange.HasValue
+                                    || !xf.LoudnessMomentary.HasValue
+                                    || (md5Exe != null && string.IsNullOrEmpty(xp.Entry.AudioMd5)))
                                 {
-                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR or extended missing)");
+                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR / extended / audioMd5 missing)");
                                 }
                                 else
                                 {
@@ -1294,7 +1303,8 @@ namespace Truedat
                                         },
                                         LastModified = currentLastMod,
                                         AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
-                                        FileMd5 = localMd5
+                                        FileMd5 = localMd5,
+                                        AudioMd5 = xp.Entry.AudioMd5
                                     };
                                     allTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref crossPathMoods);
@@ -1330,12 +1340,42 @@ namespace Truedat
                             return;
                         }
 
+                        // Run Essentia analysis, file MD5, and audio MD5 concurrently — disk/CPU
+                        // profiles overlap so wall-clock per track is roughly max(analysis, hash)
+                        // rather than the sum. File MD5 is pure I/O; audio MD5 is a subprocess
+                        // that reads the same bytes Essentia decodes, so both amortise against
+                        // the analysis run. Audio MD5 is skipped when essentia_streaming_md5.exe
+                        // is not present — field stays null rather than blocking extraction.
                         var analyzeStart = Stopwatch.GetTimestamp();
-                        var (feat, errorReason) = AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token);
+                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token));
+                        var fileMd5Task = Task.Run(() => ComputeFileMd5(t.Location));
+                        var audioMd5Task = md5Exe != null
+                            ? Task.Run(() => RunMd5(md5Exe, t.Location, cts.Token))
+                            : Task.FromResult(("", (string?)null));
+                        // Chromaprint via fpcalc — same parallel pattern. Adds the third
+                        // identity tier (path → fileMd5 → audioMd5 → chromaprint → metadataKey)
+                        // in a single analysis pass instead of requiring a separate
+                        // --fingerprint run. Skipped cleanly when fpcalc.exe isn't bundled.
+                        var chromaTask = fpcalcExe != null
+                            ? Task.Run(() => RunFpcalc(fpcalcExe, t.Location, cts.Token))
+                            : Task.FromResult(("", 0, (string?)null));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
+
+                        var (feat, errorReason) = essentiaTask.Result;
+                        var fileMd5 = fileMd5Task.Result;
+                        var (audioMd5Value, audioMd5Err) = audioMd5Task.Result;
+                        var audioMd5 = string.IsNullOrEmpty(audioMd5Value) ? null : audioMd5Value;
+                        if (md5Exe != null && audioMd5 == null && audioMd5Err != null && _audit)
+                            Console.WriteLine($"  DEBUG audioMd5: {audioMd5Err}");
+
+                        var (chromaValue, chromaDuration, chromaErr) = chromaTask.Result;
+                        var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
+                        if (fpcalcExe != null && chromaprint == null && chromaErr != null && _audit)
+                            Console.WriteLine($"  DEBUG chromaprint: {chromaErr}");
 
                         if (feat == null)
                         {
@@ -1357,17 +1397,16 @@ namespace Truedat
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                        var fileMd5 = ComputeFileMd5(t.Location);
 
                         // POST to MetaServer if configured (fire per-track, not buffered)
                         if (metaServerUrl != null)
                         {
-                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, null, fileSizeBytes, t);
+                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t);
                         }
 
                         if (writeFile)
                         {
-                            allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5 };
+                            allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5, AudioMd5 = audioMd5 };
                         }
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -3835,6 +3874,8 @@ namespace Truedat
             }
             if (!string.IsNullOrEmpty(entry.FileMd5))
                 jw.WriteString("fileMd5", entry.FileMd5);
+            if (!string.IsNullOrEmpty(entry.AudioMd5))
+                jw.WriteString("audioMd5", entry.AudioMd5);
             jw.WriteEndObject();
         }
 
@@ -3950,7 +3991,8 @@ namespace Truedat
                             HpcpEntropy = GetNullableDbl(track, "hpcpEntropy")
                         },
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
-                        FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null
+                        FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
+                        AudioMd5 = GetStr(track, "audioMd5") is var amd5Str && amd5Str.Length > 0 ? amd5Str : null
                     };
                 }
                 return allTracks.Count;
@@ -4415,7 +4457,7 @@ namespace Truedat
         /// Returns true on success, false on failure (logs warning).
         /// </summary>
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
-            string? fileMd5, string? audioMd5, long fileSize, ITunesTrack track)
+            string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track)
         {
             try
             {
@@ -4447,6 +4489,16 @@ namespace Truedat
                         jw.WriteString("fileMd5", fileMd5);
                     if (!string.IsNullOrEmpty(audioMd5))
                         jw.WriteString("audioMd5", audioMd5);
+                    // Chromaprint + duration — MetaService stores as identity.chromaprint
+                    // and identity.chromaprint.duration MediaMetadata rows. Empty string is
+                    // treated as absent so a fpcalc failure for one track doesn't pollute
+                    // the row's identity bag.
+                    if (!string.IsNullOrEmpty(chromaprint))
+                    {
+                        jw.WriteString("chromaprint", chromaprint);
+                        if (chromaprintDuration > 0)
+                            jw.WriteNumber("chromaprintDuration", chromaprintDuration);
+                    }
                     jw.WriteEndObject();
 
                     // features
@@ -4560,7 +4612,7 @@ namespace Truedat
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat, long fileSize)
         {
             var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
-            return PostToMetaServer(baseUrl, filePath, feat, null, null, fileSize, stub);
+            return PostToMetaServer(baseUrl, filePath, feat, null, null, null, 0, fileSize, stub);
         }
 
         static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
