@@ -93,7 +93,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| `mbxmoods.json` | Mood vectors and 15 raw Essentia features per track |
+| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat) |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
 | `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
@@ -105,14 +105,14 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | File | Description |
 |------|-------------|
 | `{output}/**/*.mp3` | Stub MP3 files with real ID3 metadata (artist, album, genre, year, BPM) |
-| `{output}/mbxmoods.json` | Mood entries with 15 Essentia features for all generated tracks |
+| `{output}/mbxmoods.json` | Mood entries with 15 core Essentia features for all generated tracks (extended set only populated by live analysis) |
 | `{output}/.synthetic-manifest.json` | Manifest for idempotent reruns (tracks generated, seed, settings) |
 
 ### Analyze Mode (`--analyze-file`, single-track)
 
 | File | Description |
 |------|-------------|
-| stdout (JSON) | Single track's 15 Essentia features as JSON (consumed by MBXHub ScanWorker) |
+| stdout (JSON) | Single track's 55 Essentia features as JSON (15 core + 40 extended, nullable; consumed by MBXHub ScanWorker) |
 
 ### Batch Mode (`--file-list`)
 

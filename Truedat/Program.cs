@@ -1133,13 +1133,14 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    // Re-extract when DR is missing — older mbxmoods.json entries from
-                                    // pre-LRA truedat builds need an Essentia pass to backfill DR.
-                                    // Without this, the cache-reuse branch perpetuates the missing field
-                                    // across every subsequent run.
-                                    if (!existing.Features.DynamicRange.HasValue)
+                                    // Re-extract when DR or the extended-feature canary is missing — older
+                                    // entries from pre-LRA or pre-extended-feature builds need a fresh
+                                    // Essentia pass to backfill the current schema. LoudnessMomentary is
+                                    // written by every post-extended extraction, so its absence reliably
+                                    // signals an entry produced before the 39 extended features were added.
+                                    if (!existing.Features.DynamicRange.HasValue || !existing.Features.LoudnessMomentary.HasValue)
                                     {
-                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR missing)");
+                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR or extended missing)");
                                     }
                                     else
                                     {
@@ -1210,7 +1211,10 @@ namespace Truedat
                                         return;
                                     }
                                 }
-                                if (_audit) Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
+                                else if (_audit)
+                                {
+                                    Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
+                                }
                             }
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
                         }
@@ -1222,11 +1226,11 @@ namespace Truedat
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
                                 var xf = xp.Entry.Features;
-                                // Same DR-missing fall-through as the path-cache branch — without DR
-                                // there's nothing to gain from MD5 reuse, fresh Essentia is required.
-                                if (!xf.DynamicRange.HasValue)
+                                // Same fall-through as the path-cache branch — missing DR or the extended
+                                // canary means we can't reuse the MD5-matched entry; fresh Essentia needed.
+                                if (!xf.DynamicRange.HasValue || !xf.LoudnessMomentary.HasValue)
                                 {
-                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR missing)");
+                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR or extended missing)");
                                 }
                                 else
                                 {
@@ -4211,31 +4215,31 @@ namespace Truedat
                 var loudnessRange = NavDbl(root, "lowlevel.loudness_ebu128.loudness_range", double.NaN);
 
                 // Extended features — all nullable, propagate NaN/missing as null so legacy
-                // consumers don't see bogus zeros. OptDbl returns null when the value is NaN
-                // (per NavDbl default) or absent.
-                static double? Opt(double v) => double.IsNaN(v) ? (double?)null : Math.Round(v, 6);
-                static double? OptN(JsonElement r, string p) => Opt(NavDbl(r, p, double.NaN));
+                // consumers don't see bogus zeros. Precision is picked per field: dB/LU values
+                // at 2 dp, Hz at 1 dp, tiny spectral energies at 6 dp, everything else at 4 dp.
+                static double? Opt(double v, int dp = 4) => double.IsNaN(v) ? (double?)null : Math.Round(v, dp);
+                static double? OptN(JsonElement r, string p, int dp = 4) => Opt(NavDbl(r, p, double.NaN), dp);
 
-                var loudnessMomentary = OptN(root, "lowlevel.loudness_ebu128.momentary.mean");
-                var loudnessShortTerm = OptN(root, "lowlevel.loudness_ebu128.short_term.mean");
-                var replayGain = OptN(root, "metadata.audio_properties.replay_gain");
+                var loudnessMomentary = OptN(root, "lowlevel.loudness_ebu128.momentary.mean", 2);
+                var loudnessShortTerm = OptN(root, "lowlevel.loudness_ebu128.short_term.mean", 2);
+                var replayGain = OptN(root, "metadata.audio_properties.replay_gain", 2);
                 var silenceRate20dB = OptN(root, "lowlevel.silence_rate_20dB.mean");
                 var silenceRate30dB = OptN(root, "lowlevel.silence_rate_30dB.mean");
                 var silenceRate60dB = OptN(root, "lowlevel.silence_rate_60dB.mean");
-                var spectralRolloff = OptN(root, "lowlevel.spectral_rolloff.mean");
-                var spectralComplexity = OptN(root, "lowlevel.spectral_complexity.mean");
+                var spectralRolloff = OptN(root, "lowlevel.spectral_rolloff.mean", 1);
+                var spectralComplexity = OptN(root, "lowlevel.spectral_complexity.mean", 2);
                 var spectralEntropy = OptN(root, "lowlevel.spectral_entropy.mean");
                 var spectralKurtosis = OptN(root, "lowlevel.spectral_kurtosis.mean");
                 var spectralSkewness = OptN(root, "lowlevel.spectral_skewness.mean");
                 var spectralSpread = OptN(root, "lowlevel.spectral_spread.mean");
                 var spectralStrongPeak = OptN(root, "lowlevel.spectral_strongpeak.mean");
-                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean");
-                var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean");
-                var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean");
-                var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean");
-                var spectralEnergyMidHigh = OptN(root, "lowlevel.spectral_energyband_middle_high.mean");
-                var spectralEnergyHigh = OptN(root, "lowlevel.spectral_energyband_high.mean");
-                var hfc = OptN(root, "lowlevel.hfc.mean");
+                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean", 6);
+                var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean", 6);
+                var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean", 6);
+                var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean", 6);
+                var spectralEnergyMidHigh = OptN(root, "lowlevel.spectral_energyband_middle_high.mean", 6);
+                var spectralEnergyHigh = OptN(root, "lowlevel.spectral_energyband_high.mean", 6);
+                var hfc = OptN(root, "lowlevel.hfc.mean", 2);
                 var barkCrest = OptN(root, "lowlevel.barkbands_crest.mean");
                 var barkFlatness = OptN(root, "lowlevel.barkbands_flatness_db.mean");
                 var barkKurtosis = OptN(root, "lowlevel.barkbands_kurtosis.mean");
@@ -4251,9 +4255,9 @@ namespace Truedat
                 var melKurtosis = OptN(root, "lowlevel.melbands_kurtosis.mean");
                 var melSkewness = OptN(root, "lowlevel.melbands_skewness.mean");
                 var melSpread = OptN(root, "lowlevel.melbands_spread.mean");
-                var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean");
+                var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean", 2);
                 var chordsStrength = OptN(root, "tonal.chords_strength.mean");
-                var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean");
+                var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", 2);
                 var hpcpEntropy = OptN(root, "tonal.hpcp_entropy.mean");
 
                 double[]? mfcc = null;

@@ -4,7 +4,7 @@ Truedat serves two purposes:
 
 ### 1. Production: Audio Analysis for MBXHub
 
-Runs [Essentia](https://essentia.upf.edu/) against your music library to extract 15 acoustic features per track, maps every song onto a 2D emotion space (valence/arousal), and optionally generates perceptual fingerprints and audio-data hashes. The output (`mbxmoods.json`) is the mood data file that MBXHub's AutoQ engine uses for mood-aware shuffle.
+Runs [Essentia](https://essentia.upf.edu/) against your music library to extract 55 acoustic features per track (15 core mood features + 40 extended descriptors), maps every song onto a 2D emotion space (valence/arousal), and optionally generates perceptual fingerprints and audio-data hashes. The output (`mbxmoods.json`) is the mood data file that MBXHub's AutoQ engine uses for mood-aware shuffle.
 
 ### 2. Test Tooling: Synthetic Library Generation & Mood Seeding
 
@@ -27,7 +27,7 @@ Truedat reads an iTunes Music Library XML file and runs each audio file through 
 
 - **Valence** (0-1): Sad ← → Happy (8 input features)
 - **Arousal** (0-1): Calm ← → Energetic (7 input features)
-- **15 raw Essentia features** stored per track for runtime recomputation
+- **15 core + 40 extended Essentia features** stored per track for runtime recomputation (extended set covers loudness envelope, silence profile, spectral shape, psychoacoustic bands, rhythm/tonal aggregates)
 
 This enables mood-based selection in MBXHub - pick a vibe like "Energetic" or "Chill" and the AutoQ engine filters your library accordingly.
 
@@ -257,9 +257,11 @@ Creates `dist/truedat/truedat.exe` (single file, ~1 MB). Requires .NET SDK 8.0+.
 
 ## Extracted Features
 
-Truedat extracts 15 audio features per track from Essentia's output:
+Truedat extracts 55 audio features per track from Essentia's output — 15 core features that feed valence/arousal, plus 40 extended descriptors that MBXHub persists for richer downstream scoring (sub-genre profiling, loudness normalisation, fingerprint-free clustering, etc.).
 
-### Arousal-related (energy/intensity)
+Extended features are emitted as nullable JSON fields — absent/NaN Essentia paths become omitted keys, not zeros. Older mbxmoods.json entries that pre-date the extended set round-trip cleanly as `null`s.
+
+### Core — Arousal-related (energy/intensity)
 
 | Feature            | Essentia Path                         | What It Measures                  |
 | ------------------ | ------------------------------------- | --------------------------------- |
@@ -271,7 +273,7 @@ Truedat extracts 15 audio features per track from Essentia's output:
 | Zero-crossing rate | `lowlevel.zerocrossingrate.mean`      | Noise/distortion indicator        |
 | Danceability       | `rhythm.danceability`                 | Rhythmic regularity (0-1)         |
 
-### Valence-related (positivity/happiness)
+### Core — Valence-related (positivity/happiness)
 
 | Feature            | Essentia Path                        | What It Measures                  |
 | ------------------ | ------------------------------------ | --------------------------------- |
@@ -283,6 +285,65 @@ Truedat extracts 15 audio features per track from Essentia's output:
 | Pitch salience     | `lowlevel.pitch_salience.mean`       | Harmonic clarity (HNR proxy)      |
 | Chord changes rate | `tonal.chords_changes_rate`          | Rate of harmonic movement         |
 | MFCCs              | `lowlevel.mfcc.mean`                 | 13-coefficient timbre fingerprint |
+
+### Extended — Loudness envelope (EBU R128)
+
+| JSON key              | Essentia Path                                 | What It Measures                                       |
+| --------------------- | --------------------------------------------- | ------------------------------------------------------ |
+| `dynamicRange`        | `lowlevel.loudness_ebu128.loudness_range`     | EBU R128 loudness range (LRA) in LU — quiet↔loud span  |
+| `loudnessMomentary`   | `lowlevel.loudness_ebu128.momentary.mean`     | Mean momentary loudness (400 ms gate), LU              |
+| `loudnessShortTerm`   | `lowlevel.loudness_ebu128.short_term.mean`    | Mean short-term loudness (3 s gate), LU                |
+| `replayGain`          | `metadata.audio_properties.replay_gain`       | ReplayGain adjustment for normalised playback, dB      |
+
+### Extended — Silence profile
+
+Fraction of analysis frames whose RMS falls below the given threshold — higher = sparser / more silent content.
+
+| JSON key           | Essentia Path                      | Threshold |
+| ------------------ | ---------------------------------- | --------- |
+| `silenceRate20dB`  | `lowlevel.silence_rate_20dB.mean`  | -20 dB    |
+| `silenceRate30dB`  | `lowlevel.silence_rate_30dB.mean`  | -30 dB    |
+| `silenceRate60dB`  | `lowlevel.silence_rate_60dB.mean`  | -60 dB    |
+
+### Extended — Spectral shape
+
+| JSON key                | Essentia Path                                    | What It Measures                                            |
+| ----------------------- | ------------------------------------------------ | ----------------------------------------------------------- |
+| `spectralRolloff`       | `lowlevel.spectral_rolloff.mean`                 | Hz below which 85% of spectral energy sits (bright↔dark)    |
+| `spectralComplexity`    | `lowlevel.spectral_complexity.mean`              | Count of significant spectral peaks per frame               |
+| `spectralEntropy`       | `lowlevel.spectral_entropy.mean`                 | Shannon entropy of normalised spectrum (noise↔tone)         |
+| `spectralKurtosis`      | `lowlevel.spectral_kurtosis.mean`                | Peakedness of spectral distribution                         |
+| `spectralSkewness`      | `lowlevel.spectral_skewness.mean`                | Asymmetry of spectral distribution                          |
+| `spectralSpread`        | `lowlevel.spectral_spread.mean`                  | 2nd-moment spread around centroid                           |
+| `spectralStrongPeak`    | `lowlevel.spectral_strongpeak.mean`              | Prominence of dominant spectral peak                        |
+| `spectralDecrease`      | `lowlevel.spectral_decrease.mean`                | Average slope; negative ⇒ energy concentrated at low freqs  |
+| `spectralEnergy`        | `lowlevel.spectral_energy.mean`                  | Total spectral energy                                       |
+| `spectralEnergyLow`     | `lowlevel.spectral_energyband_low.mean`          | Energy in low band (Essentia split)                         |
+| `spectralEnergyMidLow`  | `lowlevel.spectral_energyband_middle_low.mean`   | Energy in mid-low band                                      |
+| `spectralEnergyMidHigh` | `lowlevel.spectral_energyband_middle_high.mean`  | Energy in mid-high band                                     |
+| `spectralEnergyHigh`    | `lowlevel.spectral_energyband_high.mean`         | Energy in high band                                         |
+| `hfc`                   | `lowlevel.hfc.mean`                              | High-frequency content — cymbals, sibilance, brightness     |
+
+### Extended — Psychoacoustic bands
+
+Shape statistics over perceptually-spaced filterbanks. Same five statistics across three scales: **Bark** (27 critical bands), **ERB** (40 equivalent-rectangular-bandwidth bands), **Mel** (40 mel-scaled bands).
+
+| JSON key (per scale)       | Essentia Path                              | What It Measures                                           |
+| -------------------------- | ------------------------------------------ | ---------------------------------------------------------- |
+| `{bark,erb,mel}Crest`      | `lowlevel.{bark,erb,mel}bands_crest.mean`  | Peak-to-mean ratio — high ⇒ tonal/peaky within the band    |
+| `{bark,erb,mel}Flatness`   | `lowlevel.{bark,erb,mel}bands_flatness_db.mean` | Geometric/arithmetic mean ratio in dB (noisy↔tonal)    |
+| `{bark,erb,mel}Kurtosis`   | `lowlevel.{bark,erb,mel}bands_kurtosis.mean` | Peakedness of the band distribution                      |
+| `{bark,erb,mel}Skewness`   | `lowlevel.{bark,erb,mel}bands_skewness.mean` | Asymmetry of the band distribution                       |
+| `{bark,erb,mel}Spread`     | `lowlevel.{bark,erb,mel}bands_spread.mean`  | Second-moment spread across the bands                     |
+
+### Extended — Rhythm & tonal aggregates
+
+| JSON key         | Essentia Path                  | What It Measures                                                    |
+| ---------------- | ------------------------------ | ------------------------------------------------------------------- |
+| `beatsLoudness`  | `rhythm.beats_loudness.mean`   | Mean loudness at beat positions — kick/snare intensity              |
+| `chordsStrength` | `tonal.chords_strength.mean`   | Mean chord-detector confidence (0-1)                                |
+| `hpcpCrest`      | `tonal.hpcp_crest.mean`        | Crest of 12-bin harmonic pitch class profile — tonal focus (dB)     |
+| `hpcpEntropy`    | `tonal.hpcp_entropy.mean`      | Entropy of HPCP — high ⇒ atonal/chromatic, low ⇒ diatonic           |
 
 ## Output Format
 
@@ -315,6 +376,20 @@ Truedat extracts 15 audio features per track from Essentia's output:
       "pitchSalience": 0.6789,
       "chordsChangesRate": 0.8901,
       "mfcc": [-234.5, 45.2, -12.3, 8.7, -3.1, 1.2, -0.8, 0.5, -0.3, 0.2, -0.1, 0.1, -0.05],
+      "dynamicRange": 7.3,
+      "dynamicRangeSource": "essentia-lra",
+      "loudnessMomentary": -11.82, "loudnessShortTerm": -10.47, "replayGain": -8.4,
+      "silenceRate20dB": 0.02, "silenceRate30dB": 0.07, "silenceRate60dB": 0.21,
+      "spectralRolloff": 4211.5, "spectralComplexity": 14.2, "spectralEntropy": 7.86,
+      "spectralKurtosis": 21.1, "spectralSkewness": 3.42, "spectralSpread": 2.18e6,
+      "spectralStrongPeak": 1.7, "spectralDecrease": -1.8e-8,
+      "spectralEnergy": 0.0041, "spectralEnergyLow": 0.0015, "spectralEnergyMidLow": 0.0012,
+      "spectralEnergyMidHigh": 0.0009, "spectralEnergyHigh": 0.0005,
+      "hfc": 112.4,
+      "barkCrest": 9.4, "barkFlatness": -9.1, "barkKurtosis": 7.3, "barkSkewness": 2.1, "barkSpread": 21.3,
+      "erbCrest": 11.2, "erbFlatness": -8.7, "erbKurtosis": 5.8, "erbSkewness": 1.9, "erbSpread": 18.2,
+      "melCrest": 10.6, "melFlatness": -8.4, "melKurtosis": 6.1, "melSkewness": 2.0, "melSpread": 19.5,
+      "beatsLoudness": -14.1, "chordsStrength": 0.61, "hpcpCrest": 6.2, "hpcpEntropy": 2.87,
       "lastModified": "2025-12-01T00:00:00.0000000Z",
       "analysisDuration": 4.2
     }
@@ -322,7 +397,7 @@ Truedat extracts 15 audio features per track from Essentia's output:
 }
 ```
 
-Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights - no re-scan needed to adjust the formulas. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
+Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
 ### Fingerprint Output
 

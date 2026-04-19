@@ -22,6 +22,21 @@ failures with JSON summary on stdout.
 
 Plan: `docs/plans/2026-03-22-file-list-flag.md`
 
+## ~~Extended Essentia Feature Set~~ DONE
+
+Added 40 extended acoustic descriptors to `TrackFeatures` and `mbxmoods.json`:
+loudness envelope (momentary, short-term, replay gain, DR/LRA), silence profile
+(20/30/60 dB), spectral shape (rolloff, complexity, entropy, kurtosis, skewness,
+spread, strong peak, decrease, energy + 4 energybands), high-frequency content,
+Bark/ERB/Mel band shape statistics (crest, flatness, kurtosis, skewness, spread),
+and rhythm/tonal aggregates (beats loudness, chords strength, HPCP crest + entropy).
+
+All 40 are nullable — writer omits missing keys, reader tolerates older entries that
+pre-date the set. Round-trip covers extract → mbxmoods.json → MetaServer ingest →
+cache preservation. Commits: `72d8e65` (DR), `a4424fe` (extended 39).
+
+Review: `docs/reviews/2026-04-18-extended-features-review.md`
+
 ## DSD / Non-PCM Format Support
 
 Convert DSD, multi-channel, and other non-PCM formats via ffmpeg before Essentia
