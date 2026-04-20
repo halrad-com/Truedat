@@ -4,7 +4,7 @@ This file is loaded automatically by Claude Code / Claude Agent sessions scoped 
 
 ## What this project is
 
-Truedat is a Windows .NET command-line tool that analyses a music library's audio and writes `mbxmoods.json` (mood + Essentia features), optionally `mbxhub-fingerprints.json` (Chromaprint + audio MD5), and `mbxhub-details.json` (ffprobe stream details). Output files are consumed by MBXHub's AutoQ engine (separate repo: `MBX/restfulbee`).
+Truedat is a Windows .NET command-line tool that analyses a music library's audio and writes `mbxmoods.json` (mood + Essentia features), optionally `mbxhub-fingerprints.json` (Chromaprint + audio MD5), and `mbxhub-details.json` (ffprobe stream details). Output files are consumed by MBXHub's AutoQ engine (separate repo).
 
 - Build: `build-all.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
 - Runtime deps: `essentia_streaming_extractor_music.exe` (required), plus optional `essentia_streaming_md5.exe`, `fpcalc.exe`, `ffmpeg.exe`, `ffprobe.exe` — all placed alongside the exe.
@@ -42,7 +42,7 @@ Each worker runs Essentia + `ComputeFileMd5` + `RunMd5` + `RunFpcalc` + `Compute
 - `fingerprint`: TagLib parse + 64 KB MD5 at `InvariantStartPosition`. Sub-10 ms warm. Posts `identity.fingerprint.v1` composite (pathTail + fileSize + audio props + audioHead64kMd5). This is the ms-scale peer-pull ping primitive.
 - `stream`: streaming SHA-256 over `[InvariantStartPosition, InvariantEndPosition)`. Disk-bound. Superset — emits `fingerprint.v1` *and* `audioStreamSha256`.
 
-Wire contract frozen at `docs/reference/identity-wire-format.md` (consumed by MBX `restfulbee` Track B). `PathTail` convention matches `MBXHub.Shell.MetaServer.MetaService.GetPathTail` byte-for-byte.
+Wire contract frozen at `docs/reference/identity-wire-format.md` (consumed by the MetaServer side, Phase 2 Track B). `PathTail` convention matches MetaServer's `GetPathTail` byte-for-byte.
 
 ## Cache re-extract gate
 
