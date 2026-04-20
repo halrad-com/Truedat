@@ -159,7 +159,7 @@ namespace Truedat
 
     /// <summary>
     /// Path normalization utilities for cross-source path matching.
-    /// Copied from MBXC (restfulbee/MBXC/PathHelper.cs) to keep Truedat self-contained.
+    /// Mirrors the consumer-side helper of the same name to keep identity matching consistent.
     /// </summary>
     static class PathHelper
     {
