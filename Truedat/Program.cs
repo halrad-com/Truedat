@@ -515,6 +515,9 @@ namespace Truedat
             bool fileListMode = false;
             string? fileListPath = null;
 
+            bool hashOnlyMode = false;
+            string? hashLevel = null;
+
             string? metaServerUrl = null;
             bool outputFlag = false;
 
@@ -562,6 +565,8 @@ namespace Truedat
                 else if (arg == "--merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
                 else if (arg == "--analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
                 else if (arg == "--file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
+                else if (arg == "--hash-only") hashOnlyMode = true;
+                else if (arg == "--level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
                 else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (arg == "--json-output") jsonOutput = true;
                 else if (arg == "--meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
@@ -578,6 +583,34 @@ namespace Truedat
                 Console.Error.WriteLine("Error: Cannot use --file-list and --analyze-file together.");
                 Environment.ExitCode = 1;
                 return;
+            }
+
+            if (hashOnlyMode)
+            {
+                if (hashLevel != "fingerprint" && hashLevel != "stream")
+                {
+                    Console.Error.WriteLine("Error: --hash-only requires --level fingerprint or --level stream.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (analyzeFileMode)
+                {
+                    Console.Error.WriteLine("Error: Cannot use --hash-only and --analyze-file together.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (!fileListMode)
+                {
+                    Console.Error.WriteLine("Error: --hash-only requires --file-list <path>.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (string.IsNullOrEmpty(metaServerUrl))
+                {
+                    Console.Error.WriteLine("Error: --hash-only requires --meta-server <url>.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
             }
 
             if (cpuLimit > 0)
@@ -612,6 +645,8 @@ namespace Truedat
                 Console.WriteLine("                      Mutually exclusive with --analyze-file");
                 Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
                 Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server");
+                Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -774,6 +809,117 @@ namespace Truedat
                 return;
             }
 
+            // --hash-only mode: batch identity computation (no Essentia analysis)
+            // level=fingerprint: TagLib parse + 64KB MD5 at InvariantStartPosition
+            // level=stream: full audio region SHA-256 (includes fingerprint.v1 as superset)
+            if (hashOnlyMode)
+            {
+                if (!File.Exists(fileListPath!))
+                {
+                    Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var hoPaths = File.ReadAllLines(fileListPath!, Encoding.UTF8)
+                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                    .Select(line => line.Trim())
+                    .ToList();
+
+                if (hoPaths.Count == 0)
+                {
+                    Console.Error.WriteLine("Error: File list is empty.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                Console.Error.WriteLine($"Hash-only mode: level={hashLevel}, files={hoPaths.Count}, parallelism={parallelism}");
+                Console.Error.WriteLine($"  MetaServer: {metaServerUrl}");
+
+                var hoOutputDir = Path.GetDirectoryName(Path.GetFullPath(fileListPath!)) ?? ".";
+                var hoErrorCsv = Path.Combine(hoOutputDir, "mbxhub-hash-only-errors.csv");
+
+                var hoProcessed = 0;
+                var hoFailed = 0;
+                var hoPosted = 0;
+                var hoErrors = new ConcurrentBag<string>();
+                var hoSw = System.Diagnostics.Stopwatch.StartNew();
+
+                Parallel.ForEach(hoPaths, new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = parallelism,
+                    CancellationToken = CancellationToken.None
+                }, filePath =>
+                {
+                    if (!File.Exists(filePath))
+                    {
+                        Interlocked.Increment(ref hoFailed);
+                        hoErrors.Add($"{filePath}\tfile not found");
+                        Console.Error.WriteLine($"[SKIP] {filePath}: file not found");
+                        return;
+                    }
+
+                    try
+                    {
+                        var fi = new FileInfo(filePath);
+                        var fpV1 = ComputeFingerprintV1(filePath, fi.Length, out var fpErr);
+                        if (fpV1 == null)
+                        {
+                            Interlocked.Increment(ref hoFailed);
+                            hoErrors.Add($"{filePath}\t{fpErr}");
+                            Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {fpErr}");
+                            return;
+                        }
+
+                        string? streamSha = null;
+                        if (hashLevel == "stream")
+                        {
+                            streamSha = ComputeAudioStreamSha256(filePath, fpV1.InvariantStart, fpV1.InvariantEnd, out var shaErr);
+                            if (streamSha == null)
+                            {
+                                Interlocked.Increment(ref hoFailed);
+                                hoErrors.Add($"{filePath}\t{shaErr}");
+                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {shaErr}");
+                                return;
+                            }
+                        }
+
+                        var ok = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!);
+                        if (ok) Interlocked.Increment(ref hoPosted);
+
+                        Interlocked.Increment(ref hoProcessed);
+                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref hoFailed);
+                        hoErrors.Add($"{filePath}\t{ex.Message}");
+                        Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
+                    }
+                });
+
+                hoSw.Stop();
+
+                if (!hoErrors.IsEmpty)
+                {
+                    try
+                    {
+                        File.WriteAllLines(hoErrorCsv,
+                            new[] { "path\terror" }.Concat(hoErrors),
+                            Encoding.UTF8);
+                        Console.Error.WriteLine($"  Errors written to: {hoErrorCsv}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  WARNING: could not write error CSV: {ex.Message}");
+                    }
+                }
+
+                Console.Error.WriteLine($"Done: {hoProcessed} processed ({hoPosted} posted), {hoFailed} failed in {hoSw.Elapsed.TotalSeconds:F1}s");
+                Environment.ExitCode = hoFailed > 0 ? 1 : 0;
+                return;
+            }
+
             // --file-list mode: batch analysis from a text file
             if (fileListMode)
             {
@@ -933,6 +1079,8 @@ namespace Truedat
                 Console.WriteLine("                      Mutually exclusive with --analyze-file");
                 Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
                 Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server");
+                Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  -?, --help          Show this help");
@@ -1359,7 +1507,10 @@ namespace Truedat
                         var chromaTask = fpcalcExe != null
                             ? Task.Run(() => RunFpcalc(fpcalcExe, t.Location, cts.Token))
                             : Task.FromResult(("", 0, (string?)null));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask });
+                        // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
+                        // Phase 2 cheap identity signal; cost is negligible vs Essentia.
+                        var fingerprintTask = Task.Run(() => ComputeFingerprintV1(t.Location, fileSizeBytes, out _));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -1376,6 +1527,8 @@ namespace Truedat
                         var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
                         if (fpcalcExe != null && chromaprint == null && chromaErr != null && _audit)
                             Console.WriteLine($"  DEBUG chromaprint: {chromaErr}");
+
+                        var fingerprintV1 = fingerprintTask.Result;
 
                         if (feat == null)
                         {
@@ -1401,7 +1554,7 @@ namespace Truedat
                         // POST to MetaServer if configured (fire per-track, not buffered)
                         if (metaServerUrl != null)
                         {
-                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t);
+                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1);
                         }
 
                         if (writeFile)
@@ -4457,7 +4610,8 @@ namespace Truedat
         /// Returns true on success, false on failure (logs warning).
         /// </summary>
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
-            string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track)
+            string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track,
+            FingerprintV1? fingerprintV1 = null)
         {
             try
             {
@@ -4499,6 +4653,10 @@ namespace Truedat
                         if (chromaprintDuration > 0)
                             jw.WriteNumber("chromaprintDuration", chromaprintDuration);
                     }
+                    // Phase 2 ride-along: cheap composite fingerprint so default-mode scans
+                    // emit identity-complete rows for the ms-scale peer-pull ping path.
+                    if (fingerprintV1 != null)
+                        WriteFingerprintV1(jw, fingerprintV1);
                     jw.WriteEndObject();
 
                     // features
@@ -4613,6 +4771,301 @@ namespace Truedat
         {
             var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
             return PostToMetaServer(baseUrl, filePath, feat, null, null, null, 0, fileSize, stub);
+        }
+
+        /// <summary>Composite cheap fingerprint for a file. Sub-10ms per file on warm cache.</summary>
+        internal sealed class FingerprintV1
+        {
+            public long FileSize;
+            public string PathTail = "";
+            public int DurationMs;
+            public int SampleRate;
+            public int Channels;
+            public string Codec = "other";
+            public string? CodecRaw;
+            public int Bitrate;
+            public string AudioHead64kMd5 = "";
+            public string AudioHead64kMd5Source = "invariant"; // "invariant" | "whole-file-start"
+            public long InvariantStart;
+            public long InvariantEnd;
+        }
+
+        /// <summary>
+        /// Normalize a path to the cross-fleet pathTail identity signal.
+        /// Matches MBXHub.Shell.MetaServer.MetaService.GetPathTail exactly:
+        ///   replace '/' with '\', split on '\', take last up-to-3 non-empty parts,
+        ///   join with '\', lowercase (invariant). Returns null for root / single-segment paths.
+        /// </summary>
+        static string? ComputePathTail(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            var normalized = path!.Replace('/', '\\');
+            if (string.IsNullOrEmpty(normalized)) return null;
+            var parts = normalized.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return null;
+            var take = Math.Min(3, parts.Length);
+            return string.Join("\\", parts, parts.Length - take, take).ToLowerInvariant();
+        }
+
+        /// <summary>Canonical codec string from TagLibSharp MimeType. Falls back to 'other' + codecRaw.</summary>
+        static (string Codec, string? CodecRaw) NormalizeCodec(TagLib.File file)
+        {
+            var raw = file.MimeType ?? "";
+            switch (raw.ToLowerInvariant())
+            {
+                case "audio/mpeg":
+                case "audio/mp3":
+                case "taglib/mp3":
+                    return ("mp3", null);
+                case "audio/flac":
+                case "audio/x-flac":
+                case "taglib/flac":
+                    return ("flac", null);
+                case "audio/aac":
+                case "taglib/aac":
+                    return ("aac", null);
+                case "audio/mp4":
+                case "audio/x-m4a":
+                case "taglib/m4a":
+                case "taglib/mp4":
+                    // TagLib doesn't cheaply distinguish ALAC vs AAC inside MP4.
+                    // Inspect Properties.Description (e.g. "MPEG-4 Audio (alac)") when available.
+                    var desc4 = file.Properties?.Description ?? "";
+                    if (desc4.IndexOf("alac", StringComparison.OrdinalIgnoreCase) >= 0) return ("alac", null);
+                    if (desc4.IndexOf("aac", StringComparison.OrdinalIgnoreCase) >= 0) return ("aac", null);
+                    return ("m4a", string.IsNullOrEmpty(desc4) ? null : desc4);
+                case "audio/opus":
+                case "audio/ogg":
+                case "taglib/opus":
+                case "taglib/ogg":
+                    var descOgg = file.Properties?.Description ?? "";
+                    if (descOgg.IndexOf("opus", StringComparison.OrdinalIgnoreCase) >= 0) return ("opus", null);
+                    if (descOgg.IndexOf("vorbis", StringComparison.OrdinalIgnoreCase) >= 0) return ("vorbis", null);
+                    return ("ogg", string.IsNullOrEmpty(descOgg) ? null : descOgg);
+                case "audio/wav":
+                case "audio/wave":
+                case "audio/x-wav":
+                case "taglib/wav":
+                    return ("wav", null);
+                case "audio/x-ms-wma":
+                case "audio/wma":
+                case "taglib/wma":
+                    return ("wma", null);
+                case "audio/x-ape":
+                case "taglib/ape":
+                    return ("ape", null);
+                case "audio/x-musepack":
+                case "taglib/mpc":
+                    return ("mpc", null);
+                default:
+                    return ("other", string.IsNullOrEmpty(raw) ? null : raw);
+            }
+        }
+
+        /// <summary>Compute fingerprint.v1 composite. Returns null + error string on failure.</summary>
+        static FingerprintV1? ComputeFingerprintV1(string filePath, long fileSize, out string? error)
+        {
+            error = null;
+            try
+            {
+                using var tfile = TagLib.File.Create(filePath);
+                var props = tfile.Properties;
+                if (props == null)
+                {
+                    error = "no audio properties";
+                    return null;
+                }
+
+                long invStart = tfile.InvariantStartPosition;
+                long invEnd = tfile.InvariantEndPosition;
+                // Some formats return 0/0 or negative — treat as "no invariant region known".
+                string headSource = "invariant";
+                if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
+                {
+                    invStart = 0;
+                    invEnd = fileSize;
+                    headSource = "whole-file-start";
+                }
+
+                var tail = ComputePathTail(filePath);
+                if (tail == null)
+                {
+                    error = "path has too few segments for pathTail";
+                    return null;
+                }
+
+                var (codec, codecRaw) = NormalizeCodec(tfile);
+
+                // 64KB head MD5 from invariant start.
+                string headMd5;
+                int headLen = (int)Math.Min(65536L, invEnd - invStart);
+                using (var md5 = MD5.Create())
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan))
+                {
+                    fs.Seek(invStart, SeekOrigin.Begin);
+                    var buf = new byte[headLen];
+                    int read = 0;
+                    while (read < headLen)
+                    {
+                        int r = fs.Read(buf, read, headLen - read);
+                        if (r <= 0) break;
+                        read += r;
+                    }
+                    // If the file was shorter than expected, hash only the bytes we got.
+                    var hash = md5.ComputeHash(buf, 0, read);
+                    headMd5 = HexLower(hash);
+                }
+
+                return new FingerprintV1
+                {
+                    FileSize = fileSize,
+                    PathTail = tail,
+                    DurationMs = (int)props.Duration.TotalMilliseconds,
+                    SampleRate = props.AudioSampleRate,
+                    Channels = props.AudioChannels,
+                    Codec = codec,
+                    CodecRaw = codecRaw,
+                    Bitrate = props.AudioBitrate,
+                    AudioHead64kMd5 = headMd5,
+                    AudioHead64kMd5Source = headSource,
+                    InvariantStart = invStart,
+                    InvariantEnd = invEnd,
+                };
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Streaming SHA-256 of the audio region [invariantStart, invariantEnd).
+        /// Disk-bound; SHA-NI makes CPU cost negligible on modern hardware.
+        /// </summary>
+        static string? ComputeAudioStreamSha256(string filePath, long invariantStart, long invariantEnd, out string? error)
+        {
+            error = null;
+            try
+            {
+                long length = invariantEnd - invariantStart;
+                if (length <= 0)
+                {
+                    error = "empty audio region";
+                    return null;
+                }
+                using var sha = SHA256.Create();
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
+                fs.Seek(invariantStart, SeekOrigin.Begin);
+                var buf = new byte[81920];
+                long remaining = length;
+                while (remaining > 0)
+                {
+                    int want = (int)Math.Min(buf.Length, remaining);
+                    int r = fs.Read(buf, 0, want);
+                    if (r <= 0) break;
+                    sha.TransformBlock(buf, 0, r, null, 0);
+                    remaining -= r;
+                }
+                sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                return HexLower(sha.Hash!);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return null;
+            }
+        }
+
+        static string HexLower(byte[] bytes)
+        {
+            var sb = new StringBuilder(bytes.Length * 2);
+            for (int i = 0; i < bytes.Length; i++) sb.Append(bytes[i].ToString("x2"));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Identity-only POST for --hash-only mode. Same /meta/ingest endpoint as full scan,
+        /// but with only identity populated (features omitted). Level tagged in provenance.
+        /// </summary>
+        static bool PostIdentityOnly(string baseUrl, string filePath, long fileSize,
+            FingerprintV1 fp, string? audioStreamSha256, string level)
+        {
+            try
+            {
+                var url = baseUrl.TrimEnd('/') + "/meta/ingest";
+                var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
+
+                using var ms = new MemoryStream();
+                using (var jw = new Utf8JsonWriter(ms))
+                {
+                    jw.WriteStartObject();
+                    jw.WriteString("path", filePath);
+
+                    // metadata (minimal — just what the cheap pass produced)
+                    jw.WritePropertyName("metadata");
+                    jw.WriteStartObject();
+                    jw.WriteNumber("duration", fp.DurationMs / 1000.0);
+                    jw.WriteNumber("fileSize", fileSize);
+                    jw.WriteEndObject();
+
+                    // identity
+                    jw.WritePropertyName("identity");
+                    jw.WriteStartObject();
+                    WriteFingerprintV1(jw, fp);
+                    if (!string.IsNullOrEmpty(audioStreamSha256))
+                        jw.WriteString("audioStreamSha256", audioStreamSha256);
+                    jw.WriteEndObject();
+
+                    // provenance
+                    jw.WritePropertyName("provenance");
+                    jw.WriteStartObject();
+                    jw.WriteString("scannedBy", Environment.MachineName);
+                    jw.WriteString("tool", "truedat-hash");
+                    jw.WriteString("toolVersion", version);
+                    jw.WriteString("scannedAt", DateTime.UtcNow.ToString("o"));
+                    jw.WriteString("level", level);
+                    jw.WriteEndObject();
+
+                    jw.WriteEndObject();
+                }
+
+                var content = new ByteArrayContent(ms.ToArray());
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"  WARNING: MetaServer POST failed ({level}): {(int)response.StatusCode} {response.ReasonPhrase}");
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  WARNING: MetaServer POST failed ({level}): {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Serialize a FingerprintV1 into an open identity object as identity["fingerprint.v1"].</summary>
+        static void WriteFingerprintV1(Utf8JsonWriter jw, FingerprintV1 fp)
+        {
+            jw.WritePropertyName("fingerprint.v1");
+            jw.WriteStartObject();
+            jw.WriteNumber("fileSize", fp.FileSize);
+            jw.WriteString("pathTail", fp.PathTail);
+            jw.WriteNumber("durationMs", fp.DurationMs);
+            jw.WriteNumber("sampleRate", fp.SampleRate);
+            jw.WriteNumber("channels", fp.Channels);
+            jw.WriteString("codec", fp.Codec);
+            if (!string.IsNullOrEmpty(fp.CodecRaw))
+                jw.WriteString("codecRaw", fp.CodecRaw);
+            jw.WriteNumber("bitrate", fp.Bitrate);
+            jw.WriteString("audioHead64kMd5", fp.AudioHead64kMd5);
+            if (fp.AudioHead64kMd5Source != "invariant")
+                jw.WriteString("audioHead64kMd5Source", fp.AudioHead64kMd5Source);
+            jw.WriteEndObject();
         }
 
         static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
