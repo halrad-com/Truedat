@@ -18,8 +18,9 @@
 |-----------|---------|---------|---------|
 | .NET Framework | 4.8 | MIT | Runtime (ships with Windows 10/11) |
 | System.Net.Http | 4.8 (BCL) | MIT | HTTP client for MetaServer integration (framework assembly reference) |
+| System.Security.Cryptography | 4.8 (BCL) | MIT | MD5 and SHA-256 used by file-MD5, audio-head MD5 (`fingerprint.v1`), and audio-stream SHA-256 (`audioStreamSha256`); SHA-NI hardware-accelerated on supported CPUs (framework assembly reference) |
 | System.Text.Json | 8.0.5 | MIT | JSON serialization (merged into exe via ILRepack) |
-| TagLibSharp | 2.3.0 | LGPL-2.1 | ID3 tag writing for synthetic library generation (merged into exe via ILRepack) |
+| TagLibSharp | 2.3.0 | LGPL-2.1 | ID3 tag writing for synthetic library generation; audio-property parsing and `InvariantStartPosition/EndPosition` locator for Phase 2 identity signals (merged into exe via ILRepack) |
 
 **Build tools:**
 
@@ -93,7 +94,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus `fileMd5` (file bytes) and `audioMd5` (decoded audio payload via `essentia_streaming_md5.exe`); Essentia, both MD5s, and chromaprint (via `fpcalc.exe`, posted to MetaServer but not written here) all run concurrently per track |
+| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus `fileMd5` (file bytes) and `audioMd5` (decoded audio payload via `essentia_streaming_md5.exe`); Essentia, both MD5s, chromaprint (via `fpcalc.exe`), and the Phase 2 `fingerprint.v1` composite (TagLib parse + 64 KB invariant-region MD5) all run concurrently per track. `fingerprint.v1` and `chromaprint` are posted to MetaServer but not written into `mbxmoods.json`. |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
 | `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
@@ -119,6 +120,17 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | File | Description |
 |------|-------------|
 | stdout (JSON) | Summary with processed/failed counts, elapsed time, and error details (when `--json-output` or failures) |
+
+### Hash-Only Mode (`--hash-only --level fingerprint\|stream`)
+
+Identity-only passes for Phase 2 hash-first orchestration. Requires `--file-list` + `--meta-server`. Produces no local JSON output; results are POSTed to MetaServer per-track.
+
+| File | Description |
+|------|-------------|
+| `mbxhub-hash-only-errors.csv` | Failed tracks, tab-separated `path\terror` (written next to the file list) |
+| stderr | `[OK]` / `[FAIL]` / `[SKIP]` per file + run summary |
+
+Wire contract: `docs/reference/identity-wire-format.md`. Emits `identity.fingerprint.v1` (composite: pathTail + fileSize + audio props + 64 KB invariant-region MD5) in both levels; `identity.audioStreamSha256` (streaming SHA-256 over the audio region) in `--level stream` only.
 
 ### Catalog Prep (`src/catalog-prep.py`, developer tool)
 
@@ -147,7 +159,7 @@ Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt
 
 ## Security Considerations
 
-- No network access required (runtime) unless `--meta-server` is used, which POSTs features to a local network MetaServer
+- No network access required (runtime) unless `--meta-server` is used, which POSTs features (or identity-only payloads in `--hash-only` mode) to a local network MetaServer
 - Reads audio files (read-only) and iTunes Music Library XML
 - Writes JSON output next to input XML file
 - No telemetry or external services
