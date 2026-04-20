@@ -16,7 +16,7 @@ Per-track JSON object under `"tracks"[path]`. **55 numeric feature fields** (15 
 
 - **Core features** (always present): `bpm`, `key`, `mode`, `spectralCentroid`, `spectralFlux`, `loudness`, `danceability`, `onsetRate`, `zeroCrossingRate`, `spectralRms`, `spectralFlatness`, `dissonance`, `pitchSalience`, `chordsChangesRate`, `mfcc[]`.
 - **Extended** (nullable, omit-when-missing): `dynamicRange` + `dynamicRangeSource`; loudness envelope (`loudnessMomentary`, `loudnessShortTerm`, `replayGain`); silence (`silenceRate20dB/30dB/60dB`); spectral shape (rolloff, complexity, entropy, kurtosis, skewness, spread, strongPeak, decrease, energy + 4 energybands); `hfc`; Bark/ERB/Mel band stats (crest, flatness, kurtosis, skewness, spread × 3 scales = 15); rhythm/tonal (`beatsLoudness`, `chordsStrength`, `hpcpCrest`, `hpcpEntropy`).
-- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`.
+- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`. Also posted to MetaServer but not persisted in `mbxmoods.json`: `fingerprint.v1` (composite) and, in `--hash-only --level stream` only, `audioStreamSha256`.
 - **Housekeeping**: `lastModified`, `analysisDuration`.
 
 All five I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `WriteTrackEntry` (write), `LoadExistingMoods` (read), `PostToMetaServer` (identity + features body), and both cache-reuse branches (`MoodsMode` path-cache around `Program.cs:1140` and cross-MD5 around `:1227`). Adding a field means touching all five.
@@ -33,7 +33,16 @@ Don't regress to a uniform 6 dp — it inflates JSON size without analytic value
 
 ## Concurrent hashing in mood analysis
 
-Each worker runs Essentia + `ComputeFileMd5` + `RunMd5` + `RunFpcalc` concurrently via `Task.Run` + `Task.WaitAll`. Wall-clock is ~`max(analysis, slowest-hash)` per track. When any hash tool is absent, the corresponding task returns an empty result and the field stays `null` — don't add fallback logic.
+Each worker runs Essentia + `ComputeFileMd5` + `RunMd5` + `RunFpcalc` + `ComputeFingerprintV1` concurrently via `Task.Run` + `Task.WaitAll`. Wall-clock is ~`max(analysis, slowest-hash)` per track. When any hash tool is absent, the corresponding task returns an empty result and the field stays `null` — don't add fallback logic. `ComputeFingerprintV1` (~5 ms warm) is a pure-managed task so it has no tool-availability gate.
+
+## Phase 2 hash-only mode
+
+`--hash-only --level fingerprint|stream --file-list <path> --meta-server <url>` runs identity-only passes without Essentia:
+
+- `fingerprint`: TagLib parse + 64 KB MD5 at `InvariantStartPosition`. Sub-10 ms warm. Posts `identity.fingerprint.v1` composite (pathTail + fileSize + audio props + audioHead64kMd5). This is the ms-scale peer-pull ping primitive.
+- `stream`: streaming SHA-256 over `[InvariantStartPosition, InvariantEndPosition)`. Disk-bound. Superset — emits `fingerprint.v1` *and* `audioStreamSha256`.
+
+Wire contract frozen at `docs/reference/identity-wire-format.md` (consumed by MBX `restfulbee` Track B). `PathTail` convention matches `MBXHub.Shell.MetaServer.MetaService.GetPathTail` byte-for-byte.
 
 ## Cache re-extract gate
 

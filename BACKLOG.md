@@ -1,5 +1,19 @@
 # Truedat Backlog
 
+## ~~Phase 2 hash-first identity (Track A)~~ DONE
+
+`--hash-only --level fingerprint|stream` CLI for identity-only passes without
+Essentia. `fingerprint.v1` composite (pathTail + fileSize + audio props + 64 KB
+invariant-region MD5) is the ms-scale peer-pull ping primitive; `stream` level
+adds durable `audioStreamSha256` over the audio region. Default Essentia scans
+ride-along `fingerprint.v1` via a 5th concurrent task. Zero new deps. Wire
+format frozen at `docs/reference/identity-wire-format.md`; consumed by MBX
+`restfulbee` Track B.
+
+Commit: `a6a0fe7`
+Plan: `MBX/restfulbee/docs/roadmap/phase-2-orchestration-and-trueup.md` (Track A section)
+Handoff: `MBX/restfulbee/docs/handoff/2026-04-19-truedat-phase2.md`
+
 ## ~~Seed mbxmoods.json from AcousticBrainz/MusicBrainz~~ DONE
 
 Implemented `--seed-moods` command: bulk seeds mbxmoods.json from AcousticBrainz

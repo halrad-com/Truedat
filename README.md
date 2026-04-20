@@ -71,6 +71,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --details               Use ffprobe → mbxhub-details.json (implies --fingerprint)
   --meta-server <url>     POST features to MetaServer instead of writing mbxmoods.json
   --output                Also write mbxmoods.json when using --meta-server (dual output)
+  --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server
+  --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
   --audit                 Write all console output to truedat.log (for debugging)
   --analyze-file <path> Analyze a single audio file with Essentia (no iTunes XML needed)
   --file-list <path>    Analyze files listed in a text file (one path per line, UTF-8, # comments)
@@ -117,7 +119,15 @@ truedat.exe --analyze-file "C:\Music\song.mp3" --json-output
 
 REM Batch analyze files from a list, POST results to MetaServer
 truedat.exe --file-list files.txt --meta-server http://localhost:5000 -p 4
+
+REM Hash-only: cheap composite fingerprint for fleet-wide peer-pull (ms per file)
+truedat.exe --hash-only --level fingerprint --file-list files.txt --meta-server http://localhost:5000 -p 32
+
+REM Hash-only: durable audioStreamSha256 (disk-bound; emits fingerprint.v1 too)
+truedat.exe --hash-only --level stream --file-list files.txt --meta-server http://localhost:5000 -p 8
 ```
+
+Wire contract for `--hash-only` identity signals: `docs/reference/identity-wire-format.md`.
 
 ## Synthetic Library Generation (Test Tooling)
 
