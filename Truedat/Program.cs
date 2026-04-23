@@ -998,8 +998,24 @@ namespace Truedat
                         var chromaTask = flFpcalcExe != null
                             ? Task.Run(() => RunFpcalc(flFpcalcExe, filePath, CancellationToken.None))
                             : Task.FromResult(("", 0, (string?)null));
-                        var fingerprintTask = Task.Run(() => ComputeFingerprintV1(filePath, fileSize, out _));
-                        var audioStreamSha256Task = Task.Run(() => ComputeAudioStreamSha256FromFile(filePath, fileSize, out _));
+                        var fingerprintTask = Task.Run(() =>
+                        {
+                            var swFp = Stopwatch.StartNew();
+                            var fp = ComputeFingerprintV1(filePath, fileSize, out _);
+                            swFp.Stop();
+                            if (_audit)
+                                Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
+                            return fp;
+                        });
+                        var audioStreamSha256Task = Task.Run(() =>
+                        {
+                            var swSha = Stopwatch.StartNew();
+                            var sha = ComputeAudioStreamSha256FromFile(filePath, fileSize, out _);
+                            swSha.Stop();
+                            if (_audit)
+                                Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
+                            return sha;
+                        });
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
 
                         var (features, error) = essentiaTask.Result;
@@ -1542,11 +1558,27 @@ namespace Truedat
                             : Task.FromResult(("", 0, (string?)null));
                         // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
                         // Phase 2 cheap identity signal; cost is negligible vs Essentia.
-                        var fingerprintTask = Task.Run(() => ComputeFingerprintV1(t.Location, fileSizeBytes, out _));
+                        var fingerprintTask = Task.Run(() =>
+                        {
+                            var swFp = Stopwatch.StartNew();
+                            var fp = ComputeFingerprintV1(t.Location, fileSizeBytes, out _);
+                            swFp.Stop();
+                            if (_audit)
+                                Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
+                            return fp;
+                        });
                         // audioStreamSha256 ride-along — ~100ms/file with SHA-NI over the audio
                         // region. Wire-only (not persisted in mbxmoods.json). Runs concurrently
                         // so it overlaps Essentia's much longer decode.
-                        var audioStreamSha256Task = Task.Run(() => ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _));
+                        var audioStreamSha256Task = Task.Run(() =>
+                        {
+                            var swSha = Stopwatch.StartNew();
+                            var sha = ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _);
+                            swSha.Stop();
+                            if (_audit)
+                                Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
+                            return sha;
+                        });
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
@@ -4788,9 +4820,13 @@ namespace Truedat
                     jw.WriteEndObject();
                 }
 
+                var bodyBytes = ms.Length;
                 var content = new ByteArrayContent(ms.ToArray());
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
+
+                if (_audit)
+                    Console.Error.WriteLine($"[AUDIT] postBodyBytes={bodyBytes} status={(int)response.StatusCode} file=\"{Path.GetFileName(filePath)}\"");
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -4801,6 +4837,8 @@ namespace Truedat
             }
             catch (Exception ex)
             {
+                if (_audit)
+                    Console.Error.WriteLine($"[AUDIT] postFailed file=\"{Path.GetFileName(filePath)}\" error=\"{ex.Message}\"");
                 Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
                 return false;
             }
