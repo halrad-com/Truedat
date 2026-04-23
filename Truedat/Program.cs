@@ -793,7 +793,10 @@ namespace Truedat
                         Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
                     return sha;
                 });
-                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afAudioMd5Task, afChromaTask, afFingerprintTask, afAudioStreamSha256Task });
+                // Tags ride-along — no iTunes XML source in --analyze-file, so pull
+                // artist/title/album/genre/duration from TagLib.
+                var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
+                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afAudioMd5Task, afChromaTask, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
 
                 var (features, error) = afEssentiaTask.Result;
                 var afFileMd5 = afFileMd5Task.Result;
@@ -803,6 +806,7 @@ namespace Truedat
                 var afChromaprint = string.IsNullOrEmpty(afChromaValue) ? null : afChromaValue;
                 var afFingerprintV1 = afFingerprintTask.Result;
                 var afAudioStreamSha256 = afAudioStreamSha256Task.Result;
+                var afTags = afTagsTask.Result;
 
                 afSw.Stop();
 
@@ -812,6 +816,12 @@ namespace Truedat
                     Environment.ExitCode = 3;
                     return;
                 }
+
+                features.Artist = afTags.Artist;
+                features.Title = afTags.Title;
+                features.Album = afTags.Album;
+                features.Genre = afTags.Genre;
+                features.FilePath = analyzeFilePath!;
 
                 var trackEntry = new TrackEntry
                 {
@@ -1071,7 +1081,11 @@ namespace Truedat
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
                             return sha;
                         });
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
+                        // Tags ride-along — --file-list has no iTunes XML source, so populate
+                        // artist/title/album/genre/duration from TagLib tags. Without this,
+                        // identity.metadataKey on the server is empty for every local scan.
+                        var tagsTask = Task.Run(() => ExtractFileTags(filePath));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task, tagsTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
@@ -1081,6 +1095,7 @@ namespace Truedat
                         var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
                         var fingerprintV1 = fingerprintTask.Result;
                         var audioStreamSha256 = audioStreamSha256Task.Result;
+                        var tags = tagsTask.Result;
 
                         if (features == null)
                         {
@@ -1089,6 +1104,12 @@ namespace Truedat
                             Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {error}");
                             return;
                         }
+
+                        features.Artist = tags.Artist;
+                        features.Title = tags.Title;
+                        features.Album = tags.Album;
+                        features.Genre = tags.Genre;
+                        features.FilePath = filePath;
 
                         var trackEntry = new TrackEntry
                         {
@@ -1100,11 +1121,11 @@ namespace Truedat
                         };
 
                         // POST to MetaServer if configured — use the full overload so identity
-                        // actually reaches the wire. --file-list has no iTunes metadata, so
-                        // stub the ITunesTrack (duration comes from fingerprintV1 on the server).
+                        // and tag-sourced metadata reach the wire. Stub ITunesTrack carries
+                        // duration from TagLib's Properties.Duration.
                         if (!string.IsNullOrEmpty(metaServerUrl))
                         {
-                            var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
+                            var stub = new ITunesTrack { TotalTimeMs = tags.DurationMs, Location = filePath };
                             PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
                                 chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256);
                         }
@@ -4986,6 +5007,41 @@ namespace Truedat
                 default:
                     return ("other", string.IsNullOrEmpty(raw) ? null : raw);
             }
+        }
+
+        /// <summary>File metadata lifted from TagLib tags for the non-XML scan paths
+        /// (--file-list, --analyze-file). Mirrors the iTunes XML metadata MoodsMode uses
+        /// so the MetaServer ingest row isn't empty-string for artist/title/album/genre.</summary>
+        internal sealed class FileTags
+        {
+            public string Artist = "";
+            public string Title = "";
+            public string Album = "";
+            public string Genre = "";
+            public int DurationMs;
+        }
+
+        /// <summary>Best-effort tag extraction. Defaults on failure — identity signals
+        /// still flow even if tags are unreadable (identity is the primary fleet signal).</summary>
+        static FileTags ExtractFileTags(string filePath)
+        {
+            var m = new FileTags();
+            try
+            {
+                using var tfile = TagLib.File.Create(filePath);
+                var tag = tfile.Tag;
+                if (tag != null)
+                {
+                    m.Artist = tag.FirstPerformer ?? tag.FirstAlbumArtist ?? "";
+                    m.Title = tag.Title ?? "";
+                    m.Album = tag.Album ?? "";
+                    m.Genre = tag.FirstGenre ?? "";
+                }
+                if (tfile.Properties != null)
+                    m.DurationMs = (int)tfile.Properties.Duration.TotalMilliseconds;
+            }
+            catch { /* best-effort */ }
+            return m;
         }
 
         /// <summary>Compute fingerprint.v1 composite. Returns null + error string on failure.</summary>
