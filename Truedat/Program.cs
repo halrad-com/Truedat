@@ -999,7 +999,8 @@ namespace Truedat
                             ? Task.Run(() => RunFpcalc(flFpcalcExe, filePath, CancellationToken.None))
                             : Task.FromResult(("", 0, (string?)null));
                         var fingerprintTask = Task.Run(() => ComputeFingerprintV1(filePath, fileSize, out _));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask });
+                        var audioStreamSha256Task = Task.Run(() => ComputeAudioStreamSha256FromFile(filePath, fileSize, out _));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
@@ -1008,6 +1009,7 @@ namespace Truedat
                         var (chromaValue, chromaDuration, _) = chromaTask.Result;
                         var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
                         var fingerprintV1 = fingerprintTask.Result;
+                        var audioStreamSha256 = audioStreamSha256Task.Result;
 
                         if (features == null)
                         {
@@ -1033,7 +1035,7 @@ namespace Truedat
                         {
                             var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
                             PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
-                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1);
+                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256);
                         }
 
                         // Accumulate for moods file
@@ -1541,7 +1543,11 @@ namespace Truedat
                         // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
                         // Phase 2 cheap identity signal; cost is negligible vs Essentia.
                         var fingerprintTask = Task.Run(() => ComputeFingerprintV1(t.Location, fileSizeBytes, out _));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask });
+                        // audioStreamSha256 ride-along — ~100ms/file with SHA-NI over the audio
+                        // region. Wire-only (not persisted in mbxmoods.json). Runs concurrently
+                        // so it overlaps Essentia's much longer decode.
+                        var audioStreamSha256Task = Task.Run(() => ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -1560,6 +1566,7 @@ namespace Truedat
                             Console.WriteLine($"  DEBUG chromaprint: {chromaErr}");
 
                         var fingerprintV1 = fingerprintTask.Result;
+                        var audioStreamSha256 = audioStreamSha256Task.Result;
 
                         if (feat == null)
                         {
@@ -1585,7 +1592,7 @@ namespace Truedat
                         // POST to MetaServer if configured (fire per-track, not buffered)
                         if (metaServerUrl != null)
                         {
-                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1);
+                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256);
                         }
 
                         if (writeFile)
@@ -4642,7 +4649,7 @@ namespace Truedat
         /// </summary>
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
             string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track,
-            FingerprintV1? fingerprintV1 = null)
+            FingerprintV1? fingerprintV1 = null, string? audioStreamSha256 = null)
         {
             try
             {
@@ -4688,6 +4695,10 @@ namespace Truedat
                     // emit identity-complete rows for the ms-scale peer-pull ping path.
                     if (fingerprintV1 != null)
                         WriteFingerprintV1(jw, fingerprintV1);
+                    // Phase 2 durable byte identity — previously stream-only. Ride-along in
+                    // default mode is cheap with SHA-NI; wire-only, not persisted in mbxmoods.json.
+                    if (!string.IsNullOrEmpty(audioStreamSha256))
+                        jw.WriteString("audioStreamSha256", audioStreamSha256);
                     jw.WriteEndObject();
 
                     // features
@@ -4953,6 +4964,36 @@ namespace Truedat
                     InvariantStart = invStart,
                     InvariantEnd = invEnd,
                 };
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Ride-along entry point: parse TagLib bounds, then SHA-256 the audio region.
+        /// Kept separate from ComputeFingerprintV1 so the two run concurrently without
+        /// one blocking the other on a shared result. Second TagLib open costs ~5ms.
+        /// </summary>
+        static string? ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error)
+        {
+            error = null;
+            try
+            {
+                long invStart, invEnd;
+                using (var tfile = TagLib.File.Create(filePath))
+                {
+                    invStart = tfile.InvariantStartPosition;
+                    invEnd = tfile.InvariantEndPosition;
+                }
+                if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
+                {
+                    invStart = 0;
+                    invEnd = fileSize;
+                }
+                return ComputeAudioStreamSha256(filePath, invStart, invEnd, out error);
             }
             catch (Exception ex)
             {
