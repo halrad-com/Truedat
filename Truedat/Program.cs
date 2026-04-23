@@ -749,6 +749,11 @@ namespace Truedat
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
+                // Identity tools — same resolution as MoodsMode/--file-list. Shell's
+                // ReportComplete path reads fileMd5/audioMd5/audioStreamSha256/fingerprint.v1
+                // from the outer wrapper of our stdout JSON (ScanWorker.cs:933-955).
+                var afMd5Exe = FindTool("essentia_streaming_md5.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
+                var afFpcalcExe = FindTool("fpcalc.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
 
                 if (afEssentiaExe == null)
                 {
@@ -760,8 +765,44 @@ namespace Truedat
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
-                var (features, error) = AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!,
-                    new FileInfo(analyzeFilePath!).Length, CancellationToken.None);
+                var afFileSize = new FileInfo(analyzeFilePath!).Length;
+                // Identity ride-along — mirrors MoodsMode:1527-1544 and --file-list.
+                var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!, afFileSize, CancellationToken.None));
+                var afFileMd5Task = Task.Run(() => ComputeFileMd5(analyzeFilePath!));
+                var afAudioMd5Task = afMd5Exe != null
+                    ? Task.Run(() => RunMd5(afMd5Exe, analyzeFilePath!, CancellationToken.None))
+                    : Task.FromResult(("", (string?)null));
+                var afChromaTask = afFpcalcExe != null
+                    ? Task.Run(() => RunFpcalc(afFpcalcExe, analyzeFilePath!, CancellationToken.None))
+                    : Task.FromResult(("", 0, (string?)null));
+                var afFingerprintTask = Task.Run(() =>
+                {
+                    var swFp = Stopwatch.StartNew();
+                    var fp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                    swFp.Stop();
+                    if (_audit)
+                        Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
+                    return fp;
+                });
+                var afAudioStreamSha256Task = Task.Run(() =>
+                {
+                    var swSha = Stopwatch.StartNew();
+                    var sha = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                    swSha.Stop();
+                    if (_audit)
+                        Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
+                    return sha;
+                });
+                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afAudioMd5Task, afChromaTask, afFingerprintTask, afAudioStreamSha256Task });
+
+                var (features, error) = afEssentiaTask.Result;
+                var afFileMd5 = afFileMd5Task.Result;
+                var (afAudioMd5Value, _) = afAudioMd5Task.Result;
+                var afAudioMd5 = string.IsNullOrEmpty(afAudioMd5Value) ? null : afAudioMd5Value;
+                var (afChromaValue, afChromaDuration, _) = afChromaTask.Result;
+                var afChromaprint = string.IsNullOrEmpty(afChromaValue) ? null : afChromaValue;
+                var afFingerprintV1 = afFingerprintTask.Result;
+                var afAudioStreamSha256 = afAudioStreamSha256Task.Result;
 
                 afSw.Stop();
 
@@ -776,10 +817,14 @@ namespace Truedat
                 {
                     Features = features,
                     LastModified = File.GetLastWriteTimeUtc(analyzeFilePath),
-                    AnalysisDurationSecs = afSw.Elapsed.TotalSeconds
+                    AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
+                    FileMd5 = afFileMd5,
+                    AudioMd5 = afAudioMd5
                 };
 
-                // Output features as JSON to stdout
+                // Output features as JSON to stdout. Identity fields not already on the
+                // TrackEntry (fingerprint.v1, audioStreamSha256, chromaprint) ride on the
+                // outer wrapper — Shell's IngestViaMetaService falls back to outerRoot.
                 if (jsonOutput)
                 {
                     using var ms = new MemoryStream();
@@ -787,6 +832,16 @@ namespace Truedat
                     {
                         jw.WriteStartObject();
                         WriteTrackEntry(jw, Path.GetFullPath(analyzeFilePath), trackEntry);
+                        if (afFingerprintV1 != null)
+                            WriteFingerprintV1(jw, afFingerprintV1);
+                        if (!string.IsNullOrEmpty(afAudioStreamSha256))
+                            jw.WriteString("audioStreamSha256", afAudioStreamSha256);
+                        if (!string.IsNullOrEmpty(afChromaprint))
+                        {
+                            jw.WriteString("chromaprint", afChromaprint);
+                            if (afChromaDuration > 0)
+                                jw.WriteNumber("chromaprintDuration", afChromaDuration);
+                        }
                         jw.WriteEndObject();
                     }
                     Console.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
