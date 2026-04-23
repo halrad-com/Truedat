@@ -945,9 +945,14 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
 
-                // Find Essentia
+                // Find Essentia + identity tools (mirror MoodsMode resolution at :1158-1169).
+                // Without these, --file-list mode posted identity:{} even though the deployed
+                // exe advertised fingerprint.v1 ride-along. Symptom: 0 identity across 3,909
+                // fleet scans. See docs/analysis/2026-04-22-phase2-emission-audit.md.
                 var flBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var flEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", flBaseDir, Environment.CurrentDirectory);
+                var flMd5Exe = FindTool("essentia_streaming_md5.exe", flBaseDir, Environment.CurrentDirectory);
+                var flFpcalcExe = FindTool("fpcalc.exe", flBaseDir, Environment.CurrentDirectory);
                 if (flEssentiaExe == null)
                 {
                     Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
@@ -982,7 +987,27 @@ namespace Truedat
                     try
                     {
                         var fileSize = new FileInfo(filePath).Length;
-                        var (features, error) = AnalyzeWithEssentia(flEssentiaExe, filePath, fileSize, CancellationToken.None);
+
+                        // Identity ride-along — same concurrency pattern as MoodsMode at :1497-1513.
+                        // Without this, --file-list mode was POSTing identity:{} (features-only).
+                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(flEssentiaExe, filePath, fileSize, CancellationToken.None));
+                        var fileMd5Task = Task.Run(() => ComputeFileMd5(filePath));
+                        var audioMd5Task = flMd5Exe != null
+                            ? Task.Run(() => RunMd5(flMd5Exe, filePath, CancellationToken.None))
+                            : Task.FromResult(("", (string?)null));
+                        var chromaTask = flFpcalcExe != null
+                            ? Task.Run(() => RunFpcalc(flFpcalcExe, filePath, CancellationToken.None))
+                            : Task.FromResult(("", 0, (string?)null));
+                        var fingerprintTask = Task.Run(() => ComputeFingerprintV1(filePath, fileSize, out _));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask });
+
+                        var (features, error) = essentiaTask.Result;
+                        var fileMd5 = fileMd5Task.Result;
+                        var (audioMd5Value, _) = audioMd5Task.Result;
+                        var audioMd5 = string.IsNullOrEmpty(audioMd5Value) ? null : audioMd5Value;
+                        var (chromaValue, chromaDuration, _) = chromaTask.Result;
+                        var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
+                        var fingerprintV1 = fingerprintTask.Result;
 
                         if (features == null)
                         {
@@ -996,13 +1021,19 @@ namespace Truedat
                         {
                             Features = features,
                             LastModified = File.GetLastWriteTimeUtc(filePath),
-                            AnalysisDurationSecs = 0 // individual timing not tracked in batch
+                            AnalysisDurationSecs = 0, // individual timing not tracked in batch
+                            FileMd5 = fileMd5,
+                            AudioMd5 = audioMd5
                         };
 
-                        // POST to MetaServer if configured
+                        // POST to MetaServer if configured — use the full overload so identity
+                        // actually reaches the wire. --file-list has no iTunes metadata, so
+                        // stub the ITunesTrack (duration comes from fingerprintV1 on the server).
                         if (!string.IsNullOrEmpty(metaServerUrl))
                         {
-                            PostToMetaServer(metaServerUrl!, filePath, features, fileSize);
+                            var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
+                            PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
+                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1);
                         }
 
                         // Accumulate for moods file
@@ -4762,15 +4793,6 @@ namespace Truedat
                 Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
                 return false;
             }
-        }
-
-        /// <summary>
-        /// PostToMetaServer overload for file-list mode (no iTunes metadata available).
-        /// </summary>
-        static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat, long fileSize)
-        {
-            var stub = new ITunesTrack { TotalTimeMs = 0, Location = filePath };
-            return PostToMetaServer(baseUrl, filePath, feat, null, null, null, 0, fileSize, stub);
         }
 
         /// <summary>Composite cheap fingerprint for a file. Sub-10ms per file on warm cache.</summary>
