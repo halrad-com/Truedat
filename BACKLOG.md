@@ -6,11 +6,16 @@
 Essentia. `fingerprint.v1` composite (pathTail + fileSize + audio props + 64 KB
 invariant-region MD5) is the ms-scale peer-pull ping primitive; `stream` level
 adds durable `audioStreamSha256` over the audio region. Default Essentia scans
-ride-along `fingerprint.v1` via a 5th concurrent task. Zero new deps. Wire
-format frozen at `docs/reference/identity-wire-format.md`; consumed by the
-MetaServer side (Phase 2 Track B, separate repo).
+ride-along both `fingerprint.v1` and `audioStreamSha256` via two concurrent
+tasks (6 total: essentia + fileMd5 + audioMd5 + chromaprint + fingerprintV1 +
+audioStreamSha256), so every full scan emits an identity-complete row —
+not just `--hash-only --level stream` runs. Zero new deps. Wire format frozen
+at `docs/reference/identity-wire-format.md`; consumed by the MetaServer side
+(Phase 2 Track B, separate repo).
 
-Commit: `a6a0fe7`
+Commits: `a6a0fe7` (Track A CLI + fingerprint.v1 ride-along), `10a2940`
+(audioStreamSha256 ride-along in default mode), `eb241a3` (wire-format +
+CLAUDE.md sync).
 
 ## ~~Seed mbxmoods.json from AcousticBrainz/MusicBrainz~~ DONE
 
