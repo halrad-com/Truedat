@@ -1123,11 +1123,15 @@ namespace Truedat
                         // POST to MetaServer if configured — use the full overload so identity
                         // and tag-sourced metadata reach the wire. Stub ITunesTrack carries
                         // duration from TagLib's Properties.Duration.
+                        // V1-BLOCKER fix — POST false returns now count toward flFailed so the
+                        // exit code at line ~1175 reflects POST failures. --file-list mode's
+                        // whole purpose is to post, so POST failure IS a file failure here.
                         if (!string.IsNullOrEmpty(metaServerUrl))
                         {
                             var stub = new ITunesTrack { TotalTimeMs = tags.DurationMs, Location = filePath };
-                            PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
-                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256);
+                            if (!PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
+                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256))
+                                Interlocked.Increment(ref flFailed);
                         }
 
                         // Accumulate for moods file
@@ -1351,6 +1355,11 @@ namespace Truedat
             int analyzed = 0;
             int skipped = 0;
             int failed = 0;
+            // V1-BLOCKER fix — track POST failures separately from analysis failures
+            // (exceptions). Previously PostToMetaServer's false return was discarded:
+            // MetaServer offline → 100% silent data loss, exit 0, Shell credits
+            // TotalAnalyzed. Now reflected in exit code + summary.
+            int postFailed = 0;
             int timedOut = 0;
             int processed = 0;
             int total = tracks.Count;
@@ -1697,10 +1706,13 @@ namespace Truedat
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
 
-                        // POST to MetaServer if configured (fire per-track, not buffered)
+                        // POST to MetaServer if configured (fire per-track, not buffered).
+                        // V1-BLOCKER fix — capture the bool return so the exit code can reflect
+                        // POST failures. Prior behavior: return value discarded, silent data loss.
                         if (metaServerUrl != null)
                         {
-                            PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256);
+                            if (!PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256))
+                                Interlocked.Increment(ref postFailed);
                         }
 
                         if (writeFile)
@@ -1768,7 +1780,12 @@ namespace Truedat
             if (writeFile)
                 Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (metaServerUrl != null)
-                Console.WriteLine($"  MetaServer: {analyzed} tracks posted to {metaServerUrl}");
+            {
+                if (postFailed > 0)
+                    Console.WriteLine($"  MetaServer: {analyzed - postFailed}/{analyzed} posted to {metaServerUrl}  ({postFailed} FAILED — data NOT persisted server-side)");
+                else
+                    Console.WriteLine($"  MetaServer: {analyzed} tracks posted to {metaServerUrl}");
+            }
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
@@ -1791,7 +1808,10 @@ namespace Truedat
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
 
-            if (failed > 0)
+            // V1-BLOCKER fix — postFailed reflects MetaServer POST rejections separate
+            // from analysis exceptions. Either condition makes the run a failure so
+            // downstream (Shell ScanWorker) can't credit a silent-loss run as success.
+            if (failed > 0 || postFailed > 0)
                 Environment.ExitCode = 1;
         }
 
