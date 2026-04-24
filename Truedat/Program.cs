@@ -4917,7 +4917,7 @@ namespace Truedat
                 }
 
                 var bodyBytes = ms.Length;
-                var content = new ByteArrayContent(ms.ToArray());
+                using var content = new ByteArrayContent(ms.ToArray());
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
 
@@ -5262,7 +5262,7 @@ namespace Truedat
                     jw.WriteEndObject();
                 }
 
-                var content = new ByteArrayContent(ms.ToArray());
+                using var content = new ByteArrayContent(ms.ToArray());
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
 
