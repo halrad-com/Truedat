@@ -1391,6 +1391,56 @@ namespace Truedat
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Parallelism: {parallelism} threads");
             Console.WriteLine();
+
+            // Cross-host MetaServer pre-pass — batch-lookup features by audioHead64kMd5
+            // before launching Essentia workers. Mirror-library scenario: if a peer
+            // already scanned this audio (same bytes, different drive letter), we pull
+            // the cached features in one batch round-trip and skip Essentia entirely.
+            // Best-effort: any failure leaves metaPreCache empty and the worker pool
+            // proceeds normally through path-cache + cross-MD5 + live MetaServer + Essentia.
+            var metaPreCache = new ConcurrentDictionary<string, TrackFeatures>(PathComparer.Instance);
+            if (!string.IsNullOrEmpty(metaServerUrl))
+            {
+                Console.WriteLine($"  Pre-pass: querying MetaServer for {tracks.Count} fingerprints...");
+                var prePassSw = Stopwatch.StartNew();
+                var heads = new List<string>(tracks.Count);
+                var headByPath = new Dictionary<string, string>(tracks.Count, PathComparer.Instance);
+                int fpFailed = 0;
+                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, t =>
+                {
+                    try
+                    {
+                        var fi = new FileInfo(t.Location);
+                        if (!fi.Exists) return;
+                        var fp = ComputeFingerprintV1(t.Location, fi.Length, out _);
+                        if (fp != null && !string.IsNullOrEmpty(fp.AudioHead64kMd5))
+                        {
+                            lock (heads)
+                            {
+                                heads.Add(fp.AudioHead64kMd5);
+                                headByPath[t.Location] = fp.AudioHead64kMd5;
+                            }
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref fpFailed);
+                        }
+                    }
+                    catch
+                    {
+                        Interlocked.Increment(ref fpFailed);
+                    }
+                });
+                var batchHits = LookupMetaServerBatch(metaServerUrl!, heads);
+                foreach (var kvp in headByPath)
+                    if (batchHits.TryGetValue(kvp.Value, out var feat))
+                        metaPreCache[kvp.Key] = feat;
+                prePassSw.Stop();
+                Console.WriteLine($"  Pre-pass: {metaPreCache.Count} cache hits, {tracks.Count - metaPreCache.Count} need scanning ({prePassSw.Elapsed.TotalSeconds:F1}s)");
+                if (fpFailed > 0 && _audit)
+                    Console.WriteLine($"  Pre-pass: {fpFailed} fingerprint computations failed (those tracks fall through to Essentia)");
+            }
+
             try
             {
                 Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
@@ -1407,6 +1457,37 @@ namespace Truedat
                         {
                             Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
                             Interlocked.Increment(ref skipped);
+                            return;
+                        }
+
+                        // Cross-host pre-pass cache hit — features pulled from MetaServer in
+                        // the batch round-trip before this worker pool started. Apply the
+                        // same canary gate as the local cross-MD5 path (DR + LoudnessMomentary
+                        // present) so stale pre-canary entries still re-extract.
+                        if (metaPreCache.TryGetValue(t.Location, out var preFeat)
+                            && preFeat.DynamicRange.HasValue
+                            && preFeat.LoudnessMomentary.HasValue)
+                        {
+                            // Override metadata from local iTunes XML — MetaServer's stored
+                            // metadata came from whichever endpoint scanned first; local
+                            // iTunes is the source of truth for this endpoint.
+                            preFeat.TrackId = t.TrackId;
+                            preFeat.Artist = t.Artist;
+                            preFeat.Title = t.Name;
+                            preFeat.Album = t.Album;
+                            preFeat.Genre = t.Genre;
+                            preFeat.FilePath = t.Location;
+                            var currentLastMod = DateTime.MinValue;
+                            try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                            allTracks[t.Location] = new TrackEntry
+                            {
+                                Features = preFeat,
+                                LastModified = currentLastMod,
+                                FileMd5 = ComputeFileMd5(t.Location)
+                            };
+                            Interlocked.Increment(ref _metaServerPreCacheHits);
+                            Interlocked.Increment(ref cachedCount);
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached: meta-server pre-pass)");
                             return;
                         }
 
@@ -1606,6 +1687,44 @@ namespace Truedat
                             if (sizeMb >= 100) sizeTag = $" [{sizeMb:F0} MB]";
                         }
                         catch { }
+
+                        // Live MetaServer fallback \u2014 for tracks the pre-pass missed (e.g., file
+                        // added after the pre-pass walk, or a transient batch failure for that
+                        // chunk). Sync fingerprint + GET. Best-effort: any failure falls through
+                        // to Essentia. The per-track fp is recomputed inside fingerprintTask
+                        // below; double-cost (~5ms) only on cache+MetaServer miss path.
+                        if (!string.IsNullOrEmpty(metaServerUrl) && fileSizeBytes > 0)
+                        {
+                            var fpLookup = ComputeFingerprintV1(t.Location, fileSizeBytes, out _);
+                            if (fpLookup != null && !string.IsNullOrEmpty(fpLookup.AudioHead64kMd5))
+                            {
+                                var msFeatures = LookupMetaServerByFingerprint(metaServerUrl!, fpLookup.AudioHead64kMd5);
+                                if (msFeatures != null
+                                    && msFeatures.DynamicRange.HasValue
+                                    && msFeatures.LoudnessMomentary.HasValue)
+                                {
+                                    msFeatures.TrackId = t.TrackId;
+                                    msFeatures.Artist = t.Artist;
+                                    msFeatures.Title = t.Name;
+                                    msFeatures.Album = t.Album;
+                                    msFeatures.Genre = t.Genre;
+                                    msFeatures.FilePath = t.Location;
+                                    var currentLastMod = DateTime.MinValue;
+                                    try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                    allTracks[t.Location] = new TrackEntry
+                                    {
+                                        Features = msFeatures,
+                                        LastModified = currentLastMod,
+                                        FileMd5 = ComputeFileMd5(t.Location)
+                                    };
+                                    Interlocked.Increment(ref _metaServerCacheHits);
+                                    Interlocked.Increment(ref cachedCount);
+                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached: meta-server)");
+                                    return;
+                                }
+                            }
+                        }
+
                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
 
                         // Pre-flight: skip files that exceed Essentia's ChordsDetection buffer
@@ -1772,6 +1891,10 @@ namespace Truedat
             Console.WriteLine($"  Cached:     {cachedCount}");
             if (crossPathMoods > 0)
                 Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
+            if (_metaServerPreCacheHits > 0)
+                Console.WriteLine($"  Meta pre:   {_metaServerPreCacheHits}  (of {cachedCount} cached, batch pre-pass)");
+            if (_metaServerCacheHits > 0)
+                Console.WriteLine($"  Meta live:  {_metaServerCacheHits}  (of {cachedCount} cached, per-track fallback)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
@@ -4231,84 +4354,12 @@ namespace Truedat
                     else if (!DateTime.TryParse(lastModStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastMod))
                         continue;
 
-                    double[]? mfcc = null;
-                    if (track.TryGetProperty("mfcc", out var mfccEl) && mfccEl.ValueKind == JsonValueKind.Array)
-                    {
-                        mfcc = new double[mfccEl.GetArrayLength()];
-                        int idx = 0;
-                        foreach (var v in mfccEl.EnumerateArray())
-                            mfcc[idx++] = v.GetDouble();
-                    }
-
+                    var features = ParseTrackFeaturesFromJson(track);
+                    features.FilePath = filePath;
                     allTracks[filePath] = new TrackEntry
                     {
                         LastModified = lastMod,
-                        Features = new TrackFeatures
-                        {
-                            FilePath = filePath,
-                            TrackId = GetInt(track, "trackId"),
-                            Artist = GetStr(track, "artist"),
-                            Title = GetStr(track, "title"),
-                            Album = GetStr(track, "album"),
-                            Genre = GetStr(track, "genre"),
-                            Bpm = GetDbl(track, "bpm"),
-                            Key = GetStr(track, "key"),
-                            Mode = GetStr(track, "mode"),
-                            SpectralCentroid = GetDbl(track, "spectralCentroid"),
-                            SpectralFlux = GetDbl(track, "spectralFlux"),
-                            Loudness = GetDbl(track, "loudness"),
-                            Danceability = GetDbl(track, "danceability"),
-                            OnsetRate = GetDbl(track, "onsetRate"),
-                            ZeroCrossingRate = GetDbl(track, "zeroCrossingRate"),
-                            SpectralRms = GetDbl(track, "spectralRms"),
-                            SpectralFlatness = GetDbl(track, "spectralFlatness"),
-                            Dissonance = GetDbl(track, "dissonance"),
-                            PitchSalience = GetDbl(track, "pitchSalience"),
-                            ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
-                            Mfcc = mfcc,
-                            DynamicRange = GetNullableDbl(track, "dynamicRange"),
-                            DynamicRangeSource = track.TryGetProperty("dynamicRangeSource", out var drs) && drs.ValueKind == JsonValueKind.String ? drs.GetString() : null,
-                            // Extended features — every one nullable; missing → null, not 0.
-                            LoudnessMomentary = GetNullableDbl(track, "loudnessMomentary"),
-                            LoudnessShortTerm = GetNullableDbl(track, "loudnessShortTerm"),
-                            ReplayGain = GetNullableDbl(track, "replayGain"),
-                            SilenceRate20dB = GetNullableDbl(track, "silenceRate20dB"),
-                            SilenceRate30dB = GetNullableDbl(track, "silenceRate30dB"),
-                            SilenceRate60dB = GetNullableDbl(track, "silenceRate60dB"),
-                            SpectralRolloff = GetNullableDbl(track, "spectralRolloff"),
-                            SpectralComplexity = GetNullableDbl(track, "spectralComplexity"),
-                            SpectralEntropy = GetNullableDbl(track, "spectralEntropy"),
-                            SpectralKurtosis = GetNullableDbl(track, "spectralKurtosis"),
-                            SpectralSkewness = GetNullableDbl(track, "spectralSkewness"),
-                            SpectralSpread = GetNullableDbl(track, "spectralSpread"),
-                            SpectralStrongPeak = GetNullableDbl(track, "spectralStrongPeak"),
-                            SpectralDecrease = GetNullableDbl(track, "spectralDecrease"),
-                            SpectralEnergy = GetNullableDbl(track, "spectralEnergy"),
-                            SpectralEnergyLow = GetNullableDbl(track, "spectralEnergyLow"),
-                            SpectralEnergyMidLow = GetNullableDbl(track, "spectralEnergyMidLow"),
-                            SpectralEnergyMidHigh = GetNullableDbl(track, "spectralEnergyMidHigh"),
-                            SpectralEnergyHigh = GetNullableDbl(track, "spectralEnergyHigh"),
-                            Hfc = GetNullableDbl(track, "hfc"),
-                            BarkCrest = GetNullableDbl(track, "barkCrest"),
-                            BarkFlatness = GetNullableDbl(track, "barkFlatness"),
-                            BarkKurtosis = GetNullableDbl(track, "barkKurtosis"),
-                            BarkSkewness = GetNullableDbl(track, "barkSkewness"),
-                            BarkSpread = GetNullableDbl(track, "barkSpread"),
-                            ErbCrest = GetNullableDbl(track, "erbCrest"),
-                            ErbFlatness = GetNullableDbl(track, "erbFlatness"),
-                            ErbKurtosis = GetNullableDbl(track, "erbKurtosis"),
-                            ErbSkewness = GetNullableDbl(track, "erbSkewness"),
-                            ErbSpread = GetNullableDbl(track, "erbSpread"),
-                            MelCrest = GetNullableDbl(track, "melCrest"),
-                            MelFlatness = GetNullableDbl(track, "melFlatness"),
-                            MelKurtosis = GetNullableDbl(track, "melKurtosis"),
-                            MelSkewness = GetNullableDbl(track, "melSkewness"),
-                            MelSpread = GetNullableDbl(track, "melSpread"),
-                            BeatsLoudness = GetNullableDbl(track, "beatsLoudness"),
-                            ChordsStrength = GetNullableDbl(track, "chordsStrength"),
-                            HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
-                            HpcpEntropy = GetNullableDbl(track, "hpcpEntropy")
-                        },
+                        Features = features,
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
                         FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
                         AudioMd5 = GetStr(track, "audioMd5") is var amd5Str && amd5Str.Length > 0 ? amd5Str : null
@@ -4338,6 +4389,115 @@ namespace Truedat
                 Console.WriteLine($"WARNING: Could not load existing moods ({ex.Message})");
                 return 0;
             }
+        }
+
+        /// <summary>
+        /// Parse a per-track JsonElement (as written by WriteTrackEntry) into TrackFeatures.
+        /// Mirror of WriteTrackEntry's field-by-field serialization. Used by both
+        /// LoadExistingMoods (local mbxmoods.json) and ParseTrackFeaturesFromMetaServer
+        /// (MetaServer /meta/features/by-fingerprint hit). Caller fills FilePath.
+        /// </summary>
+        static TrackFeatures ParseTrackFeaturesFromJson(JsonElement track)
+        {
+            // mfcc is a JSON array in mbxmoods.json (truedat writes via WriteStartArray)
+            // but a stringified JSON array in MetaServer responses (FeatureData.Mfcc is
+            // typed string? — MBXHub stores the raw text in a string DB column and
+            // re-serializes it as a JSON string value). Accept both shapes.
+            double[]? mfcc = null;
+            if (track.TryGetProperty("mfcc", out var mfccEl))
+            {
+                if (mfccEl.ValueKind == JsonValueKind.Array)
+                {
+                    mfcc = new double[mfccEl.GetArrayLength()];
+                    int idx = 0;
+                    foreach (var v in mfccEl.EnumerateArray())
+                        mfcc[idx++] = v.GetDouble();
+                }
+                else if (mfccEl.ValueKind == JsonValueKind.String)
+                {
+                    var raw = mfccEl.GetString();
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        try
+                        {
+                            using var inner = JsonDocument.Parse(raw!);
+                            if (inner.RootElement.ValueKind == JsonValueKind.Array)
+                            {
+                                mfcc = new double[inner.RootElement.GetArrayLength()];
+                                int idx = 0;
+                                foreach (var v in inner.RootElement.EnumerateArray())
+                                    mfcc[idx++] = v.GetDouble();
+                            }
+                        }
+                        catch { /* leave mfcc null on malformed string */ }
+                    }
+                }
+            }
+
+            return new TrackFeatures
+            {
+                TrackId = GetInt(track, "trackId"),
+                Artist = GetStr(track, "artist"),
+                Title = GetStr(track, "title"),
+                Album = GetStr(track, "album"),
+                Genre = GetStr(track, "genre"),
+                Bpm = GetDbl(track, "bpm"),
+                Key = GetStr(track, "key"),
+                Mode = GetStr(track, "mode"),
+                SpectralCentroid = GetDbl(track, "spectralCentroid"),
+                SpectralFlux = GetDbl(track, "spectralFlux"),
+                Loudness = GetDbl(track, "loudness"),
+                Danceability = GetDbl(track, "danceability"),
+                OnsetRate = GetDbl(track, "onsetRate"),
+                ZeroCrossingRate = GetDbl(track, "zeroCrossingRate"),
+                SpectralRms = GetDbl(track, "spectralRms"),
+                SpectralFlatness = GetDbl(track, "spectralFlatness"),
+                Dissonance = GetDbl(track, "dissonance"),
+                PitchSalience = GetDbl(track, "pitchSalience"),
+                ChordsChangesRate = GetDbl(track, "chordsChangesRate"),
+                Mfcc = mfcc,
+                DynamicRange = GetNullableDbl(track, "dynamicRange"),
+                DynamicRangeSource = track.TryGetProperty("dynamicRangeSource", out var drs) && drs.ValueKind == JsonValueKind.String ? drs.GetString() : null,
+                LoudnessMomentary = GetNullableDbl(track, "loudnessMomentary"),
+                LoudnessShortTerm = GetNullableDbl(track, "loudnessShortTerm"),
+                ReplayGain = GetNullableDbl(track, "replayGain"),
+                SilenceRate20dB = GetNullableDbl(track, "silenceRate20dB"),
+                SilenceRate30dB = GetNullableDbl(track, "silenceRate30dB"),
+                SilenceRate60dB = GetNullableDbl(track, "silenceRate60dB"),
+                SpectralRolloff = GetNullableDbl(track, "spectralRolloff"),
+                SpectralComplexity = GetNullableDbl(track, "spectralComplexity"),
+                SpectralEntropy = GetNullableDbl(track, "spectralEntropy"),
+                SpectralKurtosis = GetNullableDbl(track, "spectralKurtosis"),
+                SpectralSkewness = GetNullableDbl(track, "spectralSkewness"),
+                SpectralSpread = GetNullableDbl(track, "spectralSpread"),
+                SpectralStrongPeak = GetNullableDbl(track, "spectralStrongPeak"),
+                SpectralDecrease = GetNullableDbl(track, "spectralDecrease"),
+                SpectralEnergy = GetNullableDbl(track, "spectralEnergy"),
+                SpectralEnergyLow = GetNullableDbl(track, "spectralEnergyLow"),
+                SpectralEnergyMidLow = GetNullableDbl(track, "spectralEnergyMidLow"),
+                SpectralEnergyMidHigh = GetNullableDbl(track, "spectralEnergyMidHigh"),
+                SpectralEnergyHigh = GetNullableDbl(track, "spectralEnergyHigh"),
+                Hfc = GetNullableDbl(track, "hfc"),
+                BarkCrest = GetNullableDbl(track, "barkCrest"),
+                BarkFlatness = GetNullableDbl(track, "barkFlatness"),
+                BarkKurtosis = GetNullableDbl(track, "barkKurtosis"),
+                BarkSkewness = GetNullableDbl(track, "barkSkewness"),
+                BarkSpread = GetNullableDbl(track, "barkSpread"),
+                ErbCrest = GetNullableDbl(track, "erbCrest"),
+                ErbFlatness = GetNullableDbl(track, "erbFlatness"),
+                ErbKurtosis = GetNullableDbl(track, "erbKurtosis"),
+                ErbSkewness = GetNullableDbl(track, "erbSkewness"),
+                ErbSpread = GetNullableDbl(track, "erbSpread"),
+                MelCrest = GetNullableDbl(track, "melCrest"),
+                MelFlatness = GetNullableDbl(track, "melFlatness"),
+                MelKurtosis = GetNullableDbl(track, "melKurtosis"),
+                MelSkewness = GetNullableDbl(track, "melSkewness"),
+                MelSpread = GetNullableDbl(track, "melSpread"),
+                BeatsLoudness = GetNullableDbl(track, "beatsLoudness"),
+                ChordsStrength = GetNullableDbl(track, "chordsStrength"),
+                HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
+                HpcpEntropy = GetNullableDbl(track, "hpcpEntropy")
+            };
         }
 
         static string ExtractEssentiaError(string stderr, int exitCode)
@@ -4938,6 +5098,112 @@ namespace Truedat
                 Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
                 return false;
             }
+        }
+
+        // Cross-host cache hit counters — populated by the MetaServer lookup paths.
+        // Pre-pass = batch GET before the worker pool; live = per-track GET as fallback.
+        static int _metaServerPreCacheHits;
+        static int _metaServerCacheHits;
+
+        /// <summary>
+        /// Cross-host cache lookup. GET /meta/features/by-fingerprint/{audioHead64kMd5}.
+        /// Returns parsed features on hit, null on miss / error / timeout. Best-effort:
+        /// every failure mode falls through silently to local cache + Essentia.
+        /// </summary>
+        static TrackFeatures? LookupMetaServerByFingerprint(string baseUrl, string audioHead64kMd5)
+        {
+            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(audioHead64kMd5)) return null;
+            try
+            {
+                var url = baseUrl.TrimEnd('/') + "/meta/features/by-fingerprint/" + audioHead64kMd5;
+                using var resp = _metaClient.GetAsync(url).GetAwaiter().GetResult();
+                if (!resp.IsSuccessStatusCode) return null;
+                var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("matched", out var m) || m.ValueKind != JsonValueKind.True) return null;
+                if (!root.TryGetProperty("features", out var f) || f.ValueKind != JsonValueKind.Object) return null;
+                return ParseTrackFeaturesFromJson(f);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Pre-pass batch lookup. POST /meta/features/batch with chunks of up to 500
+        /// queries (MBXHub returns 400 BATCH_TOO_LARGE above that). Returns dictionary
+        /// keyed by audioHead64kMd5 → TrackFeatures (case-insensitive). Best-effort:
+        /// any chunk failure leaves those keys absent from the result and the caller
+        /// falls back to per-track lookup or Essentia.
+        /// </summary>
+        static Dictionary<string, TrackFeatures> LookupMetaServerBatch(
+            string baseUrl, IReadOnlyList<string> audioHead64kMd5s)
+        {
+            var hits = new Dictionary<string, TrackFeatures>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(baseUrl) || audioHead64kMd5s == null || audioHead64kMd5s.Count == 0)
+                return hits;
+
+            var url = baseUrl.TrimEnd('/') + "/meta/features/batch";
+            const int ChunkSize = 500;
+            for (int i = 0; i < audioHead64kMd5s.Count; i += ChunkSize)
+            {
+                int sliceLen = Math.Min(ChunkSize, audioHead64kMd5s.Count - i);
+                var slice = new string[sliceLen];
+                for (int k = 0; k < sliceLen; k++) slice[k] = audioHead64kMd5s[i + k];
+
+                try
+                {
+                    byte[] bodyBytes;
+                    using (var ms = new MemoryStream())
+                    {
+                        using (var jw = new Utf8JsonWriter(ms))
+                        {
+                            jw.WriteStartObject();
+                            jw.WritePropertyName("queries");
+                            jw.WriteStartArray();
+                            foreach (var h in slice)
+                            {
+                                jw.WriteStartObject();
+                                jw.WriteString("fingerprintAudioHead", h);
+                                jw.WriteEndObject();
+                            }
+                            jw.WriteEndArray();
+                            jw.WriteEndObject();
+                        }
+                        bodyBytes = ms.ToArray();
+                    }
+
+                    using var content = new ByteArrayContent(bodyBytes);
+                    content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                    using var resp = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
+                    if (!resp.IsSuccessStatusCode) continue;
+
+                    var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    using var doc = JsonDocument.Parse(json);
+                    if (!doc.RootElement.TryGetProperty("results", out var results)
+                        || results.ValueKind != JsonValueKind.Array) continue;
+
+                    int idx = 0;
+                    foreach (var r in results.EnumerateArray())
+                    {
+                        if (idx >= slice.Length) break;
+                        if (r.TryGetProperty("matched", out var m) && m.ValueKind == JsonValueKind.True
+                            && r.TryGetProperty("features", out var f) && f.ValueKind == JsonValueKind.Object)
+                        {
+                            try { hits[slice[idx]] = ParseTrackFeaturesFromJson(f); }
+                            catch { /* malformed entry — best-effort */ }
+                        }
+                        idx++;
+                    }
+                }
+                catch
+                {
+                    // Best-effort per chunk; downstream falls through to Essentia.
+                }
+            }
+            return hits;
         }
 
         /// <summary>Composite cheap fingerprint for a file. Sub-10ms per file on warm cache.</summary>
