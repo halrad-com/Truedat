@@ -4598,7 +4598,11 @@ namespace Truedat
                 {
                     FileName = essentiaExe,
                     Arguments = $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)}",
-                    RedirectStandardOutput = false,
+                    // Redirect (and drain) Essentia's stdout — without this, essentia's own
+                    // progress prints inherit truedat's stdout and pollute the JSON channel
+                    // in --analyze-file --json-output mode (Shell parses stdout as a single
+                    // JSON document; essentia's trailing "Done" line breaks JsonDocument.Parse).
+                    RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
@@ -4611,6 +4615,9 @@ namespace Truedat
                 var pid = proc.Id;
 
                 var stderrTask = proc.StandardError.ReadToEndAsync();
+                // Drain stdout so a chatty essentia build can't deadlock on a full pipe
+                // buffer. Result is discarded — essentia's per-file output is in tempJson.
+                var stdoutDrainTask = proc.StandardOutput.ReadToEndAsync();
 
                 // CPU activity monitoring — same approach as RunTool
                 const int pollMs = 5000;
