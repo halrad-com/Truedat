@@ -950,10 +950,17 @@ namespace Truedat
                         }
 
                         var ok = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!);
-                        if (ok) Interlocked.Increment(ref hoPosted);
-
                         Interlocked.Increment(ref hoProcessed);
-                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                        if (ok)
+                        {
+                            Interlocked.Increment(ref hoPosted);
+                            Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref hoFailed);
+                            // [POSTFAIL] line already emitted by PostIdentityOnly with status + body
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1123,15 +1130,16 @@ namespace Truedat
                         // POST to MetaServer if configured — use the full overload so identity
                         // and tag-sourced metadata reach the wire. Stub ITunesTrack carries
                         // duration from TagLib's Properties.Duration.
-                        // V1-BLOCKER fix — POST false returns now count toward flFailed so the
+                        // V1-BLOCKER fix — POST false returns count toward flFailed so the
                         // exit code at line ~1175 reflects POST failures. --file-list mode's
                         // whole purpose is to post, so POST failure IS a file failure here.
+                        bool postOk = true;
                         if (!string.IsNullOrEmpty(metaServerUrl))
                         {
                             var stub = new ITunesTrack { TotalTimeMs = tags.DurationMs, Location = filePath };
-                            if (!PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
-                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256))
-                                Interlocked.Increment(ref flFailed);
+                            postOk = PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
+                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256);
+                            if (!postOk) Interlocked.Increment(ref flFailed);
                         }
 
                         // Accumulate for moods file
@@ -1141,7 +1149,9 @@ namespace Truedat
                         }
 
                         Interlocked.Increment(ref flProcessed);
-                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                        if (postOk)
+                            Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                        // else: [POSTFAIL] already emitted by PostToMetaServer with status + body
                     }
                     catch (Exception ex)
                     {
@@ -5086,7 +5096,11 @@ namespace Truedat
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"  WARNING: MetaServer POST failed: {(int)response.StatusCode} {response.ReasonPhrase}");
+                    string body = "";
+                    try { body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult() ?? ""; }
+                    catch { /* body unavailable */ }
+                    if (body.Length > 500) body = body.Substring(0, 500) + "...";
+                    Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: HTTP {(int)response.StatusCode} {response.ReasonPhrase} body={body}");
                     return false;
                 }
                 return true;
@@ -5095,7 +5109,7 @@ namespace Truedat
             {
                 if (_audit)
                     Console.Error.WriteLine($"[AUDIT] postFailed file=\"{Path.GetFileName(filePath)}\" error=\"{ex.Message}\"");
-                Console.WriteLine($"  WARNING: MetaServer POST failed: {ex.Message}");
+                Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: exception {ex.Message}");
                 return false;
             }
         }
@@ -5534,14 +5548,18 @@ namespace Truedat
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"  WARNING: MetaServer POST failed ({level}): {(int)response.StatusCode} {response.ReasonPhrase}");
+                    string body = "";
+                    try { body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult() ?? ""; }
+                    catch { /* body unavailable */ }
+                    if (body.Length > 500) body = body.Substring(0, 500) + "...";
+                    Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: HTTP {(int)response.StatusCode} {response.ReasonPhrase} ({level}) body={body}");
                     return false;
                 }
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  WARNING: MetaServer POST failed ({level}): {ex.Message}");
+                Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: exception ({level}) {ex.Message}");
                 return false;
             }
         }
