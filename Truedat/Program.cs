@@ -1516,8 +1516,13 @@ namespace Truedat
                 var heads = new List<string>(tracks.Count);
                 var headByPath = new Dictionary<string, string>(tracks.Count, PathComparer.Instance);
                 int fpFailed = 0;
-                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, t =>
+                // Pre-pass parallelism honours cts.Token so a Ctrl-C during the
+                // 70k-track FileInfo + TagLib walk doesn't hang waiting for the
+                // whole batch to finish. Matches the live worker pool's pattern
+                // at the equivalent ParallelOptions construction below.
+                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
                 {
+                    if (cts.IsCancellationRequested) return;
                     try
                     {
                         var fi = new FileInfo(t.Location);
@@ -1541,7 +1546,7 @@ namespace Truedat
                         Interlocked.Increment(ref fpFailed);
                     }
                 });
-                var batchHits = LookupMetaServerBatch(metaServerUrl!, heads);
+                var (batchHits, batchSucceeded) = LookupMetaServerBatch(metaServerUrl!, heads);
                 foreach (var kvp in headByPath)
                     if (batchHits.TryGetValue(kvp.Value, out var feat))
                         metaPreCache[kvp.Key] = feat;
@@ -1549,6 +1554,14 @@ namespace Truedat
                 Console.WriteLine($"  Pre-pass: {metaPreCache.Count} cache hits, {tracks.Count - metaPreCache.Count} need scanning ({prePassSw.Elapsed.TotalSeconds:F1}s)");
                 if (fpFailed > 0 && _audit)
                     Console.WriteLine($"  Pre-pass: {fpFailed} fingerprint computations failed (those tracks fall through to Essentia)");
+                // If every chunk failed, MetaServer is unreachable. Trip the
+                // circuit-breaker so the live per-track fallback short-circuits
+                // instead of firing N×10s timeouts during the worker pool.
+                if (!batchSucceeded && heads.Count > 0)
+                {
+                    _metaServerLive = false;
+                    Console.WriteLine($"  Pre-pass: MetaServer unreachable — disabling live fallback (was {heads.Count} fingerprints across {((heads.Count + 499) / 500)} chunk(s))");
+                }
             }
 
             try
@@ -1589,11 +1602,27 @@ namespace Truedat
                             preFeat.FilePath = t.Location;
                             var currentLastMod = DateTime.MinValue;
                             try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                            // Locally compute audioMd5 so the persisted TrackEntry has the full
+                            // identity. MetaServer's lookup response (LookupResult.Identity in
+                            // MetaService.BuildResult) doesn't carry audioMd5 today — only
+                            // MediaItemId/Source/AnalyzedAt — so we can't extract it from the
+                            // response. Without this, next run's path-cache canary at the
+                            // existing-entry branch fails on the (md5Exe != null && AudioMd5
+                            // empty) leg and re-extracts via Essentia, defeating the cross-
+                            // host cache benefit. Cost is much lower than full Essentia we
+                            // just skipped, so net cache benefit is preserved.
+                            string? msAudioMd5 = null;
+                            if (md5Exe != null)
+                            {
+                                var (md5Value, _) = RunMd5(md5Exe, t.Location, cts.Token);
+                                msAudioMd5 = string.IsNullOrEmpty(md5Value) ? null : md5Value;
+                            }
                             allTracks[t.Location] = new TrackEntry
                             {
                                 Features = preFeat,
                                 LastModified = currentLastMod,
-                                FileMd5 = ComputeFileMd5(t.Location)
+                                FileMd5 = ComputeFileMd5(t.Location),
+                                AudioMd5 = msAudioMd5
                             };
                             Interlocked.Increment(ref _metaServerPreCacheHits);
                             Interlocked.Increment(ref cachedCount);
@@ -1803,12 +1832,27 @@ namespace Truedat
                         // chunk). Sync fingerprint + GET. Best-effort: any failure falls through
                         // to Essentia. The per-track fp is recomputed inside fingerprintTask
                         // below; double-cost (~5ms) only on cache+MetaServer miss path.
-                        if (!string.IsNullOrEmpty(metaServerUrl) && fileSizeBytes > 0)
+                        // Gated on _metaServerLive \u2014 flipped false by the pre-pass batch when
+                        // every chunk failed, or by a previous live lookup that hit a network
+                        // error. Bounds worst-case scan wall-clock when MetaServer slow-fails
+                        // (DNS black-hole, dropped SYN) at parallelism N over 70k tracks.
+                        if (!string.IsNullOrEmpty(metaServerUrl) && fileSizeBytes > 0 && _metaServerLive)
                         {
                             var fpLookup = ComputeFingerprintV1(t.Location, fileSizeBytes, out _);
                             if (fpLookup != null && !string.IsNullOrEmpty(fpLookup.AudioHead64kMd5))
                             {
-                                var msFeatures = LookupMetaServerByFingerprint(metaServerUrl!, fpLookup.AudioHead64kMd5);
+                                var (msFeatures, msNetworkError) = LookupMetaServerByFingerprint(metaServerUrl!, fpLookup.AudioHead64kMd5);
+                                if (msNetworkError)
+                                {
+                                    // Trip the breaker \u2014 every subsequent worker in this scan
+                                    // skips the live fallback. One failed lookup is enough; we
+                                    // don't try to distinguish transient blips from sustained
+                                    // outages because the cost of being wrong (24h dead-socket
+                                    // wait at parallelism=8 over 70k tracks) is asymmetric.
+                                    if (_metaServerLive)
+                                        Console.WriteLine($"  Live fallback: MetaServer network error \u2014 disabling for the rest of this scan");
+                                    _metaServerLive = false;
+                                }
                                 if (msFeatures != null
                                     && msFeatures.DynamicRange.HasValue
                                     && msFeatures.LoudnessMomentary.HasValue)
@@ -1821,11 +1865,20 @@ namespace Truedat
                                     msFeatures.FilePath = t.Location;
                                     var currentLastMod = DateTime.MinValue;
                                     try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                    // Same audioMd5-local-compute as the pre-pass branch above;
+                                    // see the comment there for the cache-poison rationale.
+                                    string? msAudioMd5 = null;
+                                    if (md5Exe != null)
+                                    {
+                                        var (md5Value, _) = RunMd5(md5Exe, t.Location, cts.Token);
+                                        msAudioMd5 = string.IsNullOrEmpty(md5Value) ? null : md5Value;
+                                    }
                                     allTracks[t.Location] = new TrackEntry
                                     {
                                         Features = msFeatures,
                                         LastModified = currentLastMod,
-                                        FileMd5 = ComputeFileMd5(t.Location)
+                                        FileMd5 = ComputeFileMd5(t.Location),
+                                        AudioMd5 = msAudioMd5
                                     };
                                     Interlocked.Increment(ref _metaServerCacheHits);
                                     Interlocked.Increment(ref cachedCount);
@@ -5232,46 +5285,59 @@ namespace Truedat
         static int _metaServerPreCacheHits;
         static int _metaServerCacheHits;
 
+        // Circuit-breaker for the live MetaServer fallback. Set false when the
+        // pre-pass batch returns no successful chunks (likely down) or when the
+        // live fallback observes a network error. Once tripped, the live fallback
+        // short-circuits without firing more 10s-timeout requests — bounding
+        // worst-case scan wall-clock when MetaServer slow-fails.
+        static volatile bool _metaServerLive = true;
+
         /// <summary>
         /// Cross-host cache lookup. GET /meta/features/by-fingerprint/{audioHead64kMd5}.
-        /// Returns parsed features on hit, null on miss / error / timeout. Best-effort:
-        /// every failure mode falls through silently to local cache + Essentia.
+        /// Returns (features, networkError) — features non-null on hit; networkError=true
+        /// on HTTP 5xx, timeout, or any thrown exception (signal for the circuit-breaker).
+        /// Clean misses (404 / matched=false) return (null, false).
         /// </summary>
-        static TrackFeatures? LookupMetaServerByFingerprint(string baseUrl, string audioHead64kMd5)
+        static (TrackFeatures? features, bool networkError) LookupMetaServerByFingerprint(string baseUrl, string audioHead64kMd5)
         {
-            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(audioHead64kMd5)) return null;
+            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(audioHead64kMd5)) return (null, false);
             try
             {
                 var url = baseUrl.TrimEnd('/') + "/meta/features/by-fingerprint/" + audioHead64kMd5;
                 using var resp = _metaClient.GetAsync(url).GetAwaiter().GetResult();
-                if (!resp.IsSuccessStatusCode) return null;
+                // 404 = clean miss, 5xx = network error. 4xx other than 404 also
+                // counts as miss (the request itself reached the server).
+                if (!resp.IsSuccessStatusCode)
+                    return (null, (int)resp.StatusCode >= 500);
                 var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
-                if (!root.TryGetProperty("matched", out var m) || m.ValueKind != JsonValueKind.True) return null;
-                if (!root.TryGetProperty("features", out var f) || f.ValueKind != JsonValueKind.Object) return null;
-                return ParseTrackFeaturesFromJson(f);
+                if (!root.TryGetProperty("matched", out var m) || m.ValueKind != JsonValueKind.True) return (null, false);
+                if (!root.TryGetProperty("features", out var f) || f.ValueKind != JsonValueKind.Object) return (null, false);
+                return (ParseTrackFeaturesFromJson(f), false);
             }
             catch
             {
-                return null;
+                return (null, true);
             }
         }
 
         /// <summary>
         /// Pre-pass batch lookup. POST /meta/features/batch with chunks of up to 500
-        /// queries (MBXHub returns 400 BATCH_TOO_LARGE above that). Returns dictionary
-        /// keyed by audioHead64kMd5 → TrackFeatures (case-insensitive). Best-effort:
-        /// any chunk failure leaves those keys absent from the result and the caller
-        /// falls back to per-track lookup or Essentia.
+        /// queries (MBXHub returns 400 BATCH_TOO_LARGE above that). Returns
+        /// (hits dictionary keyed by audioHead64kMd5 → TrackFeatures (case-insensitive),
+        /// anyChunkSucceeded). Best-effort per chunk: any chunk failure leaves those
+        /// keys absent from the result. anyChunkSucceeded=false signals MetaServer
+        /// is unreachable — caller can use it to disable the live fallback.
         /// </summary>
-        static Dictionary<string, TrackFeatures> LookupMetaServerBatch(
+        static (Dictionary<string, TrackFeatures> hits, bool anyChunkSucceeded) LookupMetaServerBatch(
             string baseUrl, IReadOnlyList<string> audioHead64kMd5s)
         {
             var hits = new Dictionary<string, TrackFeatures>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(baseUrl) || audioHead64kMd5s == null || audioHead64kMd5s.Count == 0)
-                return hits;
+                return (hits, false);
 
+            bool anyChunkSucceeded = false;
             var url = baseUrl.TrimEnd('/') + "/meta/features/batch";
             const int ChunkSize = 500;
             for (int i = 0; i < audioHead64kMd5s.Count; i += ChunkSize)
@@ -5312,6 +5378,10 @@ namespace Truedat
                     if (!doc.RootElement.TryGetProperty("results", out var results)
                         || results.ValueKind != JsonValueKind.Array) continue;
 
+                    // Successful HTTP + parseable response — even if zero hits, it
+                    // proves MetaServer is reachable and the live fallback can stay on.
+                    anyChunkSucceeded = true;
+
                     int idx = 0;
                     foreach (var r in results.EnumerateArray())
                     {
@@ -5330,7 +5400,7 @@ namespace Truedat
                     // Best-effort per chunk; downstream falls through to Essentia.
                 }
             }
-            return hits;
+            return (hits, anyChunkSucceeded);
         }
 
         /// <summary>Composite cheap fingerprint for a file. Sub-10ms per file on warm cache.</summary>
