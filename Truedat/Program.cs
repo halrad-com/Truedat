@@ -787,11 +787,11 @@ namespace Truedat
                 var afAudioStreamSha256Task = Task.Run(() =>
                 {
                     var swSha = Stopwatch.StartNew();
-                    var sha = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                    var result = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
                     swSha.Stop();
                     if (_audit)
                         Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
-                    return sha;
+                    return result;
                 });
                 // Tags ride-along — no iTunes XML source in --analyze-file, so pull
                 // artist/title/album/genre/duration from TagLib.
@@ -805,7 +805,7 @@ namespace Truedat
                 var (afChromaValue, afChromaDuration, _) = afChromaTask.Result;
                 var afChromaprint = string.IsNullOrEmpty(afChromaValue) ? null : afChromaValue;
                 var afFingerprintV1 = afFingerprintTask.Result;
-                var afAudioStreamSha256 = afAudioStreamSha256Task.Result;
+                var (afAudioStreamSha256, afAudioStreamSha256Source) = afAudioStreamSha256Task.Result;
                 var afTags = afTagsTask.Result;
 
                 afSw.Stop();
@@ -845,7 +845,14 @@ namespace Truedat
                         if (afFingerprintV1 != null)
                             WriteFingerprintV1(jw, afFingerprintV1);
                         if (!string.IsNullOrEmpty(afAudioStreamSha256))
+                        {
                             jw.WriteString("audioStreamSha256", afAudioStreamSha256);
+                            // Mirror the wire-format omit-when-invariant rule from the
+                            // identity block (see PostToMetaServer / PostIdentityOnly):
+                            // emit the source signal only when it is "whole-file".
+                            if (afAudioStreamSha256Source == "whole-file")
+                                jw.WriteString("audioStreamSha256Source", "whole-file");
+                        }
                         if (!string.IsNullOrEmpty(afChromaprint))
                         {
                             jw.WriteString("chromaprint", afChromaprint);
@@ -937,6 +944,12 @@ namespace Truedat
                         }
 
                         string? streamSha = null;
+                        // Source for audioStreamSha256 piggybacks on fingerprint.v1's same-parse
+                        // result (audioHead64kMd5Source). Both reads come from the same TagLib
+                        // open above (ComputeFingerprintV1), so they share invariant validity.
+                        // "whole-file-start" on fp ↔ "whole-file" on stream — different value
+                        // namespace, same semantic (invariant region was unavailable).
+                        string? streamSource = null;
                         if (hashLevel == "stream")
                         {
                             streamSha = ComputeAudioStreamSha256(filePath, fpV1.InvariantStart, fpV1.InvariantEnd, out var shaErr);
@@ -947,9 +960,10 @@ namespace Truedat
                                 Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {shaErr}");
                                 return;
                             }
+                            streamSource = fpV1.AudioHead64kMd5Source == "invariant" ? "invariant" : "whole-file";
                         }
 
-                        var ok = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!);
+                        var ok = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
                         Interlocked.Increment(ref hoProcessed);
                         if (ok)
                         {
@@ -1082,11 +1096,11 @@ namespace Truedat
                         var audioStreamSha256Task = Task.Run(() =>
                         {
                             var swSha = Stopwatch.StartNew();
-                            var sha = ComputeAudioStreamSha256FromFile(filePath, fileSize, out _);
+                            var result = ComputeAudioStreamSha256FromFile(filePath, fileSize, out _);
                             swSha.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
-                            return sha;
+                            return result;
                         });
                         // Tags ride-along — --file-list has no iTunes XML source, so populate
                         // artist/title/album/genre/duration from TagLib tags. Without this,
@@ -1101,7 +1115,7 @@ namespace Truedat
                         var (chromaValue, chromaDuration, _) = chromaTask.Result;
                         var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
                         var fingerprintV1 = fingerprintTask.Result;
-                        var audioStreamSha256 = audioStreamSha256Task.Result;
+                        var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var tags = tagsTask.Result;
 
                         if (features == null)
@@ -1138,7 +1152,7 @@ namespace Truedat
                         {
                             var stub = new ITunesTrack { TotalTimeMs = tags.DurationMs, Location = filePath };
                             postOk = PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
-                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256);
+                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256, audioStreamSha256Source);
                             if (!postOk) Interlocked.Increment(ref flFailed);
                         }
 
@@ -1787,11 +1801,11 @@ namespace Truedat
                         var audioStreamSha256Task = Task.Run(() =>
                         {
                             var swSha = Stopwatch.StartNew();
-                            var sha = ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _);
+                            var result = ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _);
                             swSha.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
-                            return sha;
+                            return result;
                         });
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
@@ -1812,7 +1826,7 @@ namespace Truedat
                             Console.WriteLine($"  DEBUG chromaprint: {chromaErr}");
 
                         var fingerprintV1 = fingerprintTask.Result;
-                        var audioStreamSha256 = audioStreamSha256Task.Result;
+                        var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
 
                         if (feat == null)
                         {
@@ -1840,7 +1854,7 @@ namespace Truedat
                         // POST failures. Prior behavior: return value discarded, silent data loss.
                         if (metaServerUrl != null)
                         {
-                            if (!PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256))
+                            if (!PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256, audioStreamSha256Source))
                                 Interlocked.Increment(ref postFailed);
                         }
 
@@ -4954,7 +4968,7 @@ namespace Truedat
         /// </summary>
         static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
             string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track,
-            FingerprintV1? fingerprintV1 = null, string? audioStreamSha256 = null)
+            FingerprintV1? fingerprintV1 = null, string? audioStreamSha256 = null, string? audioStreamSha256Source = null)
         {
             try
             {
@@ -5002,8 +5016,14 @@ namespace Truedat
                         WriteFingerprintV1(jw, fingerprintV1);
                     // Phase 2 durable byte identity — previously stream-only. Ride-along in
                     // default mode is cheap with SHA-NI; wire-only, not persisted in mbxmoods.json.
+                    // Source signal mirrors the audioHead64kMd5Source pattern: emit only on
+                    // the "whole-file" fallback so MBXHub can decide promotion-to-primary safety.
                     if (!string.IsNullOrEmpty(audioStreamSha256))
+                    {
                         jw.WriteString("audioStreamSha256", audioStreamSha256);
+                        if (audioStreamSha256Source == "whole-file")
+                            jw.WriteString("audioStreamSha256Source", "whole-file");
+                    }
                     jw.WriteEndObject();
 
                     // features
@@ -5432,8 +5452,19 @@ namespace Truedat
         /// Ride-along entry point: parse TagLib bounds, then SHA-256 the audio region.
         /// Kept separate from ComputeFingerprintV1 so the two run concurrently without
         /// one blocking the other on a shared result. Second TagLib open costs ~5ms.
+        ///
+        /// Returns the hash plus a "source" tag indicating coverage:
+        ///   "invariant"  — hash covers [InvariantStartPosition, InvariantEndPosition)
+        ///                  (audio region only, container metadata excluded). The common
+        ///                  case; cross-machine stable across tag edits.
+        ///   "whole-file" — invariant bounds were unavailable, hash covers the entire
+        ///                  file including container metadata. Cross-machine stable
+        ///                  only for byte-identical files; tag edits diverge the hash.
+        /// MBXHub uses this signal to decide when an audioStreamSha256 is safe to
+        /// promote to primary identity (Layer 4 contract — see spec §3.2).
+        /// Mirrors the existing fingerprint.v1.audioHead64kMd5Source pattern.
         /// </summary>
-        static string? ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error)
+        static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error)
         {
             error = null;
             try
@@ -5444,17 +5475,20 @@ namespace Truedat
                     invStart = tfile.InvariantStartPosition;
                     invEnd = tfile.InvariantEndPosition;
                 }
+                string source = "invariant";
                 if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
                 {
                     invStart = 0;
                     invEnd = fileSize;
+                    source = "whole-file";
                 }
-                return ComputeAudioStreamSha256(filePath, invStart, invEnd, out error);
+                var hash = ComputeAudioStreamSha256(filePath, invStart, invEnd, out error);
+                return (hash, source);
             }
             catch (Exception ex)
             {
                 error = ex.Message;
-                return null;
+                return (null, "");
             }
         }
 
@@ -5508,7 +5542,7 @@ namespace Truedat
         /// but with only identity populated (features omitted). Level tagged in provenance.
         /// </summary>
         static bool PostIdentityOnly(string baseUrl, string filePath, long fileSize,
-            FingerprintV1 fp, string? audioStreamSha256, string level)
+            FingerprintV1 fp, string? audioStreamSha256, string level, string? audioStreamSha256Source = null)
         {
             try
             {
@@ -5533,7 +5567,11 @@ namespace Truedat
                     jw.WriteStartObject();
                     WriteFingerprintV1(jw, fp);
                     if (!string.IsNullOrEmpty(audioStreamSha256))
+                    {
                         jw.WriteString("audioStreamSha256", audioStreamSha256);
+                        if (audioStreamSha256Source == "whole-file")
+                            jw.WriteString("audioStreamSha256Source", "whole-file");
+                    }
                     jw.WriteEndObject();
 
                     // provenance
