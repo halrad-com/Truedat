@@ -520,6 +520,11 @@ namespace Truedat
 
             string? metaServerUrl = null;
             bool outputFlag = false;
+            // hashOutputPath: --hash-only mode only — NDJSON manifest file the
+            // identity envelopes are appended to. Enables offline determinism rigs
+            // without standing up a fake HTTP server. Parsed below by lookahead;
+            // see comment at the --output arm.
+            string? hashOutputPath = null;
 
             bool showHelp = false;
             int cpuLimit = 0; // 0 = no limit
@@ -570,7 +575,21 @@ namespace Truedat
                 else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (arg == "--json-output") jsonOutput = true;
                 else if (arg == "--meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
-                else if (arg == "--output") outputFlag = true;
+                else if (arg == "--output")
+                {
+                    // Backward-compatible dual semantic. Default Essentia mode treats
+                    // --output as a boolean ("also write mbxmoods.json when posting").
+                    // --hash-only mode treats --output <path> as an NDJSON manifest
+                    // sink for the offline determinism rig (handoff plan §4). We
+                    // distinguish by lookahead: if the next token exists and doesn't
+                    // start with '-' / '/', consume it as a path; otherwise treat as
+                    // the boolean flag. The boolean usage never had a path arg, so
+                    // this extension breaks no existing scripts.
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
+                        hashOutputPath = args[++i];
+                    else
+                        outputFlag = true;
+                }
                 else if (arg == "--background") cpuLimit = 25;
                 else if (arg == "--cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -605,9 +624,12 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (string.IsNullOrEmpty(metaServerUrl))
+                // Either --meta-server (POST sink) or --output <path> (NDJSON file
+                // sink) must be present so the computed identity goes somewhere.
+                // Both can be supplied together; results land at both sinks.
+                if (string.IsNullOrEmpty(metaServerUrl) && string.IsNullOrEmpty(hashOutputPath))
                 {
-                    Console.Error.WriteLine("Error: --hash-only requires --meta-server <url>.");
+                    Console.Error.WriteLine("Error: --hash-only requires --meta-server <url> and/or --output <path>.");
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -644,8 +666,10 @@ namespace Truedat
                 Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
                 Console.WriteLine("                      Mutually exclusive with --analyze-file");
                 Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
-                Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
-                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server");
+                Console.WriteLine("  --output [<path>]   Default mode: also write mbxmoods.json when using --meta-server (dual output)");
+                Console.WriteLine("                      --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, and");
+                Console.WriteLine("                      --meta-server and/or --output <path>");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
@@ -906,14 +930,32 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Hash-only mode: level={hashLevel}, files={hoPaths.Count}, parallelism={parallelism}");
-                Console.Error.WriteLine($"  MetaServer: {metaServerUrl}");
+                if (!string.IsNullOrEmpty(metaServerUrl))
+                    Console.Error.WriteLine($"  MetaServer: {metaServerUrl}");
+                if (!string.IsNullOrEmpty(hashOutputPath))
+                    Console.Error.WriteLine($"  NDJSON manifest: {hashOutputPath}");
 
                 var hoOutputDir = Path.GetDirectoryName(Path.GetFullPath(fileListPath!)) ?? ".";
                 var hoErrorCsv = Path.Combine(hoOutputDir, "mbxhub-hash-only-errors.csv");
 
+                // NDJSON sink: one shared FileStream + lock so concurrent workers can
+                // append envelopes without partial-line interleaving. Truncate-and-write
+                // (FileMode.Create) so each rig run starts from a clean manifest.
+                FileStream? hoOutputStream = null;
+                object hoOutputLock = new object();
+                if (!string.IsNullOrEmpty(hashOutputPath))
+                {
+                    var hoFullOutPath = Path.GetFullPath(hashOutputPath!);
+                    var hoOutDir = Path.GetDirectoryName(hoFullOutPath);
+                    if (!string.IsNullOrEmpty(hoOutDir) && !Directory.Exists(hoOutDir))
+                        Directory.CreateDirectory(hoOutDir!);
+                    hoOutputStream = new FileStream(hoFullOutPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                }
+
                 var hoProcessed = 0;
                 var hoFailed = 0;
                 var hoPosted = 0;
+                var hoWritten = 0;
                 var hoErrors = new ConcurrentBag<string>();
                 var hoSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -963,17 +1005,47 @@ namespace Truedat
                             streamSource = fpV1.AudioHead64kMd5Source == "invariant" ? "invariant" : "whole-file";
                         }
 
-                        var ok = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
-                        Interlocked.Increment(ref hoProcessed);
-                        if (ok)
+                        // Write the NDJSON manifest line first if --output is set —
+                        // a POST failure shouldn't lose the local manifest entry, since
+                        // the rig only cares about the file (offline determinism check).
+                        bool wroteManifest = false;
+                        if (hoOutputStream != null)
                         {
-                            Interlocked.Increment(ref hoPosted);
+                            try
+                            {
+                                var envelope = BuildIdentityOnlyEnvelope(filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
+                                lock (hoOutputLock)
+                                {
+                                    hoOutputStream.Write(envelope, 0, envelope.Length);
+                                    hoOutputStream.WriteByte((byte)'\n');
+                                }
+                                wroteManifest = true;
+                                Interlocked.Increment(ref hoWritten);
+                            }
+                            catch (Exception ex)
+                            {
+                                hoErrors.Add($"{filePath}\toutput-write: {ex.Message}");
+                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: output-write {ex.Message}");
+                            }
+                        }
+
+                        bool postOk = true;
+                        if (!string.IsNullOrEmpty(metaServerUrl))
+                        {
+                            postOk = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
+                            if (postOk) Interlocked.Increment(ref hoPosted);
+                        }
+
+                        Interlocked.Increment(ref hoProcessed);
+                        if (postOk && (wroteManifest || hoOutputStream == null))
+                        {
                             Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
                         }
                         else
                         {
                             Interlocked.Increment(ref hoFailed);
                             // [POSTFAIL] line already emitted by PostIdentityOnly with status + body
+                            // (output-write failure already emitted [FAIL] above)
                         }
                     }
                     catch (Exception ex)
@@ -985,6 +1057,15 @@ namespace Truedat
                 });
 
                 hoSw.Stop();
+
+                if (hoOutputStream != null)
+                {
+                    try { hoOutputStream.Flush(); hoOutputStream.Dispose(); }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  WARNING: could not close NDJSON manifest cleanly: {ex.Message}");
+                    }
+                }
 
                 if (!hoErrors.IsEmpty)
                 {
@@ -1001,7 +1082,10 @@ namespace Truedat
                     }
                 }
 
-                Console.Error.WriteLine($"Done: {hoProcessed} processed ({hoPosted} posted), {hoFailed} failed in {hoSw.Elapsed.TotalSeconds:F1}s");
+                var hoSinkSummary = new List<string>();
+                if (!string.IsNullOrEmpty(metaServerUrl)) hoSinkSummary.Add($"{hoPosted} posted");
+                if (!string.IsNullOrEmpty(hashOutputPath)) hoSinkSummary.Add($"{hoWritten} written");
+                Console.Error.WriteLine($"Done: {hoProcessed} processed ({string.Join(", ", hoSinkSummary)}), {hoFailed} failed in {hoSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = hoFailed > 0 ? 1 : 0;
                 return;
             }
@@ -1231,8 +1315,10 @@ namespace Truedat
                 Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
                 Console.WriteLine("                      Mutually exclusive with --analyze-file");
                 Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
-                Console.WriteLine("  --output            Also write mbxmoods.json when using --meta-server (dual output)");
-                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server");
+                Console.WriteLine("  --output [<path>]   Default mode: also write mbxmoods.json when using --meta-server (dual output)");
+                Console.WriteLine("                      --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, and");
+                Console.WriteLine("                      --meta-server and/or --output <path>");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
@@ -5538,6 +5624,57 @@ namespace Truedat
         }
 
         /// <summary>
+        /// Build the identity-only envelope JSON bytes — same shape as the
+        /// /meta/ingest POST body produced by --hash-only mode. Shared between
+        /// PostIdentityOnly (POST path) and the --hash-only --output NDJSON
+        /// manifest writer (offline determinism rig path). Single source of
+        /// truth for the wire shape so the rig and the wire never drift.
+        /// </summary>
+        static byte[] BuildIdentityOnlyEnvelope(string filePath, long fileSize,
+            FingerprintV1 fp, string? audioStreamSha256, string level, string? audioStreamSha256Source)
+        {
+            var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
+            using var ms = new MemoryStream();
+            using (var jw = new Utf8JsonWriter(ms))
+            {
+                jw.WriteStartObject();
+                jw.WriteString("path", filePath);
+
+                // metadata (minimal — just what the cheap pass produced)
+                jw.WritePropertyName("metadata");
+                jw.WriteStartObject();
+                jw.WriteNumber("duration", fp.DurationMs / 1000.0);
+                jw.WriteNumber("fileSize", fileSize);
+                jw.WriteEndObject();
+
+                // identity
+                jw.WritePropertyName("identity");
+                jw.WriteStartObject();
+                WriteFingerprintV1(jw, fp);
+                if (!string.IsNullOrEmpty(audioStreamSha256))
+                {
+                    jw.WriteString("audioStreamSha256", audioStreamSha256);
+                    if (audioStreamSha256Source == "whole-file")
+                        jw.WriteString("audioStreamSha256Source", "whole-file");
+                }
+                jw.WriteEndObject();
+
+                // provenance
+                jw.WritePropertyName("provenance");
+                jw.WriteStartObject();
+                jw.WriteString("scannedBy", Environment.MachineName);
+                jw.WriteString("tool", "truedat-hash");
+                jw.WriteString("toolVersion", version);
+                jw.WriteString("scannedAt", DateTime.UtcNow.ToString("o"));
+                jw.WriteString("level", level);
+                jw.WriteEndObject();
+
+                jw.WriteEndObject();
+            }
+            return ms.ToArray();
+        }
+
+        /// <summary>
         /// Identity-only POST for --hash-only mode. Same /meta/ingest endpoint as full scan,
         /// but with only identity populated (features omitted). Level tagged in provenance.
         /// </summary>
@@ -5547,47 +5684,8 @@ namespace Truedat
             try
             {
                 var url = baseUrl.TrimEnd('/') + "/meta/ingest";
-                var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
-
-                using var ms = new MemoryStream();
-                using (var jw = new Utf8JsonWriter(ms))
-                {
-                    jw.WriteStartObject();
-                    jw.WriteString("path", filePath);
-
-                    // metadata (minimal — just what the cheap pass produced)
-                    jw.WritePropertyName("metadata");
-                    jw.WriteStartObject();
-                    jw.WriteNumber("duration", fp.DurationMs / 1000.0);
-                    jw.WriteNumber("fileSize", fileSize);
-                    jw.WriteEndObject();
-
-                    // identity
-                    jw.WritePropertyName("identity");
-                    jw.WriteStartObject();
-                    WriteFingerprintV1(jw, fp);
-                    if (!string.IsNullOrEmpty(audioStreamSha256))
-                    {
-                        jw.WriteString("audioStreamSha256", audioStreamSha256);
-                        if (audioStreamSha256Source == "whole-file")
-                            jw.WriteString("audioStreamSha256Source", "whole-file");
-                    }
-                    jw.WriteEndObject();
-
-                    // provenance
-                    jw.WritePropertyName("provenance");
-                    jw.WriteStartObject();
-                    jw.WriteString("scannedBy", Environment.MachineName);
-                    jw.WriteString("tool", "truedat-hash");
-                    jw.WriteString("toolVersion", version);
-                    jw.WriteString("scannedAt", DateTime.UtcNow.ToString("o"));
-                    jw.WriteString("level", level);
-                    jw.WriteEndObject();
-
-                    jw.WriteEndObject();
-                }
-
-                using var content = new ByteArrayContent(ms.ToArray());
+                var bodyBytes = BuildIdentityOnlyEnvelope(filePath, fileSize, fp, audioStreamSha256, level, audioStreamSha256Source);
+                using var content = new ByteArrayContent(bodyBytes);
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
 
