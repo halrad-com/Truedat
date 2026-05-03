@@ -353,7 +353,7 @@ namespace Truedat
                 Marshal.StructureToPtr(info, ptr, false);
                 if (!SetInformationJobObject(_jobHandle, JobObjectCpuRateControlInformation, ptr, (uint)size))
                 {
-                    Console.WriteLine($"  Warning: Failed to set CPU rate limit (error {Marshal.GetLastWin32Error()})");
+                    Console.Error.WriteLine($"  Warning: Failed to set CPU rate limit (error {Marshal.GetLastWin32Error()})");
                     _jobHandle = IntPtr.Zero;
                 }
             }
@@ -617,7 +617,7 @@ namespace Truedat
             {
                 InitCpuLimitJob(cpuLimit);
                 if (_jobHandle != IntPtr.Zero)
-                    Console.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
+                    Console.Error.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
             }
 
             if (showHelp)
@@ -3414,7 +3414,7 @@ namespace Truedat
                 catch { }
             }
 
-            Console.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={lastErr}): {audioPath}");
+            Console.Error.WriteLine($"  DEBUG: hardlink failed for non-ASCII path (err={lastErr}): {audioPath}");
             return (null, "original (hardlink failed)");
         }
 
@@ -3443,7 +3443,7 @@ namespace Truedat
                 if (link != null) { toolPath = link; tempLink = link; }
             }
             if (_audit && pathMethod != "original")
-                Console.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
+                Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             try
             {
@@ -3490,14 +3490,14 @@ namespace Truedat
                                 try { proc.Kill(); proc.WaitForExit(5000); } catch { }
                                 var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "(timeout reading stderr)";
                                 var partialStdout = stdoutTask.Wait(3000) ? stdoutTask.Result : "(timeout reading stdout)";
-                                Console.WriteLine($"  DEBUG watchdog: killed stalled process after {maxIdlePolls * pollMs / 1000}s idle");
-                                Console.WriteLine($"    exe:    {Path.GetFileName(exe)}");
-                                Console.WriteLine($"    path:   {toolPath}");
-                                Console.WriteLine($"    method: {pathMethod}");
-                                Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
-                                Console.WriteLine($"    stdout: {partialStdout.Length} chars");
+                                Console.Error.WriteLine($"  DEBUG watchdog: killed stalled process after {maxIdlePolls * pollMs / 1000}s idle");
+                                Console.Error.WriteLine($"    exe:    {Path.GetFileName(exe)}");
+                                Console.Error.WriteLine($"    path:   {toolPath}");
+                                Console.Error.WriteLine($"    method: {pathMethod}");
+                                Console.Error.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
+                                Console.Error.WriteLine($"    stdout: {partialStdout.Length} chars");
                                 if (partialStderr.Length > 0)
-                                    Console.WriteLine($"    stderr: [{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]");
+                                    Console.Error.WriteLine($"    stderr: [{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]");
                                 return ("", $"Process stalled (no CPU activity for {maxIdlePolls * pollMs / 1000}s)");
                             }
                         }
@@ -3514,26 +3514,26 @@ namespace Truedat
 
                 if (proc.ExitCode != 0)
                 {
-                    Console.WriteLine($"  DEBUG RunTool: exit code {proc.ExitCode}, method={pathMethod}, path={toolPath}");
-                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
+                    Console.Error.WriteLine($"  DEBUG RunTool: exit code {proc.ExitCode}, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.Error.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
                     var err = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim().Split('\n').Last().Trim() : $"Exit code {proc.ExitCode}";
                     return ("", err);
                 }
 
                 if (stdout.Length == 0)
                 {
-                    Console.WriteLine($"  DEBUG RunTool: exit 0, stdout empty, method={pathMethod}, path={toolPath}");
-                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
-                    else Console.WriteLine($"    stderr: (empty)");
-                    Console.WriteLine($"    cpu: {lastCpu.TotalSeconds:F1}s total");
+                    Console.Error.WriteLine($"  DEBUG RunTool: exit 0, stdout empty, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.Error.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
+                    else Console.Error.WriteLine($"    stderr: (empty)");
+                    Console.Error.WriteLine($"    cpu: {lastCpu.TotalSeconds:F1}s total");
                 }
 
                 return (stdout, null);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  DEBUG RunTool: exception, method={pathMethod}, path={toolPath}");
-                Console.WriteLine($"    error:  {ex.Message}");
+                Console.Error.WriteLine($"  DEBUG RunTool: exception, method={pathMethod}, path={toolPath}");
+                Console.Error.WriteLine($"    error:  {ex.Message}");
                 return ("", ex.Message);
             }
             finally
@@ -3541,7 +3541,7 @@ namespace Truedat
                 if (tempLink != null)
                 {
                     try { RetryDelete(tempLink); }
-                    catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+                    catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
             }
         }
@@ -3630,7 +3630,7 @@ namespace Truedat
                 if (!proc.WaitForExit(300000)) // 5 min timeout
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.WriteLine($"  DEBUG downmix timed out (300s)");
+                    Console.Error.WriteLine($"  DEBUG downmix timed out (300s)");
                     try { File.Delete(tempPath); } catch { }
                     return null;
                 }
@@ -3642,17 +3642,17 @@ namespace Truedat
                     {
                         var srcMb = 0.0; try { srcMb = new FileInfo(audioPath).Length / (1024.0 * 1024.0); } catch { }
                         var tmpMb = new FileInfo(tempPath).Length / (1024.0 * 1024.0);
-                        Console.WriteLine($"  DEBUG downmix: {srcMb:F1} MB -> {tmpMb:F1} MB stereo WAV");
+                        Console.Error.WriteLine($"  DEBUG downmix: {srcMb:F1} MB -> {tmpMb:F1} MB stereo WAV");
                     }
                     return tempPath;
                 }
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
-                Console.WriteLine($"  DEBUG downmix failed (exit {proc.ExitCode}): {stderr.Substring(0, Math.Min(200, stderr.Length))}");
+                Console.Error.WriteLine($"  DEBUG downmix failed (exit {proc.ExitCode}): {stderr.Substring(0, Math.Min(200, stderr.Length))}");
                 try { File.Delete(tempPath); } catch { }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  DEBUG downmix exception: {ex.Message}");
+                Console.Error.WriteLine($"  DEBUG downmix exception: {ex.Message}");
                 try { File.Delete(tempPath); } catch { }
             }
             return null;
@@ -4589,7 +4589,7 @@ namespace Truedat
                 if (link != null) { toolPath = link; tempLink = link; }
             }
             if (_audit && pathMethod != "original")
-                Console.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
+                Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             var tempJson = Path.GetTempFileName();
             try
@@ -4650,13 +4650,13 @@ namespace Truedat
                                 timer.Stop();
                                 var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "";
                                 var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                                Console.WriteLine($"  DEBUG watchdog: killed stalled essentia after {timer.Elapsed.TotalSeconds:F0}s");
-                                Console.WriteLine($"    exe:    {Path.GetFileName(essentiaExe)}");
-                                Console.WriteLine($"    path:   {toolPath}");
-                                Console.WriteLine($"    method: {pathMethod}");
-                                Console.WriteLine($"    size:   {sizeMb:F1} MB");
-                                Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
-                                Console.WriteLine($"    stderr: {(partialStderr.Length > 0 ? $"[{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]" : "(empty)")}");
+                                Console.Error.WriteLine($"  DEBUG watchdog: killed stalled essentia after {timer.Elapsed.TotalSeconds:F0}s");
+                                Console.Error.WriteLine($"    exe:    {Path.GetFileName(essentiaExe)}");
+                                Console.Error.WriteLine($"    path:   {toolPath}");
+                                Console.Error.WriteLine($"    method: {pathMethod}");
+                                Console.Error.WriteLine($"    size:   {sizeMb:F1} MB");
+                                Console.Error.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
+                                Console.Error.WriteLine($"    stderr: {(partialStderr.Length > 0 ? $"[{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]" : "(empty)")}");
                                 var hint = !string.IsNullOrWhiteSpace(partialStderr) ? $" | {ExtractEssentiaError(partialStderr, -1)}" : "";
                                 return (null, $"Process stalled after {timer.Elapsed.TotalSeconds:F0}s (no CPU for 60s, PID {pid}, {sizeMb:F0} MB){hint}");
                             }
@@ -4676,16 +4676,16 @@ namespace Truedat
                 {
                     var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                     var errorMsg = ExtractEssentiaError(stderr, exitCode);
-                    Console.WriteLine($"  DEBUG essentia: exit {exitCode}, method={pathMethod}, path={toolPath}");
-                    if (stderr.Length > 0) Console.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
+                    Console.Error.WriteLine($"  DEBUG essentia: exit {exitCode}, method={pathMethod}, path={toolPath}");
+                    if (stderr.Length > 0) Console.Error.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
                     return (null, $"{errorMsg} (exit {exitCode}, PID {pid}, {sizeMb:F0} MB, {timer.Elapsed.TotalSeconds:F1}s)");
                 }
 
                 if (!File.Exists(tempJson) || new FileInfo(tempJson).Length == 0)
                 {
-                    Console.WriteLine($"  DEBUG essentia: exit 0 but empty output, method={pathMethod}, path={toolPath}");
-                    Console.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s, wall: {timer.Elapsed.TotalSeconds:F1}s");
-                    Console.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
+                    Console.Error.WriteLine($"  DEBUG essentia: exit 0 but empty output, method={pathMethod}, path={toolPath}");
+                    Console.Error.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s, wall: {timer.Elapsed.TotalSeconds:F1}s");
+                    Console.Error.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
                     return (null, $"Empty output from Essentia ({ExtractEssentiaError(stderr, 0)})");
                 }
 
@@ -4694,15 +4694,15 @@ namespace Truedat
                 if (features != null) return (features, null);
 
                 var jsonSize = new FileInfo(tempJson).Length;
-                Console.WriteLine($"  DEBUG essentia: exit 0, output unparseable ({jsonSize} bytes), method={pathMethod}, path={toolPath}");
-                Console.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
+                Console.Error.WriteLine($"  DEBUG essentia: exit 0, output unparseable ({jsonSize} bytes), method={pathMethod}, path={toolPath}");
+                Console.Error.WriteLine($"    stderr: {(stderr.Length > 0 ? $"[{stderr.Substring(0, Math.Min(300, stderr.Length))}]" : "(empty)")}");
                 var parseHint = !string.IsNullOrWhiteSpace(stderr) ? ExtractEssentiaError(stderr, 0) : $"output {jsonSize} bytes";
                 return (null, $"Failed to parse Essentia output ({parseHint})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  DEBUG essentia: exception, method={pathMethod}, path={toolPath}");
-                Console.WriteLine($"    error:  {ex.Message}");
+                Console.Error.WriteLine($"  DEBUG essentia: exception, method={pathMethod}, path={toolPath}");
+                Console.Error.WriteLine($"    error:  {ex.Message}");
                 return (null, $"Exception: {ex.Message}");
             }
             finally
@@ -4711,7 +4711,7 @@ namespace Truedat
                 if (tempLink != null)
                 {
                     try { RetryDelete(tempLink); }
-                    catch (Exception ex) { Console.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+                    catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
             }
         }
