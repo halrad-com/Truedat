@@ -3958,8 +3958,62 @@ namespace Truedat
 
                 if (string.IsNullOrEmpty(fingerprint))
                 {
-                    if (_audit) Console.WriteLine($"  DEBUG fpcalc: exit 0 but no FINGERPRINT. stdout={stdout.Length} chars");
-                    return ("", 0, "No FINGERPRINT in fpcalc output");
+                    if (_audit)
+                    {
+                        var stderrSnippet = string.IsNullOrWhiteSpace(stderr)
+                            ? "(stderr empty)"
+                            : stderr.Trim().Replace("\r", " ").Replace("\n", " | ");
+                        if (stderrSnippet.Length > 200) stderrSnippet = stderrSnippet.Substring(0, 200) + "…";
+                        Console.WriteLine($"  DEBUG fpcalc: exit 0 but no FINGERPRINT. stdout={stdout.Length} chars; stderr=\"{stderrSnippet}\"; file=\"{Path.GetFileName(audioPath)}\". Retrying via ffmpeg-transcoded WAV.");
+                    }
+
+                    // Same retry pattern as RunMd5 + AnalyzeWithEssentia: pipe the file
+                    // through ffmpeg to a clean stereo WAV and re-run. fpcalc's silent-no-output
+                    // mode hits encoder quirks, container oddities, or specific MP3 frame
+                    // layouts; a re-encode normalizes those away.
+                    var wavPath = DownmixToStereo(audioPath);
+                    if (wavPath != null)
+                    {
+                        try
+                        {
+                            var wavPsi = new ProcessStartInfo
+                            {
+                                FileName = fpcalcExe, Arguments = $"-length 30 {PathHelper.QuoteArg(wavPath)}",
+                                RedirectStandardOutput = true, RedirectStandardError = true,
+                                UseShellExecute = false, CreateNoWindow = true
+                            };
+                            using var wavProc = Process.Start(wavPsi)!;
+                            ApplyCpuLimit(wavProc);
+                            var wavStdoutTask = wavProc.StandardOutput.ReadToEndAsync();
+                            var wavStderrTask = wavProc.StandardError.ReadToEndAsync();
+                            if (!wavProc.WaitForExit(120000))
+                            {
+                                try { wavProc.Kill(); wavProc.WaitForExit(5000); } catch { }
+                                return ("", 0, "fpcalc retry timed out (120s)");
+                            }
+                            wavProc.WaitForExit();
+                            var wavStdout = wavStdoutTask.Wait(10000) ? wavStdoutTask.Result : "";
+                            wavStderrTask.Wait(10000);
+                            if (wavProc.ExitCode == 0)
+                            {
+                                foreach (var line in wavStdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                                {
+                                    if (line.StartsWith("DURATION=")) int.TryParse(line.Substring("DURATION=".Length).Trim(), out duration);
+                                    else if (line.StartsWith("FINGERPRINT=")) fingerprint = line.Substring("FINGERPRINT=".Length).Trim();
+                                }
+                                if (!string.IsNullOrEmpty(fingerprint))
+                                {
+                                    if (_audit) Console.WriteLine($"  DEBUG fpcalc: retry via ffmpeg WAV succeeded.");
+                                    return (fingerprint, duration, null);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            try { File.Delete(wavPath); } catch { }
+                        }
+                    }
+                    return ("", 0, string.IsNullOrWhiteSpace(stderr) ? "No FINGERPRINT in fpcalc output (after ffmpeg retry)" : "fpcalc: " + stderr.Trim().Split('\n').Last().Trim());
                 }
                 return (fingerprint, duration, null);
             }
