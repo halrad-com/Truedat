@@ -119,6 +119,15 @@ namespace Truedat
         public double? AnalysisDurationSecs;
         public string? FileMd5;
         public string? AudioMd5;
+        // Identity fields — already computed in the parallel scan task block but
+        // historically dropped on the moods-file write path. Persisting them here
+        // means every scanned track lands in mbxmoods.json with the full identity
+        // signal set, no separate hash backfill needed.
+        public string? AudioStreamSha256;
+        public string? AudioStreamSha256Source;   // "whole-file" only when invariant bounds were unavailable
+        public Program.FingerprintV1? FingerprintV1;
+        public string? Chromaprint;
+        public double? ChromaprintDuration;
     }
 
     public class TrackFingerprint
@@ -853,7 +862,12 @@ namespace Truedat
                     LastModified = File.GetLastWriteTimeUtc(analyzeFilePath),
                     AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
                     FileMd5 = afFileMd5,
-                    AudioMd5 = afAudioMd5
+                    AudioMd5 = afAudioMd5,
+                    AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
+                    AudioStreamSha256Source = afAudioStreamSha256Source,
+                    FingerprintV1 = afFingerprintV1,
+                    Chromaprint = afChromaprint,
+                    ChromaprintDuration = afChromaDuration > 0 ? (double?)afChromaDuration : null
                 };
 
                 // Output features as JSON to stdout. Identity fields not already on the
@@ -1222,7 +1236,12 @@ namespace Truedat
                             LastModified = File.GetLastWriteTimeUtc(filePath),
                             AnalysisDurationSecs = 0, // individual timing not tracked in batch
                             FileMd5 = fileMd5,
-                            AudioMd5 = audioMd5
+                            AudioMd5 = audioMd5,
+                            AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
+                            AudioStreamSha256Source = audioStreamSha256Source,
+                            FingerprintV1 = fingerprintV1,
+                            Chromaprint = string.IsNullOrEmpty(chromaprint) ? null : chromaprint,
+                            ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
                         };
 
                         // POST to MetaServer if configured — use the full overload so identity
@@ -1712,7 +1731,14 @@ namespace Truedat
                                             LastModified = currentLastMod,
                                             AnalysisDurationSecs = existing.AnalysisDurationSecs,
                                             FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location),
-                                            AudioMd5 = existing.AudioMd5
+                                            AudioMd5 = existing.AudioMd5,
+                                            // Preserve identity fields across the cache-update copy so they
+                                            // stick across reruns just like the extended Essentia features.
+                                            AudioStreamSha256 = existing.AudioStreamSha256,
+                                            AudioStreamSha256Source = existing.AudioStreamSha256Source,
+                                            FingerprintV1 = existing.FingerprintV1,
+                                            Chromaprint = existing.Chromaprint,
+                                            ChromaprintDuration = existing.ChromaprintDuration
                                         };
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
@@ -1806,7 +1832,14 @@ namespace Truedat
                                         LastModified = currentLastMod,
                                         AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
                                         FileMd5 = localMd5,
-                                        AudioMd5 = xp.Entry.AudioMd5
+                                        AudioMd5 = xp.Entry.AudioMd5,
+                                        // Cross-machine MD5 means same audio bytes — identity hashes are
+                                        // bit-for-bit reusable, no recompute needed.
+                                        AudioStreamSha256 = xp.Entry.AudioStreamSha256,
+                                        AudioStreamSha256Source = xp.Entry.AudioStreamSha256Source,
+                                        FingerprintV1 = xp.Entry.FingerprintV1,
+                                        Chromaprint = xp.Entry.Chromaprint,
+                                        ChromaprintDuration = xp.Entry.ChromaprintDuration
                                     };
                                     allTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref crossPathMoods);
@@ -1935,8 +1968,10 @@ namespace Truedat
                             return fp;
                         });
                         // audioStreamSha256 ride-along — ~100ms/file with SHA-NI over the audio
-                        // region. Wire-only (not persisted in mbxmoods.json). Runs concurrently
-                        // so it overlaps Essentia's much longer decode.
+                        // region. Persisted on the TrackEntry alongside the other identity
+                        // signals (fingerprint.v1, chromaprint, fileMd5, audioMd5) so a default
+                        // `truedat <iTunes-XML>` produces max output in one pass. Runs
+                        // concurrently so it overlaps Essentia's much longer decode.
                         var audioStreamSha256Task = Task.Run(() =>
                         {
                             var swSha = Stopwatch.StartNew();
@@ -1999,7 +2034,19 @@ namespace Truedat
 
                         if (writeFile)
                         {
-                            allTracks[t.Location] = new TrackEntry { Features = feat, LastModified = lastMod, AnalysisDurationSecs = analyzeDuration.TotalSeconds, FileMd5 = fileMd5, AudioMd5 = audioMd5 };
+                            allTracks[t.Location] = new TrackEntry
+                            {
+                                Features = feat,
+                                LastModified = lastMod,
+                                AnalysisDurationSecs = analyzeDuration.TotalSeconds,
+                                FileMd5 = fileMd5,
+                                AudioMd5 = audioMd5,
+                                AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
+                                AudioStreamSha256Source = audioStreamSha256Source,
+                                FingerprintV1 = fingerprintV1,
+                                Chromaprint = chromaprint,
+                                ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
+                            };
                         }
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -4481,6 +4528,23 @@ namespace Truedat
                 jw.WriteString("fileMd5", entry.FileMd5);
             if (!string.IsNullOrEmpty(entry.AudioMd5))
                 jw.WriteString("audioMd5", entry.AudioMd5);
+            if (!string.IsNullOrEmpty(entry.AudioStreamSha256))
+            {
+                jw.WriteString("audioStreamSha256", entry.AudioStreamSha256);
+                // Mirror the wire-format omit-when-invariant rule from PostToMetaServer /
+                // PostIdentityOnly: emit the source signal only for the whole-file fallback
+                // path so consumers can detect the lower-trust hash.
+                if (entry.AudioStreamSha256Source == "whole-file")
+                    jw.WriteString("audioStreamSha256Source", "whole-file");
+            }
+            if (entry.FingerprintV1 != null)
+                WriteFingerprintV1(jw, entry.FingerprintV1);
+            if (!string.IsNullOrEmpty(entry.Chromaprint))
+            {
+                jw.WriteString("chromaprint", entry.Chromaprint);
+                if (entry.ChromaprintDuration.HasValue && entry.ChromaprintDuration.Value > 0)
+                    jw.WriteNumber("chromaprintDuration", entry.ChromaprintDuration.Value);
+            }
             jw.WriteEndObject();
         }
 
@@ -4525,7 +4589,12 @@ namespace Truedat
                         Features = features,
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
                         FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
-                        AudioMd5 = GetStr(track, "audioMd5") is var amd5Str && amd5Str.Length > 0 ? amd5Str : null
+                        AudioMd5 = GetStr(track, "audioMd5") is var amd5Str && amd5Str.Length > 0 ? amd5Str : null,
+                        AudioStreamSha256 = GetStr(track, "audioStreamSha256") is var shaStr && shaStr.Length > 0 ? shaStr : null,
+                        AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
+                        FingerprintV1 = ParseFingerprintV1FromJson(track),
+                        Chromaprint = GetStr(track, "chromaprint") is var cpStr && cpStr.Length > 0 ? cpStr : null,
+                        ChromaprintDuration = GetNullableDbl(track, "chromaprintDuration")
                     };
                 }
                 return allTracks.Count;
@@ -5774,6 +5843,44 @@ namespace Truedat
             {
                 Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: exception ({level}) {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>Parse a FingerprintV1 back from mbxmoods.json round-trip. Returns null
+        /// when the "fingerprint.v1" property is missing or malformed; LoadExistingMoods
+        /// uses this so re-runs preserve identity fields without recomputing.</summary>
+        static FingerprintV1? ParseFingerprintV1FromJson(JsonElement track)
+        {
+            if (!track.TryGetProperty("fingerprint.v1", out var fp) || fp.ValueKind != JsonValueKind.Object)
+                return null;
+            try
+            {
+                var head = GetStr(fp, "audioHead64kMd5");
+                if (string.IsNullOrEmpty(head)) return null;  // primary key missing -> not a valid fingerprint
+                var src  = GetStr(fp, "audioHead64kMd5Source");
+                var codecRaw = GetStr(fp, "codecRaw");
+                long fileSize = fp.TryGetProperty("fileSize", out var fs) && fs.ValueKind == JsonValueKind.Number ? fs.GetInt64() : 0L;
+                long invStart = fp.TryGetProperty("invariantStart", out var iS) && iS.ValueKind == JsonValueKind.Number ? iS.GetInt64() : 0L;
+                long invEnd   = fp.TryGetProperty("invariantEnd",   out var iE) && iE.ValueKind == JsonValueKind.Number ? iE.GetInt64() : 0L;
+                return new FingerprintV1
+                {
+                    FileSize = fileSize,
+                    PathTail = GetStr(fp, "pathTail"),
+                    DurationMs = GetInt(fp, "durationMs"),
+                    SampleRate = GetInt(fp, "sampleRate"),
+                    Channels = GetInt(fp, "channels"),
+                    Codec = string.IsNullOrEmpty(GetStr(fp, "codec")) ? "other" : GetStr(fp, "codec"),
+                    CodecRaw = string.IsNullOrEmpty(codecRaw) ? null : codecRaw,
+                    Bitrate = GetInt(fp, "bitrate"),
+                    AudioHead64kMd5 = head,
+                    AudioHead64kMd5Source = string.IsNullOrEmpty(src) ? "invariant" : src,
+                    InvariantStart = invStart,
+                    InvariantEnd = invEnd
+                };
+            }
+            catch
+            {
+                return null;
             }
         }
 
