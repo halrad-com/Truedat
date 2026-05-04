@@ -569,54 +569,60 @@ namespace Truedat
             for (int i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
-                if (arg == "-?" || arg == "--?" || arg == "/?" ||
-                    arg == "?" || arg == "help" ||
-                    arg == "-h" || arg == "--help" ||
-                    arg == "/h" || arg == "/help")
+                // Windows-friendly flag normalization: accept `-foo`, `/foo`, AND
+                // legacy `--foo`. The matchers below all compare against the bare
+                // name so authors don't have to repeat themselves three times.
+                // Positional args (no leading dash/slash) bypass this and stay raw.
+                string canonical;
+                if (arg.StartsWith("--"))      canonical = arg.Substring(2);
+                else if (arg.Length > 1 && (arg[0] == '-' || arg[0] == '/')) canonical = arg.Substring(1);
+                else                            canonical = arg;
+
+                if (canonical == "?" || canonical == "h" || canonical == "help")
                     showHelp = true;
-                else if (arg == "--fixup") fixupMode = true;
-                else if (arg == "--retry-errors") retryErrors = true;
-                else if (arg == "--migrate") migrateMode = true;
-                else if (arg == "--fingerprint") fingerprintMode = true;
-                else if (arg == "--chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
-                else if (arg == "--md5-only") { fingerprintMode = true; md5Only = true; }
-                else if (arg == "--details") { fingerprintMode = true; detailsMode = true; }
-                else if (arg == "--analyze") analyzeMode = true;
-                else if (arg == "--all") { fingerprintMode = true; detailsMode = true; analyzeMode = true; }
-                else if (arg == "--audit") auditLog = true;
-                else if (arg == "--check-filenames") checkFilenames = true;
-                else if (arg == "--duplicates") duplicatesMode = true;
-                else if (arg == "--quick-fingerprint") quickFingerprintMode = true;
-                else if ((arg == "-p" || arg == "--parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
-                else if (arg == "--synthesize") synthesize = true;
-                else if (arg == "--catalog" && i + 1 < args.Length) synthCatalog = args[++i];
-                else if (arg == "--synth-output" && i + 1 < args.Length) synthOutput = args[++i];
-                else if (arg == "--count" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cnt) && cnt > 0)
+                else if (canonical == "fixup") fixupMode = true;
+                else if (canonical == "retry-errors") retryErrors = true;
+                else if (canonical == "migrate") migrateMode = true;
+                else if (canonical == "fingerprint") fingerprintMode = true;
+                else if (canonical == "chromaprint-only") { fingerprintMode = true; chromaprintOnly = true; }
+                else if (canonical == "md5-only") { fingerprintMode = true; md5Only = true; }
+                else if (canonical == "details") { fingerprintMode = true; detailsMode = true; }
+                else if (canonical == "analyze") analyzeMode = true;
+                else if (canonical == "all") { fingerprintMode = true; detailsMode = true; analyzeMode = true; }
+                else if (canonical == "audit") auditLog = true;
+                else if (canonical == "check-filenames") checkFilenames = true;
+                else if (canonical == "duplicates") duplicatesMode = true;
+                else if (canonical == "quick-fingerprint") quickFingerprintMode = true;
+                else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
+                else if (canonical == "synthesize") synthesize = true;
+                else if (canonical == "catalog" && i + 1 < args.Length) synthCatalog = args[++i];
+                else if (canonical == "synth-output" && i + 1 < args.Length) synthOutput = args[++i];
+                else if (canonical == "count" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cnt) && cnt > 0)
                     { synthCount = cnt; i++; }
-                else if (arg == "--album-ratio" && i + 1 < args.Length && double.TryParse(args[i + 1], out var ar))
+                else if (canonical == "album-ratio" && i + 1 < args.Length && double.TryParse(args[i + 1], out var ar))
                     { synthAlbumRatio = Math.Max(0, Math.Min(1, ar)); i++; }
-                else if (arg == "--synth-moods" && i + 1 < args.Length) synthMoods = args[++i];
-                else if (arg == "--seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
+                else if (canonical == "synth-moods" && i + 1 < args.Length) synthMoods = args[++i];
+                else if (canonical == "seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
                     { synthSeed = sd; i++; }
-                else if (arg == "--dry-run") synthDryRun = true;
-                else if (arg == "--seed-moods") seedMoods = true;
-                else if (arg == "--seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
-                else if (arg == "--seed-target" && i + 1 < args.Length) seedTarget = args[++i];
-                else if (arg == "--merge-moods") mergeMode = true;
-                else if (arg == "--merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
-                else if (arg == "--merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
-                else if (arg == "--analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
-                else if (arg == "--file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
-                else if (arg == "--hash-only") hashOnlyMode = true;
-                else if (arg == "--level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
-                else if (arg == "--moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
-                else if (arg == "--json-output") jsonOutput = true;
-                else if (arg == "--meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
-                else if (arg == "--output")
+                else if (canonical == "dry-run") synthDryRun = true;
+                else if (canonical == "seed-moods") seedMoods = true;
+                else if (canonical == "seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
+                else if (canonical == "seed-target" && i + 1 < args.Length) seedTarget = args[++i];
+                else if (canonical == "merge-moods") mergeMode = true;
+                else if (canonical == "merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
+                else if (canonical == "merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
+                else if (canonical == "analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
+                else if (canonical == "file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
+                else if (canonical == "hash-only") hashOnlyMode = true;
+                else if (canonical == "level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
+                else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
+                else if (canonical == "json-output") jsonOutput = true;
+                else if (canonical == "meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
+                else if (canonical == "output")
                 {
                     // Backward-compatible dual semantic. Default Essentia mode treats
-                    // --output as a boolean ("also write mbxmoods.json when posting").
-                    // --hash-only mode treats --output <path> as an NDJSON manifest
+                    // -output as a boolean ("also write mbxmoods.json when posting").
+                    // -hash-only mode treats -output <path> as an NDJSON manifest
                     // sink for the offline determinism rig (handoff plan §4). We
                     // distinguish by lookahead: if the next token exists and doesn't
                     // start with '-' / '/', consume it as a path; otherwise treat as
@@ -627,8 +633,8 @@ namespace Truedat
                     else
                         outputFlag = true;
                 }
-                else if (arg == "--background") cpuLimit = 25;
-                else if (arg == "--cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
+                else if (canonical == "background") cpuLimit = 25;
+                else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
