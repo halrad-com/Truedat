@@ -480,6 +480,34 @@ namespace Truedat
             return filtered;
         }
 
+        /// <summary>Playlist / redirector file extensions that point at audio but
+        /// aren't audio themselves. fpcalc + Essentia waste time on them and
+        /// produce empty / nonsense output. Distinct from VideoExtensions so the
+        /// log line stays accurate.</summary>
+        internal static readonly HashSet<string> NonAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".asx",   // Advanced Stream Redirector (Windows Media)
+            ".m3u",   // M3U playlist
+            ".m3u8",  // M3U UTF-8 playlist
+            ".pls",   // PLS playlist
+            ".wpl",   // Windows Media Player playlist
+            ".cue",   // CUE sheet (track index for a single audio file)
+            ".xspf"   // XSPF playlist
+        };
+
+        /// <summary>Remove playlist / redirector files from a parsed track list and log the count.</summary>
+        static List<ITunesTrack> FilterNonAudio(List<ITunesTrack> tracks)
+        {
+            int before = tracks.Count;
+            var filtered = tracks.Where(t =>
+                string.IsNullOrEmpty(t.Location) ||
+                !NonAudioExtensions.Contains(Path.GetExtension(t.Location))).ToList();
+            int removed = before - filtered.Count;
+            if (removed > 0)
+                Console.WriteLine($"  Skipped {removed} playlist / redirector file(s)");
+            return filtered;
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -1446,6 +1474,7 @@ namespace Truedat
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
+            tracks = FilterNonAudio(tracks);
 
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
@@ -2204,6 +2233,7 @@ namespace Truedat
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
+            tracks = FilterNonAudio(tracks);
             Console.WriteLine();
 
             var errors = new List<(ITunesTrack Track, List<char> Chars)>();
@@ -2899,6 +2929,7 @@ namespace Truedat
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
+            tracks = FilterNonAudio(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(quickFpPath, allFp);
@@ -3104,6 +3135,7 @@ namespace Truedat
             Console.WriteLine($"Found {tracks.Count} tracks");
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
+            tracks = FilterNonAudio(tracks);
 
             var allFp = new ConcurrentDictionary<string, FingerprintEntry>(PathComparer.Instance);
             int existingCount = LoadExistingFingerprints(fingerprintsPath, allFp);
