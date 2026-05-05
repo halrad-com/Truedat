@@ -69,15 +69,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
   --md5-only              Fingerprint mode: only run audio md5 (skip chromaprint)
   --details               Use ffprobe → mbxhub-details.json (implies --fingerprint)
-  --meta-server <url>     POST features to MetaServer instead of writing mbxmoods.json
-  --output                Also write mbxmoods.json when using --meta-server (dual output)
-  --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --meta-server
+  --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
+  --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
   --audit                 Write all console output to truedat.log (for debugging)
   --analyze-file <path> Analyze a single audio file with Essentia (no iTunes XML needed)
   --file-list <path>    Analyze files listed in a text file (one path per line, UTF-8, # comments)
-                        Use with --meta-server to POST results, -p for parallelism
-                        Mutually exclusive with --analyze-file
+                        Mutually exclusive with --analyze-file; -p sets parallelism
   --check-filenames       Scan for filenames with characters that break Essentia tools
 ```
 
@@ -117,17 +115,15 @@ truedat.exe "iTunes Music Library.xml" --details
 REM Analyze a single file (no iTunes XML needed)
 truedat.exe --analyze-file "C:\Music\song.mp3" --json-output
 
-REM Batch analyze files from a list, POST results to MetaServer
-truedat.exe --file-list files.txt --meta-server http://localhost:5000 -p 4
+REM Batch analyze files from a list, write entries to a moods file
+truedat.exe --file-list files.txt --moods C:\Music\mbxmoods.json -p 4
 
-REM Hash-only: cheap composite fingerprint for fleet-wide peer-pull (ms per file)
-truedat.exe --hash-only --level fingerprint --file-list files.txt --meta-server http://localhost:5000 -p 32
+REM Hash-only: cheap composite fingerprint, append to NDJSON manifest (ms per file)
+truedat.exe --hash-only --level fingerprint --file-list files.txt --output manifest.ndjson -p 32
 
 REM Hash-only: durable audioStreamSha256 (disk-bound; emits fingerprint.v1 too)
-truedat.exe --hash-only --level stream --file-list files.txt --meta-server http://localhost:5000 -p 8
+truedat.exe --hash-only --level stream --file-list files.txt --output manifest.ndjson -p 8
 ```
-
-Wire contract for `--hash-only` identity signals: `docs/reference/identity-wire-format.md`.
 
 ## Synthetic Library Generation (Test Tooling)
 
@@ -247,12 +243,12 @@ Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or
 | ---- | ------- | ------- | ------ |
 | [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
 | [Essentia](https://essentia.upf.edu/) `essentia_streaming_md5.exe` | Mood analysis `audioMd5` (concurrent with extraction) and `--fingerprint` (md5) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
-| [Chromaprint](https://acoustid.org/chromaprint) `fpcalc.exe` | Mood analysis inline chromaprint (concurrent with extraction, posted via MetaServer identity bag) | LGPL-2.1+ | [AcoustID](https://acoustid.org/chromaprint) / `--quick-fingerprint` already depended on this |
+| [Chromaprint](https://acoustid.org/chromaprint) `fpcalc.exe` | Mood analysis inline chromaprint (concurrent with extraction) and `--quick-fingerprint` mode | LGPL-2.1+ | [AcoustID](https://acoustid.org/chromaprint) / `--quick-fingerprint` already depended on this |
 | [Essentia](https://essentia.upf.edu/) `essentia_standard_chromaprinter.exe` | `--fingerprint` mode (chromaprint persisted to `mbxhub-fingerprints.json`) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
 | [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 | [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 
-All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. For MetaServer-backed deployments, bundle `essentia_streaming_md5.exe` and `fpcalc.exe` alongside `truedat.exe` so every analysis run emits the full identity tier set (`fileMd5` + `audioMd5` + `chromaprint`) without a separate `--fingerprint` pass. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
+All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. Bundle `essentia_streaming_md5.exe` and `fpcalc.exe` alongside `truedat.exe` so every analysis run emits the full identity tier set (`fileMd5` + `audioMd5` + `chromaprint`) without a separate `--fingerprint` pass. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
 
 ### Essentia Builds
 
@@ -261,7 +257,7 @@ All Essentia tools are custom 64-bit builds from source. See [`essentia-build/`]
 ### Building from Source
 
 ```cmd
-build-all.cmd
+build-truedat.cmd
 ```
 
 Creates `dist/truedat/truedat.exe` (single file, ~1 MB). Requires .NET SDK 8.0+.
@@ -412,9 +408,7 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
 
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
-`fileMd5` (MD5 of the file bytes) and `audioMd5` (MD5 of the decoded audio payload via `essentia_streaming_md5.exe`) are computed in the same analysis pass as the Essentia feature extraction — each worker fires Essentia, file hash, audio hash, and chromaprint (via `fpcalc.exe`) concurrently, so wall-clock per track is roughly `max(analysis, hash, chromaprint)` rather than the sum. `audioMd5` and `fileMd5` are persisted in `mbxmoods.json`; chromaprint flows through the MetaServer identity bag (`chromaprint` + `chromaprintDuration`) but is not persisted to `mbxmoods.json` — the dedicated `--fingerprint` pass produces `mbxhub-fingerprints.json` if you want chromaprint on disk. Any tool that's missing from the truedat directory is skipped cleanly — the corresponding field stays `null` rather than blocking extraction.
-
-With all three identity tiers populated in one pass, a single scan produces everything MetaServer needs to satisfy its lookup walk (path → fileMd5 → audioMd5 → chromaprint → metadataKey) without requiring a separate `--fingerprint` run over the library.
+`fileMd5` (MD5 of the file bytes) and `audioMd5` (MD5 of the decoded audio payload via `essentia_streaming_md5.exe`) are computed in the same analysis pass as the Essentia feature extraction — each worker fires Essentia, file hash, audio hash, and chromaprint (via `fpcalc.exe`) concurrently, so wall-clock per track is roughly `max(analysis, hash, chromaprint)` rather than the sum. `audioMd5` and `fileMd5` are persisted in `mbxmoods.json`; chromaprint is computed in-pass but not persisted to `mbxmoods.json` — the dedicated `--fingerprint` pass produces `mbxhub-fingerprints.json` if you want chromaprint on disk. Any tool that's missing from the truedat directory is skipped cleanly — the corresponding field stays `null` rather than blocking extraction.
 
 ### Fingerprint Output
 

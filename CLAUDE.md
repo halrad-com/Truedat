@@ -6,7 +6,7 @@ This file is loaded automatically by Claude Code / Claude Agent sessions scoped 
 
 Truedat is a Windows .NET command-line tool that analyses a music library's audio and writes `mbxmoods.json` (mood + Essentia features), optionally `mbxhub-fingerprints.json` (Chromaprint + audio MD5), and `mbxhub-details.json` (ffprobe stream details). Output files are consumed by MBXHub's AutoQ engine (separate repo).
 
-- Build: `build-all.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
+- Build: `build-truedat.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
 - Runtime deps: `essentia_streaming_extractor_music.exe` (required), plus optional `essentia_streaming_md5.exe`, `fpcalc.exe`, `ffmpeg.exe`, `ffprobe.exe` — all placed alongside the exe.
 - Framework: **.NET Framework 4.8**. No .NET 6/8 APIs, no `ValueTask`, no `init` setters on public types. Use `System.Text.Json` (merged via ILRepack).
 
@@ -16,10 +16,10 @@ Per-track JSON object under `"tracks"[path]`. **55 numeric feature fields** (15 
 
 - **Core features** (always present): `bpm`, `key`, `mode`, `spectralCentroid`, `spectralFlux`, `loudness`, `danceability`, `onsetRate`, `zeroCrossingRate`, `spectralRms`, `spectralFlatness`, `dissonance`, `pitchSalience`, `chordsChangesRate`, `mfcc[]`.
 - **Extended** (nullable, omit-when-missing): `dynamicRange` + `dynamicRangeSource`; loudness envelope (`loudnessMomentary`, `loudnessShortTerm`, `replayGain`); silence (`silenceRate20dB/30dB/60dB`); spectral shape (rolloff, complexity, entropy, kurtosis, skewness, spread, strongPeak, decrease, energy + 4 energybands); `hfc`; Bark/ERB/Mel band stats (crest, flatness, kurtosis, skewness, spread × 3 scales = 15); rhythm/tonal (`beatsLoudness`, `chordsStrength`, `hpcpCrest`, `hpcpEntropy`).
-- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`. Also posted to MetaServer but not persisted in `mbxmoods.json`: `fingerprint.v1` (composite) and `audioStreamSha256` (ride-along in default Essentia mode via `ComputeAudioStreamSha256FromFile`; emitted in all three scan-path modes — MoodsMode, `--file-list`, `--analyze-file` — plus `--hash-only --level stream`).
+- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`, `fingerprint.v1` (composite, written via `WriteFingerprintV1`), `audioStreamSha256` (ride-along in default Essentia mode via `ComputeAudioStreamSha256FromFile`; emitted in all three scan-path modes — MoodsMode, `--file-list`, `--analyze-file` — plus `--hash-only --level stream`).
 - **Housekeeping**: `lastModified`, `analysisDuration`.
 
-All five I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `WriteTrackEntry` (write), `LoadExistingMoods` (read), `PostToMetaServer` (identity + features body), and both cache-reuse branches (`MoodsMode` path-cache around `Program.cs:1140` and cross-MD5 around `:1227`). Adding a field means touching all five.
+Four I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `WriteTrackEntry` (write), `LoadExistingMoods` (read via `ParseTrackFeaturesFromJson`), and the cross-MD5 cache-reuse branch in `MoodsMode`. Adding a field means touching all four.
 
 ## Rounding convention (extended features)
 
@@ -35,14 +35,14 @@ Don't regress to a uniform 6 dp — it inflates JSON size without analytic value
 
 Each worker runs Essentia + `ComputeFileMd5` + `RunMd5` + `RunFpcalc` + `ComputeFingerprintV1` concurrently via `Task.Run` + `Task.WaitAll`. Wall-clock is ~`max(analysis, slowest-hash)` per track. When any hash tool is absent, the corresponding task returns an empty result and the field stays `null` — don't add fallback logic. `ComputeFingerprintV1` (~5 ms warm) is a pure-managed task so it has no tool-availability gate.
 
-## Phase 2 hash-only mode
+## Hash-only mode (offline NDJSON manifest)
 
-`--hash-only --level fingerprint|stream --file-list <path> --meta-server <url>` runs identity-only passes without Essentia:
+`--hash-only --level fingerprint|stream --file-list <paths.txt> --output <manifest.ndjson>` runs identity-only passes without Essentia and appends one envelope per file to an NDJSON manifest. Used by the determinism rig at `tools/verify-audiosha-determinism.ps1`.
 
-- `fingerprint`: TagLib parse + 64 KB MD5 at `InvariantStartPosition`. Sub-10 ms warm. Posts `identity.fingerprint.v1` composite (pathTail + fileSize + audio props + audioHead64kMd5). This is the ms-scale peer-pull ping primitive.
-- `stream`: streaming SHA-256 over `[InvariantStartPosition, InvariantEndPosition)`. Disk-bound. Superset — emits `fingerprint.v1` *and* `audioStreamSha256`.
+- `fingerprint`: TagLib parse + 64 KB MD5 at `InvariantStartPosition`. Sub-10 ms warm. Envelope carries the `fingerprint.v1` composite (pathTail + fileSize + audio props + audioHead64kMd5).
+- `stream`: streaming SHA-256 over `[InvariantStartPosition, InvariantEndPosition)`. Disk-bound. Superset — envelope carries `fingerprint.v1` *and* `audioStreamSha256`.
 
-Wire contract frozen at `docs/reference/identity-wire-format.md` (consumed by the MetaServer side, Phase 2 Track B). `PathTail` convention matches MetaServer's `GetPathTail` byte-for-byte.
+Envelope shape is defined by `BuildIdentityOnlyEnvelope` in `Program.cs`. It has no external consumers — when the rig and the format need to evolve, evolve them together.
 
 ## Cache re-extract gate
 
@@ -56,7 +56,7 @@ When adding a new always-extracted field, decide whether to add it to the canary
 
 ## Conventions
 
-- **Offline-first.** No runtime network calls except the optional `--meta-server` POST. No CDN-fetched assets, no cloud dependencies.
+- **Offline-first.** No runtime network calls. No CDN-fetched assets, no cloud dependencies. Truedat reads files, runs subprocess tools, writes files.
 - **No new runtime dependencies** without discussion. `System.Text.Json` and `TagLibSharp` are the only NuGet refs; both merged into the single exe via ILRepack.
 - **Never push.** Never change repo visibility. Never mark project status as "Production Ready" / "Stable" / etc. — those are user-only decisions.
 - **Never add Co-Authored-By lines to commits.** This is a hard rule in the user's global CLAUDE.md.

@@ -2,18 +2,12 @@
 
 Scripts and helpers that sit alongside the truedat exe but ship outside it.
 
-## poke-metaserver.ps1
-
-Minimal contract-compliant POST to `/meta/ingest`. Removes truedat from the
-equation when triaging "is the wire payload right?" questions. See the script
-header for usage.
-
 ## verify-audiosha-determinism.ps1
 
 Cross-machine sanity rig for `audioStreamSha256`. Verifies that two machines
-holding the same audio bytes produce the same `audioStreamSha256`. Required by
-the Phase 2 / Layer 4 spec §3.2 ("determinism across machines") before MBXHub
-can promote `audioStreamSha256` to a primary identity in `TrackLocations`.
+holding the same audio bytes produce the same `audioStreamSha256` — useful
+whenever you need to confirm the hash is content-stable across volumes,
+filesystems, or TagLib versions.
 
 ### How it works
 
@@ -24,13 +18,11 @@ and runs:
 truedat.exe --hash-only --level stream --file-list <tmp> --output <manifest>
 ```
 
-The new `--output <path>` flag (added alongside the script) makes truedat
-append one identity envelope per file as NDJSON to `<manifest>`. No HTTP
-server required — the rig is fully offline.
+The `--output <path>` flag makes truedat append one identity envelope per file
+as NDJSON to `<manifest>`. No HTTP server required — the rig is fully offline.
 
-Each NDJSON line is the same envelope shape `PostIdentityOnly` would POST
-to `/meta/ingest`, including `identity.audioStreamSha256` and (when the
-TagLib invariant region was unavailable) `identity.audioStreamSha256Source`.
+Each NDJSON line carries `identity.audioStreamSha256` and (when the TagLib
+invariant region was unavailable) `identity.audioStreamSha256Source`.
 
 ### Two-machine verification protocol
 

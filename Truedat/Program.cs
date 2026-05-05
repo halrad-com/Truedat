@@ -305,7 +305,6 @@ namespace Truedat
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
         static bool _audit;
 
-        static readonly HttpClient _metaClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
 
         // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
         // At 44100 Hz / 2048 hop size = ~21.53 frames/sec -> max ~12172s before buffer overflow.
@@ -555,12 +554,9 @@ namespace Truedat
             bool hashOnlyMode = false;
             string? hashLevel = null;
 
-            string? metaServerUrl = null;
-            bool outputFlag = false;
             // hashOutputPath: --hash-only mode only — NDJSON manifest file the
             // identity envelopes are appended to. Enables offline determinism rigs
-            // without standing up a fake HTTP server. Parsed below by lookahead;
-            // see comment at the --output arm.
+            // without standing up a fake HTTP server.
             string? hashOutputPath = null;
 
             bool showHelp = false;
@@ -617,22 +613,8 @@ namespace Truedat
                 else if (canonical == "level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
                 else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (canonical == "json-output") jsonOutput = true;
-                else if (canonical == "meta-server" && i + 1 < args.Length) metaServerUrl = args[++i];
-                else if (canonical == "output")
-                {
-                    // Backward-compatible dual semantic. Default Essentia mode treats
-                    // -output as a boolean ("also write mbxmoods.json when posting").
-                    // -hash-only mode treats -output <path> as an NDJSON manifest
-                    // sink for the offline determinism rig (handoff plan §4). We
-                    // distinguish by lookahead: if the next token exists and doesn't
-                    // start with '-' / '/', consume it as a path; otherwise treat as
-                    // the boolean flag. The boolean usage never had a path arg, so
-                    // this extension breaks no existing scripts.
-                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
-                        hashOutputPath = args[++i];
-                    else
-                        outputFlag = true;
-                }
+                else if (canonical == "output" && i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
+                    hashOutputPath = args[++i];
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -667,12 +649,10 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                // Either --meta-server (POST sink) or --output <path> (NDJSON file
-                // sink) must be present so the computed identity goes somewhere.
-                // Both can be supplied together; results land at both sinks.
-                if (string.IsNullOrEmpty(metaServerUrl) && string.IsNullOrEmpty(hashOutputPath))
+                // --output <path> is the only sink — appends NDJSON identity envelopes.
+                if (string.IsNullOrEmpty(hashOutputPath))
                 {
-                    Console.Error.WriteLine("Error: --hash-only requires --meta-server <url> and/or --output <path>.");
+                    Console.Error.WriteLine("Error: --hash-only requires --output <path>.");
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -706,13 +686,9 @@ namespace Truedat
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
-                Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
-                Console.WriteLine("                      Mutually exclusive with --analyze-file");
-                Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
-                Console.WriteLine("  --output [<path>]   Default mode: also write mbxmoods.json when using --meta-server (dual output)");
-                Console.WriteLine("                      --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
-                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, and");
-                Console.WriteLine("                      --meta-server and/or --output <path>");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file; -p sets parallelism");
+                Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
@@ -816,9 +792,9 @@ namespace Truedat
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
-                // Identity tools — same resolution as MoodsMode/--file-list. Shell's
-                // ReportComplete path reads fileMd5/audioMd5/audioStreamSha256/fingerprint.v1
-                // from the outer wrapper of our stdout JSON (ScanWorker.cs:933-955).
+                // Identity tools — same resolution as MoodsMode/--file-list. Identity
+                // fields ride on the outer wrapper of our stdout JSON for downstream
+                // consumers of --analyze-file --json-output.
                 var afMd5Exe = FindTool("essentia_streaming_md5.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
                 var afFpcalcExe = FindTool("fpcalc.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
 
@@ -919,9 +895,8 @@ namespace Truedat
                         if (!string.IsNullOrEmpty(afAudioStreamSha256))
                         {
                             jw.WriteString("audioStreamSha256", afAudioStreamSha256);
-                            // Mirror the wire-format omit-when-invariant rule from the
-                            // identity block (see PostToMetaServer / PostIdentityOnly):
-                            // emit the source signal only when it is "whole-file".
+                            // Emit the source signal only when it is "whole-file" so consumers
+                            // can detect the lower-trust hash (invariant region was unavailable).
                             if (afAudioStreamSha256Source == "whole-file")
                                 jw.WriteString("audioStreamSha256Source", "whole-file");
                         }
@@ -978,8 +953,6 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Hash-only mode: level={hashLevel}, files={hoPaths.Count}, parallelism={parallelism}");
-                if (!string.IsNullOrEmpty(metaServerUrl))
-                    Console.Error.WriteLine($"  MetaServer: {metaServerUrl}");
                 if (!string.IsNullOrEmpty(hashOutputPath))
                     Console.Error.WriteLine($"  NDJSON manifest: {hashOutputPath}");
 
@@ -1002,7 +975,6 @@ namespace Truedat
 
                 var hoProcessed = 0;
                 var hoFailed = 0;
-                var hoPosted = 0;
                 var hoWritten = 0;
                 var hoErrors = new ConcurrentBag<string>();
                 var hoSw = System.Diagnostics.Stopwatch.StartNew();
@@ -1053,48 +1025,31 @@ namespace Truedat
                             streamSource = fpV1.AudioHead64kMd5Source == "invariant" ? "invariant" : "whole-file";
                         }
 
-                        // Write the NDJSON manifest line first if --output is set —
-                        // a POST failure shouldn't lose the local manifest entry, since
-                        // the rig only cares about the file (offline determinism check).
+                        // Append NDJSON manifest line. Worker pool serializes writes via
+                        // hoOutputLock so concurrent envelopes don't interleave.
                         bool wroteManifest = false;
-                        if (hoOutputStream != null)
+                        try
                         {
-                            try
+                            var envelope = BuildIdentityOnlyEnvelope(filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
+                            lock (hoOutputLock)
                             {
-                                var envelope = BuildIdentityOnlyEnvelope(filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
-                                lock (hoOutputLock)
-                                {
-                                    hoOutputStream.Write(envelope, 0, envelope.Length);
-                                    hoOutputStream.WriteByte((byte)'\n');
-                                }
-                                wroteManifest = true;
-                                Interlocked.Increment(ref hoWritten);
+                                hoOutputStream!.Write(envelope, 0, envelope.Length);
+                                hoOutputStream.WriteByte((byte)'\n');
                             }
-                            catch (Exception ex)
-                            {
-                                hoErrors.Add($"{filePath}\toutput-write: {ex.Message}");
-                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: output-write {ex.Message}");
-                            }
+                            wroteManifest = true;
+                            Interlocked.Increment(ref hoWritten);
                         }
-
-                        bool postOk = true;
-                        if (!string.IsNullOrEmpty(metaServerUrl))
+                        catch (Exception ex)
                         {
-                            postOk = PostIdentityOnly(metaServerUrl!, filePath, fi.Length, fpV1, streamSha, hashLevel!, streamSource);
-                            if (postOk) Interlocked.Increment(ref hoPosted);
+                            hoErrors.Add($"{filePath}\toutput-write: {ex.Message}");
+                            Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: output-write {ex.Message}");
                         }
 
                         Interlocked.Increment(ref hoProcessed);
-                        if (postOk && (wroteManifest || hoOutputStream == null))
-                        {
+                        if (wroteManifest)
                             Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
-                        }
                         else
-                        {
                             Interlocked.Increment(ref hoFailed);
-                            // [POSTFAIL] line already emitted by PostIdentityOnly with status + body
-                            // (output-write failure already emitted [FAIL] above)
-                        }
                     }
                     catch (Exception ex)
                     {
@@ -1130,10 +1085,7 @@ namespace Truedat
                     }
                 }
 
-                var hoSinkSummary = new List<string>();
-                if (!string.IsNullOrEmpty(metaServerUrl)) hoSinkSummary.Add($"{hoPosted} posted");
-                if (!string.IsNullOrEmpty(hashOutputPath)) hoSinkSummary.Add($"{hoWritten} written");
-                Console.Error.WriteLine($"Done: {hoProcessed} processed ({string.Join(", ", hoSinkSummary)}), {hoFailed} failed in {hoSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done: {hoProcessed} processed ({hoWritten} written), {hoFailed} failed in {hoSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = hoFailed > 0 ? 1 : 0;
                 return;
             }
@@ -1163,10 +1115,7 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
 
-                // Find Essentia + identity tools (mirror MoodsMode resolution at :1158-1169).
-                // Without these, --file-list mode posted identity:{} even though the deployed
-                // exe advertised fingerprint.v1 ride-along. Symptom: 0 identity across 3,909
-                // fleet scans. See docs/analysis/2026-04-22-phase2-emission-audit.md.
+                // Find Essentia + identity tools (mirror MoodsMode resolution).
                 var flBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var flEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", flBaseDir, Environment.CurrentDirectory);
                 var flMd5Exe = FindTool("essentia_streaming_md5.exe", flBaseDir, Environment.CurrentDirectory);
@@ -1278,31 +1227,14 @@ namespace Truedat
                             ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
                         };
 
-                        // POST to MetaServer if configured — use the full overload so identity
-                        // and tag-sourced metadata reach the wire. Stub ITunesTrack carries
-                        // duration from TagLib's Properties.Duration.
-                        // V1-BLOCKER fix — POST false returns count toward flFailed so the
-                        // exit code at line ~1175 reflects POST failures. --file-list mode's
-                        // whole purpose is to post, so POST failure IS a file failure here.
-                        bool postOk = true;
-                        if (!string.IsNullOrEmpty(metaServerUrl))
-                        {
-                            var stub = new ITunesTrack { TotalTimeMs = tags.DurationMs, Location = filePath };
-                            postOk = PostToMetaServer(metaServerUrl!, filePath, features, fileMd5, audioMd5,
-                                chromaprint, chromaDuration, fileSize, stub, fingerprintV1, audioStreamSha256, audioStreamSha256Source);
-                            if (!postOk) Interlocked.Increment(ref flFailed);
-                        }
-
-                        // Accumulate for moods file
-                        if (!string.IsNullOrEmpty(analyzeFileMoods) || outputFlag)
+                        // Accumulate for moods file (only saved if --moods is set).
+                        if (!string.IsNullOrEmpty(analyzeFileMoods))
                         {
                             flMoodsTracks[Path.GetFullPath(filePath)] = trackEntry;
                         }
 
                         Interlocked.Increment(ref flProcessed);
-                        if (postOk)
-                            Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
-                        // else: [POSTFAIL] already emitted by PostToMetaServer with status + body
+                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
                     }
                     catch (Exception ex)
                     {
@@ -1365,13 +1297,9 @@ namespace Truedat
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
-                Console.WriteLine("                      Use with --meta-server to POST results, -p for parallelism");
-                Console.WriteLine("                      Mutually exclusive with --analyze-file");
-                Console.WriteLine("  --meta-server <url> POST features to MetaServer instead of writing mbxmoods.json");
-                Console.WriteLine("  --output [<path>]   Default mode: also write mbxmoods.json when using --meta-server (dual output)");
-                Console.WriteLine("                      --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
-                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, and");
-                Console.WriteLine("                      --meta-server and/or --output <path>");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file; -p sets parallelism");
+                Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
+                Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
@@ -1418,12 +1346,7 @@ namespace Truedat
             if (fingerprintMode) modeList.Add(chromaprintOnly ? "chromaprint-only" : md5Only ? "md5-only" : "fingerprint");
             if (detailsMode) modeList.Add("details");
             if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode && !fingerprintMode)) modeList.Add("analyze");
-            if (metaServerUrl != null) modeList.Add("meta-server");
-            if (metaServerUrl != null && outputFlag) modeList.Add("output");
             Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}");
-
-            // When --meta-server is set, only write mbxmoods.json if --output is also specified
-            bool writeFile = metaServerUrl == null || outputFlag;
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
@@ -1485,18 +1408,11 @@ namespace Truedat
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            int existingCount = 0;
-            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodMd5Index = null;
-            if (writeFile)
-            {
-                existingCount = LoadExistingMoods(moodsPath, allTracks);
-                Console.WriteLine($"Existing moods: {existingCount}");
-                moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
-                if (moodMd5Index != null)
-                    Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
-            }
-            if (metaServerUrl != null)
-                Console.WriteLine($"  MetaServer: {metaServerUrl}");
+            int existingCount = LoadExistingMoods(moodsPath, allTracks);
+            Console.WriteLine($"Existing moods: {existingCount}");
+            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
+            if (moodMd5Index != null)
+                Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
             int crossPathMoods = 0;
 
             Dictionary<string, string> existingErrors;
@@ -1519,11 +1435,6 @@ namespace Truedat
             int analyzed = 0;
             int skipped = 0;
             int failed = 0;
-            // V1-BLOCKER fix — track POST failures separately from analysis failures
-            // (exceptions). Previously PostToMetaServer's false return was discarded:
-            // MetaServer offline → 100% silent data loss, exit 0, Shell credits
-            // TotalAnalyzed. Now reflected in exit code + summary.
-            int postFailed = 0;
             int timedOut = 0;
             int processed = 0;
             int total = tracks.Count;
@@ -1556,68 +1467,6 @@ namespace Truedat
             Console.WriteLine($"Parallelism: {parallelism} threads");
             Console.WriteLine();
 
-            // Cross-host MetaServer pre-pass — batch-lookup features by audioHead64kMd5
-            // before launching Essentia workers. Mirror-library scenario: if a peer
-            // already scanned this audio (same bytes, different drive letter), we pull
-            // the cached features in one batch round-trip and skip Essentia entirely.
-            // Best-effort: any failure leaves metaPreCache empty and the worker pool
-            // proceeds normally through path-cache + cross-MD5 + live MetaServer + Essentia.
-            var metaPreCache = new ConcurrentDictionary<string, TrackFeatures>(PathComparer.Instance);
-            if (!string.IsNullOrEmpty(metaServerUrl))
-            {
-                Console.WriteLine($"  Pre-pass: querying MetaServer for {tracks.Count} fingerprints...");
-                var prePassSw = Stopwatch.StartNew();
-                var heads = new List<string>(tracks.Count);
-                var headByPath = new Dictionary<string, string>(tracks.Count, PathComparer.Instance);
-                int fpFailed = 0;
-                // Pre-pass parallelism honours cts.Token so a Ctrl-C during the
-                // 70k-track FileInfo + TagLib walk doesn't hang waiting for the
-                // whole batch to finish. Matches the live worker pool's pattern
-                // at the equivalent ParallelOptions construction below.
-                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
-                {
-                    if (cts.IsCancellationRequested) return;
-                    try
-                    {
-                        var fi = new FileInfo(t.Location);
-                        if (!fi.Exists) return;
-                        var fp = ComputeFingerprintV1(t.Location, fi.Length, out _);
-                        if (fp != null && !string.IsNullOrEmpty(fp.AudioHead64kMd5))
-                        {
-                            lock (heads)
-                            {
-                                heads.Add(fp.AudioHead64kMd5);
-                                headByPath[t.Location] = fp.AudioHead64kMd5;
-                            }
-                        }
-                        else
-                        {
-                            Interlocked.Increment(ref fpFailed);
-                        }
-                    }
-                    catch
-                    {
-                        Interlocked.Increment(ref fpFailed);
-                    }
-                });
-                var (batchHits, batchSucceeded) = LookupMetaServerBatch(metaServerUrl!, heads);
-                foreach (var kvp in headByPath)
-                    if (batchHits.TryGetValue(kvp.Value, out var feat))
-                        metaPreCache[kvp.Key] = feat;
-                prePassSw.Stop();
-                Console.WriteLine($"  Pre-pass: {metaPreCache.Count} cache hits, {tracks.Count - metaPreCache.Count} need scanning ({prePassSw.Elapsed.TotalSeconds:F1}s)");
-                if (fpFailed > 0 && _audit)
-                    Console.WriteLine($"  Pre-pass: {fpFailed} fingerprint computations failed (those tracks fall through to Essentia)");
-                // If every chunk failed, MetaServer is unreachable. Trip the
-                // circuit-breaker so the live per-track fallback short-circuits
-                // instead of firing N×10s timeouts during the worker pool.
-                if (!batchSucceeded && heads.Count > 0)
-                {
-                    _metaServerLive = false;
-                    Console.WriteLine($"  Pre-pass: MetaServer unreachable — disabling live fallback (was {heads.Count} fingerprints across {((heads.Count + 499) / 500)} chunk(s))");
-                }
-            }
-
             try
             {
                 Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
@@ -1634,53 +1483,6 @@ namespace Truedat
                         {
                             Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
                             Interlocked.Increment(ref skipped);
-                            return;
-                        }
-
-                        // Cross-host pre-pass cache hit — features pulled from MetaServer in
-                        // the batch round-trip before this worker pool started. Apply the
-                        // same canary gate as the local cross-MD5 path (DR + LoudnessMomentary
-                        // present) so stale pre-canary entries still re-extract.
-                        if (metaPreCache.TryGetValue(t.Location, out var preFeat)
-                            && preFeat.DynamicRange.HasValue
-                            && preFeat.LoudnessMomentary.HasValue)
-                        {
-                            // Override metadata from local iTunes XML — MetaServer's stored
-                            // metadata came from whichever endpoint scanned first; local
-                            // iTunes is the source of truth for this endpoint.
-                            preFeat.TrackId = t.TrackId;
-                            preFeat.Artist = t.Artist;
-                            preFeat.Title = t.Name;
-                            preFeat.Album = t.Album;
-                            preFeat.Genre = t.Genre;
-                            preFeat.FilePath = t.Location;
-                            var currentLastMod = DateTime.MinValue;
-                            try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                            // Locally compute audioMd5 so the persisted TrackEntry has the full
-                            // identity. MetaServer's lookup response (LookupResult.Identity in
-                            // MetaService.BuildResult) doesn't carry audioMd5 today — only
-                            // MediaItemId/Source/AnalyzedAt — so we can't extract it from the
-                            // response. Without this, next run's path-cache canary at the
-                            // existing-entry branch fails on the (md5Exe != null && AudioMd5
-                            // empty) leg and re-extracts via Essentia, defeating the cross-
-                            // host cache benefit. Cost is much lower than full Essentia we
-                            // just skipped, so net cache benefit is preserved.
-                            string? msAudioMd5 = null;
-                            if (md5Exe != null)
-                            {
-                                var (md5Value, _) = RunMd5(md5Exe, t.Location, cts.Token);
-                                msAudioMd5 = string.IsNullOrEmpty(md5Value) ? null : md5Value;
-                            }
-                            allTracks[t.Location] = new TrackEntry
-                            {
-                                Features = preFeat,
-                                LastModified = currentLastMod,
-                                FileMd5 = ComputeFileMd5(t.Location),
-                                AudioMd5 = msAudioMd5
-                            };
-                            Interlocked.Increment(ref _metaServerPreCacheHits);
-                            Interlocked.Increment(ref cachedCount);
-                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached: meta-server pre-pass)");
                             return;
                         }
 
@@ -1895,67 +1697,6 @@ namespace Truedat
                         }
                         catch { }
 
-                        // Live MetaServer fallback \u2014 for tracks the pre-pass missed (e.g., file
-                        // added after the pre-pass walk, or a transient batch failure for that
-                        // chunk). Sync fingerprint + GET. Best-effort: any failure falls through
-                        // to Essentia. The per-track fp is recomputed inside fingerprintTask
-                        // below; double-cost (~5ms) only on cache+MetaServer miss path.
-                        // Gated on _metaServerLive \u2014 flipped false by the pre-pass batch when
-                        // every chunk failed, or by a previous live lookup that hit a network
-                        // error. Bounds worst-case scan wall-clock when MetaServer slow-fails
-                        // (DNS black-hole, dropped SYN) at parallelism N over 70k tracks.
-                        if (!string.IsNullOrEmpty(metaServerUrl) && fileSizeBytes > 0 && _metaServerLive)
-                        {
-                            var fpLookup = ComputeFingerprintV1(t.Location, fileSizeBytes, out _);
-                            if (fpLookup != null && !string.IsNullOrEmpty(fpLookup.AudioHead64kMd5))
-                            {
-                                var (msFeatures, msNetworkError) = LookupMetaServerByFingerprint(metaServerUrl!, fpLookup.AudioHead64kMd5);
-                                if (msNetworkError)
-                                {
-                                    // Trip the breaker \u2014 every subsequent worker in this scan
-                                    // skips the live fallback. One failed lookup is enough; we
-                                    // don't try to distinguish transient blips from sustained
-                                    // outages because the cost of being wrong (24h dead-socket
-                                    // wait at parallelism=8 over 70k tracks) is asymmetric.
-                                    if (_metaServerLive)
-                                        Console.WriteLine($"  Live fallback: MetaServer network error \u2014 disabling for the rest of this scan");
-                                    _metaServerLive = false;
-                                }
-                                if (msFeatures != null
-                                    && msFeatures.DynamicRange.HasValue
-                                    && msFeatures.LoudnessMomentary.HasValue)
-                                {
-                                    msFeatures.TrackId = t.TrackId;
-                                    msFeatures.Artist = t.Artist;
-                                    msFeatures.Title = t.Name;
-                                    msFeatures.Album = t.Album;
-                                    msFeatures.Genre = t.Genre;
-                                    msFeatures.FilePath = t.Location;
-                                    var currentLastMod = DateTime.MinValue;
-                                    try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                                    // Same audioMd5-local-compute as the pre-pass branch above;
-                                    // see the comment there for the cache-poison rationale.
-                                    string? msAudioMd5 = null;
-                                    if (md5Exe != null)
-                                    {
-                                        var (md5Value, _) = RunMd5(md5Exe, t.Location, cts.Token);
-                                        msAudioMd5 = string.IsNullOrEmpty(md5Value) ? null : md5Value;
-                                    }
-                                    allTracks[t.Location] = new TrackEntry
-                                    {
-                                        Features = msFeatures,
-                                        LastModified = currentLastMod,
-                                        FileMd5 = ComputeFileMd5(t.Location),
-                                        AudioMd5 = msAudioMd5
-                                    };
-                                    Interlocked.Increment(ref _metaServerCacheHits);
-                                    Interlocked.Increment(ref cachedCount);
-                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached: meta-server)");
-                                    return;
-                                }
-                            }
-                        }
-
                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
 
                         // Pre-flight: skip files that exceed Essentia's ChordsDetection buffer
@@ -2058,34 +1799,22 @@ namespace Truedat
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
 
-                        // POST to MetaServer if configured (fire per-track, not buffered).
-                        // V1-BLOCKER fix — capture the bool return so the exit code can reflect
-                        // POST failures. Prior behavior: return value discarded, silent data loss.
-                        if (metaServerUrl != null)
+                        allTracks[t.Location] = new TrackEntry
                         {
-                            if (!PostToMetaServer(metaServerUrl, t.Location, feat, fileMd5, audioMd5, chromaprint, chromaDuration, fileSizeBytes, t, fingerprintV1, audioStreamSha256, audioStreamSha256Source))
-                                Interlocked.Increment(ref postFailed);
-                        }
-
-                        if (writeFile)
-                        {
-                            allTracks[t.Location] = new TrackEntry
-                            {
-                                Features = feat,
-                                LastModified = lastMod,
-                                AnalysisDurationSecs = analyzeDuration.TotalSeconds,
-                                FileMd5 = fileMd5,
-                                AudioMd5 = audioMd5,
-                                AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
-                                AudioStreamSha256Source = audioStreamSha256Source,
-                                FingerprintV1 = fingerprintV1,
-                                Chromaprint = chromaprint,
-                                ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
-                            };
-                        }
+                            Features = feat,
+                            LastModified = lastMod,
+                            AnalysisDurationSecs = analyzeDuration.TotalSeconds,
+                            FileMd5 = fileMd5,
+                            AudioMd5 = audioMd5,
+                            AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
+                            AudioStreamSha256Source = audioStreamSha256Source,
+                            FingerprintV1 = fingerprintV1,
+                            Chromaprint = chromaprint,
+                            ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
+                        };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
-                        if (writeFile && newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
+                        if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
                         {
                             lock (saveLock)
                             {
@@ -2118,13 +1847,9 @@ namespace Truedat
             var endTime = DateTime.Now;
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
 
-            Stopwatch? finalSaveSw = null;
-            if (writeFile)
-            {
-                finalSaveSw = Stopwatch.StartNew();
-                SaveResults(moodsPath, allTracks);
-                finalSaveSw.Stop();
-            }
+            var finalSaveSw = Stopwatch.StartNew();
+            SaveResults(moodsPath, allTracks);
+            finalSaveSw.Stop();
 
             Console.WriteLine();
             if (wasCancelled)
@@ -2136,24 +1861,12 @@ namespace Truedat
             Console.WriteLine($"  Cached:     {cachedCount}");
             if (crossPathMoods > 0)
                 Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
-            if (_metaServerPreCacheHits > 0)
-                Console.WriteLine($"  Meta pre:   {_metaServerPreCacheHits}  (of {cachedCount} cached, batch pre-pass)");
-            if (_metaServerCacheHits > 0)
-                Console.WriteLine($"  Meta live:  {_metaServerCacheHits}  (of {cachedCount} cached, per-track fallback)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + failed}");
-            if (writeFile)
-                Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
-            if (metaServerUrl != null)
-            {
-                if (postFailed > 0)
-                    Console.WriteLine($"  MetaServer: {analyzed - postFailed}/{analyzed} posted to {metaServerUrl}  ({postFailed} FAILED — data NOT persisted server-side)");
-                else
-                    Console.WriteLine($"  MetaServer: {analyzed} tracks posted to {metaServerUrl}");
-            }
+            Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
@@ -2169,17 +1882,11 @@ namespace Truedat
             }
             catch { }
             Console.WriteLine();
-            if (writeFile)
-                Console.WriteLine($"Output: {moodsPath}");
-            if (metaServerUrl != null)
-                Console.WriteLine($"MetaServer: {metaServerUrl}");
+            Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
 
-            // V1-BLOCKER fix — postFailed reflects MetaServer POST rejections separate
-            // from analysis exceptions. Either condition makes the run a failure so
-            // downstream (Shell ScanWorker) can't credit a silent-loss run as success.
-            if (failed > 0 || postFailed > 0)
+            if (failed > 0)
                 Environment.ExitCode = 1;
         }
 
@@ -4623,9 +4330,8 @@ namespace Truedat
             if (!string.IsNullOrEmpty(entry.AudioStreamSha256))
             {
                 jw.WriteString("audioStreamSha256", entry.AudioStreamSha256);
-                // Mirror the wire-format omit-when-invariant rule from PostToMetaServer /
-                // PostIdentityOnly: emit the source signal only for the whole-file fallback
-                // path so consumers can detect the lower-trust hash.
+                // Emit the source signal only for the whole-file fallback path so
+                // consumers can detect the lower-trust hash.
                 if (entry.AudioStreamSha256Source == "whole-file")
                     jw.WriteString("audioStreamSha256Source", "whole-file");
             }
@@ -4717,16 +4423,14 @@ namespace Truedat
 
         /// <summary>
         /// Parse a per-track JsonElement (as written by WriteTrackEntry) into TrackFeatures.
-        /// Mirror of WriteTrackEntry's field-by-field serialization. Used by both
-        /// LoadExistingMoods (local mbxmoods.json) and ParseTrackFeaturesFromMetaServer
-        /// (MetaServer /meta/features/by-fingerprint hit). Caller fills FilePath.
+        /// Mirror of WriteTrackEntry's field-by-field serialization. Used by
+        /// LoadExistingMoods to round-trip mbxmoods.json across runs.
         /// </summary>
         static TrackFeatures ParseTrackFeaturesFromJson(JsonElement track)
         {
-            // mfcc is a JSON array in mbxmoods.json (truedat writes via WriteStartArray)
-            // but a stringified JSON array in MetaServer responses (FeatureData.Mfcc is
-            // typed string? — MBXHub stores the raw text in a string DB column and
-            // re-serializes it as a JSON string value). Accept both shapes.
+            // mfcc may appear as a JSON array (current WriteTrackEntry shape) or as
+            // a stringified JSON array (legacy mbxmoods.json files written by older
+            // builds). Accept both shapes for forward-compat.
             double[]? mfcc = null;
             if (track.TryGetProperty("mfcc", out var mfccEl))
             {
@@ -5262,308 +4966,6 @@ namespace Truedat
             catch { return null; }
         }
 
-        /// <summary>
-        /// POST track features to MetaServer's /meta/ingest endpoint.
-        /// Returns true on success, false on failure (logs warning).
-        /// </summary>
-        static bool PostToMetaServer(string baseUrl, string filePath, TrackFeatures feat,
-            string? fileMd5, string? audioMd5, string? chromaprint, int chromaprintDuration, long fileSize, ITunesTrack track,
-            FingerprintV1? fingerprintV1 = null, string? audioStreamSha256 = null, string? audioStreamSha256Source = null)
-        {
-            try
-            {
-                var url = baseUrl.TrimEnd('/') + "/meta/ingest";
-                var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
-
-                using var ms = new MemoryStream();
-                using (var jw = new Utf8JsonWriter(ms))
-                {
-                    jw.WriteStartObject();
-
-                    jw.WriteString("path", filePath);
-
-                    // metadata
-                    jw.WritePropertyName("metadata");
-                    jw.WriteStartObject();
-                    jw.WriteString("artist", feat.Artist);
-                    jw.WriteString("title", feat.Title);
-                    jw.WriteString("album", feat.Album);
-                    jw.WriteString("genre", feat.Genre);
-                    jw.WriteNumber("duration", track.TotalTimeMs / 1000.0);
-                    jw.WriteNumber("fileSize", fileSize);
-                    jw.WriteEndObject();
-
-                    // identity
-                    jw.WritePropertyName("identity");
-                    jw.WriteStartObject();
-                    if (!string.IsNullOrEmpty(fileMd5))
-                        jw.WriteString("fileMd5", fileMd5);
-                    if (!string.IsNullOrEmpty(audioMd5))
-                        jw.WriteString("audioMd5", audioMd5);
-                    // Chromaprint + duration — MetaService stores as identity.chromaprint
-                    // and identity.chromaprint.duration MediaMetadata rows. Empty string is
-                    // treated as absent so a fpcalc failure for one track doesn't pollute
-                    // the row's identity bag.
-                    if (!string.IsNullOrEmpty(chromaprint))
-                    {
-                        jw.WriteString("chromaprint", chromaprint);
-                        if (chromaprintDuration > 0)
-                            jw.WriteNumber("chromaprintDuration", chromaprintDuration);
-                    }
-                    // Phase 2 ride-along: cheap composite fingerprint so default-mode scans
-                    // emit identity-complete rows for the ms-scale peer-pull ping path.
-                    if (fingerprintV1 != null)
-                        WriteFingerprintV1(jw, fingerprintV1);
-                    // Phase 2 durable byte identity — previously stream-only. Ride-along in
-                    // default mode is cheap with SHA-NI; wire-only, not persisted in mbxmoods.json.
-                    // Source signal mirrors the audioHead64kMd5Source pattern: emit only on
-                    // the "whole-file" fallback so MBXHub can decide promotion-to-primary safety.
-                    if (!string.IsNullOrEmpty(audioStreamSha256))
-                    {
-                        jw.WriteString("audioStreamSha256", audioStreamSha256);
-                        if (audioStreamSha256Source == "whole-file")
-                            jw.WriteString("audioStreamSha256Source", "whole-file");
-                    }
-                    jw.WriteEndObject();
-
-                    // features
-                    jw.WritePropertyName("features");
-                    jw.WriteStartObject();
-                    jw.WriteNumber("bpm", feat.Bpm);
-                    jw.WriteString("key", feat.Key);
-                    jw.WriteString("mode", feat.Mode);
-                    jw.WriteNumber("spectralCentroid", feat.SpectralCentroid);
-                    jw.WriteNumber("spectralFlux", feat.SpectralFlux);
-                    jw.WriteNumber("loudness", feat.Loudness);
-                    jw.WriteNumber("danceability", feat.Danceability);
-                    jw.WriteNumber("onsetRate", feat.OnsetRate);
-                    jw.WriteNumber("zeroCrossingRate", feat.ZeroCrossingRate);
-                    jw.WriteNumber("spectralRms", feat.SpectralRms);
-                    jw.WriteNumber("spectralFlatness", feat.SpectralFlatness);
-                    jw.WriteNumber("dissonance", feat.Dissonance);
-                    jw.WriteNumber("pitchSalience", feat.PitchSalience);
-                    jw.WriteNumber("chordsChangesRate", feat.ChordsChangesRate);
-                    // DR emitted only when present; MBXHub's MetaService ingest maps it into
-                    // MoodFeatures.DynamicRange + DynamicRangeSource.
-                    if (feat.DynamicRange.HasValue)
-                    {
-                        jw.WriteNumber("dynamicRange", feat.DynamicRange.Value);
-                        if (!string.IsNullOrEmpty(feat.DynamicRangeSource))
-                            jw.WriteString("dynamicRangeSource", feat.DynamicRangeSource);
-                    }
-                    // Extended features — same omit-when-null contract.
-                    static void WriteOpt2(Utf8JsonWriter w, string name, double? v) { if (v.HasValue) w.WriteNumber(name, v.Value); }
-                    WriteOpt2(jw, "loudnessMomentary", feat.LoudnessMomentary);
-                    WriteOpt2(jw, "loudnessShortTerm", feat.LoudnessShortTerm);
-                    WriteOpt2(jw, "replayGain", feat.ReplayGain);
-                    WriteOpt2(jw, "silenceRate20dB", feat.SilenceRate20dB);
-                    WriteOpt2(jw, "silenceRate30dB", feat.SilenceRate30dB);
-                    WriteOpt2(jw, "silenceRate60dB", feat.SilenceRate60dB);
-                    WriteOpt2(jw, "spectralRolloff", feat.SpectralRolloff);
-                    WriteOpt2(jw, "spectralComplexity", feat.SpectralComplexity);
-                    WriteOpt2(jw, "spectralEntropy", feat.SpectralEntropy);
-                    WriteOpt2(jw, "spectralKurtosis", feat.SpectralKurtosis);
-                    WriteOpt2(jw, "spectralSkewness", feat.SpectralSkewness);
-                    WriteOpt2(jw, "spectralSpread", feat.SpectralSpread);
-                    WriteOpt2(jw, "spectralStrongPeak", feat.SpectralStrongPeak);
-                    WriteOpt2(jw, "spectralDecrease", feat.SpectralDecrease);
-                    WriteOpt2(jw, "spectralEnergy", feat.SpectralEnergy);
-                    WriteOpt2(jw, "spectralEnergyLow", feat.SpectralEnergyLow);
-                    WriteOpt2(jw, "spectralEnergyMidLow", feat.SpectralEnergyMidLow);
-                    WriteOpt2(jw, "spectralEnergyMidHigh", feat.SpectralEnergyMidHigh);
-                    WriteOpt2(jw, "spectralEnergyHigh", feat.SpectralEnergyHigh);
-                    WriteOpt2(jw, "hfc", feat.Hfc);
-                    WriteOpt2(jw, "barkCrest", feat.BarkCrest);
-                    WriteOpt2(jw, "barkFlatness", feat.BarkFlatness);
-                    WriteOpt2(jw, "barkKurtosis", feat.BarkKurtosis);
-                    WriteOpt2(jw, "barkSkewness", feat.BarkSkewness);
-                    WriteOpt2(jw, "barkSpread", feat.BarkSpread);
-                    WriteOpt2(jw, "erbCrest", feat.ErbCrest);
-                    WriteOpt2(jw, "erbFlatness", feat.ErbFlatness);
-                    WriteOpt2(jw, "erbKurtosis", feat.ErbKurtosis);
-                    WriteOpt2(jw, "erbSkewness", feat.ErbSkewness);
-                    WriteOpt2(jw, "erbSpread", feat.ErbSpread);
-                    WriteOpt2(jw, "melCrest", feat.MelCrest);
-                    WriteOpt2(jw, "melFlatness", feat.MelFlatness);
-                    WriteOpt2(jw, "melKurtosis", feat.MelKurtosis);
-                    WriteOpt2(jw, "melSkewness", feat.MelSkewness);
-                    WriteOpt2(jw, "melSpread", feat.MelSpread);
-                    WriteOpt2(jw, "beatsLoudness", feat.BeatsLoudness);
-                    WriteOpt2(jw, "chordsStrength", feat.ChordsStrength);
-                    WriteOpt2(jw, "hpcpCrest", feat.HpcpCrest);
-                    WriteOpt2(jw, "hpcpEntropy", feat.HpcpEntropy);
-                    if (feat.Mfcc != null)
-                    {
-                        jw.WritePropertyName("mfcc");
-                        jw.WriteStartArray();
-                        foreach (var v in feat.Mfcc) jw.WriteNumberValue(v);
-                        jw.WriteEndArray();
-                    }
-                    jw.WriteEndObject();
-
-                    // provenance
-                    jw.WritePropertyName("provenance");
-                    jw.WriteStartObject();
-                    jw.WriteString("scannedBy", Environment.MachineName);
-                    jw.WriteString("tool", "essentia");
-                    jw.WriteString("toolVersion", version);
-                    jw.WriteString("scannedAt", DateTime.UtcNow.ToString("o"));
-                    jw.WriteEndObject();
-
-                    jw.WriteEndObject();
-                }
-
-                var bodyBytes = ms.Length;
-                using var content = new ByteArrayContent(ms.ToArray());
-                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
-
-                if (_audit)
-                    Console.Error.WriteLine($"[AUDIT] postBodyBytes={bodyBytes} status={(int)response.StatusCode} file=\"{Path.GetFileName(filePath)}\"");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    string body = "";
-                    try { body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult() ?? ""; }
-                    catch { /* body unavailable */ }
-                    if (body.Length > 500) body = body.Substring(0, 500) + "...";
-                    Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: HTTP {(int)response.StatusCode} {response.ReasonPhrase} body={body}");
-                    return false;
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                if (_audit)
-                    Console.Error.WriteLine($"[AUDIT] postFailed file=\"{Path.GetFileName(filePath)}\" error=\"{ex.Message}\"");
-                Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: exception {ex.Message}");
-                return false;
-            }
-        }
-
-        // Cross-host cache hit counters — populated by the MetaServer lookup paths.
-        // Pre-pass = batch GET before the worker pool; live = per-track GET as fallback.
-        static int _metaServerPreCacheHits;
-        static int _metaServerCacheHits;
-
-        // Circuit-breaker for the live MetaServer fallback. Set false when the
-        // pre-pass batch returns no successful chunks (likely down) or when the
-        // live fallback observes a network error. Once tripped, the live fallback
-        // short-circuits without firing more 10s-timeout requests — bounding
-        // worst-case scan wall-clock when MetaServer slow-fails.
-        static volatile bool _metaServerLive = true;
-
-        /// <summary>
-        /// Cross-host cache lookup. GET /meta/features/by-fingerprint/{audioHead64kMd5}.
-        /// Returns (features, networkError) — features non-null on hit; networkError=true
-        /// on HTTP 5xx, timeout, or any thrown exception (signal for the circuit-breaker).
-        /// Clean misses (404 / matched=false) return (null, false).
-        /// </summary>
-        static (TrackFeatures? features, bool networkError) LookupMetaServerByFingerprint(string baseUrl, string audioHead64kMd5)
-        {
-            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(audioHead64kMd5)) return (null, false);
-            try
-            {
-                var url = baseUrl.TrimEnd('/') + "/meta/features/by-fingerprint/" + audioHead64kMd5;
-                using var resp = _metaClient.GetAsync(url).GetAwaiter().GetResult();
-                // 404 = clean miss, 5xx = network error. 4xx other than 404 also
-                // counts as miss (the request itself reached the server).
-                if (!resp.IsSuccessStatusCode)
-                    return (null, (int)resp.StatusCode >= 500);
-                var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-                if (!root.TryGetProperty("matched", out var m) || m.ValueKind != JsonValueKind.True) return (null, false);
-                if (!root.TryGetProperty("features", out var f) || f.ValueKind != JsonValueKind.Object) return (null, false);
-                return (ParseTrackFeaturesFromJson(f), false);
-            }
-            catch
-            {
-                return (null, true);
-            }
-        }
-
-        /// <summary>
-        /// Pre-pass batch lookup. POST /meta/features/batch with chunks of up to 500
-        /// queries (MBXHub returns 400 BATCH_TOO_LARGE above that). Returns
-        /// (hits dictionary keyed by audioHead64kMd5 → TrackFeatures (case-insensitive),
-        /// anyChunkSucceeded). Best-effort per chunk: any chunk failure leaves those
-        /// keys absent from the result. anyChunkSucceeded=false signals MetaServer
-        /// is unreachable — caller can use it to disable the live fallback.
-        /// </summary>
-        static (Dictionary<string, TrackFeatures> hits, bool anyChunkSucceeded) LookupMetaServerBatch(
-            string baseUrl, IReadOnlyList<string> audioHead64kMd5s)
-        {
-            var hits = new Dictionary<string, TrackFeatures>(StringComparer.OrdinalIgnoreCase);
-            if (string.IsNullOrEmpty(baseUrl) || audioHead64kMd5s == null || audioHead64kMd5s.Count == 0)
-                return (hits, false);
-
-            bool anyChunkSucceeded = false;
-            var url = baseUrl.TrimEnd('/') + "/meta/features/batch";
-            const int ChunkSize = 500;
-            for (int i = 0; i < audioHead64kMd5s.Count; i += ChunkSize)
-            {
-                int sliceLen = Math.Min(ChunkSize, audioHead64kMd5s.Count - i);
-                var slice = new string[sliceLen];
-                for (int k = 0; k < sliceLen; k++) slice[k] = audioHead64kMd5s[i + k];
-
-                try
-                {
-                    byte[] bodyBytes;
-                    using (var ms = new MemoryStream())
-                    {
-                        using (var jw = new Utf8JsonWriter(ms))
-                        {
-                            jw.WriteStartObject();
-                            jw.WritePropertyName("queries");
-                            jw.WriteStartArray();
-                            foreach (var h in slice)
-                            {
-                                jw.WriteStartObject();
-                                jw.WriteString("fingerprintAudioHead", h);
-                                jw.WriteEndObject();
-                            }
-                            jw.WriteEndArray();
-                            jw.WriteEndObject();
-                        }
-                        bodyBytes = ms.ToArray();
-                    }
-
-                    using var content = new ByteArrayContent(bodyBytes);
-                    content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                    using var resp = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
-                    if (!resp.IsSuccessStatusCode) continue;
-
-                    var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    using var doc = JsonDocument.Parse(json);
-                    if (!doc.RootElement.TryGetProperty("results", out var results)
-                        || results.ValueKind != JsonValueKind.Array) continue;
-
-                    // Successful HTTP + parseable response — even if zero hits, it
-                    // proves MetaServer is reachable and the live fallback can stay on.
-                    anyChunkSucceeded = true;
-
-                    int idx = 0;
-                    foreach (var r in results.EnumerateArray())
-                    {
-                        if (idx >= slice.Length) break;
-                        if (r.TryGetProperty("matched", out var m) && m.ValueKind == JsonValueKind.True
-                            && r.TryGetProperty("features", out var f) && f.ValueKind == JsonValueKind.Object)
-                        {
-                            try { hits[slice[idx]] = ParseTrackFeaturesFromJson(f); }
-                            catch { /* malformed entry — best-effort */ }
-                        }
-                        idx++;
-                    }
-                }
-                catch
-                {
-                    // Best-effort per chunk; downstream falls through to Essentia.
-                }
-            }
-            return (hits, anyChunkSucceeded);
-        }
-
         /// <summary>Composite cheap fingerprint for a file. Sub-10ms per file on warm cache.</summary>
         internal sealed class FingerprintV1
         {
@@ -5582,8 +4984,8 @@ namespace Truedat
         }
 
         /// <summary>
-        /// Normalize a path to the cross-fleet pathTail identity signal.
-        /// Matches MBXHub.Shell.MetaServer.MetaService.GetPathTail exactly:
+        /// Normalize a path to a tail identity signal (last up-to-3 non-empty
+        /// segments, lowercased). Used inside the cheap fingerprint composite.
         ///   replace '/' with '\', split on '\', take last up-to-3 non-empty parts,
         ///   join with '\', lowercase (invariant). Returns null for root / single-segment paths.
         /// </summary>
@@ -5655,7 +5057,7 @@ namespace Truedat
 
         /// <summary>File metadata lifted from TagLib tags for the non-XML scan paths
         /// (--file-list, --analyze-file). Mirrors the iTunes XML metadata MoodsMode uses
-        /// so the MetaServer ingest row isn't empty-string for artist/title/album/genre.</summary>
+        /// so artist/title/album/genre populate when there is no XML source.</summary>
         internal sealed class FileTags
         {
             public string Artist = "";
@@ -5666,7 +5068,7 @@ namespace Truedat
         }
 
         /// <summary>Best-effort tag extraction. Defaults on failure — identity signals
-        /// still flow even if tags are unreadable (identity is the primary fleet signal).</summary>
+        /// still flow even if tags are unreadable.</summary>
         static FileTags ExtractFileTags(string filePath)
         {
             var m = new FileTags();
@@ -5855,11 +5257,8 @@ namespace Truedat
         }
 
         /// <summary>
-        /// Build the identity-only envelope JSON bytes — same shape as the
-        /// /meta/ingest POST body produced by --hash-only mode. Shared between
-        /// PostIdentityOnly (POST path) and the --hash-only --output NDJSON
-        /// manifest writer (offline determinism rig path). Single source of
-        /// truth for the wire shape so the rig and the wire never drift.
+        /// Build an identity envelope JSON object as the body of one NDJSON line
+        /// in the --hash-only --output manifest (offline determinism rig path).
         /// </summary>
         static byte[] BuildIdentityOnlyEnvelope(string filePath, long fileSize,
             FingerprintV1 fp, string? audioStreamSha256, string level, string? audioStreamSha256Source)
@@ -5903,39 +5302,6 @@ namespace Truedat
                 jw.WriteEndObject();
             }
             return ms.ToArray();
-        }
-
-        /// <summary>
-        /// Identity-only POST for --hash-only mode. Same /meta/ingest endpoint as full scan,
-        /// but with only identity populated (features omitted). Level tagged in provenance.
-        /// </summary>
-        static bool PostIdentityOnly(string baseUrl, string filePath, long fileSize,
-            FingerprintV1 fp, string? audioStreamSha256, string level, string? audioStreamSha256Source = null)
-        {
-            try
-            {
-                var url = baseUrl.TrimEnd('/') + "/meta/ingest";
-                var bodyBytes = BuildIdentityOnlyEnvelope(filePath, fileSize, fp, audioStreamSha256, level, audioStreamSha256Source);
-                using var content = new ByteArrayContent(bodyBytes);
-                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                using var response = _metaClient.PostAsync(url, content).GetAwaiter().GetResult();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    string body = "";
-                    try { body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult() ?? ""; }
-                    catch { /* body unavailable */ }
-                    if (body.Length > 500) body = body.Substring(0, 500) + "...";
-                    Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: HTTP {(int)response.StatusCode} {response.ReasonPhrase} ({level}) body={body}");
-                    return false;
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[POSTFAIL] {Path.GetFileName(filePath)}: exception ({level}) {ex.Message}");
-                return false;
-            }
         }
 
         /// <summary>Parse a FingerprintV1 back from mbxmoods.json round-trip. Returns null
