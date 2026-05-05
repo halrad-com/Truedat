@@ -494,6 +494,17 @@ namespace Truedat
             ".xspf"   // XSPF playlist
         };
 
+        /// <summary>
+        /// File extensions for audio formats Essentia cannot decode. Surfaced as a
+        /// distinct "unsupported format" bucket by --check-filenames so users can
+        /// see them up-front rather than discovering analysis failures one-by-one.
+        /// </summary>
+        static readonly HashSet<string> UnsupportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".dsf",   // Sony DSD format
+            ".dff"    // Philips DSDIFF format
+        };
+
         /// <summary>Remove playlist / redirector files from a parsed track list and log the count.</summary>
         static List<ITunesTrack> FilterNonAudio(List<ITunesTrack> tracks)
         {
@@ -681,7 +692,7 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
-                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
+                Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -1252,7 +1263,7 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
-                Console.WriteLine("  --check-filenames   Scan for filenames with characters that break Essentia tools -> mbxhub-filenames.json");
+                Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -1878,19 +1889,32 @@ namespace Truedat
 
             var errors = new List<(ITunesTrack Track, List<char> Chars)>();
             var warnings = new List<(ITunesTrack Track, List<char> Chars, bool Has83)>();
+            var zeroByteFiles = new List<ITunesTrack>();
             var smallFiles = new List<(ITunesTrack Track, long Bytes)>();
+            var unsupportedFiles = new List<(ITunesTrack Track, string Ext)>();
             const long SmallFileThreshold = 50 * 1024; // 50 KB
 
             foreach (var t in tracks)
             {
-                var fileName = Path.GetFileName(t.Location);
-                if (string.IsNullOrEmpty(fileName)) continue;
+                var pathToScan = t.Location;
+                if (string.IsNullOrEmpty(pathToScan)) continue;
+
+                // Unsupported format check is independent of the other categories —
+                // a .dsf with a non-ASCII path AND zero bytes shows up in three buckets.
+                var ext = Path.GetExtension(pathToScan);
+                if (!string.IsNullOrEmpty(ext) && UnsupportedExtensions.Contains(ext))
+                    unsupportedFiles.Add((t, ext));
 
                 List<char>? errorList = null;
                 List<char>? warnList = null;
 
+                // Scan the full path (not just the filename) — non-ASCII chars in
+                // any directory component trigger the same legacy-mode (RunTool)
+                // path-escape failure as non-ASCII in the filename. ASCII chars
+                // (<=127) include the path separators (\ /) and drive colon, so
+                // the threshold-only filter is sufficient.
                 var seen = new HashSet<char>();
-                foreach (var c in fileName)
+                foreach (var c in pathToScan)
                 {
                     if (c <= 127 || !seen.Add(c)) continue;
 
@@ -1906,11 +1930,14 @@ namespace Truedat
                     }
                 }
 
-                // Check file size
+                // Check file size — split zero-byte (almost certainly broken) from
+                // small-but-nonzero (could be a legit short clip or a truncation).
                 try
                 {
                     var size = new FileInfo(t.Location).Length;
-                    if (size < SmallFileThreshold)
+                    if (size == 0)
+                        zeroByteFiles.Add(t);
+                    else if (size < SmallFileThreshold)
                         smallFiles.Add((t, size));
                 }
                 catch { }
@@ -1965,7 +1992,33 @@ namespace Truedat
                 }
             }
 
-            // Small files — likely corrupt or truncated
+            // Unsupported audio formats — Essentia can't decode these
+            if (unsupportedFiles.Count > 0)
+            {
+                Console.WriteLine($"UNSUPPORTED: {unsupportedFiles.Count} file(s) in formats Essentia cannot decode:");
+                Console.WriteLine();
+                foreach (var (t, ext) in unsupportedFiles)
+                {
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}  ({ext.ToLowerInvariant()})");
+                }
+                Console.WriteLine();
+            }
+
+            // Zero-byte files — almost certainly broken
+            if (zeroByteFiles.Count > 0)
+            {
+                Console.WriteLine($"ZERO BYTES: {zeroByteFiles.Count} file(s) of zero length:");
+                Console.WriteLine();
+                foreach (var t in zeroByteFiles)
+                {
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}  (0 bytes)");
+                }
+                Console.WriteLine();
+            }
+
+            // Small files — could be a short legit clip or truncated
             if (smallFiles.Count > 0)
             {
                 Console.WriteLine($"SUSPECT: {smallFiles.Count} file(s) under {SmallFileThreshold / 1024} KB (may be corrupt/truncated):");
@@ -1985,7 +2038,9 @@ namespace Truedat
             Console.WriteLine($"  Errors:           {errors.Count}  (will break - rename these)");
             Console.WriteLine($"  Warnings (no 8.3):{warnsNo83.Count}  (may break - check these)");
             Console.WriteLine($"  Warnings (8.3 ok):{warnsOk.Count}  (safe - 8.3 short path available)");
-            Console.WriteLine($"  Suspect files:    {smallFiles.Count}  (under {SmallFileThreshold / 1024} KB)");
+            Console.WriteLine($"  Unsupported:      {unsupportedFiles.Count}  (DSD/DSF — Essentia cannot decode)");
+            Console.WriteLine($"  Zero-byte files:  {zeroByteFiles.Count}  (length == 0)");
+            Console.WriteLine($"  Suspect files:    {smallFiles.Count}  (over 0 and under {SmallFileThreshold / 1024} KB)");
             Console.WriteLine($"  Clean:            {tracks.Count - errors.Count - warnings.Count}");
             if (errors.Count > 0)
             {
@@ -2010,6 +2065,8 @@ namespace Truedat
                 jw.WriteNumber("errors", errors.Count);
                 jw.WriteNumber("warningsNo83", warnsNo83.Count);
                 jw.WriteNumber("warnings83Ok", warnsOk.Count);
+                jw.WriteNumber("unsupportedFiles", unsupportedFiles.Count);
+                jw.WriteNumber("zeroByteFiles", zeroByteFiles.Count);
                 jw.WriteNumber("suspectFiles", smallFiles.Count);
                 jw.WriteNumber("clean", tracks.Count - errors.Count - warnings.Count);
                 jw.WriteEndObject();
@@ -2084,6 +2141,38 @@ namespace Truedat
                             jw.WriteEndObject();
                         }
                         jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                if (unsupportedFiles.Count > 0)
+                {
+                    jw.WriteStartArray("unsupportedFiles");
+                    foreach (var (t, ext) in unsupportedFiles)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteString("extension", ext.ToLowerInvariant());
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                }
+
+                if (zeroByteFiles.Count > 0)
+                {
+                    jw.WriteStartArray("zeroByteFiles");
+                    foreach (var t in zeroByteFiles)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("trackId", t.TrackId);
+                        jw.WriteString("artist", t.Artist);
+                        jw.WriteString("title", t.Name);
+                        jw.WriteString("path", t.Location);
+                        jw.WriteNumber("bytes", 0);
                         jw.WriteEndObject();
                     }
                     jw.WriteEndArray();
