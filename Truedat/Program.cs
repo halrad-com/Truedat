@@ -498,11 +498,25 @@ namespace Truedat
         /// File extensions for audio formats Essentia cannot decode. Surfaced as a
         /// distinct "unsupported format" bucket by --check-filenames so users can
         /// see them up-front rather than discovering analysis failures one-by-one.
+        /// Also skipped during --folder enumeration.
         /// </summary>
         static readonly HashSet<string> UnsupportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             ".dsf",   // Sony DSD format
             ".dff"    // Philips DSDIFF format
+        };
+
+        /// <summary>
+        /// Audio file extensions used by --folder enumeration to filter out
+        /// non-audio content (cover art, .nfo, .log, .txt, sidecar files, etc.).
+        /// Conservative allowlist — anything not on this list is silently skipped.
+        /// </summary>
+        static readonly HashSet<string> AudioExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp3", ".m4a", ".m4b", ".aac",
+            ".flac", ".ogg", ".oga", ".opus",
+            ".wma", ".wav", ".aiff", ".aif",
+            ".ape", ".mpc", ".wv"
         };
 
         /// <summary>Remove playlist / redirector files from a parsed track list and log the count.</summary>
@@ -562,6 +576,12 @@ namespace Truedat
             bool fileListMode = false;
             string? fileListPath = null;
 
+            // --folder <dir> walks dir recursively for audio files (per AudioExtensions
+            // allowlist) and feeds them into the same worker pool as --file-list.
+            // Mutually exclusive with --file-list and --analyze-file.
+            bool folderMode = false;
+            string? folderPath = null;
+
             bool hashOnlyMode = false;
             string? hashLevel = null;
 
@@ -620,6 +640,7 @@ namespace Truedat
                 else if (canonical == "merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
                 else if (canonical == "analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
                 else if (canonical == "file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
+                else if (canonical == "folder" && i + 1 < args.Length) { folderMode = true; folderPath = args[++i]; }
                 else if (canonical == "hash-only") hashOnlyMode = true;
                 else if (canonical == "level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
                 else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
@@ -639,6 +660,21 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
+            if (folderMode && (fileListMode || analyzeFileMode))
+            {
+                Console.Error.WriteLine("Error: --folder is mutually exclusive with --file-list and --analyze-file.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (folderMode && !Directory.Exists(folderPath!))
+            {
+                Console.Error.WriteLine($"Error: Folder not found: {folderPath}");
+                Environment.ExitCode = 1;
+                return;
+            }
+            // --folder reuses the --file-list worker code path entirely; the only
+            // difference is path discovery (directory walk vs reading a list file).
+            if (folderMode) fileListMode = true;
 
             if (hashOnlyMode)
             {
@@ -697,7 +733,10 @@ namespace Truedat
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
-                Console.WriteLine("                      Mutually exclusive with --analyze-file; -p sets parallelism");
+                Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
+                Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
+                Console.WriteLine("                      Use --moods <path> to merge results into an existing mbxmoods.json");
                 Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
                 Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
@@ -1076,25 +1115,60 @@ namespace Truedat
                 return;
             }
 
-            // --file-list mode: batch analysis from a text file
+            // --file-list / --folder mode: batch analysis from one of three path sources.
+            //   --folder <dir>      walk the directory recursively for audio files
+            //   --file-list <path>  read paths from a UTF-8 text file
+            //   --file-list -       read paths from stdin (one per line, # comments)
             if (fileListMode)
             {
-                if (!File.Exists(fileListPath!))
-                {
-                    Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
-                    Environment.ExitCode = 1;
-                    return;
-                }
+                List<string> filePaths;
 
-                // Read paths, skip empty lines and comments
-                var filePaths = File.ReadAllLines(fileListPath!, Encoding.UTF8)
-                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
-                    .Select(line => line.Trim())
-                    .ToList();
+                if (folderMode)
+                {
+                    Console.Error.WriteLine($"Walking folder: {folderPath}");
+                    int unsupportedCount = 0;
+                    var walked = new List<string>();
+                    foreach (var p in Directory.EnumerateFiles(folderPath!, "*", SearchOption.AllDirectories))
+                    {
+                        var ext = Path.GetExtension(p);
+                        if (string.IsNullOrEmpty(ext)) continue;
+                        if (UnsupportedExtensions.Contains(ext)) { unsupportedCount++; continue; }
+                        if (AudioExtensions.Contains(ext)) walked.Add(p);
+                    }
+                    filePaths = walked;
+                    Console.Error.WriteLine($"  Found {filePaths.Count} audio file(s)" +
+                        (unsupportedCount > 0 ? $" (skipped {unsupportedCount} unsupported DSD/DSF)" : ""));
+                }
+                else if (fileListPath == "-")
+                {
+                    Console.Error.WriteLine("Reading file list from stdin (one path per line, # comments, EOF to start)...");
+                    filePaths = new List<string>();
+                    string? line;
+                    while ((line = Console.In.ReadLine()) != null)
+                    {
+                        var trimmed = line.Trim();
+                        if (!string.IsNullOrWhiteSpace(trimmed) && !trimmed.StartsWith("#"))
+                            filePaths.Add(trimmed);
+                    }
+                    Console.Error.WriteLine($"  Read {filePaths.Count} path(s) from stdin");
+                }
+                else
+                {
+                    if (!File.Exists(fileListPath!))
+                    {
+                        Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    filePaths = File.ReadAllLines(fileListPath!, Encoding.UTF8)
+                        .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                        .Select(line => line.Trim())
+                        .ToList();
+                }
 
                 if (filePaths.Count == 0)
                 {
-                    Console.Error.WriteLine("Error: File list is empty.");
+                    Console.Error.WriteLine("Error: No paths to process.");
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -1268,7 +1342,10 @@ namespace Truedat
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
-                Console.WriteLine("                      Mutually exclusive with --analyze-file; -p sets parallelism");
+                Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
+                Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
+                Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
+                Console.WriteLine("                      Use --moods <path> to merge results into an existing mbxmoods.json");
                 Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
                 Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
