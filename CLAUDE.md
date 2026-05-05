@@ -7,7 +7,7 @@ This file is loaded automatically by Claude Code / Claude Agent sessions scoped 
 Truedat is a Windows .NET command-line tool that analyses a music library's audio and writes `mbxmoods.json` (mood + Essentia features), optionally `mbxhub-fingerprints.json` (Chromaprint + audio MD5), and `mbxhub-details.json` (ffprobe stream details). Output files are consumed by MBXHub's AutoQ engine (separate repo).
 
 - Build: `build-truedat.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
-- Runtime deps: `essentia_streaming_extractor_music.exe` (required), plus optional `essentia_streaming_md5.exe`, `fpcalc.exe`, `ffmpeg.exe`, `ffprobe.exe` — all placed alongside the exe.
+- Runtime deps: `essentia_streaming_extractor_music.exe` (required for default scan), plus optional `ffmpeg.exe` (multi-channel downmix). `essentia_streaming_md5.exe` and `fpcalc.exe` are **legacy-mode only** — used by `--fingerprint`, `--md5-only`, `--quick-fingerprint`. Default scan no longer runs them.
 - Framework: **.NET Framework 4.8**. No .NET 6/8 APIs, no `ValueTask`, no `init` setters on public types. Use `System.Text.Json` (merged via ILRepack).
 
 ## mbxmoods.json schema (current)
@@ -33,7 +33,9 @@ Don't regress to a uniform 6 dp — it inflates JSON size without analytic value
 
 ## Concurrent hashing in mood analysis
 
-Each worker runs Essentia + `ComputeFileMd5` + `RunMd5` + `RunFpcalc` + `ComputeFingerprintV1` concurrently via `Task.Run` + `Task.WaitAll`. Wall-clock is ~`max(analysis, slowest-hash)` per track. When any hash tool is absent, the corresponding task returns an empty result and the field stays `null` — don't add fallback logic. `ComputeFingerprintV1` (~5 ms warm) is a pure-managed task so it has no tool-availability gate.
+Each worker runs Essentia + `ComputeFileMd5` + `ComputeFingerprintV1` + `ComputeAudioStreamSha256FromFile` concurrently via `Task.Run` + `Task.WaitAll`. Wall-clock is ~`max(analysis, slowest-hash)` per track. All hashes are pure-managed (no subprocess), so there's no tool-availability gate and no path-escape exposure. The `audioStreamSha256` task hashes the TagLib invariant audio region with SHA-256 — content-stable (tag edits don't change it), portable (managed `FileStream` over Unicode path), fast (SHA-NI hardware accel).
+
+The legacy `essentia_streaming_md5.exe` and `fpcalc.exe` subprocesses are **no longer in the default codepath**. They're invoked only by `--fingerprint`, `--md5-only`, and `--quick-fingerprint`, where they still run via `RunTool` (with the `SafePath`/`TryCreateHardlink` path-escape fallback).
 
 ## Hash-only mode (offline NDJSON manifest)
 
@@ -50,9 +52,8 @@ Path-cache and cross-MD5 cache branches re-extract (skip cache reuse) when any o
 
 - `DynamicRange` — pre-LRA builds.
 - `LoudnessMomentary` — pre-extended-feature builds (canary for the 40-extended set).
-- `AudioMd5` **only when** `md5Exe != null` — otherwise every track re-extracts forever on installs without the MD5 tool.
 
-When adding a new always-extracted field, decide whether to add it to the canary. If yes, guard on the tool availability the way `audioMd5` does.
+When adding a new always-extracted field, decide whether to add it to the canary. Avoid canary conditions that depend on optional external tools — those caused infinite re-extraction loops on installs without the tool, which is why the old `audioMd5`-presence canary was removed when the binary left the default codepath.
 
 ## Conventions
 

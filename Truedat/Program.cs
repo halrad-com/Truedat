@@ -792,11 +792,6 @@ namespace Truedat
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
-                // Identity tools — same resolution as MoodsMode/--file-list. Identity
-                // fields ride on the outer wrapper of our stdout JSON for downstream
-                // consumers of --analyze-file --json-output.
-                var afMd5Exe = FindTool("essentia_streaming_md5.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
-                var afFpcalcExe = FindTool("fpcalc.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
 
                 if (afEssentiaExe == null)
                 {
@@ -812,12 +807,6 @@ namespace Truedat
                 // Identity ride-along — mirrors MoodsMode:1527-1544 and --file-list.
                 var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!, afFileSize, CancellationToken.None));
                 var afFileMd5Task = Task.Run(() => ComputeFileMd5(analyzeFilePath!));
-                var afAudioMd5Task = afMd5Exe != null
-                    ? Task.Run(() => RunMd5(afMd5Exe, analyzeFilePath!, CancellationToken.None))
-                    : Task.FromResult(("", (string?)null));
-                var afChromaTask = afFpcalcExe != null
-                    ? Task.Run(() => RunFpcalc(afFpcalcExe, analyzeFilePath!, CancellationToken.None))
-                    : Task.FromResult(("", 0, (string?)null));
                 var afFingerprintTask = Task.Run(() =>
                 {
                     var swFp = Stopwatch.StartNew();
@@ -839,14 +828,10 @@ namespace Truedat
                 // Tags ride-along — no iTunes XML source in --analyze-file, so pull
                 // artist/title/album/genre/duration from TagLib.
                 var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
-                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afAudioMd5Task, afChromaTask, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
+                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
 
                 var (features, error) = afEssentiaTask.Result;
                 var afFileMd5 = afFileMd5Task.Result;
-                var (afAudioMd5Value, _) = afAudioMd5Task.Result;
-                var afAudioMd5 = string.IsNullOrEmpty(afAudioMd5Value) ? null : afAudioMd5Value;
-                var (afChromaValue, afChromaDuration, _) = afChromaTask.Result;
-                var afChromaprint = string.IsNullOrEmpty(afChromaValue) ? null : afChromaValue;
                 var afFingerprintV1 = afFingerprintTask.Result;
                 var (afAudioStreamSha256, afAudioStreamSha256Source) = afAudioStreamSha256Task.Result;
                 var afTags = afTagsTask.Result;
@@ -872,17 +857,13 @@ namespace Truedat
                     LastModified = File.GetLastWriteTimeUtc(analyzeFilePath),
                     AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
                     FileMd5 = afFileMd5,
-                    AudioMd5 = afAudioMd5,
                     AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
                     AudioStreamSha256Source = afAudioStreamSha256Source,
-                    FingerprintV1 = afFingerprintV1,
-                    Chromaprint = afChromaprint,
-                    ChromaprintDuration = afChromaDuration > 0 ? (double?)afChromaDuration : null
+                    FingerprintV1 = afFingerprintV1
                 };
 
                 // Output features as JSON to stdout. Identity fields not already on the
-                // TrackEntry (fingerprint.v1, audioStreamSha256, chromaprint) ride on the
-                // outer wrapper — Shell's IngestViaMetaService falls back to outerRoot.
+                // TrackEntry (fingerprint.v1, audioStreamSha256) ride on the outer wrapper.
                 if (jsonOutput)
                 {
                     using var ms = new MemoryStream();
@@ -899,12 +880,6 @@ namespace Truedat
                             // can detect the lower-trust hash (invariant region was unavailable).
                             if (afAudioStreamSha256Source == "whole-file")
                                 jw.WriteString("audioStreamSha256Source", "whole-file");
-                        }
-                        if (!string.IsNullOrEmpty(afChromaprint))
-                        {
-                            jw.WriteString("chromaprint", afChromaprint);
-                            if (afChromaDuration > 0)
-                                jw.WriteNumber("chromaprintDuration", afChromaDuration);
                         }
                         jw.WriteEndObject();
                     }
@@ -1115,11 +1090,9 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
 
-                // Find Essentia + identity tools (mirror MoodsMode resolution).
+                // Find Essentia (mirror MoodsMode resolution).
                 var flBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var flEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", flBaseDir, Environment.CurrentDirectory);
-                var flMd5Exe = FindTool("essentia_streaming_md5.exe", flBaseDir, Environment.CurrentDirectory);
-                var flFpcalcExe = FindTool("fpcalc.exe", flBaseDir, Environment.CurrentDirectory);
                 if (flEssentiaExe == null)
                 {
                     Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
@@ -1159,12 +1132,6 @@ namespace Truedat
                         // Without this, --file-list mode was POSTing identity:{} (features-only).
                         var essentiaTask = Task.Run(() => AnalyzeWithEssentia(flEssentiaExe, filePath, fileSize, CancellationToken.None));
                         var fileMd5Task = Task.Run(() => ComputeFileMd5(filePath));
-                        var audioMd5Task = flMd5Exe != null
-                            ? Task.Run(() => RunMd5(flMd5Exe, filePath, CancellationToken.None))
-                            : Task.FromResult(("", (string?)null));
-                        var chromaTask = flFpcalcExe != null
-                            ? Task.Run(() => RunFpcalc(flFpcalcExe, filePath, CancellationToken.None))
-                            : Task.FromResult(("", 0, (string?)null));
                         var fingerprintTask = Task.Run(() =>
                         {
                             var swFp = Stopwatch.StartNew();
@@ -1187,14 +1154,10 @@ namespace Truedat
                         // artist/title/album/genre/duration from TagLib tags. Without this,
                         // identity.metadataKey on the server is empty for every local scan.
                         var tagsTask = Task.Run(() => ExtractFileTags(filePath));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task, tagsTask });
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
-                        var (audioMd5Value, _) = audioMd5Task.Result;
-                        var audioMd5 = string.IsNullOrEmpty(audioMd5Value) ? null : audioMd5Value;
-                        var (chromaValue, chromaDuration, _) = chromaTask.Result;
-                        var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var tags = tagsTask.Result;
@@ -1219,12 +1182,9 @@ namespace Truedat
                             LastModified = File.GetLastWriteTimeUtc(filePath),
                             AnalysisDurationSecs = 0, // individual timing not tracked in batch
                             FileMd5 = fileMd5,
-                            AudioMd5 = audioMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
-                            FingerprintV1 = fingerprintV1,
-                            Chromaprint = string.IsNullOrEmpty(chromaprint) ? null : chromaprint,
-                            ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
+                            FingerprintV1 = fingerprintV1
                         };
 
                         // Accumulate for moods file (only saved if --moods is set).
@@ -1371,7 +1331,6 @@ namespace Truedat
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
-            var md5Exe = FindTool("essentia_streaming_md5.exe", baseDir, outputDir, Environment.CurrentDirectory);
             var catalogPath = FindCatalog(baseDir, Environment.CurrentDirectory,
                 Path.GetDirectoryName(Path.GetDirectoryName(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))) ?? "");
 
@@ -1379,10 +1338,7 @@ namespace Truedat
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
-            Console.WriteLine($"  MD5:        {md5Exe ?? "not found (audioMd5 will be skipped)"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
-            var fpcalcExe = FindTool("fpcalc.exe", baseDir, outputDir, Environment.CurrentDirectory);
-            Console.WriteLine($"  fpcalc:     {fpcalcExe ?? "not found"}");
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found (run: python src/catalog-prep.py --download --build)")}");
             Console.WriteLine();
 
@@ -1494,16 +1450,13 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    // Re-extract when DR, the extended-feature canary, or — if the MD5
-                                    // tool is present — AudioMd5 is missing. Older entries from pre-LRA,
-                                    // pre-extended-feature, or pre-audioMd5 builds need a fresh Essentia
-                                    // pass to backfill the current schema. The md5Exe guard prevents
-                                    // infinite re-extraction when the user hasn't installed the MD5 tool.
+                                    // Re-extract when DR or the extended-feature canary is missing.
+                                    // Older entries from pre-LRA or pre-extended-feature builds need
+                                    // a fresh Essentia pass to backfill the current schema.
                                     if (!existing.Features.DynamicRange.HasValue
-                                        || !existing.Features.LoudnessMomentary.HasValue
-                                        || (md5Exe != null && string.IsNullOrEmpty(existing.AudioMd5)))
+                                        || !existing.Features.LoudnessMomentary.HasValue)
                                     {
-                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR / extended / audioMd5 missing)");
+                                        if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR / extended missing)");
                                     }
                                     else
                                     {
@@ -1597,14 +1550,12 @@ namespace Truedat
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
                                 var xf = xp.Entry.Features;
-                                // Same fall-through as the path-cache branch — missing DR, extended
-                                // canary, or (when md5Exe is present) audioMd5 means we can't reuse
-                                // the MD5-matched entry; fresh Essentia needed.
+                                // Same fall-through as the path-cache branch — missing DR or extended
+                                // canary means we can't reuse the MD5-matched entry; fresh Essentia needed.
                                 if (!xf.DynamicRange.HasValue
-                                    || !xf.LoudnessMomentary.HasValue
-                                    || (md5Exe != null && string.IsNullOrEmpty(xp.Entry.AudioMd5)))
+                                    || !xf.LoudnessMomentary.HasValue)
                                 {
-                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR / extended / audioMd5 missing)");
+                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR / extended missing)");
                                 }
                                 else
                                 {
@@ -1713,25 +1664,14 @@ namespace Truedat
                             return;
                         }
 
-                        // Run Essentia analysis, file MD5, and audio MD5 concurrently — disk/CPU
+                        // Run Essentia analysis and the managed hashes concurrently — disk/CPU
                         // profiles overlap so wall-clock per track is roughly max(analysis, hash)
-                        // rather than the sum. File MD5 is pure I/O; audio MD5 is a subprocess
-                        // that reads the same bytes Essentia decodes, so both amortise against
-                        // the analysis run. Audio MD5 is skipped when essentia_streaming_md5.exe
-                        // is not present — field stays null rather than blocking extraction.
+                        // rather than the sum. All hashes are pure-managed I/O; the audio MD5
+                        // and chromaprint subprocesses (essentia_streaming_md5, fpcalc) are no
+                        // longer in the default codepath — see --fingerprint mode for those.
                         var analyzeStart = Stopwatch.GetTimestamp();
                         var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token));
                         var fileMd5Task = Task.Run(() => ComputeFileMd5(t.Location));
-                        var audioMd5Task = md5Exe != null
-                            ? Task.Run(() => RunMd5(md5Exe, t.Location, cts.Token))
-                            : Task.FromResult(("", (string?)null));
-                        // Chromaprint via fpcalc — same parallel pattern. Adds the third
-                        // identity tier (path → fileMd5 → audioMd5 → chromaprint → metadataKey)
-                        // in a single analysis pass instead of requiring a separate
-                        // --fingerprint run. Skipped cleanly when fpcalc.exe isn't bundled.
-                        var chromaTask = fpcalcExe != null
-                            ? Task.Run(() => RunFpcalc(fpcalcExe, t.Location, cts.Token))
-                            : Task.FromResult(("", 0, (string?)null));
                         // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
                         // Phase 2 cheap identity signal; cost is negligible vs Essentia.
                         var fingerprintTask = Task.Run(() =>
@@ -1757,7 +1697,7 @@ namespace Truedat
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
                             return result;
                         });
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, audioMd5Task, chromaTask, fingerprintTask, audioStreamSha256Task });
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -1765,16 +1705,6 @@ namespace Truedat
 
                         var (feat, errorReason) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
-                        var (audioMd5Value, audioMd5Err) = audioMd5Task.Result;
-                        var audioMd5 = string.IsNullOrEmpty(audioMd5Value) ? null : audioMd5Value;
-                        if (md5Exe != null && audioMd5 == null && audioMd5Err != null && _audit)
-                            Console.WriteLine($"  DEBUG audioMd5: {audioMd5Err}");
-
-                        var (chromaValue, chromaDuration, chromaErr) = chromaTask.Result;
-                        var chromaprint = string.IsNullOrEmpty(chromaValue) ? null : chromaValue;
-                        if (fpcalcExe != null && chromaprint == null && chromaErr != null && _audit)
-                            Console.WriteLine($"  DEBUG chromaprint: {chromaErr}");
-
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
 
@@ -1805,12 +1735,9 @@ namespace Truedat
                             LastModified = lastMod,
                             AnalysisDurationSecs = analyzeDuration.TotalSeconds,
                             FileMd5 = fileMd5,
-                            AudioMd5 = audioMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
-                            FingerprintV1 = fingerprintV1,
-                            Chromaprint = chromaprint,
-                            ChromaprintDuration = chromaDuration > 0 ? (double?)chromaDuration : null
+                            FingerprintV1 = fingerprintV1
                         };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 

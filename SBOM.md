@@ -93,7 +93,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5`, `audioMd5`, `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); Essentia, both MD5s, chromaprint (via `fpcalc.exe`), `fingerprint.v1`, and `audioStreamSha256` all run concurrently per track. |
+| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5`, `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). The legacy `audioMd5` and `chromaprint` fields stay nullable in schema; pre-existing values are preserved on cache reuse but new entries do not populate them — those are produced by `--fingerprint` mode now. |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
 | `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
