@@ -94,7 +94,9 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | File | Description |
 |------|-------------|
 | `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5`, `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). The legacy `audioMd5` and `chromaprint` fields stay nullable in schema; pre-existing values are preserved on cache reuse but new entries do not populate them — those are produced by `--fingerprint` mode now. |
-| `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis) |
+| `mbxmoods.<host>.json` | Output of `--chunk M/N` — hostname-suffixed shard. Each machine in a chunked scan writes its own shard; combine with `--merge-moods` for a unified file. |
+| `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. |
+| `mbxmoods-verify.csv` | Output of `--verify` — per-entry integrity report (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Tab-separated. Excludes OK rows to keep size small. |
 | `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
 | `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
 | `mbxhub-details.json` | Audio stream details: codec, bitrate, sample rate, channels per track (requires ffprobe) |

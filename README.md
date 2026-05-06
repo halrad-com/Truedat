@@ -63,6 +63,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 
   -p, --parallel <N>      Number of parallel threads (default: all cores)
   --fixup                 Validate and remap paths in mbxmoods.json without re-analyzing
+  --verify                Recompute audioStreamSha256 per entry, report drift / missing
+                          (read-only; writes mbxmoods-verify.csv next to the moods file)
+  --chunk M/N             Split scan across machines via deterministic hash-mod assignment
+                          (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Strip legacy valence/arousal fields from mbxmoods.json (creates backup)
   --fingerprint           Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json
@@ -85,10 +89,14 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 
 For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fingerprinting is much faster. Both modes are designed for this:
 
-- **Incremental** - Skips tracks already processed (by file path + last-modified timestamp)
+- **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
+- **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
+- **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
+- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
-- **ETA tracking** - Shows per-track rate and estimated completion time
-- **Error resilience** - Failed tracks logged to errors CSV, skipped on retry
+- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly.
+- **ETA tracking** - Shows per-track rate and estimated completion time.
+- **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
 ```cmd
 REM First run - analyzes everything
@@ -123,6 +131,14 @@ truedat.exe --hash-only --level fingerprint --file-list files.txt --output manif
 
 REM Hash-only: durable audioStreamSha256 (disk-bound; emits fingerprint.v1 too)
 truedat.exe --hash-only --level stream --file-list files.txt --output manifest.ndjson -p 8
+
+REM Verify the cache against disk (read-only — recomputes audioStreamSha256 per entry)
+truedat.exe --verify --moods C:\Music\mbxmoods.json
+
+REM Two-machine same-library scan: each box does its own deterministic shard
+truedat.exe "iTunes Music Library.xml" --chunk 1/2     REM machine A
+truedat.exe "iTunes Music Library.xml" --chunk 2/2     REM machine B
+truedat.exe --merge-moods --merge-source mbxmoods.machineA.json --merge-source mbxmoods.machineB.json --merge-output mbxmoods.json
 ```
 
 ## Synthetic Library Generation (Test Tooling)

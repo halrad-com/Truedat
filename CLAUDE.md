@@ -46,14 +46,33 @@ The legacy `essentia_streaming_md5.exe` and `fpcalc.exe` subprocesses are **no l
 
 Envelope shape is defined by `BuildIdentityOnlyEnvelope` in `Program.cs`. It has no external consumers — when the rig and the format need to evolve, evolve them together.
 
-## Cache re-extract gate
+## Cache hierarchy & re-extract gate
 
-Path-cache and cross-MD5 cache branches re-extract (skip cache reuse) when any of these are missing:
+`MoodsMode` checks the cache in this order before falling through to Essentia:
+
+1. **Path + mtime** (`allTracks[t.Location]`, `TruncateToSeconds` equality) — the fastest path. Returns `(cached)`.
+2. **Path + audioStreamSha256** (`(cached·sha)`) — when path matches but mtime drifted, recompute `audioStreamSha256` (~50ms managed SHA-NI). If it matches the cached value, audio bytes are unchanged (just tags). Reuse Essentia features, refresh `lastModified` + `fileMd5` + `fingerprint.v1` (the tag-affected fields).
+3. **Cross-MD5** (`moodMd5Index`, `(cached·md5)`) — different path, byte-identical file (covers paths-changed-but-mtimes-preserved-on-copy and clean moves). Re-keys old → new path.
+4. **Cross-SHA** (`moodShaIndex`, `(cached·sha)`) — different path AND tag-edited (file bytes differ but invariant audio region matches). Re-keys old → new path; recomputes `fileMd5` + `fingerprint.v1`.
+
+Tiers 2 and 4 use `RebuildCacheEntry` — adding a new `TrackFeatures` field means updating that one helper, not 4 inline copies.
+
+Re-extract (cache miss → full Essentia) when any of these are missing:
 
 - `DynamicRange` — pre-LRA builds.
 - `LoudnessMomentary` — pre-extended-feature builds (canary for the 40-extended set).
 
 When adding a new always-extracted field, decide whether to add it to the canary. Avoid canary conditions that depend on optional external tools — those caused infinite re-extraction loops on installs without the tool, which is why the old `audioMd5`-presence canary was removed when the binary left the default codepath.
+
+## Chunked scanning across machines
+
+`--chunk M/N` uses hash-mod assignment: `(PathComparer.GetHashCode(path) & 0x7FFFFFFF) % N == M-1`. `PathComparer`'s hash is FNV-1a, deterministic across processes and machines, separator-normalized, case-folded. Same path → same bucket on every box, **regardless of XML differences**. Asymmetric libraries are tolerated. Output filenames auto-suffix with hostname to prevent shard collisions when machines write to a shared library directory. Combine with `--merge-moods`.
+
+Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migrate` / `--fixup` / `--verify` / `--merge-moods` / `--synthesize` / `--seed-moods` / `--hash-only`.
+
+## Verify mode
+
+`--verify` (read-only) walks `mbxmoods.json`, recomputes `audioStreamSha256` per entry, and writes `mbxmoods-verify.csv` (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Exit 1 on any drift / missing / error so it's CI-friendly. Pure diagnostic — no auto-repair (the right action depends on cause: tag edit → rescan, re-encode → reanalyze, file gone → drop).
 
 ## Conventions
 
