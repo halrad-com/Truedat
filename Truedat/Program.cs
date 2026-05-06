@@ -906,80 +906,190 @@ namespace Truedat
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
                 var afFileSize = new FileInfo(analyzeFilePath!).Length;
-                // Identity ride-along — mirrors MoodsMode:1527-1544 and --file-list.
-                var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!, afFileSize, CancellationToken.None));
-                var afFileMd5Task = Task.Run(() => ComputeFileMd5(analyzeFilePath!));
-                var afFingerprintTask = Task.Run(() =>
-                {
-                    var swFp = Stopwatch.StartNew();
-                    var fp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
-                    swFp.Stop();
-                    if (_audit)
-                        Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
-                    return fp;
-                });
-                var afAudioStreamSha256Task = Task.Run(() =>
-                {
-                    var swSha = Stopwatch.StartNew();
-                    var result = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
-                    swSha.Stop();
-                    if (_audit)
-                        Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
-                    return result;
-                });
-                // Tags ride-along — no iTunes XML source in --analyze-file, so pull
-                // artist/title/album/genre/duration from TagLib.
-                var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
-                Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
+                var afKey = Path.GetFullPath(analyzeFilePath!);
+                DateTime afCurrentLastMod = DateTime.MinValue;
+                try { afCurrentLastMod = File.GetLastWriteTimeUtc(analyzeFilePath!); } catch { }
 
-                var (features, error) = afEssentiaTask.Result;
-                var afFileMd5 = afFileMd5Task.Result;
-                var afFingerprintV1 = afFingerprintTask.Result;
-                var (afAudioStreamSha256, afAudioStreamSha256Source) = afAudioStreamSha256Task.Result;
-                var afTags = afTagsTask.Result;
+                // Pre-load moods for cache check (only meaningful when --moods is set).
+                ConcurrentDictionary<string, TrackEntry>? afMoodsTracks = null;
+                if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
+                {
+                    afMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    LoadExistingMoods(analyzeFileMoods!, afMoodsTracks);
+                }
+
+                TrackEntry? trackEntry = null;
+                string afHitTag = "analyzed";
+                FingerprintV1? afFingerprintV1 = null;
+                string? afAudioStreamSha256 = null;
+                string afAudioStreamSha256Source = "";
+
+                // Cache hierarchy — same tiers as MoodsMode and --file-list.
+                if (afMoodsTracks != null)
+                {
+                    var afMoodMd5Index = BuildMd5Index(afMoodsTracks, e => e.FileMd5);
+                    var afMoodShaIndex = BuildMd5Index(afMoodsTracks, e => e.AudioStreamSha256);
+
+                    if (afMoodsTracks.TryGetValue(afKey, out var afEx)
+                        && afEx.Features.DynamicRange.HasValue
+                        && afEx.Features.LoudnessMomentary.HasValue)
+                    {
+                        // Tier 1: path-mtime
+                        if (TruncateToSeconds(afCurrentLastMod) == TruncateToSeconds(afEx.LastModified))
+                        {
+                            var freshTags = ExtractFileTags(analyzeFilePath!);
+                            trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, null, null);
+                            afHitTag = "cached";
+                            afFingerprintV1 = trackEntry.FingerprintV1;
+                            afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                            afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                        }
+                        // Tier 2: path-sha (mtime drifted, audio bytes unchanged)
+                        else if (!string.IsNullOrEmpty(afEx.AudioStreamSha256))
+                        {
+                            var (recompSha, _) = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                            if (!string.IsNullOrEmpty(recompSha)
+                                && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                            {
+                                var refreshedMd5 = ComputeFileMd5(analyzeFilePath!);
+                                var refreshedFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                                var freshTags = ExtractFileTags(analyzeFilePath!);
+                                trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                    freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                                afHitTag = "cached·sha";
+                                afFingerprintV1 = trackEntry.FingerprintV1;
+                                afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                                afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                            }
+                        }
+                    }
+
+                    // Tier 3: cross-MD5
+                    if (trackEntry == null && afMoodMd5Index != null)
+                    {
+                        var localMd5 = ComputeFileMd5(analyzeFilePath!);
+                        if (!string.IsNullOrEmpty(localMd5)
+                            && afMoodMd5Index.TryGetValue(localMd5!, out var xp)
+                            && xp.Entry.Features.DynamicRange.HasValue
+                            && xp.Entry.Features.LoudnessMomentary.HasValue)
+                        {
+                            var freshTags = ExtractFileTags(analyzeFilePath!);
+                            trackEntry = RebuildCacheEntryFromTags(xp.Entry, freshTags.Artist, freshTags.Title,
+                                freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, localMd5, null);
+                            afMoodsTracks.TryRemove(xp.OldKey, out _);
+                            afHitTag = "cached·md5";
+                            afFingerprintV1 = trackEntry.FingerprintV1;
+                            afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                            afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                        }
+                    }
+
+                    // Tier 4: cross-SHA
+                    if (trackEntry == null && afMoodShaIndex != null)
+                    {
+                        var (localSha, _) = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                        if (!string.IsNullOrEmpty(localSha)
+                            && afMoodShaIndex.TryGetValue(localSha!, out var xs)
+                            && xs.Entry.Features.DynamicRange.HasValue
+                            && xs.Entry.Features.LoudnessMomentary.HasValue)
+                        {
+                            var refreshedMd5 = ComputeFileMd5(analyzeFilePath!);
+                            var refreshedFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                            var freshTags = ExtractFileTags(analyzeFilePath!);
+                            trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
+                                freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                            afMoodsTracks.TryRemove(xs.OldKey, out _);
+                            afHitTag = "cached·sha";
+                            afFingerprintV1 = trackEntry.FingerprintV1;
+                            afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                            afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                        }
+                    }
+                }
+
+                // Cache miss (or no --moods): full Essentia + identity ride-along.
+                if (trackEntry == null)
+                {
+                    var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!, afFileSize, CancellationToken.None));
+                    var afFileMd5Task = Task.Run(() => ComputeFileMd5(analyzeFilePath!));
+                    var afFingerprintTask = Task.Run(() =>
+                    {
+                        var swFp = Stopwatch.StartNew();
+                        var fp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                        swFp.Stop();
+                        if (_audit)
+                            Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
+                        return fp;
+                    });
+                    var afAudioStreamSha256Task = Task.Run(() =>
+                    {
+                        var swSha = Stopwatch.StartNew();
+                        var result = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                        swSha.Stop();
+                        if (_audit)
+                            Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
+                        return result;
+                    });
+                    var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
+                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
+
+                    var (features, error) = afEssentiaTask.Result;
+                    var afFileMd5 = afFileMd5Task.Result;
+                    afFingerprintV1 = afFingerprintTask.Result;
+                    var (sha, shaSrc) = afAudioStreamSha256Task.Result;
+                    afAudioStreamSha256 = sha;
+                    afAudioStreamSha256Source = shaSrc;
+                    var afTags = afTagsTask.Result;
+
+                    if (features == null)
+                    {
+                        Console.Error.WriteLine($"Error: {error}");
+                        Environment.ExitCode = 3;
+                        return;
+                    }
+
+                    features.Artist = afTags.Artist;
+                    features.Title = afTags.Title;
+                    features.Album = afTags.Album;
+                    features.Genre = afTags.Genre;
+                    features.FilePath = analyzeFilePath!;
+
+                    trackEntry = new TrackEntry
+                    {
+                        Features = features,
+                        LastModified = afCurrentLastMod == DateTime.MinValue ? File.GetLastWriteTimeUtc(analyzeFilePath) : afCurrentLastMod,
+                        AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
+                        FileMd5 = afFileMd5,
+                        AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
+                        AudioStreamSha256Source = afAudioStreamSha256Source,
+                        FingerprintV1 = afFingerprintV1
+                    };
+
+                    // Carry forward legacy fields if entry already exists in the moods file.
+                    if (afMoodsTracks != null && afMoodsTracks.TryGetValue(afKey, out var afPrior))
+                    {
+                        trackEntry.AudioMd5 ??= afPrior.AudioMd5;
+                        trackEntry.Chromaprint ??= afPrior.Chromaprint;
+                        trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
+                    }
+                }
 
                 afSw.Stop();
 
-                if (features == null)
-                {
-                    Console.Error.WriteLine($"Error: {error}");
-                    Environment.ExitCode = 3;
-                    return;
-                }
-
-                features.Artist = afTags.Artist;
-                features.Title = afTags.Title;
-                features.Album = afTags.Album;
-                features.Genre = afTags.Genre;
-                features.FilePath = analyzeFilePath!;
-
-                var trackEntry = new TrackEntry
-                {
-                    Features = features,
-                    LastModified = File.GetLastWriteTimeUtc(analyzeFilePath),
-                    AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
-                    FileMd5 = afFileMd5,
-                    AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
-                    AudioStreamSha256Source = afAudioStreamSha256Source,
-                    FingerprintV1 = afFingerprintV1
-                };
-
-                // Output features as JSON to stdout. Identity fields not already on the
-                // TrackEntry (fingerprint.v1, audioStreamSha256) ride on the outer wrapper.
+                // Output features as JSON to stdout. Identity fields ride on the outer wrapper.
                 if (jsonOutput)
                 {
                     using var ms = new MemoryStream();
                     using (var jw = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
                     {
                         jw.WriteStartObject();
-                        WriteTrackEntry(jw, Path.GetFullPath(analyzeFilePath), trackEntry);
+                        WriteTrackEntry(jw, afKey, trackEntry);
                         if (afFingerprintV1 != null)
                             WriteFingerprintV1(jw, afFingerprintV1);
                         if (!string.IsNullOrEmpty(afAudioStreamSha256))
                         {
                             jw.WriteString("audioStreamSha256", afAudioStreamSha256);
-                            // Emit the source signal only when it is "whole-file" so consumers
-                            // can detect the lower-trust hash (invariant region was unavailable).
                             if (afAudioStreamSha256Source == "whole-file")
                                 jw.WriteString("audioStreamSha256Source", "whole-file");
                         }
@@ -988,28 +1098,16 @@ namespace Truedat
                     Console.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
                 }
 
-                // Merge into moods file if --moods specified
+                // Save moods file if --moods specified
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                 {
-                    var moodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
-                    if (File.Exists(analyzeFileMoods))
-                        LoadExistingMoods(analyzeFileMoods!, moodsTracks);
-
-                    var afKey = Path.GetFullPath(analyzeFilePath!);
-                    // Carry forward legacy fields that this mode doesn't compute, so a
-                    // user with prior --fingerprint output doesn't silently lose them.
-                    if (moodsTracks.TryGetValue(afKey, out var afPrior))
-                    {
-                        trackEntry.AudioMd5 ??= afPrior.AudioMd5;
-                        trackEntry.Chromaprint ??= afPrior.Chromaprint;
-                        trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
-                    }
-                    moodsTracks[afKey] = trackEntry;
-                    SaveResults(analyzeFileMoods!, moodsTracks);
+                    afMoodsTracks ??= new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    afMoodsTracks[afKey] = trackEntry;
+                    SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                 }
 
-                Console.Error.WriteLine($"Done in {afSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -1247,6 +1345,11 @@ namespace Truedat
                 }
 
                 var flProcessed = 0;
+                var flAnalyzed = 0;
+                var flCachedByMtime = 0;
+                var flCachedByShaPath = 0;
+                var flCachedByMd5Cross = 0;
+                var flCachedByShaCross = 0;
                 var flFailed = 0;
                 var flErrors = new ConcurrentBag<string>();
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
@@ -1255,6 +1358,17 @@ namespace Truedat
                 var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                 if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
                     LoadExistingMoods(analyzeFileMoods!, flMoodsTracks);
+
+                // Cross-indexes for cache reuse — same shape as MoodsMode. Built once
+                // before the worker pool spins up. Plugin-driven workflows where this
+                // mode is invoked repeatedly (e.g. after MusicBee scans add new files)
+                // get path-cache hits ~free; only genuinely new files run Essentia.
+                Dictionary<string, (TrackEntry Entry, string OldKey)>? flMoodMd5Index =
+                    BuildMd5Index(flMoodsTracks, e => e.FileMd5);
+                Dictionary<string, (TrackEntry Entry, string OldKey)>? flMoodShaIndex =
+                    BuildMd5Index(flMoodsTracks, e => e.AudioStreamSha256);
+                if (flMoodsTracks.Count > 0)
+                    Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (md5={flMoodMd5Index?.Count ?? 0}, sha={flMoodShaIndex?.Count ?? 0})");
 
                 Parallel.ForEach(filePaths, new ParallelOptions
                 {
@@ -1272,6 +1386,101 @@ namespace Truedat
 
                     try
                     {
+                        var fullPath = Path.GetFullPath(filePath);
+                        var hasMoods = !string.IsNullOrEmpty(analyzeFileMoods);
+
+                        // Cache hierarchy — same tiers as MoodsMode. Plugin-driven
+                        // workflows (re-invoke after MusicBee scan finds new files) get
+                        // path-mtime hits ~free; only new / changed audio runs Essentia.
+                        if (hasMoods)
+                        {
+                            // Tier 1: path-mtime hit
+                            DateTime currentLastMod = DateTime.MinValue;
+                            try { currentLastMod = File.GetLastWriteTimeUtc(filePath); } catch { }
+                            if (flMoodsTracks.TryGetValue(fullPath, out var fEx)
+                                && fEx.Features.DynamicRange.HasValue
+                                && fEx.Features.LoudnessMomentary.HasValue)
+                            {
+                                if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(fEx.LastModified))
+                                {
+                                    var freshTags = ExtractFileTags(filePath);
+                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                        fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                        freshTags.Genre, fullPath, currentLastMod, null, null);
+                                    Interlocked.Increment(ref flProcessed);
+                                    Interlocked.Increment(ref flCachedByMtime);
+                                    Console.Error.WriteLine($"[CACHED] {Path.GetFileName(filePath)}");
+                                    return;
+                                }
+
+                                // Tier 2: path-sha hit (mtime drifted but audio bytes unchanged)
+                                if (!string.IsNullOrEmpty(fEx.AudioStreamSha256))
+                                {
+                                    var fileSize2 = new FileInfo(filePath).Length;
+                                    var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(filePath, fileSize2, out _);
+                                    if (!string.IsNullOrEmpty(recomputedSha)
+                                        && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var refreshedMd5 = ComputeFileMd5(filePath);
+                                        var refreshedFp = ComputeFingerprintV1(filePath, fileSize2, out _);
+                                        var freshTags = ExtractFileTags(filePath);
+                                        flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                            fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                            freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                        Interlocked.Increment(ref flProcessed);
+                                        Interlocked.Increment(ref flCachedByShaPath);
+                                        Console.Error.WriteLine($"[CACHED·sha] {Path.GetFileName(filePath)}");
+                                        return;
+                                    }
+                                }
+                            }
+
+                            // Tier 3: cross-MD5 hit (file at a different path, same bytes)
+                            if (flMoodMd5Index != null)
+                            {
+                                var localMd5 = ComputeFileMd5(filePath);
+                                if (!string.IsNullOrEmpty(localMd5)
+                                    && flMoodMd5Index.TryGetValue(localMd5!, out var xp)
+                                    && xp.Entry.Features.DynamicRange.HasValue
+                                    && xp.Entry.Features.LoudnessMomentary.HasValue)
+                                {
+                                    var freshTags = ExtractFileTags(filePath);
+                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                        xp.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                        freshTags.Genre, fullPath, currentLastMod, localMd5, null);
+                                    flMoodsTracks.TryRemove(xp.OldKey, out _);
+                                    Interlocked.Increment(ref flProcessed);
+                                    Interlocked.Increment(ref flCachedByMd5Cross);
+                                    Console.Error.WriteLine($"[CACHED·md5] {Path.GetFileName(filePath)}");
+                                    return;
+                                }
+                            }
+
+                            // Tier 4: cross-SHA hit (file moved AND tag-edited)
+                            if (flMoodShaIndex != null)
+                            {
+                                var fileSize3 = new FileInfo(filePath).Length;
+                                var (localSha, _) = ComputeAudioStreamSha256FromFile(filePath, fileSize3, out _);
+                                if (!string.IsNullOrEmpty(localSha)
+                                    && flMoodShaIndex.TryGetValue(localSha!, out var xs)
+                                    && xs.Entry.Features.DynamicRange.HasValue
+                                    && xs.Entry.Features.LoudnessMomentary.HasValue)
+                                {
+                                    var refreshedMd5 = ComputeFileMd5(filePath);
+                                    var refreshedFp = ComputeFingerprintV1(filePath, fileSize3, out _);
+                                    var freshTags = ExtractFileTags(filePath);
+                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                        xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                        freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                    flMoodsTracks.TryRemove(xs.OldKey, out _);
+                                    Interlocked.Increment(ref flProcessed);
+                                    Interlocked.Increment(ref flCachedByShaCross);
+                                    Console.Error.WriteLine($"[CACHED·sha] {Path.GetFileName(filePath)}");
+                                    return;
+                                }
+                            }
+                        }
+
                         var fileSize = new FileInfo(filePath).Length;
 
                         // Identity ride-along — same concurrency pattern as MoodsMode at :1497-1513.
@@ -1349,6 +1558,7 @@ namespace Truedat
                         }
 
                         Interlocked.Increment(ref flProcessed);
+                        Interlocked.Increment(ref flAnalyzed);
                         Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
                     }
                     catch (Exception ex)
@@ -1368,12 +1578,20 @@ namespace Truedat
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                 }
 
+                int flCachedTotal = flCachedByMtime + flCachedByShaPath + flCachedByMd5Cross + flCachedByShaCross;
+
                 // Summary JSON on stdout
                 if (jsonOutput || flFailed > 0)
                 {
                     var summary = new
                     {
                         processed = flProcessed,
+                        analyzed = flAnalyzed,
+                        cached = flCachedTotal,
+                        cachedByMtime = flCachedByMtime,
+                        cachedByShaPath = flCachedByShaPath,
+                        cachedByMd5Cross = flCachedByMd5Cross,
+                        cachedByShaCross = flCachedByShaCross,
                         failed = flFailed,
                         elapsed = flSw.Elapsed.TotalSeconds,
                         errors = flErrors.ToArray()
@@ -1383,7 +1601,7 @@ namespace Truedat
                     Console.WriteLine(summaryJson);
                 }
 
-                Console.Error.WriteLine($"Done: {flProcessed} processed, {flFailed} failed in {flSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed in {flSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -5736,13 +5954,40 @@ namespace Truedat
             string? refreshedFileMd5,
             FingerprintV1? refreshedFp)
         {
+            return RebuildCacheEntryCore(source, t.TrackId, t.Artist, t.Name, t.Album, t.Genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp);
+        }
+
+        /// <summary>
+        /// Same shape as RebuildCacheEntry but takes metadata fields explicitly.
+        /// Used by --file-list / --analyze-file where the metadata source is TagLib
+        /// tags rather than an iTunes XML track. trackId carries through from the
+        /// cached entry (zero if it was never an iTunes-XML-derived entry).
+        /// </summary>
+        static TrackEntry RebuildCacheEntryFromTags(
+            TrackEntry source,
+            string artist, string title, string album, string genre, string filePath,
+            DateTime newLastMod,
+            string? refreshedFileMd5,
+            FingerprintV1? refreshedFp)
+        {
+            return RebuildCacheEntryCore(source, source.Features.TrackId, artist, title, album, genre, filePath, newLastMod, refreshedFileMd5, refreshedFp);
+        }
+
+        static TrackEntry RebuildCacheEntryCore(
+            TrackEntry source,
+            int trackId,
+            string artist, string title, string album, string genre, string filePath,
+            DateTime newLastMod,
+            string? refreshedFileMd5,
+            FingerprintV1? refreshedFp)
+        {
             var sf = source.Features;
             return new TrackEntry
             {
                 Features = new TrackFeatures
                 {
-                    TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
-                    Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                    TrackId = trackId, Artist = artist, Title = title,
+                    Album = album, Genre = genre, FilePath = filePath,
                     Bpm = sf.Bpm, Key = sf.Key, Mode = sf.Mode,
                     SpectralCentroid = sf.SpectralCentroid, SpectralFlux = sf.SpectralFlux,
                     Loudness = sf.Loudness, Danceability = sf.Danceability,

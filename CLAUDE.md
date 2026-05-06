@@ -48,14 +48,16 @@ Envelope shape is defined by `BuildIdentityOnlyEnvelope` in `Program.cs`. It has
 
 ## Cache hierarchy & re-extract gate
 
-`MoodsMode` checks the cache in this order before falling through to Essentia:
+All four scan modes — `MoodsMode` (default iTunes-XML), `--folder`, `--file-list`, `--analyze-file` — check the cache in this order before falling through to Essentia:
 
-1. **Path + mtime** (`allTracks[t.Location]`, `TruncateToSeconds` equality) — the fastest path. Returns `(cached)`.
-2. **Path + audioStreamSha256** (`(cached·sha)`) — when path matches but mtime drifted, recompute `audioStreamSha256` (~50ms managed SHA-NI). If it matches the cached value, audio bytes are unchanged (just tags). Reuse Essentia features, refresh `lastModified` + `fileMd5` + `fingerprint.v1` (the tag-affected fields).
-3. **Cross-MD5** (`moodMd5Index`, `(cached·md5)`) — different path, byte-identical file (covers paths-changed-but-mtimes-preserved-on-copy and clean moves). Re-keys old → new path.
-4. **Cross-SHA** (`moodShaIndex`, `(cached·sha)`) — different path AND tag-edited (file bytes differ but invariant audio region matches). Re-keys old → new path; recomputes `fileMd5` + `fingerprint.v1`.
+1. **Path + mtime** (`allTracks[t.Location]`, `TruncateToSeconds` equality) — the fastest path. Returns `(cached)` / `[CACHED]`.
+2. **Path + audioStreamSha256** (`(cached·sha)` / `[CACHED·sha]`) — when path matches but mtime drifted, recompute `audioStreamSha256` (~50ms managed SHA-NI). If it matches the cached value, audio bytes are unchanged (just tags). Reuse Essentia features, refresh `lastModified` + `fileMd5` + `fingerprint.v1` (the tag-affected fields).
+3. **Cross-MD5** (`moodMd5Index`, `(cached·md5)` / `[CACHED·md5]`) — different path, byte-identical file (covers paths-changed-but-mtimes-preserved-on-copy and clean moves). Re-keys old → new path.
+4. **Cross-SHA** (`moodShaIndex`, `(cached·sha)` / `[CACHED·sha]`) — different path AND tag-edited (file bytes differ but invariant audio region matches). Re-keys old → new path; recomputes `fileMd5` + `fingerprint.v1`.
 
-Tiers 2 and 4 use `RebuildCacheEntry` — adding a new `TrackFeatures` field means updating that one helper, not 4 inline copies.
+`MoodsMode` uses `RebuildCacheEntry` (takes an `ITunesTrack` for metadata); `--folder` / `--file-list` / `--analyze-file` use `RebuildCacheEntryFromTags` (takes TagLib-derived metadata). Both delegate to `RebuildCacheEntryCore` — single source of truth for the 55-feature copy. Adding a new `TrackFeatures` field means updating one helper, not 7 inline call sites.
+
+The plugin-driven autoscan workflow (MBXHub plugin pipes new file paths to `truedat --file-list -` or `truedat --folder ... --moods ...` after MusicBee detects new files) depends on these tiers — without them, every poll re-runs Essentia on the entire library.
 
 Re-extract (cache miss → full Essentia) when any of these are missing:
 
