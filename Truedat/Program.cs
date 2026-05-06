@@ -539,6 +539,7 @@ namespace Truedat
             var parallelism = Environment.ProcessorCount;
             string? xmlPath = null;
             bool fixupMode = false;
+            bool verifyMode = false;
             bool retryErrors = false;
             bool migrateMode = false;
             bool fingerprintMode = false;
@@ -593,6 +594,13 @@ namespace Truedat
             bool showHelp = false;
             int cpuLimit = 0; // 0 = no limit
 
+            // --chunk M/N: split the scan list across machines. Two boxes with the
+            // same library run `--chunk 1/2` and `--chunk 2/2` and produce two
+            // non-overlapping output files keyed by hostname. Sort + range-slice
+            // after all filters; chunking is invisible to the cache logic.
+            int chunkIndex = 0; // 0 = chunking disabled
+            int chunkTotal = 0;
+
             for (int i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
@@ -608,6 +616,7 @@ namespace Truedat
                 if (canonical == "?" || canonical == "h" || canonical == "help")
                     showHelp = true;
                 else if (canonical == "fixup") fixupMode = true;
+                else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "retry-errors") retryErrors = true;
                 else if (canonical == "migrate") migrateMode = true;
                 else if (canonical == "fingerprint") fingerprintMode = true;
@@ -647,6 +656,8 @@ namespace Truedat
                 else if (canonical == "json-output") jsonOutput = true;
                 else if (canonical == "output" && i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
                     hashOutputPath = args[++i];
+                else if (canonical == "chunk" && i + 1 < args.Length && TryParseChunk(args[i + 1], out var cIdx, out var cTot))
+                    { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -657,6 +668,18 @@ namespace Truedat
             if (fileListMode && analyzeFileMode)
             {
                 Console.Error.WriteLine("Error: Cannot use --file-list and --analyze-file together.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (chunkTotal > 0 && (chunkIndex < 1 || chunkIndex > chunkTotal))
+            {
+                Console.Error.WriteLine($"Error: --chunk M/N requires 1 <= M <= N (got {chunkIndex}/{chunkTotal}).");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            {
+                Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
                 return;
             }
@@ -719,6 +742,8 @@ namespace Truedat
                 Console.WriteLine("Options:");
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
+                Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
+                Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -742,6 +767,8 @@ namespace Truedat
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
+                Console.WriteLine("  --chunk M/N         Process shard M of N for two-machine same-library scans. Output");
+                Console.WriteLine("                      auto-suffixed with hostname: mbxmoods.<host>.json. Combine via --merge-moods.");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
@@ -807,6 +834,31 @@ namespace Truedat
                 }
                 Environment.ExitCode = new SynthesizeCommand(synthCatalog!, synthOutput ?? "", synthCount,
                     synthAlbumRatio, synthMoods, synthSeed, synthDryRun).Run();
+                return;
+            }
+
+            // --verify: read-only diagnostic. Walk a moods file, recompute
+            // audioStreamSha256 for each entry, classify drift / missing / no-hash.
+            // No iTunes XML required — moods file location comes from --moods,
+            // or defaults to mbxmoods.json next to the XML if given, else cwd.
+            if (verifyMode)
+            {
+                string? verifyPath = analyzeFileMoods;
+                if (string.IsNullOrEmpty(verifyPath))
+                {
+                    var dir = !string.IsNullOrEmpty(xmlPath)
+                        ? Path.GetDirectoryName(Path.GetFullPath(xmlPath)) ?? "."
+                        : Environment.CurrentDirectory;
+                    verifyPath = Path.Combine(dir, "mbxmoods.json");
+                }
+                if (!File.Exists(verifyPath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {verifyPath}");
+                    Console.Error.WriteLine("Hint: pass --moods <path> to verify a specific file.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunVerify(verifyPath!, parallelism);
                 return;
             }
 
@@ -943,7 +995,16 @@ namespace Truedat
                     if (File.Exists(analyzeFileMoods))
                         LoadExistingMoods(analyzeFileMoods!, moodsTracks);
 
-                    moodsTracks[Path.GetFullPath(analyzeFilePath!)] = trackEntry;
+                    var afKey = Path.GetFullPath(analyzeFilePath!);
+                    // Carry forward legacy fields that this mode doesn't compute, so a
+                    // user with prior --fingerprint output doesn't silently lose them.
+                    if (moodsTracks.TryGetValue(afKey, out var afPrior))
+                    {
+                        trackEntry.AudioMd5 ??= afPrior.AudioMd5;
+                        trackEntry.Chromaprint ??= afPrior.Chromaprint;
+                        trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
+                    }
+                    moodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, moodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                 }
@@ -1275,7 +1336,16 @@ namespace Truedat
                         // Accumulate for moods file (only saved if --moods is set).
                         if (!string.IsNullOrEmpty(analyzeFileMoods))
                         {
-                            flMoodsTracks[Path.GetFullPath(filePath)] = trackEntry;
+                            var flKey = Path.GetFullPath(filePath);
+                            // Carry forward legacy fields that this mode doesn't compute,
+                            // so a user with prior --fingerprint output doesn't silently lose them.
+                            if (flMoodsTracks.TryGetValue(flKey, out var flPrior))
+                            {
+                                trackEntry.AudioMd5 ??= flPrior.AudioMd5;
+                                trackEntry.Chromaprint ??= flPrior.Chromaprint;
+                                trackEntry.ChromaprintDuration ??= flPrior.ChromaprintDuration;
+                            }
+                            flMoodsTracks[flKey] = trackEntry;
                         }
 
                         Interlocked.Increment(ref flProcessed);
@@ -1328,6 +1398,8 @@ namespace Truedat
                 Console.WriteLine("Options:");
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
+                Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
+                Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -1351,6 +1423,8 @@ namespace Truedat
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
+                Console.WriteLine("  --chunk M/N         Process shard M of N for two-machine same-library scans. Output");
+                Console.WriteLine("                      auto-suffixed with hostname: mbxmoods.<host>.json. Combine via --merge-moods.");
                 Console.WriteLine("  -?, --help          Show this help");
                 Console.WriteLine();
                 Console.WriteLine("Synthesize mode:");
@@ -1378,6 +1452,15 @@ namespace Truedat
 
             var outputDir = Path.GetDirectoryName(Path.GetFullPath(xmlPath)) ?? ".";
             var moodsPath = Path.Combine(outputDir, "mbxmoods.json");
+            // --chunk: each shard writes to its own hostname-suffixed moods + errors
+            // file so two machines pointing at the same library directory don't
+            // stomp each other. Plugin discovery picks the union back up by glob.
+            string? chunkHostSuffix = null;
+            if (chunkTotal > 0)
+            {
+                chunkHostSuffix = SanitizeForFilename(Environment.MachineName);
+                moodsPath = InsertFilenameSuffix(moodsPath, chunkHostSuffix);
+            }
             var logPath = Path.Combine(outputDir, "truedat.log");
             TeeWriter? tee = null;
             if (auditLog)
@@ -1439,6 +1522,8 @@ namespace Truedat
             }
 
             var errorsPath = Path.Combine(outputDir, "mbxmoods-errors.csv");
+            if (chunkHostSuffix != null)
+                errorsPath = InsertFilenameSuffix(errorsPath, chunkHostSuffix);
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues);
@@ -1449,6 +1534,27 @@ namespace Truedat
             tracks = FilterVideoFiles(tracks);
             tracks = FilterNonAudio(tracks);
 
+            // --chunk M/N: hash-mod assignment across machines. Each track's path
+            // hashes to a fixed bucket via PathComparer's FNV-1a (deterministic
+            // across processes/machines, separator-normalized, case-folded). Two
+            // machines independently keep only "their" buckets — no need for
+            // identical XMLs, identical track counts, or identical sort order.
+            // Asymmetric libraries converge: each machine works the paths it
+            // actually has, in the buckets it owns. Load balance is statistical,
+            // ~equal at scale; locality isn't a real concern (Essentia is CPU-
+            // bound at ~70s/track, not seek-bound).
+            if (chunkTotal > 0)
+            {
+                int n = tracks.Count;
+                int bucket = chunkIndex - 1;
+                tracks = tracks
+                    .Where(t => !string.IsNullOrEmpty(t.Location)
+                        && (PathComparer.Instance.GetHashCode(t.Location) & 0x7FFFFFFF) % chunkTotal == bucket)
+                    .ToList();
+                Console.WriteLine($"Chunk {chunkIndex}/{chunkTotal} on {Environment.MachineName}: {tracks.Count} of {n} tracks (hash-mod, bucket {bucket})");
+                Console.WriteLine($"Output: {moodsPath}");
+            }
+
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -1457,7 +1563,15 @@ namespace Truedat
             Dictionary<string, (TrackEntry Entry, string OldKey)>? moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
             if (moodMd5Index != null)
                 Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
+            // Secondary cross-index keyed by audioStreamSha256 — invariant-region hash,
+            // stable across tag edits. Catches "audio bytes unchanged but tags drifted"
+            // (cross-MD5 misses these because fileMd5 covers the whole file including tags).
+            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodShaIndex = BuildMd5Index(allTracks, e => e.AudioStreamSha256);
+            if (moodShaIndex != null)
+                Console.WriteLine($"  SHA index:  {moodShaIndex.Count} entries available for tag-edit / cross-machine matching");
             int crossPathMoods = 0;
+            int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
+            int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
@@ -1548,84 +1662,48 @@ namespace Truedat
                                     }
                                     else
                                     {
-                                        // Update metadata atomically — replace the entire entry
-                                        var updatedFeatures = existing.Features;
-                                        allTracks[t.Location] = new TrackEntry
-                                        {
-                                            Features = new TrackFeatures
-                                            {
-                                                TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
-                                                Album = t.Album, Genre = t.Genre, FilePath = t.Location,
-                                                Bpm = updatedFeatures.Bpm, Key = updatedFeatures.Key, Mode = updatedFeatures.Mode,
-                                                SpectralCentroid = updatedFeatures.SpectralCentroid, SpectralFlux = updatedFeatures.SpectralFlux,
-                                                Loudness = updatedFeatures.Loudness, Danceability = updatedFeatures.Danceability,
-                                                OnsetRate = updatedFeatures.OnsetRate, ZeroCrossingRate = updatedFeatures.ZeroCrossingRate,
-                                                SpectralRms = updatedFeatures.SpectralRms, SpectralFlatness = updatedFeatures.SpectralFlatness,
-                                                Dissonance = updatedFeatures.Dissonance, PitchSalience = updatedFeatures.PitchSalience,
-                                                ChordsChangesRate = updatedFeatures.ChordsChangesRate, Mfcc = updatedFeatures.Mfcc,
-                                                // Preserve DR + extended features through cache copy so they stick across reruns.
-                                                DynamicRange = updatedFeatures.DynamicRange,
-                                                DynamicRangeSource = updatedFeatures.DynamicRangeSource,
-                                                LoudnessMomentary = updatedFeatures.LoudnessMomentary,
-                                                LoudnessShortTerm = updatedFeatures.LoudnessShortTerm,
-                                                ReplayGain = updatedFeatures.ReplayGain,
-                                                SilenceRate20dB = updatedFeatures.SilenceRate20dB,
-                                                SilenceRate30dB = updatedFeatures.SilenceRate30dB,
-                                                SilenceRate60dB = updatedFeatures.SilenceRate60dB,
-                                                SpectralRolloff = updatedFeatures.SpectralRolloff,
-                                                SpectralComplexity = updatedFeatures.SpectralComplexity,
-                                                SpectralEntropy = updatedFeatures.SpectralEntropy,
-                                                SpectralKurtosis = updatedFeatures.SpectralKurtosis,
-                                                SpectralSkewness = updatedFeatures.SpectralSkewness,
-                                                SpectralSpread = updatedFeatures.SpectralSpread,
-                                                SpectralStrongPeak = updatedFeatures.SpectralStrongPeak,
-                                                SpectralDecrease = updatedFeatures.SpectralDecrease,
-                                                SpectralEnergy = updatedFeatures.SpectralEnergy,
-                                                SpectralEnergyLow = updatedFeatures.SpectralEnergyLow,
-                                                SpectralEnergyMidLow = updatedFeatures.SpectralEnergyMidLow,
-                                                SpectralEnergyMidHigh = updatedFeatures.SpectralEnergyMidHigh,
-                                                SpectralEnergyHigh = updatedFeatures.SpectralEnergyHigh,
-                                                Hfc = updatedFeatures.Hfc,
-                                                BarkCrest = updatedFeatures.BarkCrest,
-                                                BarkFlatness = updatedFeatures.BarkFlatness,
-                                                BarkKurtosis = updatedFeatures.BarkKurtosis,
-                                                BarkSkewness = updatedFeatures.BarkSkewness,
-                                                BarkSpread = updatedFeatures.BarkSpread,
-                                                ErbCrest = updatedFeatures.ErbCrest,
-                                                ErbFlatness = updatedFeatures.ErbFlatness,
-                                                ErbKurtosis = updatedFeatures.ErbKurtosis,
-                                                ErbSkewness = updatedFeatures.ErbSkewness,
-                                                ErbSpread = updatedFeatures.ErbSpread,
-                                                MelCrest = updatedFeatures.MelCrest,
-                                                MelFlatness = updatedFeatures.MelFlatness,
-                                                MelKurtosis = updatedFeatures.MelKurtosis,
-                                                MelSkewness = updatedFeatures.MelSkewness,
-                                                MelSpread = updatedFeatures.MelSpread,
-                                                BeatsLoudness = updatedFeatures.BeatsLoudness,
-                                                ChordsStrength = updatedFeatures.ChordsStrength,
-                                                HpcpCrest = updatedFeatures.HpcpCrest,
-                                                HpcpEntropy = updatedFeatures.HpcpEntropy
-                                            },
-                                            LastModified = currentLastMod,
-                                            AnalysisDurationSecs = existing.AnalysisDurationSecs,
-                                            FileMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location),
-                                            AudioMd5 = existing.AudioMd5,
-                                            // Preserve identity fields across the cache-update copy so they
-                                            // stick across reruns just like the extended Essentia features.
-                                            AudioStreamSha256 = existing.AudioStreamSha256,
-                                            AudioStreamSha256Source = existing.AudioStreamSha256Source,
-                                            FingerprintV1 = existing.FingerprintV1,
-                                            Chromaprint = existing.Chromaprint,
-                                            ChromaprintDuration = existing.ChromaprintDuration
-                                        };
+                                        // Path-cache hit: same path, same mtime, canary passed.
+                                        // Backfill fileMd5 if older entry lacked it.
+                                        var refreshedMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location);
+                                        allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null);
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
                                         return;
                                     }
                                 }
-                                else if (_audit)
+                                else
                                 {
-                                    Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
+                                    // Mtime mismatched. Try the audioStreamSha256 path-tier:
+                                    // if the audio bytes are unchanged (only tags / container
+                                    // metadata drifted), reuse Essentia features and refresh
+                                    // identity fields the tag edit invalidated.
+                                    if (!string.IsNullOrEmpty(existing.AudioStreamSha256)
+                                        && existing.Features.DynamicRange.HasValue
+                                        && existing.Features.LoudnessMomentary.HasValue)
+                                    {
+                                        long fileSize = 0;
+                                        try { fileSize = new FileInfo(t.Location).Length; } catch { }
+                                        if (fileSize > 0)
+                                        {
+                                            var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(t.Location, fileSize, out _);
+                                            if (!string.IsNullOrEmpty(recomputedSha)
+                                                && string.Equals(recomputedSha, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                // Audio bytes unchanged — tag edit only. Refresh
+                                                // fileMd5 + fingerprint.v1 (both tag-affected),
+                                                // reuse everything else.
+                                                var refreshedMd5 = ComputeFileMd5(t.Location);
+                                                var refreshedFp = ComputeFingerprintV1(t.Location, fileSize, out _);
+                                                allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
+                                                Interlocked.Increment(ref cachedCount);
+                                                Interlocked.Increment(ref cachedByShaPath);
+                                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha)");
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    if (_audit)
+                                        Console.WriteLine($"  DEBUG cache: stale (file:{currentLastMod:o} != cached:{existing.LastModified:o})");
                                 }
                             }
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
@@ -1726,6 +1804,45 @@ namespace Truedat
                             }
                         }
 
+                        // Cross-machine SHA fallback \u2014 same audio bytes (invariant region) at
+                        // a different path. Catches "moved + tag-edited" where cross-MD5 misses
+                        // because fileMd5 covers the whole file. Cost is ~50ms managed SHA-NI
+                        // per cache miss that gets here.
+                        if (moodShaIndex != null)
+                        {
+                            long fileSizeForSha = 0;
+                            try { fileSizeForSha = new FileInfo(t.Location).Length; } catch { }
+                            if (fileSizeForSha > 0)
+                            {
+                                var (localSha, _) = ComputeAudioStreamSha256FromFile(t.Location, fileSizeForSha, out _);
+                                if (!string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out var xs))
+                                {
+                                    var xsf = xs.Entry.Features;
+                                    if (!xsf.DynamicRange.HasValue || !xsf.LoudnessMomentary.HasValue)
+                                    {
+                                        if (_audit) Console.WriteLine($"  DEBUG cache-sha: re-extracting (DR / extended missing)");
+                                    }
+                                    else
+                                    {
+                                        // Audio bytes match. fileMd5 likely differs (else cross-MD5
+                                        // would have caught it); fingerprint.v1 is also tag-affected.
+                                        // Recompute both, reuse Essentia features.
+                                        var refreshedMd5 = ComputeFileMd5(t.Location);
+                                        var refreshedFp = ComputeFingerprintV1(t.Location, fileSizeForSha, out _);
+                                        var currentLastMod = DateTime.MinValue;
+                                        try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                        allTracks[t.Location] = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        allTracks.TryRemove(xs.OldKey, out _);
+                                        Interlocked.Increment(ref crossPathMoods);
+                                        Interlocked.Increment(ref cachedByShaCross);
+                                        Interlocked.Increment(ref cachedCount);
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha)");
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+
                         long fileSizeBytes = 0;
                         var sizeTag = "";
                         try
@@ -1817,15 +1934,24 @@ namespace Truedat
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
 
+                        // Carry forward legacy fields the default codepath doesn't compute
+                        // (audioMd5, chromaprint), so a re-extract triggered by the cache
+                        // canary doesn't silently wipe them on entries seeded by a prior
+                        // --fingerprint run. The audio is unchanged from those tools' POV;
+                        // only Essentia's features need refresh.
+                        allTracks.TryGetValue(t.Location, out var priorEntry);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
                             LastModified = lastMod,
                             AnalysisDurationSecs = analyzeDuration.TotalSeconds,
                             FileMd5 = fileMd5,
+                            AudioMd5 = priorEntry?.AudioMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
-                            FingerprintV1 = fingerprintV1
+                            FingerprintV1 = fingerprintV1,
+                            Chromaprint = priorEntry?.Chromaprint,
+                            ChromaprintDuration = priorEntry?.ChromaprintDuration
                         };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -1876,6 +2002,8 @@ namespace Truedat
             Console.WriteLine($"  Cached:     {cachedCount}");
             if (crossPathMoods > 0)
                 Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
+            if (cachedByShaPath > 0 || cachedByShaCross > 0)
+                Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
@@ -2534,6 +2662,125 @@ namespace Truedat
                 Console.WriteLine($"Updated: {moodsPath}");
             }
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
+        }
+
+        /// <summary>
+        /// Read-only diagnostic. Walk a moods file and, for each entry, classify:
+        ///   OK       — file present, audioStreamSha256 recomputes to the cached value
+        ///   DRIFT    — file present, audioStreamSha256 differs (audio bytes changed)
+        ///   MISSING  — path doesn't exist on disk
+        ///   NO_HASH  — entry has no audioStreamSha256 to verify against (older cache)
+        ///   ERROR    — TagLib parse / IO failure
+        /// Prints summary; writes mbxmoods-verify.csv next to the moods file with
+        /// per-entry detail. No writes to the moods file itself.
+        /// </summary>
+        static int RunVerify(string moodsPath, int parallelism)
+        {
+            Console.WriteLine("=== Verify Mode ===");
+            Console.WriteLine($"Moods file: {moodsPath}");
+            Console.WriteLine();
+
+            var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+            int loaded = LoadExistingMoods(moodsPath, allTracks);
+            Console.WriteLine($"Loaded {loaded} entries");
+            if (loaded == 0) return 0;
+
+            int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0;
+            var details = new ConcurrentBag<string>();
+            var sw = Stopwatch.StartNew();
+            int done = 0;
+
+            Parallel.ForEach(allTracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
+            {
+                var path = kvp.Key;
+                var entry = kvp.Value;
+                string status;
+                string detail = "";
+
+                if (!File.Exists(path))
+                {
+                    status = "MISSING";
+                    Interlocked.Increment(ref missing);
+                }
+                else if (string.IsNullOrEmpty(entry.AudioStreamSha256))
+                {
+                    status = "NO_HASH";
+                    Interlocked.Increment(ref noHash);
+                }
+                else
+                {
+                    try
+                    {
+                        var fileSize = new FileInfo(path).Length;
+                        var (recomputed, _) = ComputeAudioStreamSha256FromFile(path, fileSize, out var err);
+                        if (string.IsNullOrEmpty(recomputed))
+                        {
+                            status = "ERROR";
+                            detail = err ?? "hash compute failed";
+                            Interlocked.Increment(ref errored);
+                        }
+                        else
+                        {
+                            var cached = entry.AudioStreamSha256!;
+                            if (string.Equals(recomputed, cached, StringComparison.OrdinalIgnoreCase))
+                            {
+                                status = "OK";
+                                Interlocked.Increment(ref ok);
+                            }
+                            else
+                            {
+                                status = "DRIFT";
+                                detail = $"cached={cached.Substring(0, 12)}.. disk={recomputed!.Substring(0, 12)}..";
+                                Interlocked.Increment(ref drift);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        status = "ERROR";
+                        detail = ex.Message;
+                        Interlocked.Increment(ref errored);
+                    }
+                }
+
+                if (status != "OK")
+                    details.Add($"{status}\t{path}\t{detail}");
+
+                var n = Interlocked.Increment(ref done);
+                if (n % 250 == 0)
+                {
+                    var pct = (n * 100) / loaded;
+                    Console.WriteLine($"[{n}/{loaded} {pct}%{FormatEta(sw.Elapsed, n, loaded)}] verifying...");
+                }
+            });
+
+            sw.Stop();
+
+            var csvPath = Path.Combine(
+                Path.GetDirectoryName(moodsPath) ?? ".",
+                "mbxmoods-verify.csv");
+            try
+            {
+                var lines = new List<string> { "status\tpath\tdetail" };
+                lines.AddRange(details.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+                File.WriteAllLines(csvPath, lines, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"WARNING: could not write {csvPath}: {ex.Message}");
+                csvPath = "(not written)";
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("=== Results ===");
+            Console.WriteLine($"  OK:        {ok}");
+            Console.WriteLine($"  Drift:     {drift}");
+            Console.WriteLine($"  Missing:   {missing}");
+            Console.WriteLine($"  No hash:   {noHash}");
+            Console.WriteLine($"  Errored:   {errored}");
+            Console.WriteLine($"  Elapsed:   {FormatTimeSpan(sw.Elapsed)}");
+            Console.WriteLine($"  Detail:    {csvPath}");
+            return (drift > 0 || missing > 0 || errored > 0) ? 1 : 0;
         }
 
         static int RunMergeMoods(List<string> sources, string outputPath)
@@ -5471,6 +5718,92 @@ namespace Truedat
             return index;
         }
 
+        /// <summary>
+        /// Build a fresh TrackEntry that reuses cached Essentia features but takes
+        /// fresh metadata from the iTunes XML track and (optionally) refreshes
+        /// identity fields the caller has just recomputed off disk. Used by every
+        /// cache-reuse path (path-mtime, cross-MD5, sha-path, sha-cross). Centralized
+        /// so adding a new TrackFeatures field doesn't have to be done four places.
+        ///
+        /// `refreshedFileMd5` / `refreshedFp`: pass non-null when the caller knows
+        /// the cached values are stale (e.g. tag edits diverge fileMd5). Otherwise
+        /// pass null and the source's existing values are kept.
+        /// </summary>
+        static TrackEntry RebuildCacheEntry(
+            TrackEntry source,
+            ITunesTrack t,
+            DateTime newLastMod,
+            string? refreshedFileMd5,
+            FingerprintV1? refreshedFp)
+        {
+            var sf = source.Features;
+            return new TrackEntry
+            {
+                Features = new TrackFeatures
+                {
+                    TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
+                    Album = t.Album, Genre = t.Genre, FilePath = t.Location,
+                    Bpm = sf.Bpm, Key = sf.Key, Mode = sf.Mode,
+                    SpectralCentroid = sf.SpectralCentroid, SpectralFlux = sf.SpectralFlux,
+                    Loudness = sf.Loudness, Danceability = sf.Danceability,
+                    OnsetRate = sf.OnsetRate, ZeroCrossingRate = sf.ZeroCrossingRate,
+                    SpectralRms = sf.SpectralRms, SpectralFlatness = sf.SpectralFlatness,
+                    Dissonance = sf.Dissonance, PitchSalience = sf.PitchSalience,
+                    ChordsChangesRate = sf.ChordsChangesRate, Mfcc = sf.Mfcc,
+                    DynamicRange = sf.DynamicRange,
+                    DynamicRangeSource = sf.DynamicRangeSource,
+                    LoudnessMomentary = sf.LoudnessMomentary,
+                    LoudnessShortTerm = sf.LoudnessShortTerm,
+                    ReplayGain = sf.ReplayGain,
+                    SilenceRate20dB = sf.SilenceRate20dB,
+                    SilenceRate30dB = sf.SilenceRate30dB,
+                    SilenceRate60dB = sf.SilenceRate60dB,
+                    SpectralRolloff = sf.SpectralRolloff,
+                    SpectralComplexity = sf.SpectralComplexity,
+                    SpectralEntropy = sf.SpectralEntropy,
+                    SpectralKurtosis = sf.SpectralKurtosis,
+                    SpectralSkewness = sf.SpectralSkewness,
+                    SpectralSpread = sf.SpectralSpread,
+                    SpectralStrongPeak = sf.SpectralStrongPeak,
+                    SpectralDecrease = sf.SpectralDecrease,
+                    SpectralEnergy = sf.SpectralEnergy,
+                    SpectralEnergyLow = sf.SpectralEnergyLow,
+                    SpectralEnergyMidLow = sf.SpectralEnergyMidLow,
+                    SpectralEnergyMidHigh = sf.SpectralEnergyMidHigh,
+                    SpectralEnergyHigh = sf.SpectralEnergyHigh,
+                    Hfc = sf.Hfc,
+                    BarkCrest = sf.BarkCrest,
+                    BarkFlatness = sf.BarkFlatness,
+                    BarkKurtosis = sf.BarkKurtosis,
+                    BarkSkewness = sf.BarkSkewness,
+                    BarkSpread = sf.BarkSpread,
+                    ErbCrest = sf.ErbCrest,
+                    ErbFlatness = sf.ErbFlatness,
+                    ErbKurtosis = sf.ErbKurtosis,
+                    ErbSkewness = sf.ErbSkewness,
+                    ErbSpread = sf.ErbSpread,
+                    MelCrest = sf.MelCrest,
+                    MelFlatness = sf.MelFlatness,
+                    MelKurtosis = sf.MelKurtosis,
+                    MelSkewness = sf.MelSkewness,
+                    MelSpread = sf.MelSpread,
+                    BeatsLoudness = sf.BeatsLoudness,
+                    ChordsStrength = sf.ChordsStrength,
+                    HpcpCrest = sf.HpcpCrest,
+                    HpcpEntropy = sf.HpcpEntropy
+                },
+                LastModified = newLastMod,
+                AnalysisDurationSecs = source.AnalysisDurationSecs,
+                FileMd5 = refreshedFileMd5 ?? source.FileMd5,
+                AudioMd5 = source.AudioMd5,
+                AudioStreamSha256 = source.AudioStreamSha256,
+                AudioStreamSha256Source = source.AudioStreamSha256Source,
+                FingerprintV1 = refreshedFp ?? source.FingerprintV1,
+                Chromaprint = source.Chromaprint,
+                ChromaprintDuration = source.ChromaprintDuration
+            };
+        }
+
         static TimeSpan StopwatchTicksToTimeSpan(long stopwatchTicks)
         {
             return TimeSpan.FromSeconds((double)stopwatchTicks / Stopwatch.Frequency);
@@ -5487,6 +5820,49 @@ namespace Truedat
             if (done < 10 || total <= done) return "";
             var remaining = total - done;
             return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(elapsed.TotalSeconds / done * remaining))}";
+        }
+
+        /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>
+        static bool TryParseChunk(string spec, out int index, out int total)
+        {
+            index = 0; total = 0;
+            if (string.IsNullOrWhiteSpace(spec)) return false;
+            var parts = spec.Split(new[] { '/', ':' }, 2);
+            if (parts.Length != 2)
+            {
+                var of = spec.IndexOf("of", StringComparison.OrdinalIgnoreCase);
+                if (of <= 0) return false;
+                parts = new[] { spec.Substring(0, of), spec.Substring(of + 2) };
+            }
+            return int.TryParse(parts[0].Trim(), out index)
+                && int.TryParse(parts[1].Trim(), out total)
+                && total >= 1;
+        }
+
+        /// <summary>
+        /// Insert a suffix before the file extension. Used when --chunk is set
+        /// so two machines writing to the same library directory don't collide.
+        ///   InsertSuffix("C:\foo\mbxmoods.json", "machineA")
+        ///     -> "C:\foo\mbxmoods.machineA.json"
+        /// </summary>
+        static string InsertFilenameSuffix(string path, string suffix)
+        {
+            var dir = Path.GetDirectoryName(path) ?? "";
+            var name = Path.GetFileNameWithoutExtension(path);
+            var ext = Path.GetExtension(path);
+            return Path.Combine(dir, $"{name}.{suffix}{ext}");
+        }
+
+        /// <summary>Strip filename-hostile characters from a hostname for use in a path.</summary>
+        static string SanitizeForFilename(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "host";
+            var bad = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder(raw.Length);
+            foreach (var c in raw)
+                sb.Append(Array.IndexOf(bad, c) >= 0 || c == '.' ? '_' : c);
+            var s = sb.ToString().Trim('_');
+            return s.Length == 0 ? "host" : s;
         }
 
         static string FormatTimeSpan(TimeSpan ts)
