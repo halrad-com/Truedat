@@ -586,6 +586,15 @@ namespace Truedat
             bool hashOnlyMode = false;
             string? hashLevel = null;
 
+            // --transcode <in> --transcode-out <out.flac> [--sample-rate N] [--bit-depth N]
+            // Standalone utility mode: ffmpeg-driven opus/other -> FLAC conversion.
+            // No essentia, no cache, no mbxmoods.json. Overrides default to source props.
+            bool transcodeMode = false;
+            string? transcodeInput = null;
+            string? transcodeOutput = null;
+            int transcodeSampleRate = 0; // 0 = match source
+            int transcodeBitDepth = 0;   // 0 = match source
+
             // hashOutputPath: --hash-only mode only — NDJSON manifest file the
             // identity envelopes are appended to. Enables offline determinism rigs
             // without standing up a fake HTTP server.
@@ -652,6 +661,10 @@ namespace Truedat
                 else if (canonical == "folder" && i + 1 < args.Length) { folderMode = true; folderPath = args[++i]; }
                 else if (canonical == "hash-only") hashOnlyMode = true;
                 else if (canonical == "level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
+                else if (canonical == "transcode" && i + 1 < args.Length) { transcodeMode = true; transcodeInput = args[++i]; }
+                else if (canonical == "transcode-out" && i + 1 < args.Length) transcodeOutput = args[++i];
+                else if (canonical == "sample-rate" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tsr) && tsr > 0) { transcodeSampleRate = tsr; i++; }
+                else if (canonical == "bit-depth" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tbd) && (tbd == 16 || tbd == 24)) { transcodeBitDepth = tbd; i++; }
                 else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (canonical == "json-output") jsonOutput = true;
                 else if (canonical == "output" && i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
@@ -728,6 +741,30 @@ namespace Truedat
                 }
             }
 
+            if (transcodeMode)
+            {
+                if (string.IsNullOrEmpty(transcodeInput) || !File.Exists(transcodeInput))
+                {
+                    Console.Error.WriteLine($"Error: --transcode input not found: {transcodeInput}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (string.IsNullOrEmpty(transcodeOutput))
+                {
+                    Console.Error.WriteLine("Error: --transcode requires --transcode-out <path.flac>.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                {
+                    Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunTranscode(transcodeInput!, transcodeOutput!, transcodeSampleRate, transcodeBitDepth);
+                return;
+            }
+
             if (cpuLimit > 0)
             {
                 InitCpuLimitJob(cpuLimit);
@@ -765,6 +802,10 @@ namespace Truedat
                 Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
                 Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
+                Console.WriteLine("  --transcode <in>    Standalone: ffmpeg-transcode <in> to uncompressed FLAC. Requires --transcode-out.");
+                Console.WriteLine("  --transcode-out <p> Output FLAC path for --transcode mode.");
+                Console.WriteLine("  --sample-rate <hz>  With --transcode: override output sample rate (default: match source).");
+                Console.WriteLine("  --bit-depth <16|24> With --transcode: override output bit depth (default: match source).");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  --chunk M/N         Process shard M of N for two-machine same-library scans. Output");
@@ -1639,6 +1680,10 @@ namespace Truedat
                 Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
                 Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
                 Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
+                Console.WriteLine("  --transcode <in>    Standalone: ffmpeg-transcode <in> to uncompressed FLAC. Requires --transcode-out.");
+                Console.WriteLine("  --transcode-out <p> Output FLAC path for --transcode mode.");
+                Console.WriteLine("  --sample-rate <hz>  With --transcode: override output sample rate (default: match source).");
+                Console.WriteLine("  --bit-depth <16|24> With --transcode: override output bit depth (default: match source).");
                 Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
                 Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
                 Console.WriteLine("  --chunk M/N         Process shard M of N for two-machine same-library scans. Output");
@@ -4161,6 +4206,103 @@ namespace Truedat
             return null;
         }
 
+        /// <summary>
+        /// --transcode mode: ffmpeg-transcode input -> uncompressed FLAC.
+        /// Defaults to source sample rate / bit depth; overrides supplied via CLI.
+        /// Returns process exit code (0 = success).
+        /// </summary>
+        static int RunTranscode(string inputPath, string outputPath, int overrideRate, int overrideDepth)
+        {
+            var ffmpeg = _ffmpegPath.Value;
+            if (ffmpeg == null)
+            {
+                Console.Error.WriteLine("Error: ffmpeg not found on PATH (required for --transcode).");
+                return 1;
+            }
+
+            int rate = overrideRate;
+            int depth = overrideDepth;
+            if (rate == 0 || depth == 0)
+            {
+                var ffprobe = FindTool("ffprobe.exe", AppDomain.CurrentDomain.BaseDirectory, Environment.CurrentDirectory);
+                if (ffprobe != null)
+                {
+                    var details = ProbeAudio(ffprobe, inputPath);
+                    if (details != null)
+                    {
+                        if (rate == 0 && details.SampleRate > 0) rate = details.SampleRate;
+                        if (depth == 0 && details.BitDepth > 0) depth = details.BitDepth;
+                    }
+                }
+                // Fallbacks when ffprobe is missing or the source reports nothing
+                // (e.g. opus is internally float — container reports no bit depth).
+                if (rate == 0) rate = 48000;
+                if (depth == 0) depth = 24;
+            }
+            if (depth != 16 && depth != 24)
+            {
+                Console.Error.WriteLine($"Error: unsupported --bit-depth {depth} (allowed: 16, 24).");
+                return 1;
+            }
+
+            // FLAC native sample formats: s16 for 16-bit, s32 for 24-bit (FLAC
+            // packs 24-bit samples in s32 containers; -bits_per_raw_sample 24
+            // sets the FLAC stream's declared depth so decoders round-trip it.)
+            string sampleFmt = depth == 16 ? "s16" : "s32";
+            string bitsArg = depth == 24 ? "-bits_per_raw_sample 24 " : "";
+
+            try { var dir = Path.GetDirectoryName(outputPath); if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir); } catch { }
+
+            Console.WriteLine($"Transcoding: {inputPath}");
+            Console.WriteLine($"  -> {outputPath}");
+            Console.WriteLine($"  rate={rate} Hz, depth={depth} bits, codec=flac (compression_level 0)");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpeg,
+                Arguments = $"-i {PathHelper.QuoteArg(inputPath)} -c:a flac -compression_level 0 -ar {rate} -sample_fmt {sampleFmt} {bitsArg}-y {PathHelper.QuoteArg(outputPath)}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            try
+            {
+                using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(300000)) // 5 min, matches DownmixToStereo
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    Console.Error.WriteLine("Error: ffmpeg transcode timed out (300s).");
+                    return 1;
+                }
+                proc.WaitForExit();
+                stdoutTask.Wait(5000);
+                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+                if (proc.ExitCode != 0)
+                {
+                    var tail = stderr.Trim();
+                    if (tail.Length > 500) tail = "…" + tail.Substring(tail.Length - 500);
+                    Console.Error.WriteLine($"ffmpeg exit {proc.ExitCode}:\n{tail}");
+                    return proc.ExitCode == 0 ? 1 : proc.ExitCode;
+                }
+                if (!File.Exists(outputPath))
+                {
+                    Console.Error.WriteLine("Error: ffmpeg reported success but output file is missing.");
+                    return 1;
+                }
+                Console.WriteLine($"OK ({new FileInfo(outputPath).Length / 1024} KB)");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: transcode failed: {ex.Message}");
+                return 1;
+            }
+        }
+
         static (string Fingerprint, int Duration, string? Error) RunChromaprinter(string exe, string audioPath, CancellationToken ct = default)
         {
             var (stdout, error) = RunTool(exe, audioPath, ct);
@@ -5143,6 +5285,31 @@ namespace Truedat
                 else if (_ffmpegPath.Value == null)
                 {
                     result = (null, result.Error + " (install ffmpeg on PATH to auto-downmix)");
+                }
+            }
+
+            // Unsupported codec (e.g. .opus — essentia's AudioLoader lacks libopus):
+            // transcode to WAV via ffmpeg and retry. Same pattern as the multi-channel
+            // branch; DownmixToStereo writes a clean stereo WAV which essentia can read.
+            if (result.Features == null && result.Error != null && result.Error.Contains("Unsupported codec"))
+            {
+                var wavPath = DownmixToStereo(audioPath);
+                if (wavPath != null)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Transcoding via ffmpeg (unsupported codec detected)");
+                        var wavSize = new FileInfo(wavPath).Length;
+                        result = AnalyzeWithEssentiaCore(essentiaExe, wavPath, wavSize, ct);
+                    }
+                    finally
+                    {
+                        try { File.Delete(wavPath); } catch { }
+                    }
+                }
+                else if (_ffmpegPath.Value == null)
+                {
+                    result = (null, result.Error + " (install ffmpeg on PATH to auto-transcode)");
                 }
             }
 
