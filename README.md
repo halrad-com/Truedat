@@ -81,9 +81,18 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --file-list <path>    Analyze files listed in a text file (one path per line, UTF-8, # comments)
                         Mutually exclusive with --analyze-file; -p sets parallelism
   --check-filenames       Scan for filenames with characters that break Essentia tools
+  --transcode <input>     Standalone: ffmpeg-transcode <input> to uncompressed FLAC.
+                          Requires --transcode-out. Mutually exclusive with all scan modes.
+  --transcode-out <path>  Output FLAC path for --transcode mode.
+  --sample-rate <hz>      With --transcode: override output sample rate (default: match source).
+  --bit-depth <16|24>     With --transcode: override output bit depth (default: match source).
 ```
 
-**Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable auto-downmix of multi-channel (5.1+) audio files and the `--details` probe mode. Without ffmpeg, multi-channel files are skipped with a warning.
+**Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
+- Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
+- Auto-retry of files essentia can't decode natively — e.g. `.opus`, which this essentia build lacks. The file is transcoded to a stereo WAV and essentia is re-run against it, all transparently.
+- `--details` probe mode.
+- Standalone `--transcode` mode for converting opus/etc. to uncompressed FLAC.
 
 ### Large Libraries
 
@@ -134,6 +143,12 @@ truedat.exe --hash-only --level stream --file-list files.txt --output manifest.n
 
 REM Verify the cache against disk (read-only — recomputes audioStreamSha256 per entry)
 truedat.exe --verify --moods C:\Music\mbxmoods.json
+
+REM Transcode opus (or any ffmpeg-readable input) to uncompressed FLAC at source rate/depth
+truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.flac"
+
+REM Same, but force a specific output rate and bit depth
+truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.flac" --sample-rate 44100 --bit-depth 16
 
 REM Two-machine same-library scan: each box does its own deterministic shard
 truedat.exe "iTunes Music Library.xml" --chunk 1/2     REM machine A

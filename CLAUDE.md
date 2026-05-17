@@ -7,7 +7,7 @@ This file is loaded automatically by Claude Code / Claude Agent sessions scoped 
 Truedat is a Windows .NET command-line tool that analyses a music library's audio and writes `mbxmoods.json` (mood + Essentia features), optionally `mbxhub-fingerprints.json` (Chromaprint + audio MD5), and `mbxhub-details.json` (ffprobe stream details). Output files are consumed by MBXHub's AutoQ engine (separate repo).
 
 - Build: `build-truedat.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
-- Runtime deps: `essentia_streaming_extractor_music.exe` (required for default scan), plus optional `ffmpeg.exe` (multi-channel downmix). `essentia_streaming_md5.exe` and `fpcalc.exe` are **legacy-mode only** — used by `--fingerprint`, `--md5-only`, `--quick-fingerprint`. Default scan no longer runs them.
+- Runtime deps: `essentia_streaming_extractor_music.exe` (required for default scan), plus optional `ffmpeg.exe` (multi-channel downmix, `Unsupported codec` retry — e.g. `.opus`, since this essentia build lacks libopus — and the standalone `--transcode` utility) and `ffprobe.exe` (audio-property probe for `--details` and for matching source rate/depth in `--transcode`). `essentia_streaming_md5.exe` and `fpcalc.exe` are **legacy-mode only** — used by `--fingerprint`, `--md5-only`, `--quick-fingerprint`. Default scan no longer runs them.
 - Framework: **.NET Framework 4.8**. No .NET 6/8 APIs, no `ValueTask`, no `init` setters on public types. Use `System.Text.Json` (merged via ILRepack).
 
 ## mbxmoods.json schema (current)

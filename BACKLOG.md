@@ -1,5 +1,38 @@
 # Truedat Backlog
 
+## ~~Opus support via ffmpeg transcode~~ DONE
+
+Two changes layered on the existing ffmpeg-transcode pattern (the one that
+already handled `more than 2 channels` downmix):
+
+- **Scan-side retry on `Unsupported codec`** in `AnalyzeWithEssentia`. When
+  essentia's `AudioLoader` rejects a file (e.g. every `.opus` track —
+  this essentia build lacks libopus), `DownmixToStereo` transcodes the
+  source to a stereo WAV and `AnalyzeWithEssentiaCore` re-runs against
+  the WAV. Reactive (not preemptive on `.opus` extension) so it picks
+  up future unsupported codecs without rewiring; failed first attempt
+  is ~0.1s so the overhead is negligible. Same temp-WAV cleanup as the
+  multi-channel branch.
+
+- **Standalone `--transcode` utility mode**: `--transcode <in>
+  --transcode-out <out.flac> [--sample-rate N] [--bit-depth 16|24]`.
+  Pure ffmpeg-driven opus/other → uncompressed FLAC. Defaults to source
+  sample rate / bit depth via `ProbeAudio`; falls back to 48000/24 when
+  the source reports float-internal (opus's container has no bit
+  depth). FLAC native sample formats — `s16` for 16-bit, `s32` with
+  `-bits_per_raw_sample 24` for 24-bit; `-compression_level 0`.
+  Timeout 300s matching `DownmixToStereo`. No essentia, no cache, no
+  mbxmoods.json. Mutually exclusive with all other standalone modes.
+
+Acceptance: opus file that previously exited 1 in 0.1s with
+`AudioLoader: Unsupported codec!` now analyzes end-to-end (exit 0, all
+55 features populated, `fingerprint.v1.codec="opus"`,
+`audioStreamSha256` set). Reduces (but doesn't close) the broader
+"DSD / Non-PCM Format Support" item below — DSD likely errors with a
+different essentia string and may need its own trigger.
+
+Commits: `b9ebdc7` (code), `e4f1205` (binary).
+
 ## ~~Phase 2 hash-first identity (Track A)~~ DONE
 
 `--hash-only --level fingerprint|stream` CLI for identity-only passes without
