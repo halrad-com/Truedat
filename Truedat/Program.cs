@@ -4391,10 +4391,19 @@ namespace Truedat
             // For short tracks fall back to decoding from the start.
             double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
             string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
+            // NOTE: No -ar argument. The whole point of bit-usage measurement is to inspect
+            // the SOURCE's bit depth as it lands in the s32le output. Resampling
+            // inherently introduces sub-bit interpolation noise that fills all 32 bits,
+            // making "lowestNonZeroBit" reflect resample artifacts instead of source
+            // resolution. Letting ffmpeg keep the native sample rate preserves the
+            // bit-alignment property (int24 source -> int32 with lowest-active-bit at 8;
+            // int16 padded-to-int24 source -> int32 with lowest-active-bit at 16).
+            // -ac 1 (mono) is safe for clean stereo sources because (L+R)/2 over int32
+            // doesn't add bits; only resampling does.
             var psi = new ProcessStartInfo
             {
                 FileName = ffmpegExe!,
-                Arguments = $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -f s32le -ac 1 -ar 48000 pipe:1",
+                Arguments = $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -f s32le -ac 1 pipe:1",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -4481,7 +4490,12 @@ namespace Truedat
                     BottomBitActivity = Math.Round(bottomBitActivity, 4),
                     EffectiveBits = Math.Round(effectiveBits, 2),
                     SamplesAnalyzed = (int)Math.Min(count, int.MaxValue),
-                    Method = "ffmpeg-s32le-30s-mid",
+                    // Method tag bumped from "ffmpeg-s32le-30s-mid" because the prior
+                    // method forced -ar 48000 which contaminated the bit-depth measurement
+                    // with resample interpolation noise (saw lowestNonZeroBit=0 and
+                    // effectiveBits>24 on verified hi-res sources — impossible for true
+                    // 24-bit content). Native sample rate restores measurement integrity.
+                    Method = "ffmpeg-s32le-30s-mid-native",
                 };
             }
             catch
