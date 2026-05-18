@@ -21,12 +21,18 @@ so the metric is meaningless for MP3/AAC and Phase 4's verdict block must
 gate it accordingly. See
 [`docs/plans/2026-05-18-data-plumbing-phase2.5.md`](docs/plans/2026-05-18-data-plumbing-phase2.5.md).
 
-**Phase 3 — `spectralCeilingHz`**: requires either a custom Essentia descriptor
-(rebuild extractor) or a dedicated FFT pass at native sample rate over
-[22 kHz, Nyquist]. The existing 85 % `spectralRolloff` and the 4-band
-`spectralEnergy*` fields cannot answer "is there content above 22 kHz?" —
-see self-review note in the Phase 2 plan. Needed for catching spectral
-fake-hi-res (orthogonal to bit-depth fakery caught by `bitUsage`).
+**~~Phase 3 — `hfEnergyRatio`~~ DONE** (commits below). Two concurrent ffmpeg
+passes per track (total RMS + `highpass=f=22050` filtered RMS) at the source's
+native sample rate; emits `hfEnergyRatio` (0..1) and `hfEnergyMethod` (frozen
+tag). Only populated when `sourceSampleRate > 44100` (CD-rate files have no
+Nyquist headroom). Catches spectral fake-hi-res that `bitUsage` alone can't —
+an upsampler that adds dither fools `bitUsage` but can't fabricate energy
+above the original Nyquist. The originally-planned full `spectralCeilingHz`
+(via FFT) was descoped to this single-number ratio: ~30 LOC vs ~300, zero new
+deps (ffmpeg's `highpass` filter does the work), one number that's easy to
+threshold. If finer-grained spectral data is needed later, a real FFT pass
+can be added as Phase 5+. See
+[`docs/plans/2026-05-18-data-plumbing-phase3.md`](docs/plans/2026-05-18-data-plumbing-phase3.md).
 
 **Phase 4 — the `truedat.*` verdict block**: consumes Phase 1 / 2 / 2.5 / 3
 fields and emits booleans + confidence (`truedat.lossySourceLikely`,

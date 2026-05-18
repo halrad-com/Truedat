@@ -115,6 +115,16 @@ namespace Truedat
         // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
         // Detects bit-depth fakery (16-bit content padded to 24-bit container).
         public BitUsageSummary? BitUsage { get; set; }
+
+        // Phase 3 — spectral fake-hi-res signal. Fraction of audio energy above 22.05 kHz,
+        // measured at native sample rate. Only populated when sourceSampleRate > 44100
+        // (no Nyquist headroom otherwise). Pairs with BitUsage as the second independent
+        // signal for the Phase 4 verdict's hires_genuine question — an upsampled CD with
+        // added dither can fool BitUsage but can't fabricate HF content above the original
+        // Nyquist. Genuine hi-res content typically lands in 0.001–0.05; upsampled content
+        // lands at 0 or essentially-zero.
+        public double? HfEnergyRatio { get; set; }
+        public string? HfEnergyMethod { get; set; }   // frozen tag: "ffmpeg-rms-hp22050-30s-mid"
     }
 
     /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
@@ -1105,7 +1115,9 @@ namespace Truedat
                         try { using var tf = TagLib.File.Create(analyzeFilePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                         return ComputeBitUsage(analyzeFilePath!, dur, _ffmpegPath.Value);
                     });
-                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask });
+                    // Phase 3 — HF energy ratio in parallel; self-contained TagLib probe inside the helper.
+                    var afHfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(analyzeFilePath!, _ffmpegPath.Value));
+                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask });
 
                     var (features, error) = afEssentiaTask.Result;
                     var afFileMd5 = afFileMd5Task.Result;
@@ -1115,6 +1127,7 @@ namespace Truedat
                     afAudioStreamSha256Source = shaSrc;
                     var afTags = afTagsTask.Result;
                     var afBitUsage = afBitUsageTask.Result;
+                    var (afHfRatio, afHfMethod) = afHfEnergyTask.Result;
 
                     if (features == null)
                     {
@@ -1129,6 +1142,7 @@ namespace Truedat
                     features.Genre = afTags.Genre;
                     features.FilePath = analyzeFilePath!;
                     if (afBitUsage != null) features.BitUsage = afBitUsage;
+                    if (afHfRatio.HasValue) { features.HfEnergyRatio = afHfRatio; features.HfEnergyMethod = afHfMethod; }
 
                     trackEntry = new TrackEntry
                     {
@@ -1591,7 +1605,9 @@ namespace Truedat
                             try { using var tf = TagLib.File.Create(filePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                             return ComputeBitUsage(filePath, dur, _ffmpegPath.Value);
                         });
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask });
+                        // Phase 3 — HF energy ratio in parallel.
+                        var hfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(filePath, _ffmpegPath.Value));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
@@ -1599,6 +1615,7 @@ namespace Truedat
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var tags = tagsTask.Result;
                         var bitUsage = bitUsageTask.Result;
+                        var (hfRatio, hfMethod) = hfEnergyTask.Result;
 
                         if (features == null)
                         {
@@ -1614,6 +1631,7 @@ namespace Truedat
                         features.Genre = tags.Genre;
                         features.FilePath = filePath;
                         if (bitUsage != null) features.BitUsage = bitUsage;
+                        if (hfRatio.HasValue) { features.HfEnergyRatio = hfRatio; features.HfEnergyMethod = hfMethod; }
 
                         var trackEntry = new TrackEntry
                         {
@@ -2092,7 +2110,9 @@ namespace Truedat
                                             ChordsStrength = xf.ChordsStrength,
                                             HpcpCrest = xf.HpcpCrest,
                                             HpcpEntropy = xf.HpcpEntropy,
-                                            BitUsage = xf.BitUsage    // Phase 2.5 — preserve on cross-MD5 cache reuse
+                                            BitUsage = xf.BitUsage,    // Phase 2.5 — preserve on cross-MD5 cache reuse
+                                            HfEnergyRatio = xf.HfEnergyRatio,    // Phase 3 — preserve on cross-MD5 cache reuse
+                                            HfEnergyMethod = xf.HfEnergyMethod
                                         },
                                         LastModified = currentLastMod,
                                         AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
@@ -2217,7 +2237,9 @@ namespace Truedat
                         // so we don't need a TagLib probe inside the task.
                         double bitUsageDurSec = trackDurationSecs;
                         var bitUsageTask = Task.Run(() => ComputeBitUsage(t.Location, bitUsageDurSec, _ffmpegPath.Value));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask });
+                        // Phase 3 — HF energy ratio in parallel.
+                        var hfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(t.Location, _ffmpegPath.Value));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -2228,6 +2250,7 @@ namespace Truedat
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var bitUsageResult = bitUsageTask.Result;
+                        var (hfRatioResult, hfMethodResult) = hfEnergyTask.Result;
 
                         if (feat == null)
                         {
@@ -2247,6 +2270,7 @@ namespace Truedat
                         feat.Genre = t.Genre;
                         feat.FilePath = t.Location;
                         if (bitUsageResult != null) feat.BitUsage = bitUsageResult;
+                        if (hfRatioResult.HasValue) { feat.HfEnergyRatio = hfRatioResult; feat.HfEnergyMethod = hfMethodResult; }
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
@@ -4450,6 +4474,115 @@ namespace Truedat
             }
         }
 
+        /// <summary>Phase 3 — fraction of audio energy above 22.05 kHz, measured at
+        /// the source's native sample rate. Returns (null, null) when not applicable:
+        /// ffmpeg absent, sample rate at or below 44.1 kHz (no Nyquist headroom), or
+        /// total RMS is zero (silent file). The ratio is bounded [0, ~1]; genuine hi-res
+        /// music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0
+        /// or essentially zero. Pairs with bitUsage as a second independent fake-hi-res
+        /// signal that dither evasion can't fabricate.
+        /// Self-contained: opens TagLib internally for duration + sample rate so call
+        /// sites are one line, same pattern as ComputeBitUsage.</summary>
+        static (double? Ratio, string? Method) ComputeHfEnergyRatio(string filePath, string? ffmpegExe)
+        {
+            if (string.IsNullOrEmpty(ffmpegExe)) return (null, null);
+
+            int sourceSampleRate = 0;
+            double durationSec = 0;
+            try
+            {
+                using var tf = TagLib.File.Create(filePath);
+                sourceSampleRate = tf.Properties?.AudioSampleRate ?? 0;
+                durationSec = tf.Properties?.Duration.TotalSeconds ?? 0;
+            }
+            catch { return (null, null); }
+
+            if (sourceSampleRate <= 44100) return (null, null);   // no Nyquist headroom above 22 kHz
+
+            double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
+            string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
+            string srArg = $"-ar {sourceSampleRate}";
+
+            try
+            {
+                // Two concurrent ffmpeg invocations: total RMS and highpass-filtered RMS.
+                var totalTask = Task.Run(() => RmsFromFfmpegPipe(ffmpegExe!,
+                    $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -ac 1 {srArg} -f s32le pipe:1"));
+                var hpTask = Task.Run(() => RmsFromFfmpegPipe(ffmpegExe!,
+                    $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -af highpass=f=22050 -ac 1 {srArg} -f s32le pipe:1"));
+                Task.WaitAll(new Task[] { totalTask, hpTask });
+
+                double totalRms = totalTask.Result;
+                double hpRms = hpTask.Result;
+                if (totalRms <= 0 || double.IsNaN(totalRms)) return (null, null);
+
+                double ratio = hpRms / totalRms;
+                if (double.IsNaN(ratio) || double.IsInfinity(ratio)) return (null, null);
+                if (ratio < 0) ratio = 0;
+                // Clamp upward slack — filter overshoot can technically exceed 1; round-trip clip.
+                if (ratio > 2) ratio = 2;
+                return (Math.Round(ratio, 6), "ffmpeg-rms-hp22050-30s-mid");
+            }
+            catch
+            {
+                return (null, null);
+            }
+        }
+
+        /// <summary>Run ffmpeg with the given args, stream s32le mono out via stdout,
+        /// walk samples computing RMS. Returns 0 on any failure (caller treats as "no data").</summary>
+        static double RmsFromFfmpegPipe(string ffmpegExe, string args)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegExe,
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            try
+            {
+                using var proc = Process.Start(psi);
+                if (proc == null) return 0;
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
+                double sumSq = 0;
+                long count = 0;
+                var buf = new byte[64 * 1024];
+                var stream = proc.StandardOutput.BaseStream;
+                int residue = 0;
+                while (true)
+                {
+                    int got = stream.Read(buf, residue, buf.Length - residue);
+                    if (got <= 0) break;
+                    int total = residue + got;
+                    int wholeSamples = total / 4;
+                    for (int i = 0; i < wholeSamples; i++)
+                    {
+                        int s = BitConverter.ToInt32(buf, i * 4);
+                        sumSq += (double)s * s;
+                        count++;
+                    }
+                    int used = wholeSamples * 4;
+                    residue = total - used;
+                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                }
+                if (!proc.WaitForExit(60000))
+                {
+                    try { proc.Kill(); } catch { }
+                    return 0;
+                }
+                if (count == 0) return 0;
+                return Math.Sqrt(sumSq / count);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
         /// <summary>Trailing-zero count for a uint32 value; returns 32 for zero.
         /// Pure-managed; net48 lacks System.Numerics.BitOperations.TrailingZeroCount.</summary>
         static int TrailingZeroCountUInt32(uint x)
@@ -5338,6 +5471,11 @@ namespace Truedat
                     jw.WriteString("method", f.BitUsage.Method);
                 jw.WriteEndObject();
             }
+            // Phase 3 — HF energy ratio; omit-when-null.
+            if (f.HfEnergyRatio.HasValue)
+                jw.WriteNumber("hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, 6));
+            if (!string.IsNullOrEmpty(f.HfEnergyMethod))
+                jw.WriteString("hfEnergyMethod", f.HfEnergyMethod);
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -5552,7 +5690,9 @@ namespace Truedat
                 ChordsStrength = GetNullableDbl(track, "chordsStrength"),
                 HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
                 HpcpEntropy = GetNullableDbl(track, "hpcpEntropy"),
-                BitUsage = ParseBitUsageFromJson(track)
+                BitUsage = ParseBitUsageFromJson(track),
+                HfEnergyRatio = GetNullableDbl(track, "hfEnergyRatio"),
+                HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null
             };
         }
 
@@ -6910,7 +7050,9 @@ namespace Truedat
                     ChordsStrength = sf.ChordsStrength,
                     HpcpCrest = sf.HpcpCrest,
                     HpcpEntropy = sf.HpcpEntropy,
-                    BitUsage = sf.BitUsage     // Phase 2.5 — preserve across cache hits
+                    BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
+                    HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
+                    HfEnergyMethod = sf.HfEnergyMethod
                 },
                 LastModified = newLastMod,
                 AnalysisDurationSecs = source.AnalysisDurationSecs,

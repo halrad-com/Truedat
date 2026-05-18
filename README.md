@@ -456,6 +456,8 @@ For MP3 specifically, Phase 2 adds a nested `mp3LameTag` block inside `fingerpri
 
 For lossless containers claiming ≥24-bit depth, Phase 2.5 adds the `bitUsage` block to track features: a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity`, `effectiveBits` (continuous signal for confidence scoring), `samplesAnalyzed`, `method` (frozen tag `ffmpeg-s32le-30s-mid` for future-method tracking). Populated only during fresh analysis (cache hits preserve cached values; legacy entries pick it up on the next full scan). Null on ffmpeg-absent installs.
 
+Phase 3 adds the orthogonal `hfEnergyRatio` signal — fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via two concurrent ffmpeg passes (total RMS vs `highpass=f=22050` filtered RMS). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Genuine hi-res music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0 or essentially zero. Together, `bitUsage` and `hfEnergyRatio` are two independent signals the Phase 4 verdict block weights to answer "is this 24/96 claim genuine?".
+
 ### Fingerprint Output
 
 `mbxhub-fingerprints.json`:
