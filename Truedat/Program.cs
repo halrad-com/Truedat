@@ -110,6 +110,24 @@ namespace Truedat
         public double? ChordsStrength { get; set; }           // tonal.chords_strength.mean
         public double? HpcpCrest { get; set; }                // tonal.hpcp_crest.mean
         public double? HpcpEntropy { get; set; }              // tonal.hpcp_entropy.mean
+
+        // Phase 2.5 — bottom-bit analysis. Populated during fresh analysis via ffmpeg
+        // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
+        // Detects bit-depth fakery (16-bit content padded to 24-bit container).
+        public BitUsageSummary? BitUsage { get; set; }
+    }
+
+    /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
+    /// LowestNonZeroBit >= 8 is 16-bit content padded with zeros — the canonical
+    /// fake-hi-res signature. Populated by ComputeBitUsage (ffmpeg s32le walk).
+    /// Public because TrackFeatures.BitUsage is part of the serialized contract.</summary>
+    public sealed class BitUsageSummary
+    {
+        public int LowestNonZeroBit;      // 0 = bit 0 active in at least one sample; 8 = bottom 8 bits all zero
+        public double BottomBitActivity;  // fraction of non-silent samples with bit 0 != 0 (0..1)
+        public double EffectiveBits;      // log2(rms / quantStep) approximation; useful 0..24 range
+        public int SamplesAnalyzed;
+        public string Method = "";        // "ffmpeg-s32le-30s-mid" — frozen tag for future-method tracking
     }
 
     class TrackEntry
@@ -1079,7 +1097,15 @@ namespace Truedat
                         return result;
                     });
                     var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
-                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask });
+                    // Phase 2.5 — bitUsage runs in parallel with everything else. Self-contained
+                    // duration probe so it doesn't depend on other tasks' completion.
+                    var afBitUsageTask = Task.Run(() =>
+                    {
+                        double dur = 0;
+                        try { using var tf = TagLib.File.Create(analyzeFilePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
+                        return ComputeBitUsage(analyzeFilePath!, dur, _ffmpegPath.Value);
+                    });
+                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask });
 
                     var (features, error) = afEssentiaTask.Result;
                     var afFileMd5 = afFileMd5Task.Result;
@@ -1088,6 +1114,7 @@ namespace Truedat
                     afAudioStreamSha256 = sha;
                     afAudioStreamSha256Source = shaSrc;
                     var afTags = afTagsTask.Result;
+                    var afBitUsage = afBitUsageTask.Result;
 
                     if (features == null)
                     {
@@ -1101,6 +1128,7 @@ namespace Truedat
                     features.Album = afTags.Album;
                     features.Genre = afTags.Genre;
                     features.FilePath = analyzeFilePath!;
+                    if (afBitUsage != null) features.BitUsage = afBitUsage;
 
                     trackEntry = new TrackEntry
                     {
@@ -1556,13 +1584,21 @@ namespace Truedat
                         // artist/title/album/genre/duration from TagLib tags. Without this,
                         // identity.metadataKey on the server is empty for every local scan.
                         var tagsTask = Task.Run(() => ExtractFileTags(filePath));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask });
+                        // Phase 2.5 — bitUsage in parallel; self-contained duration probe.
+                        var bitUsageTask = Task.Run(() =>
+                        {
+                            double dur = 0;
+                            try { using var tf = TagLib.File.Create(filePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
+                            return ComputeBitUsage(filePath, dur, _ffmpegPath.Value);
+                        });
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var tags = tagsTask.Result;
+                        var bitUsage = bitUsageTask.Result;
 
                         if (features == null)
                         {
@@ -1577,6 +1613,7 @@ namespace Truedat
                         features.Album = tags.Album;
                         features.Genre = tags.Genre;
                         features.FilePath = filePath;
+                        if (bitUsage != null) features.BitUsage = bitUsage;
 
                         var trackEntry = new TrackEntry
                         {
@@ -2054,7 +2091,8 @@ namespace Truedat
                                             BeatsLoudness = xf.BeatsLoudness,
                                             ChordsStrength = xf.ChordsStrength,
                                             HpcpCrest = xf.HpcpCrest,
-                                            HpcpEntropy = xf.HpcpEntropy
+                                            HpcpEntropy = xf.HpcpEntropy,
+                                            BitUsage = xf.BitUsage    // Phase 2.5 — preserve on cross-MD5 cache reuse
                                         },
                                         LastModified = currentLastMod,
                                         AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
@@ -2175,7 +2213,11 @@ namespace Truedat
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
                             return result;
                         });
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task });
+                        // Phase 2.5 — bitUsage in parallel. iTunes XML gives us duration up front,
+                        // so we don't need a TagLib probe inside the task.
+                        double bitUsageDurSec = trackDurationSecs;
+                        var bitUsageTask = Task.Run(() => ComputeBitUsage(t.Location, bitUsageDurSec, _ffmpegPath.Value));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -2185,6 +2227,7 @@ namespace Truedat
                         var fileMd5 = fileMd5Task.Result;
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
+                        var bitUsageResult = bitUsageTask.Result;
 
                         if (feat == null)
                         {
@@ -2203,6 +2246,7 @@ namespace Truedat
                         feat.Album = t.Album;
                         feat.Genre = t.Genre;
                         feat.FilePath = t.Location;
+                        if (bitUsageResult != null) feat.BitUsage = bitUsageResult;
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
@@ -4294,6 +4338,132 @@ namespace Truedat
             return null;
         }
 
+        /// <summary>Phase 2.5 — decode 30s mid-track to s32le mono via ffmpeg, walk the
+        /// samples once, build a trailing-zeros histogram, derive the bit-usage summary.
+        /// Returns null on ffmpeg absence / decode failure / silent file — never throws.
+        /// Designed to run concurrently with Essentia (single ffmpeg child process,
+        /// ~5.5 MB total decoded payload, typically completes in 1–3s warm).</summary>
+        static BitUsageSummary? ComputeBitUsage(string filePath, double durationSec, string? ffmpegExe)
+        {
+            if (string.IsNullOrEmpty(ffmpegExe)) return null;
+
+            // Sample 25% into the track when it's long enough — skips intros / fades.
+            // For short tracks fall back to decoding from the start.
+            double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
+            string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegExe!,
+                Arguments = $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -f s32le -ac 1 -ar 48000 pipe:1",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            try
+            {
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+                // Drain stderr async so a chatty ffmpeg can't deadlock the pipe.
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
+                // 33 buckets: 0..31 for trailing-zero counts of nonzero samples; index 32 for fully-zero samples.
+                var tzHistogram = new long[33];
+                double signalSqSum = 0;   // double to avoid int-overflow accumulation
+                long count = 0;
+                long countNonZero = 0;
+
+                var buf = new byte[64 * 1024];  // 16 K samples per read
+                var stream = proc.StandardOutput.BaseStream;
+                int residue = 0;
+                while (true)
+                {
+                    int got = stream.Read(buf, residue, buf.Length - residue);
+                    if (got <= 0) break;
+                    int total = residue + got;
+                    int wholeSamples = total / 4;
+                    for (int i = 0; i < wholeSamples; i++)
+                    {
+                        int s = BitConverter.ToInt32(buf, i * 4);
+                        count++;
+                        signalSqSum += (double)s * s;
+                        if (s == 0) { tzHistogram[32]++; continue; }
+                        countNonZero++;
+                        // Math.Abs(int.MinValue) overflows — clamp.
+                        uint abs = s == int.MinValue ? (uint)int.MaxValue : (uint)Math.Abs(s);
+                        tzHistogram[TrailingZeroCountUInt32(abs)]++;
+                    }
+                    int used = wholeSamples * 4;
+                    residue = total - used;
+                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                }
+
+                if (!proc.WaitForExit(60000))
+                {
+                    try { proc.Kill(); } catch { }
+                    return null;
+                }
+                if (proc.ExitCode != 0 && count == 0) return null;  // tolerate non-zero exit if we got data
+
+                if (count == 0 || countNonZero == 0) return null;   // pure silence — can't infer bit depth
+
+                // Lowest non-zero bit across the 30s window.
+                int lowestNonZeroBit = 0;
+                for (int i = 0; i < 32; i++)
+                {
+                    if (tzHistogram[i] > 0) { lowestNonZeroBit = i; break; }
+                }
+
+                // Activity at the resolution boundary — fraction of non-silent samples
+                // whose lowest set bit is at the boundary position.
+                double bottomBitActivity = (double)tzHistogram[lowestNonZeroBit] / countNonZero;
+
+                // EffectiveBits = log2(rms / quantStep). Approximate; useful continuous signal
+                // for downstream confidence scoring.
+                double rms = Math.Sqrt(signalSqSum / count);
+                double effectiveBits;
+                if (rms <= 0)
+                {
+                    effectiveBits = 0;
+                }
+                else
+                {
+                    double quantStep = Math.Pow(2, lowestNonZeroBit);
+                    effectiveBits = quantStep > 0 ? Math.Log(rms / quantStep, 2) : 0;
+                    if (effectiveBits < 0) effectiveBits = 0;
+                    if (effectiveBits > 32) effectiveBits = 32;
+                }
+
+                return new BitUsageSummary
+                {
+                    LowestNonZeroBit = lowestNonZeroBit,
+                    BottomBitActivity = Math.Round(bottomBitActivity, 4),
+                    EffectiveBits = Math.Round(effectiveBits, 2),
+                    SamplesAnalyzed = (int)Math.Min(count, int.MaxValue),
+                    Method = "ffmpeg-s32le-30s-mid",
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Trailing-zero count for a uint32 value; returns 32 for zero.
+        /// Pure-managed; net48 lacks System.Numerics.BitOperations.TrailingZeroCount.</summary>
+        static int TrailingZeroCountUInt32(uint x)
+        {
+            if (x == 0) return 32;
+            int n = 0;
+            if ((x & 0xFFFF) == 0) { n += 16; x >>= 16; }
+            if ((x & 0xFF)   == 0) { n += 8;  x >>= 8; }
+            if ((x & 0xF)    == 0) { n += 4;  x >>= 4; }
+            if ((x & 0x3)    == 0) { n += 2;  x >>= 2; }
+            if ((x & 0x1)    == 0) { n += 1; }
+            return n;
+        }
+
         /// <summary>
         /// Downmix a multi-channel audio file to stereo using ffmpeg.
         /// Returns path to temp WAV file, or null on failure. Caller must delete the temp file.
@@ -5155,6 +5325,19 @@ namespace Truedat
             WriteOpt(jw, "chordsStrength", f.ChordsStrength);
             WriteOpt(jw, "hpcpCrest", f.HpcpCrest);
             WriteOpt(jw, "hpcpEntropy", f.HpcpEntropy);
+            // Phase 2.5 — bottom-bit analysis; omit-when-null.
+            if (f.BitUsage != null)
+            {
+                jw.WritePropertyName("bitUsage");
+                jw.WriteStartObject();
+                jw.WriteNumber("lowestNonZeroBit", f.BitUsage.LowestNonZeroBit);
+                jw.WriteNumber("bottomBitActivity", f.BitUsage.BottomBitActivity);
+                jw.WriteNumber("effectiveBits", f.BitUsage.EffectiveBits);
+                jw.WriteNumber("samplesAnalyzed", f.BitUsage.SamplesAnalyzed);
+                if (!string.IsNullOrEmpty(f.BitUsage.Method))
+                    jw.WriteString("method", f.BitUsage.Method);
+                jw.WriteEndObject();
+            }
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -5368,8 +5551,29 @@ namespace Truedat
                 BeatsLoudness = GetNullableDbl(track, "beatsLoudness"),
                 ChordsStrength = GetNullableDbl(track, "chordsStrength"),
                 HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
-                HpcpEntropy = GetNullableDbl(track, "hpcpEntropy")
+                HpcpEntropy = GetNullableDbl(track, "hpcpEntropy"),
+                BitUsage = ParseBitUsageFromJson(track)
             };
+        }
+
+        /// <summary>Phase 2.5 — read the nested bitUsage block back from mbxmoods.json.
+        /// Returns null when the block is absent (legacy entries) or malformed. Tolerant
+        /// of missing fields within the block — defaults are zero, never throws.</summary>
+        static BitUsageSummary? ParseBitUsageFromJson(JsonElement track)
+        {
+            if (!track.TryGetProperty("bitUsage", out var b) || b.ValueKind != JsonValueKind.Object) return null;
+            try
+            {
+                return new BitUsageSummary
+                {
+                    LowestNonZeroBit = GetInt(b, "lowestNonZeroBit"),
+                    BottomBitActivity = GetDbl(b, "bottomBitActivity"),
+                    EffectiveBits = GetDbl(b, "effectiveBits"),
+                    SamplesAnalyzed = GetInt(b, "samplesAnalyzed"),
+                    Method = GetStr(b, "method"),
+                };
+            }
+            catch { return null; }
         }
 
         static string ExtractEssentiaError(string stderr, int exitCode)
@@ -6705,7 +6909,8 @@ namespace Truedat
                     BeatsLoudness = sf.BeatsLoudness,
                     ChordsStrength = sf.ChordsStrength,
                     HpcpCrest = sf.HpcpCrest,
-                    HpcpEntropy = sf.HpcpEntropy
+                    HpcpEntropy = sf.HpcpEntropy,
+                    BitUsage = sf.BitUsage     // Phase 2.5 — preserve across cache hits
                 },
                 LastModified = newLastMod,
                 AnalysisDurationSecs = source.AnalysisDurationSecs,

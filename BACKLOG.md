@@ -8,13 +8,18 @@ Builds on the shipped Phase 1 (`bitDepth` + `encoder` in `fingerprint.v1` +
 and Phase 2 (MP3 LAME tag block, see
 [`docs/plans/2026-05-18-data-plumbing-phase2.md`](docs/plans/2026-05-18-data-plumbing-phase2.md)).
 
-**Phase 2.5 — `bitUsage` block** (deferred from Phase 2 because the
-concurrent-task integration touches 3 scan paths and warrants its own plan):
-ffmpeg-pipe PCM walk over 30 s mid-track; emits `lowestNonZeroBit`,
-`bottomBitActivity`, `effectiveBits`. **The** fake-hi-res signal — a 24-bit
-file with `lowestNonZeroBit ≥ 8` is 16-bit content padded with zeros, full
-stop. Helper code design and the deferral rationale are in the Phase 2 plan's
-"Implementation status" section.
+**~~Phase 2.5 — `bitUsage` block~~ DONE** (commits below). ffmpeg-pipe PCM walk
+over 30 s mid-track; emits `lowestNonZeroBit`, `bottomBitActivity`,
+`effectiveBits`, `samplesAnalyzed`, `method`. Wired as a 5th concurrent task
+in all three scan paths (`--analyze-file`, `--file-list`/`--folder`,
+MoodsMode). Cache hits preserve cached values; legacy entries pick it up on
+the next full scan (not added to the re-extract canary — would force
+unwanted Essentia re-runs across the whole library on first upgrade).
+**Detection-only valid for codec ∈ {flac, alac, wav, aiff} claiming
+`bitDepth ≥ 24`** — lossy decode floods the LSBs with reconstruction noise,
+so the metric is meaningless for MP3/AAC and Phase 4's verdict block must
+gate it accordingly. See
+[`docs/plans/2026-05-18-data-plumbing-phase2.5.md`](docs/plans/2026-05-18-data-plumbing-phase2.5.md).
 
 **Phase 3 — `spectralCeilingHz`**: requires either a custom Essentia descriptor
 (rebuild extractor) or a dedicated FFT pass at native sample rate over
@@ -27,6 +32,39 @@ fake-hi-res (orthogonal to bit-depth fakery caught by `bitUsage`).
 fields and emits booleans + confidence (`truedat.lossySourceLikely`,
 `truedat.hiresGenuine`, `truedat.spectralCeilingHz`, `truedat.confidence`).
 This is the user-facing answer; everything above is data plumbing.
+
+### Known detection challenges (must inform Phase 4 design)
+
+Single-signal heuristics fail in well-documented ways. Real-world cases the
+verdict block must handle without making them worse:
+
+| Case | Why naive detectors fail | What we need |
+|---|---|---|
+| **False positive on CDDA / "Fakin the Funk"-style rips** | Naive spectral-rolloff sees the ~15 kHz ceiling and flags it as transcoded; ignores that the rip is genuinely from a low-HF source (pre-1985 recording, deliberately rolled-off master, dark instrumentation) | LAME-tag absence on a non-Xing MP3 + spectral rolloff is the joint signal, not either alone. A genuine CDDA-→MP3 rip with a real LAME tag and `lowpassHz: 19500` shouldn't be flagged just because the *music* lacks 16+ kHz content. |
+| **False negative on 320→320 transcode** | Second encoder preserves the first's lowpass character; spectral evidence is gone | Encoder fingerprint is the only handle — original 320k from LAME has `Mp3LameTag.version: "LAME3.x"`; transcoded 320k typically has either no LAME tag (ffmpeg) or a *different* LAME version (re-encoded via lame). Music CRC drift across the file is a secondary tell. |
+| **False negative on 128→320 transcode** | Second encoder can introduce HF noise above what the source had, making rolloff look "wide enough" | Same as above — LAME tag absence + Lavc/Lavf encoder string. Also: if the source LAME tag survived re-muxing (rare), `lowpassHz: 16000` on a "320k" file is a definitive flag regardless of spectral measurement. |
+| **Genuine 16-bit FLAC with low HF** | Spectral-only detection would see "ceiling at 15 kHz" and call it fake | Don't apply hi-res detection to anything claiming `bitDepth < 24`. The detection is about the *bit depth claim*, not generic spectral analysis. |
+| **Upsampled CD with dither added** | Adding dither in the upsample chain restores LSB activity, defeating naive `lowestNonZeroBit ≥ 16` | This is a real evasion. Detection becomes probabilistic. Multiple signals needed: `bitUsage.bottomBitActivity` distribution (real 24-bit is more uniform), `spectralCeilingHz` (Phase 3 — content above 22 kHz can't be faked by dither), encoder string forensics. |
+
+**Implications for the verdict block:**
+
+1. **Voting / weighting over signals**, not a single threshold. Each signal
+   votes (yes/no/abstain) with a confidence weight. Verdict combines them.
+2. **Refuse to verdict** when signals are weak / contradictory — emit
+   `truedat.confidence: low` rather than guess.
+3. **Codec-aware gating**: hi-res checks only apply to claimed-lossless
+   claimed-≥24-bit files. Transcode checks only apply to MP3/AAC. Don't
+   waste signal on inapplicable measurements.
+4. **Treat older-recording corpora differently** (informed by genre /
+   year metadata when available): "naturally low HF" is a legitimate
+   class that mustn't be falsely flagged.
+
+**Test corpus is needed.** Per the user's feedback (2026-05-18), we need
+ground-truth pairs labeled by hand to validate the verdict block before
+shipping. At minimum: a CDDA rip flagged by naive detectors but genuine
+(e.g. Fakin the Funk), a known-good 24/96, a known-fake 24/96, a 128→320
+transcode, a 320→320 transcode, a deliberately-rolled-off modern
+production. Build this in Phase 4's planning sprint, not now.
 
 ## Vader-sprint (next planned work) — VADER lyrical sentiment
 

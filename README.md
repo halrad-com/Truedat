@@ -454,6 +454,8 @@ The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed f
 
 For MP3 specifically, Phase 2 adds a nested `mp3LameTag` block inside `fingerprint.v1` when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
 
+For lossless containers claiming ≥24-bit depth, Phase 2.5 adds the `bitUsage` block to track features: a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity`, `effectiveBits` (continuous signal for confidence scoring), `samplesAnalyzed`, `method` (frozen tag `ffmpeg-s32le-30s-mid` for future-method tracking). Populated only during fresh analysis (cache hits preserve cached values; legacy entries pick it up on the next full scan). Null on ffmpeg-absent installs.
+
 ### Fingerprint Output
 
 `mbxhub-fingerprints.json`:
