@@ -107,3 +107,15 @@ Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at 
 ## When in doubt
 
 Read `docs/plans/` and `docs/reviews/` before touching the scan pipeline. Every non-trivial change in recent history has a plan or review doc capturing the design rationale.
+
+## Authenticity sprint state (2026-05-18)
+
+Phases 1–4 shipped — `bitDepth` + `encoder` in `fingerprint.v1` (Phase 1), `mp3LameTag` block (Phase 2), `bitUsage` block (Phase 2.5), `hfEnergyRatio` (Phase 3), `truedat.*` verdict block (Phase 4). Current verdict method tag: **`truedat-v1-corpus1-2026-05-18`**.
+
+Test corpus at `C:\Users\scott\Music\_truedat-corpus\` — 23 files, documented in `docs/reviews/2026-05-18-phase4-corpus-validation.md`. External tools used for corpus generation (NOT in PATH): `C:\test\MB3\Codec\lame.exe` (LAME 3.100) and `C:\test\MB3\Codec\flac.exe` (FLAC 1.3.2).
+
+Known signal gaps that survived corpus tuning (Phase 5+ work, NOT bugs):
+- ffmpeg-upsampled fake hi-res FLACs verdict "yes" (resample dither/imaging mimics real HF content) — needs FFT-based spectral structure analysis to fix
+- LAME-to-LAME re-encode chains verdict "no" (second LAME encode rewrites Xing tag) — needs cascade-encode artifact detection
+
+For session resume: read `docs/SESSION-RESUME-2026-05-18.md` first.

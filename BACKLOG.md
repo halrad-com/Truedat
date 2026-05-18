@@ -34,23 +34,45 @@ threshold. If finer-grained spectral data is needed later, a real FFT pass
 can be added as Phase 5+. See
 [`docs/plans/2026-05-18-data-plumbing-phase3.md`](docs/plans/2026-05-18-data-plumbing-phase3.md).
 
-**~~Phase 4 — `truedat.*` verdict block (v1-untuned)~~ DONE** (commits below). Implementation
+**~~Phase 4 — `truedat.*` verdict block (corpus1-tuned)~~ DONE**. Implementation
 shipped: TruedatVerdict class, ComputeTruedatVerdict helper, four-string-enum
 output (`yes` / `no` / `unknown` / `n/a`), multi-signal weighted voting with ±0.7
 threshold, codec-aware applicability gates, inline emission at write time so
 threshold changes don't require rescans, `--audit` per-signal vote+weight trace.
 
-**Validated** on three real files (Sleepy Lagoon 24/48 FLAC → `hiresGenuine: yes,
-conf=0.6`; LAME 256k MP3 → `lossyTranscodeLikely: no, conf=0.7`; Lavc 256k MP3 →
-`lossyTranscodeLikely: yes, conf=0.65`). Multi-signal disagreement correctly
-reduces confidence without flipping verdicts.
+**Corpus-validated** against a 23-file hand-built test set at
+`C:\Users\scott\Music\_truedat-corpus\` covering real hi-res (Pink Floyd Animals
+24/192, Pink Floyd The Wall 24/96, Foo Fighters 24/96 with shaped dither, NIN
+24/96, Sleepy Lagoon 24/48), genre-diverse CD-rate FLACs + WAV, ffmpeg-upsampled
+fake hi-res, real-LAME 320 originals (via standalone `lame.exe 3.100`),
+128→320 and 320→320 LAME chains, Lavc native transcode, CDDA-narrow-band
+false-positive case, and LP-rip MP3s with custom encoder strings. Final
+scorecard: **20/23 (87%) hi-res, 21/23 (91%) transcode**.
 
-**Thresholds are NOT corpus-tuned** — method tag is `truedat-v1-untuned-2026-05-18`
-to make this visible to consumers. The Phase 4 plan's ~24-track hand-labeled
-test corpus remains the gating step before flipping the method tag to a
-calibrated `truedat-v1-YYYY-MM-DD`. Until then, consumers should treat verdicts
-as advisory. Plan at
-[`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
+**Tuning applied** based on corpus findings: dropped spectralRolloff (Signal D —
+false-positives on naturally narrow-band music); dropped `bitrate >= 256`
+inner gate on Signal B (VBR `--preset extreme` dips below 256 on simple
+content); method tag bumped from `truedat-v1-untuned-2026-05-18` to
+**`truedat-v1-corpus1-2026-05-18`**.
+
+**5 remaining mismatches are documented signal-gap limitations** (NOT bugs):
+- 3 hi-res misses: ffmpeg-upsampled fake 24/96/192 verdict "yes" — resample
+  dither/imaging mimics real HF content. Needs FFT-based spectral structure
+  analysis (Phase 5+).
+- 2 transcode misses: LAME→LAME re-encode chains verdict "no" — second LAME
+  encode rewrites Xing tag masking source. Needs cascade-encode artifact
+  detection (Phase 5+).
+
+Plan: [`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
+Validation review: [`docs/reviews/2026-05-18-phase4-corpus-validation.md`](docs/reviews/2026-05-18-phase4-corpus-validation.md).
+
+**Phase 5+ candidates** (ordered roughly value/cost — full discussion in resume doc):
+1. FFT-based hi-res signal to close the ffmpeg-upsample-fake gap
+2. Encoder string whitelist/blacklist (helps LP rips, EAC, dBpoweramp)
+3. ML weight tuning spike (sklearn logistic regression → calibrated thresholds)
+4. DSD/DSF codec support (currently fails analysis)
+5. AAC ESDS-box encoder fingerprint (MP3 LAME tag equivalent for AAC/M4A)
+6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
 
 **Phase 5 — ML-derived weights for the explicit voter** (spike, not a
 rewrite): once the explicit voter from Phase 4 is running on the live
