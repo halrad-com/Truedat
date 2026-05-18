@@ -1,5 +1,30 @@
 # Truedat Backlog
 
+## Vader-sprint (next planned work) — VADER lyrical sentiment
+
+S1 of the VADER+VAM multimodal roadmap. Adds `lyrical.*` block to
+`mbxmoods.json` per track that has lyrics (USLT/SYLT tag or `.lrc` sidecar).
+
+**Decision recorded:** port VADER from Python to C# with trimmed lexicon
+(rather than VaderSharp2 NuGet or vendoring the BobLd C# source). Rationale,
+data, and the 3-option comparison live in
+[`docs/analysis/2026-05-17-vader-source-selection.md`](docs/analysis/2026-05-17-vader-source-selection.md).
+
+**Plan:** [`docs/plans/2026-05-17-vader-vendoring-port.md`](docs/plans/2026-05-17-vader-vendoring-port.md)
+— ~610 LOC port across 4 files, embedded trimmed lexicon (~85 KB),
+LICENSE/NOTICE/`--licenses` flag, integration hook in the scan pipeline.
+
+**Effort:** 1-2 focused days end-to-end. Not gated by the §5.0 SPIKE (that's
+VAM-only); VADER ships independently.
+
+**Out of scope for this sprint** (deferred to follow-up plans):
+- Tier-2 cache `lyricalSourceHash` re-run logic (S1.2)
+- `--enrich vader --file-list` mode (cross-cutting)
+- LRCLib fetch (MBXHub-side)
+- Everything VAM (S2+)
+
+**Parent roadmap:** [`docs/plans/2026-05-16-vader-vam-roadmap.md`](docs/plans/2026-05-16-vader-vam-roadmap.md)
+
 ## ~~Opus support via ffmpeg transcode~~ DONE
 
 Two changes layered on the existing ffmpeg-transcode pattern (the one that
