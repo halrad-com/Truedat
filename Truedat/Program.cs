@@ -153,7 +153,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = "truedat-v1-untuned-2026-05-18";  // bumps when thresholds change (corpus-tuned -> "truedat-v1-2026-XX-XX")
+        public string Method = "truedat-v1-corpus1-2026-05-18";  // bumps when thresholds change; corpus1 = first calibration pass against the 17-file test corpus
     }
 
     class TrackEntry
@@ -5509,14 +5509,22 @@ namespace Truedat
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.30");
                 }
 
-                // Signal B: mp3LameTag.lowpassHz vs bitrate (MP3 only — LAME tag is MP3-specific).
-                // LAME at 128 kbps sets ~16 kHz lowpass; LAME at 320 kbps sets ~19.5 kHz.
-                // A "256k+" MP3 with low LAME-stamped lowpass is transcoded from low-bitrate source.
+                // Signal B: mp3LameTag.lowpassHz (MP3 only — LAME tag is MP3-specific).
+                // LAME at 128 kbps sets ~16 kHz lowpass; LAME at 320 kbps sets ~22.1 kHz.
+                // High lowpass = encoder targeted quality (vote "original" regardless of
+                // actual measured bitrate — VBR varies on content so the bitrate value
+                // is unreliable here; the LAME tag itself is the high-fidelity signal).
+                // Low lowpass + high-bitrate-claim = encoder targeted compression but
+                // file claims premium quality = transcode signature.
+                // The outer applicability gate already ensures bitrate >= 192; dropping
+                // the inner >= 256 check (which corpus testing 2026-05-18 showed was too
+                // strict for VBR --preset extreme on simple content like orchestral —
+                // symphonic 320k came in at 250 kbps and abstained when it shouldn't).
                 if (fp.Codec == "mp3" && fp.Mp3LowpassHz > 0)
                 {
                     int vote = 0;
-                    if (fp.Mp3LowpassHz < 17500 && fp.Bitrate >= 256) vote = 1;
-                    else if (fp.Mp3LowpassHz >= 19000 && fp.Bitrate >= 256) vote = -1;
+                    if (fp.Mp3LowpassHz < 17500) vote = 1;
+                    else if (fp.Mp3LowpassHz >= 19000) vote = -1;
                     if (vote != 0) { score += vote * 0.35; maxWeight += 0.35; }
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameLowpassHz={fp.Mp3LowpassHz} bitrate={fp.Bitrate} vote={vote:+#;-#;0} weight=0.35");
                 }
@@ -5533,14 +5541,32 @@ namespace Truedat
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameTagPresent={hasLameTag} encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.20");
                 }
 
-                // Signal D: spectralRolloff (weak — false-positive risk on naturally low-HF sources,
-                // so deliberately low weight; can corroborate but not dominate).
-                if (f.SpectralRolloff.HasValue && fp.Bitrate >= 256)
+                // Signal D: spectralRolloff — DISABLED (weight 0).
+                //
+                // The Phase 4 plan included this signal with weight 0.15, calling out the
+                // "Fakin the Funk" false-positive risk and assuming the low weight would
+                // prevent it from dominating. Corpus validation (2026-05-18) showed this
+                // assumption was wrong: rolloff fights the LAME-original signals on
+                // natural music (orchestral spectralRolloff=1198 Hz, real LAME 320k of
+                // CD-rate rock at 2624 Hz) by voting +1 ("transcoded") with enough weight
+                // to push -0.55 (signals B+C both saying "original") to -0.40, below the
+                // -0.7 threshold so the verdict becomes "unknown" instead of "no".
+                //
+                // The fundamental problem: low spectralRolloff means EITHER heavy
+                // compression OR naturally low-HF content. We can't distinguish these
+                // from a single number. Any threshold trades false positives for false
+                // negatives — there's no useful setting. Drop the signal entirely; revisit
+                // in Phase 5+ with content-aware reasoning (e.g., genre-tag-conditional
+                // thresholds, or spectral artifact detection).
+                //
+                // Kept in source as comment + zero-weight block so the structural intent
+                // is preserved and future re-introduction is a one-line change.
+                if (false && f.SpectralRolloff.HasValue && fp.Bitrate >= 256)
                 {
                     double sr = f.SpectralRolloff.Value;
                     int vote = sr < 14000 ? 1 : sr >= 18000 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode spectralRolloff={sr:F0} vote={vote:+#;-#;0} weight=0.15");
+                    if (vote != 0) { score += vote * 0.0; maxWeight += 0.0; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode spectralRolloff={sr:F0} vote={vote:+#;-#;0} weight=0 (disabled)");
                 }
 
                 (v.LossyTranscodeLikely, v.LossyTranscodeConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.30);
