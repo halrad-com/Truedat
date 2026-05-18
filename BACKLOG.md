@@ -1,5 +1,33 @@
 # Truedat Backlog
 
+## Authenticity-data plumbing — Phase 2.5 (bitUsage) + Phase 3 (spectralCeiling)
+
+Builds on the shipped Phase 1 (`bitDepth` + `encoder` in `fingerprint.v1` +
+`--verify --backfill`, see
+[`docs/plans/2026-05-18-data-plumbing-phase1.md`](docs/plans/2026-05-18-data-plumbing-phase1.md))
+and Phase 2 (MP3 LAME tag block, see
+[`docs/plans/2026-05-18-data-plumbing-phase2.md`](docs/plans/2026-05-18-data-plumbing-phase2.md)).
+
+**Phase 2.5 — `bitUsage` block** (deferred from Phase 2 because the
+concurrent-task integration touches 3 scan paths and warrants its own plan):
+ffmpeg-pipe PCM walk over 30 s mid-track; emits `lowestNonZeroBit`,
+`bottomBitActivity`, `effectiveBits`. **The** fake-hi-res signal — a 24-bit
+file with `lowestNonZeroBit ≥ 8` is 16-bit content padded with zeros, full
+stop. Helper code design and the deferral rationale are in the Phase 2 plan's
+"Implementation status" section.
+
+**Phase 3 — `spectralCeilingHz`**: requires either a custom Essentia descriptor
+(rebuild extractor) or a dedicated FFT pass at native sample rate over
+[22 kHz, Nyquist]. The existing 85 % `spectralRolloff` and the 4-band
+`spectralEnergy*` fields cannot answer "is there content above 22 kHz?" —
+see self-review note in the Phase 2 plan. Needed for catching spectral
+fake-hi-res (orthogonal to bit-depth fakery caught by `bitUsage`).
+
+**Phase 4 — the `truedat.*` verdict block**: consumes Phase 1 / 2 / 2.5 / 3
+fields and emits booleans + confidence (`truedat.lossySourceLikely`,
+`truedat.hiresGenuine`, `truedat.spectralCeilingHz`, `truedat.confidence`).
+This is the user-facing answer; everything above is data plumbing.
+
 ## Vader-sprint (next planned work) — VADER lyrical sentiment
 
 S1 of the VADER+VAM multimodal roadmap. Adds `lyrical.*` block to

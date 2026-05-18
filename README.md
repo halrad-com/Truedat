@@ -66,8 +66,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
                           (read-only; writes mbxmoods-verify.csv next to the moods file)
   --verify --backfill     Also fill in missing identity fields (audioStreamSha256, fileMd5,
-                          whole fingerprint.v1, plus sub-fields bitDepth / encoder) from
-                          TagLib for entries whose audio bytes are unchanged. No Essentia
+                          whole fingerprint.v1, plus sub-fields bitDepth / encoder, plus the
+                          MP3 LAME tag block for codec=mp3 entries) from TagLib and cheap
+                          file IO for entries whose audio bytes are unchanged. No Essentia
                           re-run. Idempotent. Safe on 70k+ track libraries.
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
@@ -450,6 +451,8 @@ Raw features are stored so MBXHub can compute valence/arousal at runtime with tu
 `fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
 
 The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) and whose `spectralRolloff` sits at 16 kHz is almost certainly transcoded from a low-bitrate lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `spectralRolloff` doesn't extend past 22 kHz is upsampled CD audio. Detection logic (the future `truedat.*` verdict block) consumes these fields without needing to decode audio again.
+
+For MP3 specifically, Phase 2 adds a nested `mp3LameTag` block inside `fingerprint.v1` when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
 
 ### Fingerprint Output
 

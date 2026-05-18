@@ -3149,21 +3149,44 @@ namespace Truedat
 
             // Tier C — fingerprint.v1 exists but some IdentityField specs are missing
             var missingSpecs = IdentityFields.Where(s => !s.IsPresent(entry.FingerprintV1)).ToList();
-            if (missingSpecs.Count == 0) return;
-
-            try
+            if (missingSpecs.Count > 0)
             {
-                using var tf = TagLib.File.Create(path);
-                foreach (var spec in missingSpecs)
+                try
                 {
-                    spec.Populate(tf, entry.FingerprintV1);
-                    filled.Add(spec.Name);
+                    using var tf = TagLib.File.Create(path);
+                    foreach (var spec in missingSpecs)
+                    {
+                        spec.Populate(tf, entry.FingerprintV1);
+                        filled.Add(spec.Name);
+                    }
+                }
+                catch
+                {
+                    // TagLib threw on the file (corrupt / unsupported). Leave the entry as-is;
+                    // the CSV will still mark BACKFILLED for any Tier A/B fills already done.
                 }
             }
-            catch
+
+            // Phase 2 — MP3 LAME tag backfill (FileBytesShallow tier). Off the IdentityFields
+            // list because it doesn't use TagLib; gated on codec=mp3 + at least one field missing.
+            if (entry.FingerprintV1.Codec == "mp3" &&
+                string.IsNullOrEmpty(entry.FingerprintV1.Mp3LameVersion) &&
+                entry.FingerprintV1.Mp3LowpassHz == 0 &&
+                entry.FingerprintV1.Mp3VbrMethodCode == 0)
             {
-                // TagLib threw on the file (corrupt / unsupported). Leave the entry as-is;
-                // the CSV will still mark BACKFILLED for any Tier A/B fills already done.
+                var info = Mp3LameTagParser.TryParse(path);
+                if (info != null)
+                {
+                    entry.FingerprintV1.Mp3LameVersion = info.LameVersion;
+                    entry.FingerprintV1.Mp3InfoTagRevision = info.InfoTagRevision;
+                    entry.FingerprintV1.Mp3VbrMethodCode = info.VbrMethodCode;
+                    entry.FingerprintV1.Mp3VbrMethod = info.VbrMethod;
+                    entry.FingerprintV1.Mp3LowpassHz = info.LowpassHz;
+                    entry.FingerprintV1.Mp3EncoderDelay = info.EncoderDelay;
+                    entry.FingerprintV1.Mp3EncoderPadding = info.EncoderPadding;
+                    entry.FingerprintV1.Mp3MusicCrc = info.MusicCrc;
+                    filled.Add("mp3LameTag");
+                }
             }
         }
 
@@ -5826,6 +5849,16 @@ namespace Truedat
             public int Bitrate;
             public string? Encoder;       // normalized: e.g. "LAME3.100", "libFLAC 1.3.3", "Lavf58.76.100"
             public string? EncoderRaw;    // unparsed tag value when Encoder normalization couldn't classify
+            // MP3 LAME tag — populated only when codec == "mp3" AND the file contains a valid
+            // Xing/Info+LAME header. Phase 2 plumbing for transcode detection.
+            public string? Mp3LameVersion;    // "LAME3.100" etc.; differs from Encoder which may say "Lavc..."
+            public int Mp3LowpassHz;          // 0 when unknown; typical 16000–20500
+            public string? Mp3VbrMethod;      // "CBR" / "ABR" / "VBR (method N)" / "CBR 2-pass" etc.
+            public byte Mp3VbrMethodCode;     // raw byte for downstream consumers
+            public int Mp3EncoderDelay;       // samples
+            public int Mp3EncoderPadding;     // samples
+            public int Mp3MusicCrc;           // CRC-16 over the music data; useful as a re-encode tell
+            public byte Mp3InfoTagRevision;   // LAME tag revision byte (high nibble of rev/vbr byte)
             public string AudioHead64kMd5 = "";
             public string AudioHead64kMd5Source = "invariant"; // "invariant" | "whole-file-start"
             public long InvariantStart;
@@ -5848,13 +5881,19 @@ namespace Truedat
         /// (drives the CSV "backfilledFields" join order). To add a future identity
         /// field that's TagLib-readable, append a new spec here + add the field to
         /// FingerprintV1 + WriteFingerprintV1 + ParseFingerprintV1FromJson — same
-        /// four-surfaces rule as any FingerprintV1 change.</summary>
+        /// four-surfaces rule as any FingerprintV1 change.
+        /// Phase-2 MP3 LAME tag fields don't use TagLib (raw file bytes) so they
+        /// have their own populator path in ApplyMp3LameBackfill — kept off this
+        /// list to preserve the "TagLib-only" semantics callers depend on.</summary>
         static readonly IdentityFieldSpec[] IdentityFields = new[]
         {
             new IdentityFieldSpec
             {
                 Name = "bitDepth",
-                IsPresent = fp => fp.BitDepth > 0,
+                // Lossy codecs don't carry a bit depth — they're "complete" by definition.
+                // Without this guard, every backfill pass would retry the populate on MP3/AAC/Opus
+                // entries forever (BitDepth stays 0; IsPresent returns false; spurious BACKFILLED report).
+                IsPresent = fp => fp.BitDepth > 0 || CodecLacksBitDepth(fp.Codec),
                 Populate  = (tf, fp) => fp.BitDepth = tf.Properties?.BitsPerSample ?? 0,
             },
             new IdentityFieldSpec
@@ -5869,6 +5908,172 @@ namespace Truedat
                 },
             },
         };
+
+        /// <summary>Codecs where TagLib's BitsPerSample is always 0 because the format
+        /// is bitstream-compressed and has no per-sample-bit concept. These count as
+        /// "field complete" for backfill purposes — IsPresent returns true even at 0.</summary>
+        static bool CodecLacksBitDepth(string? codec) => codec switch
+        {
+            "mp3" => true,
+            "aac" => true,
+            "opus" => true,
+            "vorbis" => true,
+            "ogg" => true,
+            "wma" => true,
+            "mpc" => true,
+            _ => false,
+        };
+
+        /// <summary>Result of a successful Mp3LameTag parse. Defaults are "unknown"
+        /// values so the caller can copy unconditionally; consumers omit-when-zero.</summary>
+        internal sealed class Mp3LameTagInfo
+        {
+            public string? LameVersion;    // e.g. "LAME3.100"
+            public byte InfoTagRevision;
+            public byte VbrMethodCode;
+            public string? VbrMethod;      // human-friendly classification of the byte
+            public int LowpassHz;
+            public int EncoderDelay;
+            public int EncoderPadding;
+            public int MusicCrc;
+        }
+
+        /// <summary>Pure-managed MP3 Xing/Info+LAME tag reader. Reads ~4 KB from the
+        /// start of the file, skips any ID3v2 header, finds the first MPEG frame,
+        /// parses the side-info length, locates the Xing/Info magic, walks the
+        /// optional fields, and reads the LAME tag bytes appended after.
+        ///
+        /// Returns null when the file isn't MP3, has no Xing/Info header (raw CBR
+        /// without info tag — uncommon for modern encoders), or fails any structural
+        /// sanity check. Caller treats null as "no LAME info available" — not an
+        /// error. Doesn't validate the LAME tag CRC (some buggy encoders write a
+        /// wrong CRC over otherwise-good payload; we'd rather accept slightly-bad
+        /// signal than reject it outright).</summary>
+        internal static class Mp3LameTagParser
+        {
+            // ID3v2 footer flag (0x10 in the flags byte) means there's an extra 10-byte
+            // footer copy at the end of the ID3 tag. We don't usually see this, but
+            // honoring it is cheap.
+            const int Id3v2FooterFlag = 0x10;
+
+            public static Mp3LameTagInfo? TryParse(string filePath)
+            {
+                byte[] buf;
+                try
+                {
+                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 8192, FileOptions.SequentialScan);
+                    buf = new byte[Math.Min(8192, fs.Length)];
+                    int total = 0;
+                    while (total < buf.Length)
+                    {
+                        int r = fs.Read(buf, total, buf.Length - total);
+                        if (r <= 0) break;
+                        total += r;
+                    }
+                    if (total < 64) return null;
+                    if (total < buf.Length) Array.Resize(ref buf, total);
+                }
+                catch { return null; }
+
+                int p = 0;
+                // Skip ID3v2 tag if present at file start.
+                if (buf.Length >= 10 && buf[0] == 'I' && buf[1] == 'D' && buf[2] == '3')
+                {
+                    int size = ((buf[6] & 0x7F) << 21) | ((buf[7] & 0x7F) << 14) | ((buf[8] & 0x7F) << 7) | (buf[9] & 0x7F);
+                    int tagLen = 10 + size + (((buf[5] & Id3v2FooterFlag) != 0) ? 10 : 0);
+                    p = tagLen;
+                    if (p >= buf.Length) return null;  // ID3 tag larger than what we read; LAME tag (if any) is beyond our 8K window
+                }
+
+                // Scan forward for the first MPEG frame sync (11 set bits): byte[p]==0xFF AND (byte[p+1] & 0xE0) == 0xE0.
+                int frame = -1;
+                int scanEnd = Math.Min(p + 4096, buf.Length - 4);
+                for (int i = p; i < scanEnd; i++)
+                {
+                    if (buf[i] == 0xFF && (buf[i + 1] & 0xE0) == 0xE0)
+                    {
+                        // Quick sanity: bitrate index != 1111, sample-rate index != 11.
+                        int bri = (buf[i + 2] >> 4) & 0x0F;
+                        int sri = (buf[i + 2] >> 2) & 0x03;
+                        int layer = (buf[i + 1] >> 1) & 0x03;
+                        if (bri == 0x0F || sri == 0x03 || layer == 0) continue;  // junk sync; keep scanning
+                        frame = i;
+                        break;
+                    }
+                }
+                if (frame < 0) return null;
+
+                // Parse the 4-byte header.
+                int versionBits = (buf[frame + 1] >> 3) & 0x03;   // 11=MPEG1, 10=MPEG2, 00=MPEG2.5, 01=reserved
+                if (versionBits == 0x01) return null;
+                int layerBits = (buf[frame + 1] >> 1) & 0x03;     // 01=Layer III (= MP3)
+                if (layerBits != 0x01) return null;
+                bool protection = (buf[frame + 1] & 0x01) == 0;   // 0 = CRC follows
+                int channelMode = (buf[frame + 3] >> 6) & 0x03;   // 11 = mono
+
+                bool isMpeg1 = versionBits == 0x03;
+                bool isMono = channelMode == 0x03;
+                int sideInfoLen = isMpeg1 ? (isMono ? 17 : 32) : (isMono ? 9 : 17);
+
+                int xingOffset = frame + 4 + (protection ? 2 : 0) + sideInfoLen;
+                if (xingOffset + 8 > buf.Length) return null;
+
+                // Magic must be "Xing" or "Info".
+                bool isXing = buf[xingOffset] == 'X' && buf[xingOffset + 1] == 'i' && buf[xingOffset + 2] == 'n' && buf[xingOffset + 3] == 'g';
+                bool isInfo = buf[xingOffset] == 'I' && buf[xingOffset + 1] == 'n' && buf[xingOffset + 2] == 'f' && buf[xingOffset + 3] == 'o';
+                if (!isXing && !isInfo) return null;
+
+                // Flags (BE uint32) tells us which optional Xing fields follow.
+                uint flags = ((uint)buf[xingOffset + 4] << 24) | ((uint)buf[xingOffset + 5] << 16) | ((uint)buf[xingOffset + 6] << 8) | buf[xingOffset + 7];
+                int q = xingOffset + 8;
+                if ((flags & 0x1) != 0) q += 4;          // frames
+                if ((flags & 0x2) != 0) q += 4;          // bytes
+                if ((flags & 0x4) != 0) q += 100;        // TOC
+                if ((flags & 0x8) != 0) q += 4;          // quality
+
+                // LAME tag follows. Need at least 36 bytes for the full payload.
+                if (q + 36 > buf.Length) return null;
+
+                var info = new Mp3LameTagInfo();
+
+                // Encoder ID — 9 ASCII bytes. Often "LAME3.100" / "LAME3.99r" but not always.
+                int verLen = 0;
+                while (verLen < 9 && buf[q + verLen] >= 0x20 && buf[q + verLen] <= 0x7E) verLen++;
+                if (verLen > 0) info.LameVersion = Encoding.ASCII.GetString(buf, q, verLen);
+
+                // Byte 9: info-tag-rev (high 4 bits) + vbr-method (low 4 bits).
+                info.InfoTagRevision = (byte)((buf[q + 9] >> 4) & 0x0F);
+                info.VbrMethodCode = (byte)(buf[q + 9] & 0x0F);
+                info.VbrMethod = ClassifyVbrMethod(info.VbrMethodCode);
+
+                // Byte 10: lowpass filter / 100 Hz.
+                info.LowpassHz = buf[q + 10] * 100;
+
+                // Bytes 21-23: encoder delay (12 bits) + encoder padding (12 bits) packed big-endian.
+                int delayPad = (buf[q + 21] << 16) | (buf[q + 22] << 8) | buf[q + 23];
+                info.EncoderDelay = (delayPad >> 12) & 0xFFF;
+                info.EncoderPadding = delayPad & 0xFFF;
+
+                // Bytes 32-33: music CRC (big-endian).
+                info.MusicCrc = (buf[q + 32] << 8) | buf[q + 33];
+
+                return info;
+            }
+
+            static string? ClassifyVbrMethod(byte code) => code switch
+            {
+                0 => "Unknown",
+                1 => "CBR",
+                2 => "ABR",
+                3 => "VBR (method 1)",
+                4 => "VBR (method 2)",
+                5 => "VBR (method 3)",
+                6 => "VBR (method 4)",
+                8 => "CBR 2-pass",
+                9 => "ABR 2-pass",
+                _ => null,
+            };
+        }
 
         /// <summary>
         /// Normalize a path to a tail identity signal (last up-to-3 non-empty
@@ -6082,7 +6287,7 @@ namespace Truedat
                     headMd5 = HexLower(hash);
                 }
 
-                return new FingerprintV1
+                var fp = new FingerprintV1
                 {
                     FileSize = fileSize,
                     PathTail = tail,
@@ -6100,12 +6305,36 @@ namespace Truedat
                     InvariantStart = invStart,
                     InvariantEnd = invEnd,
                 };
+
+                // Phase 2 — MP3 LAME tag extraction. Only attempted for codec=mp3; failure is silent.
+                if (codec == "mp3")
+                    ApplyMp3LameTag(filePath, fp);
+
+                return fp;
             }
             catch (Exception ex)
             {
                 error = ex.Message;
                 return null;
             }
+        }
+
+        /// <summary>Phase 2 — populate MP3 LAME-tag fields on an existing FingerprintV1.
+        /// Called from ComputeFingerprintV1 (fresh extract) and from --verify --backfill
+        /// (when the entry's codec=mp3 and LAME fields are missing). Safe to call on
+        /// non-mp3 files (returns silently) and on mp3 files without a LAME tag (no-op).</summary>
+        static void ApplyMp3LameTag(string filePath, FingerprintV1 fp)
+        {
+            var info = Mp3LameTagParser.TryParse(filePath);
+            if (info == null) return;
+            fp.Mp3LameVersion = info.LameVersion;
+            fp.Mp3InfoTagRevision = info.InfoTagRevision;
+            fp.Mp3VbrMethodCode = info.VbrMethodCode;
+            fp.Mp3VbrMethod = info.VbrMethod;
+            fp.Mp3LowpassHz = info.LowpassHz;
+            fp.Mp3EncoderDelay = info.EncoderDelay;
+            fp.Mp3EncoderPadding = info.EncoderPadding;
+            fp.Mp3MusicCrc = info.MusicCrc;
         }
 
         /// <summary>
@@ -6260,6 +6489,21 @@ namespace Truedat
                 var codecRaw = GetStr(fp, "codecRaw");
                 var encoder = GetStr(fp, "encoder");
                 var encoderRaw = GetStr(fp, "encoderRaw");
+                // MP3 LAME tag (Phase 2) — nested object; tolerant of absence.
+                string? lameVersion = null, lameVbrMethod = null;
+                int lameLowpass = 0, lameDelay = 0, lamePadding = 0, lameMusicCrc = 0;
+                byte lameRev = 0, lameVbrCode = 0;
+                if (fp.TryGetProperty("mp3LameTag", out var lameNode) && lameNode.ValueKind == JsonValueKind.Object)
+                {
+                    lameVersion   = GetStr(lameNode, "version");
+                    lameVbrMethod = GetStr(lameNode, "vbrMethod");
+                    lameLowpass   = GetInt(lameNode, "lowpassHz");
+                    lameDelay     = GetInt(lameNode, "encoderDelay");
+                    lamePadding   = GetInt(lameNode, "encoderPadding");
+                    lameMusicCrc  = GetInt(lameNode, "musicCrc");
+                    lameRev       = (byte)Math.Min(255, GetInt(lameNode, "infoTagRevision"));
+                    lameVbrCode   = (byte)Math.Min(255, GetInt(lameNode, "vbrMethodCode"));
+                }
                 long fileSize = fp.TryGetProperty("fileSize", out var fs) && fs.ValueKind == JsonValueKind.Number ? fs.GetInt64() : 0L;
                 long invStart = fp.TryGetProperty("invariantStart", out var iS) && iS.ValueKind == JsonValueKind.Number ? iS.GetInt64() : 0L;
                 long invEnd   = fp.TryGetProperty("invariantEnd",   out var iE) && iE.ValueKind == JsonValueKind.Number ? iE.GetInt64() : 0L;
@@ -6276,6 +6520,14 @@ namespace Truedat
                     Bitrate = GetInt(fp, "bitrate"),
                     Encoder = string.IsNullOrEmpty(encoder) ? null : encoder,
                     EncoderRaw = string.IsNullOrEmpty(encoderRaw) ? null : encoderRaw,
+                    Mp3LameVersion = string.IsNullOrEmpty(lameVersion) ? null : lameVersion,
+                    Mp3InfoTagRevision = lameRev,
+                    Mp3VbrMethodCode = lameVbrCode,
+                    Mp3VbrMethod = string.IsNullOrEmpty(lameVbrMethod) ? null : lameVbrMethod,
+                    Mp3LowpassHz = lameLowpass,
+                    Mp3EncoderDelay = lameDelay,
+                    Mp3EncoderPadding = lamePadding,
+                    Mp3MusicCrc = lameMusicCrc,
                     AudioHead64kMd5 = head,
                     AudioHead64kMd5Source = string.IsNullOrEmpty(src) ? "invariant" : src,
                     InvariantStart = invStart,
@@ -6310,6 +6562,28 @@ namespace Truedat
                 jw.WriteString("encoder", fp.Encoder);
             if (!string.IsNullOrEmpty(fp.EncoderRaw))
                 jw.WriteString("encoderRaw", fp.EncoderRaw);
+            // Phase 2 — MP3 LAME tag block, only emitted when at least one field was extracted.
+            if (!string.IsNullOrEmpty(fp.Mp3LameVersion) || fp.Mp3LowpassHz > 0 || fp.Mp3VbrMethodCode > 0)
+            {
+                jw.WritePropertyName("mp3LameTag");
+                jw.WriteStartObject();
+                if (!string.IsNullOrEmpty(fp.Mp3LameVersion))
+                    jw.WriteString("version", fp.Mp3LameVersion);
+                if (fp.Mp3InfoTagRevision > 0)
+                    jw.WriteNumber("infoTagRevision", fp.Mp3InfoTagRevision);
+                jw.WriteNumber("vbrMethodCode", fp.Mp3VbrMethodCode);
+                if (!string.IsNullOrEmpty(fp.Mp3VbrMethod))
+                    jw.WriteString("vbrMethod", fp.Mp3VbrMethod);
+                if (fp.Mp3LowpassHz > 0)
+                    jw.WriteNumber("lowpassHz", fp.Mp3LowpassHz);
+                if (fp.Mp3EncoderDelay > 0)
+                    jw.WriteNumber("encoderDelay", fp.Mp3EncoderDelay);
+                if (fp.Mp3EncoderPadding > 0)
+                    jw.WriteNumber("encoderPadding", fp.Mp3EncoderPadding);
+                if (fp.Mp3MusicCrc > 0)
+                    jw.WriteNumber("musicCrc", fp.Mp3MusicCrc);
+                jw.WriteEndObject();
+            }
             jw.WriteString("audioHead64kMd5", fp.AudioHead64kMd5);
             if (fp.AudioHead64kMd5Source != "invariant")
                 jw.WriteString("audioHead64kMd5Source", fp.AudioHead64kMd5Source);
