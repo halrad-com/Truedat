@@ -35,9 +35,24 @@ can be added as Phase 5+. See
 [`docs/plans/2026-05-18-data-plumbing-phase3.md`](docs/plans/2026-05-18-data-plumbing-phase3.md).
 
 **Phase 4 — the `truedat.*` verdict block**: consumes Phase 1 / 2 / 2.5 / 3
-fields and emits booleans + confidence (`truedat.lossySourceLikely`,
-`truedat.hiresGenuine`, `truedat.spectralCeilingHz`, `truedat.confidence`).
-This is the user-facing answer; everything above is data plumbing.
+fields and emits a four-string-enum verdict (`yes` / `no` / `unknown` / `n/a`)
+with confidence per question. Multi-signal voting, ±0.7 threshold, codec-aware
+gates. Plan at
+[`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
+**Test corpus (~24 hand-labeled tracks) is the gating step before shipping
+the verdict** — without ground truth we can't honestly tune thresholds.
+
+**Phase 5 — ML-derived weights for the explicit voter** (spike, not a
+rewrite): once the explicit voter from Phase 4 is running on the live
+library, every scanned track becomes a candidate for a labeled corpus.
+After ~200+ hand-reviewed tracks per question accumulate, run a
+logistic-regression spike in Python (sklearn) against the verdict-input
+features. The learned coefficients become **better starting thresholds
+for the explicit voter** — keep the explicit voting algorithm (debuggable,
+tunable, no retraining loop), just feed it ML-derived weights instead of
+hand-picked ones. Same output schema, no consumer change. Full ML
+inference in production is deferred further still — the explicit voter
+is the labeled-data accumulator first.
 
 ### Known detection challenges (must inform Phase 4 design)
 
