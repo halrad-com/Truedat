@@ -34,13 +34,23 @@ threshold. If finer-grained spectral data is needed later, a real FFT pass
 can be added as Phase 5+. See
 [`docs/plans/2026-05-18-data-plumbing-phase3.md`](docs/plans/2026-05-18-data-plumbing-phase3.md).
 
-**Phase 4 — the `truedat.*` verdict block**: consumes Phase 1 / 2 / 2.5 / 3
-fields and emits a four-string-enum verdict (`yes` / `no` / `unknown` / `n/a`)
-with confidence per question. Multi-signal voting, ±0.7 threshold, codec-aware
-gates. Plan at
+**~~Phase 4 — `truedat.*` verdict block (v1-untuned)~~ DONE** (commits below). Implementation
+shipped: TruedatVerdict class, ComputeTruedatVerdict helper, four-string-enum
+output (`yes` / `no` / `unknown` / `n/a`), multi-signal weighted voting with ±0.7
+threshold, codec-aware applicability gates, inline emission at write time so
+threshold changes don't require rescans, `--audit` per-signal vote+weight trace.
+
+**Validated** on three real files (Sleepy Lagoon 24/48 FLAC → `hiresGenuine: yes,
+conf=0.6`; LAME 256k MP3 → `lossyTranscodeLikely: no, conf=0.7`; Lavc 256k MP3 →
+`lossyTranscodeLikely: yes, conf=0.65`). Multi-signal disagreement correctly
+reduces confidence without flipping verdicts.
+
+**Thresholds are NOT corpus-tuned** — method tag is `truedat-v1-untuned-2026-05-18`
+to make this visible to consumers. The Phase 4 plan's ~24-track hand-labeled
+test corpus remains the gating step before flipping the method tag to a
+calibrated `truedat-v1-YYYY-MM-DD`. Until then, consumers should treat verdicts
+as advisory. Plan at
 [`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
-**Test corpus (~24 hand-labeled tracks) is the gating step before shipping
-the verdict** — without ground truth we can't honestly tune thresholds.
 
 **Phase 5 — ML-derived weights for the explicit voter** (spike, not a
 rewrite): once the explicit voter from Phase 4 is running on the live

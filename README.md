@@ -458,6 +458,28 @@ For lossless containers claiming ≥24-bit depth, Phase 2.5 adds the `bitUsage` 
 
 Phase 3 adds the orthogonal `hfEnergyRatio` signal — fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via two concurrent ffmpeg passes (total RMS vs `highpass=f=22050` filtered RMS). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Genuine hi-res music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0 or essentially zero. Together, `bitUsage` and `hfEnergyRatio` are two independent signals the Phase 4 verdict block weights to answer "is this 24/96 claim genuine?".
 
+### Authenticity verdict (`truedat.*` block)
+
+Each track in `mbxmoods.json` carries a nested `truedat` block with two verdicts and per-question confidence, plus a method tag:
+
+```json
+"truedat": {
+  "hiresGenuine":            "yes" | "no" | "unknown" | "n/a",
+  "hiresConfidence":         0.85,
+  "lossyTranscodeLikely":    "yes" | "no" | "unknown" | "n/a",
+  "lossyTranscodeConfidence": 0.92,
+  "method":                  "truedat-v1-untuned-2026-05-18"
+}
+```
+
+Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
+
+Multi-signal weighted voting per question. Hi-res verdict combines `bitUsage.lowestNonZeroBit`, `hfEnergyRatio`, and `bitUsage.effectiveBits` with weights 0.40 / 0.40 / 0.20. Transcode verdict (MP3 only currently) combines encoder string, MP3 LAME tag lowpass, LAME tag presence, and spectralRolloff with weights 0.30 / 0.35 / 0.20 / 0.15. ±0.7 normalized-score threshold means at least two full-weight signals must agree for a verdict — one strong signal alone produces `"unknown"`.
+
+Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tag bumps when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
+
+**The thresholds are currently untuned** — the method tag `truedat-v1-untuned-2026-05-18` signals this. Phase 4 plan ([`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md)) calls out a hand-labeled ~24-track test corpus as the gating step for proper threshold tuning. Consumers should treat all verdicts as advisory until the tag flips to `truedat-v1-YYYY-MM-DD` (corpus-validated).
+
 ### Fingerprint Output
 
 `mbxhub-fingerprints.json`:

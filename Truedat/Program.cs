@@ -140,6 +140,22 @@ namespace Truedat
         public string Method = "";        // "ffmpeg-s32le-30s-mid" — frozen tag for future-method tracking
     }
 
+    /// <summary>Phase 4 — the multi-signal-voted authenticity verdict per track.
+    /// Four-string enum (yes/no/unknown/n/a) for each question; confidence is only
+    /// populated for yes/no. Computed inline at write time via ComputeTruedatVerdict
+    /// (NOT persisted in TrackEntry — recomputed on every save so threshold changes
+    /// take effect without rescanning). Method tag identifies the algorithm/threshold
+    /// generation; bumping the tag is how we mark a verdict-algorithm change distinct
+    /// from a data-schema change.</summary>
+    public sealed class TruedatVerdict
+    {
+        public string HiresGenuine = "n/a";              // "yes" | "no" | "unknown" | "n/a"
+        public double? HiresConfidence;
+        public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
+        public double? LossyTranscodeConfidence;
+        public string Method = "truedat-v1-untuned-2026-05-18";  // bumps when thresholds change (corpus-tuned -> "truedat-v1-2026-XX-XX")
+    }
+
     class TrackEntry
     {
         public TrackFeatures Features = null!;
@@ -5385,6 +5401,153 @@ namespace Truedat
             if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {allTracks.Count} tracks)"); } catch { } }
         }
 
+        // ----------------------------------------------------------------------
+        // Phase 4 — TruedatVerdict computation
+        //
+        // Multi-signal weighted voting per the plan
+        // (docs/plans/2026-05-18-data-plumbing-phase4.md). Two independent
+        // questions per track:
+        //   - hiresGenuine     : is a claimed >=24-bit lossless file actually
+        //                        carrying hi-res content?
+        //   - lossyTranscodeLikely : is an MP3/AAC at >=192 kbps likely a
+        //                            transcode from a lower-bitrate lossy source?
+        //
+        // Each question has its own applicability gate. When the gate fails the
+        // verdict is "n/a". When it passes the signals vote; weighted sum is
+        // normalized by maxWeight of voted-on signals; ±0.7 threshold decides
+        // yes/no, anything weaker is "unknown". The thresholds below are
+        // initial educated guesses — the method tag declares them as untuned
+        // until a labeled test corpus calibrates them (BACKLOG Phase 4 corpus).
+        // ----------------------------------------------------------------------
+
+        static bool IsLosslessCodecForHiresCheck(string? codec) => codec switch
+        {
+            "flac" => true, "alac" => true, "wav" => true, "aiff" => true, _ => false,
+        };
+        static bool IsLossyCodecForTranscodeCheck(string? codec) => codec switch
+        {
+            "mp3" => true, "aac" => true, _ => false,
+        };
+
+        /// <summary>Compute the per-track verdict. Pure function: depends only on
+        /// the entry's already-extracted features. Runs inline in WriteTrackEntry
+        /// on every save so threshold changes ship without a rescan.</summary>
+        static TruedatVerdict ComputeTruedatVerdict(string trackPath, TrackEntry entry)
+        {
+            var v = new TruedatVerdict();
+            var f = entry.Features;
+            var fp = entry.FingerprintV1;
+
+            // ----- hi-res verdict -----
+            // Applicability gate: lossless container + claim of >=24-bit.
+            if (fp != null && IsLosslessCodecForHiresCheck(fp.Codec) && fp.BitDepth >= 24)
+            {
+                double score = 0, maxWeight = 0;
+
+                // Signal: bitUsage.lowestNonZeroBit. After ffmpeg's int24->int32 shift,
+                // real 24-bit content lands at ~7-8; 16-bit padded to 24 lands at ~16.
+                // Margins: <=10 -> real; >=14 -> fake; in between abstain.
+                if (f.BitUsage != null)
+                {
+                    int lnz = f.BitUsage.LowestNonZeroBit;
+                    int vote = lnz <= 10 ? 1 : lnz >= 14 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires lowestNonZeroBit={lnz} vote={vote:+#;-#;0} weight=0.40");
+                }
+
+                // Signal: hfEnergyRatio. Genuine hi-res lands at 0.001-0.05; upsampled
+                // content lands at ~0. Only populated when sourceSampleRate > 44100.
+                if (f.HfEnergyRatio.HasValue)
+                {
+                    double hr = f.HfEnergyRatio.Value;
+                    int vote = hr >= 0.0010 ? 1 : hr <= 0.0001 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfEnergyRatio={hr:F6} vote={vote:+#;-#;0} weight=0.40");
+                }
+
+                // Signal: bitUsage.effectiveBits. Real 24-bit easily exceeds 18 bits
+                // effective resolution; <=14 means the file behaves like 16-bit.
+                if (f.BitUsage != null)
+                {
+                    double eb = f.BitUsage.EffectiveBits;
+                    int vote = eb >= 18 ? 1 : eb <= 14 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires effectiveBits={eb:F2} vote={vote:+#;-#;0} weight=0.20");
+                }
+
+                (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
+                if (_audit) Console.Error.WriteLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
+            }
+
+            // ----- lossy-transcode verdict -----
+            // TagLib reports AudioBitrate in kbps (Bitrate field follows the same convention).
+            if (fp != null && IsLossyCodecForTranscodeCheck(fp.Codec) && fp.Bitrate >= 192)
+            {
+                double score = 0, maxWeight = 0;
+
+                // Signal A: encoder string. Lavc/Lavf = re-muxer (transcode); LAME = original-ish.
+                if (!string.IsNullOrEmpty(fp.Encoder))
+                {
+                    var enc = fp.Encoder!.ToLowerInvariant();
+                    int vote = enc.StartsWith("lavc") || enc.StartsWith("lavf") ? 1
+                             : enc.StartsWith("lame") ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.30; maxWeight += 0.30; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.30");
+                }
+
+                // Signal B: mp3LameTag.lowpassHz vs bitrate (MP3 only — LAME tag is MP3-specific).
+                // LAME at 128 kbps sets ~16 kHz lowpass; LAME at 320 kbps sets ~19.5 kHz.
+                // A "256k+" MP3 with low LAME-stamped lowpass is transcoded from low-bitrate source.
+                if (fp.Codec == "mp3" && fp.Mp3LowpassHz > 0)
+                {
+                    int vote = 0;
+                    if (fp.Mp3LowpassHz < 17500 && fp.Bitrate >= 256) vote = 1;
+                    else if (fp.Mp3LowpassHz >= 19000 && fp.Bitrate >= 256) vote = -1;
+                    if (vote != 0) { score += vote * 0.35; maxWeight += 0.35; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameLowpassHz={fp.Mp3LowpassHz} bitrate={fp.Bitrate} vote={vote:+#;-#;0} weight=0.35");
+                }
+
+                // Signal C: mp3LameTag presence vs encoder cross-check.
+                if (fp.Codec == "mp3")
+                {
+                    bool hasLameTag = !string.IsNullOrEmpty(fp.Mp3LameVersion);
+                    var enc = (fp.Encoder ?? "").ToLowerInvariant();
+                    int vote = 0;
+                    if (!hasLameTag && (enc.StartsWith("lavc") || enc.StartsWith("lavf"))) vote = 1;
+                    else if (hasLameTag && fp.Mp3LameVersion!.StartsWith("LAME", StringComparison.OrdinalIgnoreCase)) vote = -1;
+                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameTagPresent={hasLameTag} encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.20");
+                }
+
+                // Signal D: spectralRolloff (weak — false-positive risk on naturally low-HF sources,
+                // so deliberately low weight; can corroborate but not dominate).
+                if (f.SpectralRolloff.HasValue && fp.Bitrate >= 256)
+                {
+                    double sr = f.SpectralRolloff.Value;
+                    int vote = sr < 14000 ? 1 : sr >= 18000 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode spectralRolloff={sr:F0} vote={vote:+#;-#;0} weight=0.15");
+                }
+
+                (v.LossyTranscodeLikely, v.LossyTranscodeConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.30);
+                if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.LossyTranscodeLikely}");
+            }
+
+            return v;
+        }
+
+        /// <summary>Convert score + maxWeight into the four-string-enum verdict.
+        /// Requires at least minMaxWeight of signals voted (else abstain as "unknown");
+        /// normalized score must cross ±0.7 for a yes/no, otherwise also "unknown".</summary>
+        static (string verdict, double? confidence) ResolveVerdict(double score, double maxWeight, double minMaxWeight)
+        {
+            if (maxWeight < minMaxWeight) return ("unknown", null);
+            double normalized = score / maxWeight;
+            if (normalized >= 0.70) return ("yes", Math.Round(Math.Abs(score), 2));
+            if (normalized <= -0.70) return ("no", Math.Round(Math.Abs(score), 2));
+            return ("unknown", null);
+        }
+
         static void WriteTrackEntry(Utf8JsonWriter jw, string path, TrackEntry entry)
         {
             var f = entry.Features;
@@ -5508,6 +5671,25 @@ namespace Truedat
                 if (entry.ChromaprintDuration.HasValue && entry.ChromaprintDuration.Value > 0)
                     jw.WriteNumber("chromaprintDuration", entry.ChromaprintDuration.Value);
             }
+
+            // Phase 4 — TruedatVerdict, computed inline. Emit only when at least one
+            // verdict applies; entries where both questions are "n/a" (legacy entries
+            // with no fingerprint.v1, weird-codec files, etc.) don't get a noise block.
+            var verdict = ComputeTruedatVerdict(path, entry);
+            if (verdict.HiresGenuine != "n/a" || verdict.LossyTranscodeLikely != "n/a")
+            {
+                jw.WritePropertyName("truedat");
+                jw.WriteStartObject();
+                jw.WriteString("hiresGenuine", verdict.HiresGenuine);
+                if (verdict.HiresConfidence.HasValue)
+                    jw.WriteNumber("hiresConfidence", verdict.HiresConfidence.Value);
+                jw.WriteString("lossyTranscodeLikely", verdict.LossyTranscodeLikely);
+                if (verdict.LossyTranscodeConfidence.HasValue)
+                    jw.WriteNumber("lossyTranscodeConfidence", verdict.LossyTranscodeConfidence.Value);
+                jw.WriteString("method", verdict.Method);
+                jw.WriteEndObject();
+            }
+
             jw.WriteEndObject();
         }
 
