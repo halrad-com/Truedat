@@ -65,6 +65,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --fixup                 Validate and remap paths in mbxmoods.json without re-analyzing
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
                           (read-only; writes mbxmoods-verify.csv next to the moods file)
+  --verify --backfill     Also fill in missing identity fields (audioStreamSha256, fileMd5,
+                          whole fingerprint.v1, plus sub-fields bitDepth / encoder) from
+                          TagLib for entries whose audio bytes are unchanged. No Essentia
+                          re-run. Idempotent. Safe on 70k+ track libraries.
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
@@ -103,7 +107,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fin
 - **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
-- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly.
+- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair entries missing identity fields (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder) in place without re-running Essentia — drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - Shows per-track rate and estimated completion time.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
@@ -143,6 +147,10 @@ truedat.exe --hash-only --level stream --file-list files.txt --output manifest.n
 
 REM Verify the cache against disk (read-only — recomputes audioStreamSha256 per entry)
 truedat.exe --verify --moods C:\Music\mbxmoods.json
+
+REM Backfill missing identity fields (bitDepth, encoder, fingerprint.v1, file/audio hashes)
+REM from TagLib — no Essentia re-run, safe on big libraries
+truedat.exe --verify --backfill --moods C:\Music\mbxmoods.json
 
 REM Transcode opus (or any ffmpeg-readable input) to uncompressed FLAC at source rate/depth
 truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.flac"
@@ -439,7 +447,9 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
 
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
-`fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
+`fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
+
+The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) and whose `spectralRolloff` sits at 16 kHz is almost certainly transcoded from a low-bitrate lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `spectralRolloff` doesn't extend past 22 kHz is upsampled CD audio. Detection logic (the future `truedat.*` verdict block) consumes these fields without needing to decode audio again.
 
 ### Fingerprint Output
 

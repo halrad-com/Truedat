@@ -16,7 +16,7 @@ Per-track JSON object under `"tracks"[path]`. **55 numeric feature fields** (15 
 
 - **Core features** (always present): `bpm`, `key`, `mode`, `spectralCentroid`, `spectralFlux`, `loudness`, `danceability`, `onsetRate`, `zeroCrossingRate`, `spectralRms`, `spectralFlatness`, `dissonance`, `pitchSalience`, `chordsChangesRate`, `mfcc[]`.
 - **Extended** (nullable, omit-when-missing): `dynamicRange` + `dynamicRangeSource`; loudness envelope (`loudnessMomentary`, `loudnessShortTerm`, `replayGain`); silence (`silenceRate20dB/30dB/60dB`); spectral shape (rolloff, complexity, entropy, kurtosis, skewness, spread, strongPeak, decrease, energy + 4 energybands); `hfc`; Bark/ERB/Mel band stats (crest, flatness, kurtosis, skewness, spread × 3 scales = 15); rhythm/tonal (`beatsLoudness`, `chordsStrength`, `hpcpCrest`, `hpcpEntropy`).
-- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`, `fingerprint.v1` (composite, written via `WriteFingerprintV1`), `audioStreamSha256` (ride-along in default Essentia mode via `ComputeAudioStreamSha256FromFile`; emitted in all three scan-path modes — MoodsMode, `--file-list`, `--analyze-file` — plus `--hash-only --level stream`).
+- **Identity** (nullable, omit-when-missing): `fileMd5`, `audioMd5`, `fingerprint.v1` (composite, written via `WriteFingerprintV1` — fields: `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth` (omit-when-0), `codec`, `codecRaw`, `bitrate`, `encoder` (omit-when-empty), `encoderRaw` (omit-when-empty), `audioHead64kMd5` + source flag), `audioStreamSha256` (ride-along in default Essentia mode via `ComputeAudioStreamSha256FromFile`; emitted in all three scan-path modes — MoodsMode, `--file-list`, `--analyze-file` — plus `--hash-only --level stream`).
 - **Housekeeping**: `lastModified`, `analysisDuration`.
 
 Four I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `WriteTrackEntry` (write), `LoadExistingMoods` (read via `ParseTrackFeaturesFromJson`), and the cross-MD5 cache-reuse branch in `MoodsMode`. Adding a field means touching all four.
@@ -75,6 +75,14 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 ## Verify mode
 
 `--verify` (read-only) walks `mbxmoods.json`, recomputes `audioStreamSha256` per entry, and writes `mbxmoods-verify.csv` (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Exit 1 on any drift / missing / error so it's CI-friendly. Pure diagnostic — no auto-repair (the right action depends on cause: tag edit → rescan, re-encode → reanalyze, file gone → drop).
+
+`--verify --backfill` extends the same walker to populate missing identity fields in-place. **No Essentia re-run, no audio decode** — TagLib + cheap file IO only. Three tiers per entry, all gated by the SHA drift check (drifted entries become `REANALYZE_NEEDED` and are NOT modified):
+
+- **Tier A** — entry-level: `audioStreamSha256` (computed if absent), `fileMd5` (computed if absent).
+- **Tier B** — whole `fingerprint.v1` block, when null (legacy 2012-era entries). Calls `ComputeFingerprintV1` directly; a fresh fingerprint contains every IdentityField so Tier C is moot for that entry.
+- **Tier C** — sub-fields inside an existing `fingerprint.v1`, driven by the `IdentityFields[]` spec list (one entry per field). Adding a future TagLib-readable identity field = one new `IdentityFieldSpec` + one new class field + matching read/write — same four-surfaces rule.
+
+Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR. See `docs/plans/2026-05-18-data-plumbing-phase1.md` for the per-entry decision loop, merge invariant, and Phase 2 hooks.
 
 ## Conventions
 

@@ -540,6 +540,7 @@ namespace Truedat
             string? xmlPath = null;
             bool fixupMode = false;
             bool verifyMode = false;
+            bool verifyBackfill = false;
             bool retryErrors = false;
             bool migrateMode = false;
             bool fingerprintMode = false;
@@ -626,6 +627,7 @@ namespace Truedat
                     showHelp = true;
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "verify") verifyMode = true;
+                else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "retry-errors") retryErrors = true;
                 else if (canonical == "migrate") migrateMode = true;
                 else if (canonical == "fingerprint") fingerprintMode = true;
@@ -781,6 +783,10 @@ namespace Truedat
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
+                Console.WriteLine("  --backfill          With --verify: also fill in missing identity fields (audioStreamSha256,");
+                Console.WriteLine("                      fileMd5, whole fingerprint.v1, bitDepth, encoder) from TagLib for entries");
+                Console.WriteLine("                      whose audio bytes are unchanged. Drifted entries are flagged, not modified.");
+                Console.WriteLine("                      No Essentia re-run. Safe on libraries with 70k+ tracks.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -899,7 +905,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunVerify(verifyPath!, parallelism);
+                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill);
                 return;
             }
 
@@ -1659,6 +1665,10 @@ namespace Truedat
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
+                Console.WriteLine("  --backfill          With --verify: also fill in missing identity fields (audioStreamSha256,");
+                Console.WriteLine("                      fileMd5, whole fingerprint.v1, bitDepth, encoder) from TagLib for entries");
+                Console.WriteLine("                      whose audio bytes are unchanged. Drifted entries are flagged, not modified.");
+                Console.WriteLine("                      No Essentia re-run. Safe on libraries with 70k+ tracks.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -2937,10 +2947,12 @@ namespace Truedat
         /// Prints summary; writes mbxmoods-verify.csv next to the moods file with
         /// per-entry detail. No writes to the moods file itself.
         /// </summary>
-        static int RunVerify(string moodsPath, int parallelism)
+        static int RunVerify(string moodsPath, int parallelism, bool backfill)
         {
-            Console.WriteLine("=== Verify Mode ===");
+            Console.WriteLine(backfill ? "=== Verify + Backfill Mode ===" : "=== Verify Mode ===");
             Console.WriteLine($"Moods file: {moodsPath}");
+            if (backfill)
+                Console.WriteLine("Backfill: enabled (Tier A identity hashes, Tier B fingerprint.v1, Tier C sub-fields)");
             Console.WriteLine();
 
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -2948,7 +2960,7 @@ namespace Truedat
             Console.WriteLine($"Loaded {loaded} entries");
             if (loaded == 0) return 0;
 
-            int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0;
+            int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0, backfilled = 0;
             var details = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
             int done = 0;
@@ -2959,16 +2971,12 @@ namespace Truedat
                 var entry = kvp.Value;
                 string status;
                 string detail = "";
+                var filled = new List<string>();   // tracks which fields this entry got backfilled (CSV column 4)
 
                 if (!File.Exists(path))
                 {
                     status = "MISSING";
                     Interlocked.Increment(ref missing);
-                }
-                else if (string.IsNullOrEmpty(entry.AudioStreamSha256))
-                {
-                    status = "NO_HASH";
-                    Interlocked.Increment(ref noHash);
                 }
                 else
                 {
@@ -2982,17 +2990,57 @@ namespace Truedat
                             detail = err ?? "hash compute failed";
                             Interlocked.Increment(ref errored);
                         }
+                        else if (string.IsNullOrEmpty(entry.AudioStreamSha256))
+                        {
+                            // Tier A: SHA missing on entry. In backfill mode populate it
+                            // (no drift to check against). In read-only mode flag NO_HASH.
+                            if (backfill)
+                            {
+                                entry.AudioStreamSha256 = recomputed;
+                                filled.Add("audioStreamSha256");
+                                ApplyBackfillIdentity(path, fileSize, entry, filled);
+                                status = "BACKFILLED";
+                                detail = string.Join("|", filled);
+                                Interlocked.Increment(ref backfilled);
+                            }
+                            else
+                            {
+                                status = "NO_HASH";
+                                Interlocked.Increment(ref noHash);
+                            }
+                        }
                         else
                         {
                             var cached = entry.AudioStreamSha256!;
                             if (string.Equals(recomputed, cached, StringComparison.OrdinalIgnoreCase))
                             {
-                                status = "OK";
-                                Interlocked.Increment(ref ok);
+                                // SHA matches: audio bytes unchanged. Safe to backfill cheap identity.
+                                if (backfill)
+                                {
+                                    ApplyBackfillIdentity(path, fileSize, entry, filled);
+                                    if (filled.Count > 0)
+                                    {
+                                        status = "BACKFILLED";
+                                        detail = string.Join("|", filled);
+                                        Interlocked.Increment(ref backfilled);
+                                    }
+                                    else
+                                    {
+                                        status = "OK";
+                                        Interlocked.Increment(ref ok);
+                                    }
+                                }
+                                else
+                                {
+                                    status = "OK";
+                                    Interlocked.Increment(ref ok);
+                                }
                             }
                             else
                             {
-                                status = "DRIFT";
+                                // Drift: audio bytes changed since last analysis. Don't lie by
+                                // backfilling — flag for re-analyze.
+                                status = backfill ? "REANALYZE_NEEDED" : "DRIFT";
                                 detail = $"cached={cached.Substring(0, 12)}.. disk={recomputed!.Substring(0, 12)}..";
                                 Interlocked.Increment(ref drift);
                             }
@@ -3007,24 +3055,42 @@ namespace Truedat
                 }
 
                 if (status != "OK")
-                    details.Add($"{status}\t{path}\t{detail}");
+                    details.Add($"{status}\t{path}\t{detail}\t{string.Join("|", filled)}");
 
                 var n = Interlocked.Increment(ref done);
                 if (n % 250 == 0)
                 {
                     var pct = (n * 100) / loaded;
-                    Console.WriteLine($"[{n}/{loaded} {pct}%{FormatEta(sw.Elapsed, n, loaded)}] verifying...");
+                    Console.WriteLine($"[{n}/{loaded} {pct}%{FormatEta(sw.Elapsed, n, loaded)}] {(backfill ? "backfilling" : "verifying")}...");
                 }
             });
 
             sw.Stop();
+
+            // In backfill mode write the merged file back atomically — only when we actually
+            // changed something. Idempotent re-runs do zero IO on the moods file.
+            if (backfill && backfilled > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"Writing backfilled entries to {moodsPath}...");
+                try
+                {
+                    SaveResults(moodsPath, allTracks);
+                    Console.WriteLine($"  wrote {allTracks.Count} entries");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"ERROR: could not save moods file: {ex.Message}");
+                    return 1;
+                }
+            }
 
             var csvPath = Path.Combine(
                 Path.GetDirectoryName(moodsPath) ?? ".",
                 "mbxmoods-verify.csv");
             try
             {
-                var lines = new List<string> { "status\tpath\tdetail" };
+                var lines = new List<string> { "status\tpath\tdetail\tbackfilledFields" };
                 lines.AddRange(details.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
                 File.WriteAllLines(csvPath, lines, Encoding.UTF8);
             }
@@ -3036,14 +3102,69 @@ namespace Truedat
 
             Console.WriteLine();
             Console.WriteLine("=== Results ===");
-            Console.WriteLine($"  OK:        {ok}");
-            Console.WriteLine($"  Drift:     {drift}");
-            Console.WriteLine($"  Missing:   {missing}");
-            Console.WriteLine($"  No hash:   {noHash}");
-            Console.WriteLine($"  Errored:   {errored}");
-            Console.WriteLine($"  Elapsed:   {FormatTimeSpan(sw.Elapsed)}");
-            Console.WriteLine($"  Detail:    {csvPath}");
+            Console.WriteLine($"  OK:                {ok}");
+            if (backfill)
+                Console.WriteLine($"  Backfilled:        {backfilled}");
+            Console.WriteLine($"  {(backfill ? "Reanalyze needed:" : "Drift:           ")}  {drift}");
+            Console.WriteLine($"  Missing:           {missing}");
+            if (!backfill)
+                Console.WriteLine($"  No hash:           {noHash}");
+            Console.WriteLine($"  Errored:           {errored}");
+            Console.WriteLine($"  Elapsed:           {FormatTimeSpan(sw.Elapsed)}");
+            Console.WriteLine($"  Detail:            {csvPath}");
+            // Exit non-zero on any condition that needs human attention.
+            // Backfill is a successful outcome -> doesn't fail the exit code.
             return (drift > 0 || missing > 0 || errored > 0) ? 1 : 0;
+        }
+
+        /// <summary>Per-entry identity-tier backfill (Tier A fileMd5, Tier B whole fingerprint.v1,
+        /// Tier C sub-fields). Caller must have already SHA-validated that audio bytes match
+        /// before invoking — backfill MUST NOT touch entries whose audio drifted.</summary>
+        static void ApplyBackfillIdentity(string path, long fileSize, TrackEntry entry, List<string> filled)
+        {
+            // Tier A — fileMd5
+            if (string.IsNullOrEmpty(entry.FileMd5))
+            {
+                var md5 = ComputeFileMd5(path);
+                if (!string.IsNullOrEmpty(md5))
+                {
+                    entry.FileMd5 = md5;
+                    filled.Add("fileMd5");
+                }
+            }
+
+            // Tier B — whole fingerprint.v1 missing (legacy entries)
+            if (entry.FingerprintV1 == null)
+            {
+                var fp = ComputeFingerprintV1(path, fileSize, out _);
+                if (fp != null)
+                {
+                    entry.FingerprintV1 = fp;
+                    filled.Add("fingerprint.v1");
+                    return;  // a fresh fingerprint already includes every IdentityField — Tier C is moot
+                }
+                // ComputeFingerprintV1 failed (rare — corrupt tags). Nothing more to backfill.
+                return;
+            }
+
+            // Tier C — fingerprint.v1 exists but some IdentityField specs are missing
+            var missingSpecs = IdentityFields.Where(s => !s.IsPresent(entry.FingerprintV1)).ToList();
+            if (missingSpecs.Count == 0) return;
+
+            try
+            {
+                using var tf = TagLib.File.Create(path);
+                foreach (var spec in missingSpecs)
+                {
+                    spec.Populate(tf, entry.FingerprintV1);
+                    filled.Add(spec.Name);
+                }
+            }
+            catch
+            {
+                // TagLib threw on the file (corrupt / unsupported). Leave the entry as-is;
+                // the CSV will still mark BACKFILLED for any Tier A/B fills already done.
+            }
         }
 
         static int RunMergeMoods(List<string> sources, string outputPath)
@@ -5699,14 +5820,55 @@ namespace Truedat
             public int DurationMs;
             public int SampleRate;
             public int Channels;
+            public int BitDepth;          // TagLib BitsPerSample; 0 when unknown / lossy codec doesn't report
             public string Codec = "other";
             public string? CodecRaw;
             public int Bitrate;
+            public string? Encoder;       // normalized: e.g. "LAME3.100", "libFLAC 1.3.3", "Lavf58.76.100"
+            public string? EncoderRaw;    // unparsed tag value when Encoder normalization couldn't classify
             public string AudioHead64kMd5 = "";
             public string AudioHead64kMd5Source = "invariant"; // "invariant" | "whole-file-start"
             public long InvariantStart;
             public long InvariantEnd;
         }
+
+        /// <summary>One row in the identity-backfill registry. Each spec describes a
+        /// single FingerprintV1 field that can be lifted cheaply from TagLib alone (no
+        /// Essentia, no audio decode). Adding a future identity field that meets the
+        /// "TagLib-only" bar means appending one entry to <see cref="IdentityFields"/>;
+        /// no other touch-points in the backfill walker.</summary>
+        internal sealed class IdentityFieldSpec
+        {
+            public string Name = "";                                       // diagnostic / verify CSV
+            public Func<FingerprintV1, bool> IsPresent = _ => true;        // true when already populated
+            public Action<TagLib.File, FingerprintV1> Populate = (_, __) => { };
+        }
+
+        /// <summary>Phase-1 identity fields backfilled from TagLib. Order is cosmetic
+        /// (drives the CSV "backfilledFields" join order). To add a future identity
+        /// field that's TagLib-readable, append a new spec here + add the field to
+        /// FingerprintV1 + WriteFingerprintV1 + ParseFingerprintV1FromJson — same
+        /// four-surfaces rule as any FingerprintV1 change.</summary>
+        static readonly IdentityFieldSpec[] IdentityFields = new[]
+        {
+            new IdentityFieldSpec
+            {
+                Name = "bitDepth",
+                IsPresent = fp => fp.BitDepth > 0,
+                Populate  = (tf, fp) => fp.BitDepth = tf.Properties?.BitsPerSample ?? 0,
+            },
+            new IdentityFieldSpec
+            {
+                Name = "encoder",
+                IsPresent = fp => !string.IsNullOrEmpty(fp.Encoder) || !string.IsNullOrEmpty(fp.EncoderRaw),
+                Populate  = (tf, fp) =>
+                {
+                    var (e, er) = NormalizeEncoder(tf);
+                    fp.Encoder = e;
+                    fp.EncoderRaw = er;
+                },
+            },
+        };
 
         /// <summary>
         /// Normalize a path to a tail identity signal (last up-to-3 non-empty
@@ -5815,6 +5977,56 @@ namespace Truedat
             return m;
         }
 
+        /// <summary>Best-effort encoder identification from codec-specific tag accessors.
+        /// Tries Xiph ENCODER comment / vendor string (FLAC, Vorbis, Opus, Ogg),
+        /// ID3v2 TSSE then TENC frames (MP3 / WAV / AIFF), and Apple ©too atom (MP4 / M4A).
+        /// Returns (normalized, raw): normalized is the tag string trimmed; raw is reserved
+        /// for future Phase 2 work that parses LAME tags / classifies multi-source strings.
+        /// Returns (null, null) when no encoder tag is present.</summary>
+        static (string? Encoder, string? EncoderRaw) NormalizeEncoder(TagLib.File tfile)
+        {
+            try
+            {
+                // 1. Xiph comment — FLAC, Vorbis, Opus, Ogg.
+                var xiph = tfile.GetTag(TagLib.TagTypes.Xiph, false) as TagLib.Ogg.XiphComment;
+                if (xiph != null)
+                {
+                    var enc = xiph.GetField("ENCODER");
+                    if (enc != null && enc.Length > 0 && !string.IsNullOrWhiteSpace(enc[0]))
+                        return (enc[0].Trim(), null);
+                    if (!string.IsNullOrWhiteSpace(xiph.VendorId))
+                        return (xiph.VendorId.Trim(), null);
+                }
+
+                // 2. ID3v2 — MP3, sometimes WAV/AIFF. Prefer TSSE (settings used for encoding)
+                //    over TENC (person/organization). TSSE typically carries "LAME3.100", etc.
+                var id3 = tfile.GetTag(TagLib.TagTypes.Id3v2, false) as TagLib.Id3v2.Tag;
+                if (id3 != null)
+                {
+                    var tsse = id3.GetTextAsString("TSSE");
+                    if (!string.IsNullOrWhiteSpace(tsse)) return (tsse.Trim(), null);
+                    var tenc = id3.GetTextAsString("TENC");
+                    if (!string.IsNullOrWhiteSpace(tenc)) return (tenc.Trim(), null);
+                }
+
+                // 3. Apple atoms — MP4, M4A, AAC, ALAC. ©too = "tool" used for encoding.
+                var apple = tfile.GetTag(TagLib.TagTypes.Apple, false) as TagLib.Mpeg4.AppleTag;
+                if (apple != null)
+                {
+                    var too = apple.GetText(new TagLib.ByteVector(new byte[] { 0xA9, (byte)'t', (byte)'o', (byte)'o' }));
+                    if (too != null && too.Length > 0 && !string.IsNullOrWhiteSpace(too[0]))
+                        return (too[0].Trim(), null);
+                }
+
+                return (null, null);
+            }
+            catch
+            {
+                // Tag access can throw on malformed files — fail closed, leave fields null.
+                return (null, null);
+            }
+        }
+
         /// <summary>Compute fingerprint.v1 composite. Returns null + error string on failure.</summary>
         static FingerprintV1? ComputeFingerprintV1(string filePath, long fileSize, out string? error)
         {
@@ -5848,6 +6060,7 @@ namespace Truedat
                 }
 
                 var (codec, codecRaw) = NormalizeCodec(tfile);
+                var (encoder, encoderRaw) = NormalizeEncoder(tfile);
 
                 // 64KB head MD5 from invariant start.
                 string headMd5;
@@ -5876,9 +6089,12 @@ namespace Truedat
                     DurationMs = (int)props.Duration.TotalMilliseconds,
                     SampleRate = props.AudioSampleRate,
                     Channels = props.AudioChannels,
+                    BitDepth = props.BitsPerSample,
                     Codec = codec,
                     CodecRaw = codecRaw,
                     Bitrate = props.AudioBitrate,
+                    Encoder = encoder,
+                    EncoderRaw = encoderRaw,
                     AudioHead64kMd5 = headMd5,
                     AudioHead64kMd5Source = headSource,
                     InvariantStart = invStart,
@@ -6042,6 +6258,8 @@ namespace Truedat
                 if (string.IsNullOrEmpty(head)) return null;  // primary key missing -> not a valid fingerprint
                 var src  = GetStr(fp, "audioHead64kMd5Source");
                 var codecRaw = GetStr(fp, "codecRaw");
+                var encoder = GetStr(fp, "encoder");
+                var encoderRaw = GetStr(fp, "encoderRaw");
                 long fileSize = fp.TryGetProperty("fileSize", out var fs) && fs.ValueKind == JsonValueKind.Number ? fs.GetInt64() : 0L;
                 long invStart = fp.TryGetProperty("invariantStart", out var iS) && iS.ValueKind == JsonValueKind.Number ? iS.GetInt64() : 0L;
                 long invEnd   = fp.TryGetProperty("invariantEnd",   out var iE) && iE.ValueKind == JsonValueKind.Number ? iE.GetInt64() : 0L;
@@ -6052,9 +6270,12 @@ namespace Truedat
                     DurationMs = GetInt(fp, "durationMs"),
                     SampleRate = GetInt(fp, "sampleRate"),
                     Channels = GetInt(fp, "channels"),
+                    BitDepth = GetInt(fp, "bitDepth"),                       // tolerant of older entries (returns 0)
                     Codec = string.IsNullOrEmpty(GetStr(fp, "codec")) ? "other" : GetStr(fp, "codec"),
                     CodecRaw = string.IsNullOrEmpty(codecRaw) ? null : codecRaw,
                     Bitrate = GetInt(fp, "bitrate"),
+                    Encoder = string.IsNullOrEmpty(encoder) ? null : encoder,
+                    EncoderRaw = string.IsNullOrEmpty(encoderRaw) ? null : encoderRaw,
                     AudioHead64kMd5 = head,
                     AudioHead64kMd5Source = string.IsNullOrEmpty(src) ? "invariant" : src,
                     InvariantStart = invStart,
@@ -6067,7 +6288,9 @@ namespace Truedat
             }
         }
 
-        /// <summary>Serialize a FingerprintV1 into an open identity object as identity["fingerprint.v1"].</summary>
+        /// <summary>Serialize a FingerprintV1 into an open identity object as identity["fingerprint.v1"].
+        /// New optional fields (bitDepth, encoder, encoderRaw) are omitted when empty / zero,
+        /// keeping older-schema files byte-identical when nothing is known.</summary>
         static void WriteFingerprintV1(Utf8JsonWriter jw, FingerprintV1 fp)
         {
             jw.WritePropertyName("fingerprint.v1");
@@ -6077,10 +6300,16 @@ namespace Truedat
             jw.WriteNumber("durationMs", fp.DurationMs);
             jw.WriteNumber("sampleRate", fp.SampleRate);
             jw.WriteNumber("channels", fp.Channels);
+            if (fp.BitDepth > 0)
+                jw.WriteNumber("bitDepth", fp.BitDepth);
             jw.WriteString("codec", fp.Codec);
             if (!string.IsNullOrEmpty(fp.CodecRaw))
                 jw.WriteString("codecRaw", fp.CodecRaw);
             jw.WriteNumber("bitrate", fp.Bitrate);
+            if (!string.IsNullOrEmpty(fp.Encoder))
+                jw.WriteString("encoder", fp.Encoder);
+            if (!string.IsNullOrEmpty(fp.EncoderRaw))
+                jw.WriteString("encoderRaw", fp.EncoderRaw);
             jw.WriteString("audioHead64kMd5", fp.AudioHead64kMd5);
             if (fp.AudioHead64kMd5Source != "invariant")
                 jw.WriteString("audioHead64kMd5Source", fp.AudioHead64kMd5Source);
