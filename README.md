@@ -485,7 +485,7 @@ Each track in `mbxmoods.json` carries a nested `truedat` block with two verdicts
   "hiresConfidence":         0.85,
   "lossyTranscodeLikely":    "yes" | "no" | "unknown" | "n/a",
   "lossyTranscodeConfidence": 0.92,
-  "method":                  "truedat-v1-corpus1-2026-05-18"
+  "method":                  "truedat-v1-fft-corpus1-2026-05-18"
 }
 ```
 
@@ -493,11 +493,11 @@ Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exact
 
 The block is **omitted entirely** when both questions would be `"n/a"` (legacy entries without `fingerprint.v1`, weird-codec files) OR when both would be `"unknown"` from lack of signal (legacy lossless 24-bit entries that predate the `bitUsage` / `hfEnergyRatio` work). Run `--verify --backfill` to populate those fields and pick up a real verdict on the next pass.
 
-Multi-signal weighted voting per question. Hi-res verdict combines `bitUsage.lowestNonZeroBit`, `hfEnergyRatio`, and `bitUsage.effectiveBits` with weights 0.40 / 0.40 / 0.20. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 normalized-score threshold means at least two full-weight signals must agree for a verdict — one strong signal alone produces `"unknown"`.
+Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — corpus-1 tuning showed this discipline avoided false flips on peaky-but-genuine cymbal content.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tag bumps when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
-**Current method tag: `truedat-v1-corpus1-2026-05-18`** — first calibration pass against a 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`). Two known signal gaps survived this pass (ffmpeg-upsampled fake-hi-res FLACs, LAME-to-LAME re-encode chains) — see CLAUDE.md "Authenticity sprint state" for the Phase 5+ followups. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-YYYY-MM-DD` on each subsequent calibration pass.
+**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). One known gap remains for Phase 5+: LAME-to-LAME re-encode chains verdict `"no"` because the second LAME encode rewrites the Xing tag — needs cascade-encode artifact detection. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
 
 ### Fingerprint Output
 
