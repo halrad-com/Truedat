@@ -127,6 +127,10 @@ namespace Truedat
         public string? HfEnergyMethod { get; set; }   // frozen tag: "ffmpeg-rms-hp22050-30s-mid"
     }
 
+    /// <summary>--backfill-level scope. Identity = TagLib + cheap file IO; Features =
+    /// ffmpeg-driven bitUsage / hfEnergyRatio; All = both (default).</summary>
+    public enum BackfillLevel { Identity, Features, All }
+
     /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
     /// LowestNonZeroBit >= 8 is 16-bit content padded with zeros — the canonical
     /// fake-hi-res signature. Populated by ComputeBitUsage (ffmpeg s32le walk).
@@ -135,7 +139,7 @@ namespace Truedat
     {
         public int LowestNonZeroBit;      // 0 = bit 0 active in at least one sample; 8 = bottom 8 bits all zero
         public double BottomBitActivity;  // fraction of non-silent samples with bit 0 != 0 (0..1)
-        public double EffectiveBits;      // log2(rms / quantStep) approximation; useful 0..24 range
+        public double EffectiveBits;      // log2(rms / quantStep) approximation; clipped to [0, 32] (s32le sample space ceiling)
         public int SamplesAnalyzed;
         public string Method = "";        // "ffmpeg-s32le-30s-mid" — frozen tag for future-method tracking
     }
@@ -585,6 +589,10 @@ namespace Truedat
             bool fixupMode = false;
             bool verifyMode = false;
             bool verifyBackfill = false;
+            // --backfill-level identity|features|all (default: all). Identity = TagLib-only
+            // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
+            // dependent fields (bitUsage, hfEnergyRatio). All = both.
+            BackfillLevel backfillLevel = BackfillLevel.All;
             bool retryErrors = false;
             bool migrateMode = false;
             bool fingerprintMode = false;
@@ -672,6 +680,17 @@ namespace Truedat
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
+                else if (canonical == "backfill-level" && i + 1 < args.Length)
+                {
+                    var lvl = args[++i].ToLowerInvariant();
+                    backfillLevel = lvl switch
+                    {
+                        "identity" => BackfillLevel.Identity,
+                        "features" => BackfillLevel.Features,
+                        "all" => BackfillLevel.All,
+                        _ => BackfillLevel.All,
+                    };
+                }
                 else if (canonical == "retry-errors") retryErrors = true;
                 else if (canonical == "migrate") migrateMode = true;
                 else if (canonical == "fingerprint") fingerprintMode = true;
@@ -827,10 +846,16 @@ namespace Truedat
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
-                Console.WriteLine("  --backfill          With --verify: also fill in missing identity fields (audioStreamSha256,");
-                Console.WriteLine("                      fileMd5, whole fingerprint.v1, bitDepth, encoder) from TagLib for entries");
-                Console.WriteLine("                      whose audio bytes are unchanged. Drifted entries are flagged, not modified.");
-                Console.WriteLine("                      No Essentia re-run. Safe on libraries with 70k+ tracks.");
+                Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
+                Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
+                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
+                Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
+                Console.WriteLine("                      features (bitUsage, hfEnergyRatio — requires ffmpeg, ~30s per applicable");
+                Console.WriteLine("                      track). Use --backfill-level to scope down.");
+                Console.WriteLine("  --backfill-level    With --backfill: which tier runs. Values:");
+                Console.WriteLine("                        all       (default) identity + features");
+                Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
+                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -949,7 +974,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill);
+                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel);
                 return;
             }
 
@@ -1736,10 +1761,16 @@ namespace Truedat
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
-                Console.WriteLine("  --backfill          With --verify: also fill in missing identity fields (audioStreamSha256,");
-                Console.WriteLine("                      fileMd5, whole fingerprint.v1, bitDepth, encoder) from TagLib for entries");
-                Console.WriteLine("                      whose audio bytes are unchanged. Drifted entries are flagged, not modified.");
-                Console.WriteLine("                      No Essentia re-run. Safe on libraries with 70k+ tracks.");
+                Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
+                Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
+                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
+                Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
+                Console.WriteLine("                      features (bitUsage, hfEnergyRatio — requires ffmpeg, ~30s per applicable");
+                Console.WriteLine("                      track). Use --backfill-level to scope down.");
+                Console.WriteLine("  --backfill-level    With --backfill: which tier runs. Values:");
+                Console.WriteLine("                        all       (default) identity + features");
+                Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
+                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -3031,12 +3062,22 @@ namespace Truedat
         /// Prints summary; writes mbxmoods-verify.csv next to the moods file with
         /// per-entry detail. No writes to the moods file itself.
         /// </summary>
-        static int RunVerify(string moodsPath, int parallelism, bool backfill)
+        static int RunVerify(string moodsPath, int parallelism, bool backfill, BackfillLevel level)
         {
             Console.WriteLine(backfill ? "=== Verify + Backfill Mode ===" : "=== Verify Mode ===");
             Console.WriteLine($"Moods file: {moodsPath}");
             if (backfill)
-                Console.WriteLine("Backfill: enabled (Tier A identity hashes, Tier B fingerprint.v1, Tier C sub-fields)");
+            {
+                string scope = level switch
+                {
+                    BackfillLevel.Identity => "identity only (TagLib + cheap file IO)",
+                    BackfillLevel.Features => "features only (ffmpeg — bitUsage / hfEnergyRatio)",
+                    _ => "identity + features (ffmpeg engaged; ~30s per applicable lossless 24-bit track)",
+                };
+                Console.WriteLine($"Backfill scope: {scope}");
+                if (level != BackfillLevel.Identity && string.IsNullOrEmpty(_ffmpegPath.Value))
+                    Console.WriteLine("WARNING: ffmpeg not found on PATH — features tier will silently skip every entry.");
+            }
             Console.WriteLine();
 
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -3082,7 +3123,7 @@ namespace Truedat
                             {
                                 entry.AudioStreamSha256 = recomputed;
                                 filled.Add("audioStreamSha256");
-                                ApplyBackfillIdentity(path, fileSize, entry, filled);
+                                ApplyBackfill(path, fileSize, entry, level, filled);
                                 status = "BACKFILLED";
                                 detail = string.Join("|", filled);
                                 Interlocked.Increment(ref backfilled);
@@ -3101,7 +3142,7 @@ namespace Truedat
                                 // SHA matches: audio bytes unchanged. Safe to backfill cheap identity.
                                 if (backfill)
                                 {
-                                    ApplyBackfillIdentity(path, fileSize, entry, filled);
+                                    ApplyBackfill(path, fileSize, entry, level, filled);
                                     if (filled.Count > 0)
                                     {
                                         status = "BACKFILLED";
@@ -3201,9 +3242,23 @@ namespace Truedat
             return (drift > 0 || missing > 0 || errored > 0) ? 1 : 0;
         }
 
-        /// <summary>Per-entry identity-tier backfill (Tier A fileMd5, Tier B whole fingerprint.v1,
-        /// Tier C sub-fields). Caller must have already SHA-validated that audio bytes match
-        /// before invoking — backfill MUST NOT touch entries whose audio drifted.</summary>
+        /// <summary>Per-entry backfill. Identity tier: TagLib + cheap file IO (Tier A
+        /// fileMd5, Tier B whole fingerprint.v1, Tier C sub-fields, MP3 LAME tag).
+        /// Features tier: ffmpeg-driven bitUsage + hfEnergyRatio. Level selects which
+        /// tiers run; All (default) does both. Caller must have already SHA-validated
+        /// that audio bytes match before invoking — backfill MUST NOT touch entries
+        /// whose audio drifted.</summary>
+        static void ApplyBackfill(string path, long fileSize, TrackEntry entry, BackfillLevel level, List<string> filled)
+        {
+            if (level != BackfillLevel.Features)
+                ApplyBackfillIdentity(path, fileSize, entry, filled);
+
+            if (level != BackfillLevel.Identity)
+                ApplyBackfillFeatures(path, entry, filled);
+        }
+
+        /// <summary>Identity-tier backfill (Tier A fileMd5, Tier B whole fingerprint.v1,
+        /// Tier C sub-fields, MP3 LAME tag). TagLib + cheap file IO only; no audio decode.</summary>
         static void ApplyBackfillIdentity(string path, long fileSize, TrackEntry entry, List<string> filled)
         {
             // Tier A — fileMd5
@@ -3270,6 +3325,44 @@ namespace Truedat
                     entry.FingerprintV1.Mp3EncoderPadding = info.EncoderPadding;
                     entry.FingerprintV1.Mp3MusicCrc = info.MusicCrc;
                     filled.Add("mp3LameTag");
+                }
+            }
+        }
+
+        /// <summary>Features-tier backfill — ffmpeg-driven bitUsage + hfEnergyRatio.
+        /// Runs only when fields are currently missing AND the helpers return non-null
+        /// (which they self-gate on ffmpeg presence, codec / bit-depth / sample-rate
+        /// applicability). Pulls duration from fingerprint.v1 to avoid an extra TagLib
+        /// open. If FingerprintV1 is null (Tier B above failed and we're running with
+        /// --backfill-level features alone) we skip — duration is required for the
+        /// bitUsage mid-track seek and we can't risk an unbounded decode.</summary>
+        static void ApplyBackfillFeatures(string path, TrackEntry entry, List<string> filled)
+        {
+            var ffmpeg = _ffmpegPath.Value;
+            if (string.IsNullOrEmpty(ffmpeg)) return;
+            if (entry.Features == null) return;
+
+            double durationSec = (entry.FingerprintV1?.DurationMs ?? 0) / 1000.0;
+            if (durationSec <= 0) return;
+
+            if (entry.Features.BitUsage == null)
+            {
+                var bu = ComputeBitUsage(path, durationSec, ffmpeg);
+                if (bu != null)
+                {
+                    entry.Features.BitUsage = bu;
+                    filled.Add("bitUsage");
+                }
+            }
+
+            if (!entry.Features.HfEnergyRatio.HasValue)
+            {
+                var (hr, hm) = ComputeHfEnergyRatio(path, ffmpeg);
+                if (hr.HasValue)
+                {
+                    entry.Features.HfEnergyRatio = hr;
+                    entry.Features.HfEnergyMethod = hm;
+                    filled.Add("hfEnergyRatio");
                 }
             }
         }
@@ -4386,6 +4479,26 @@ namespace Truedat
         static BitUsageSummary? ComputeBitUsage(string filePath, double durationSec, string? ffmpegExe)
         {
             if (string.IsNullOrEmpty(ffmpegExe)) return null;
+
+            // Applicability peek — TagLib-only, ~5ms. Skip lossy / sub-24-bit files
+            // BEFORE spending 30s on an ffmpeg decode whose output would be meaningless
+            // (lossy codecs flood the LSBs with reconstruction noise; sub-24-bit claims
+            // can't tell us anything about hi-res authenticity). Fail-safe: if TagLib
+            // can't be opened or the codec/bitDepth can't be derived, fall through to
+            // the analysis rather than silently dropping a potentially-applicable file.
+            try
+            {
+                using var peek = TagLib.File.Create(filePath);
+                var (peekCodec, _) = NormalizeCodec(peek);
+                int peekBitDepth = peek.Properties?.BitsPerSample ?? 0;
+                bool applicable = IsLosslessCodecForHiresCheck(peekCodec) && peekBitDepth >= 24;
+                if (!applicable) return null;
+            }
+            catch
+            {
+                // TagLib failed — proceed with the analysis. Better to do unnecessary
+                // work occasionally than to drop measurements on hard-to-parse files.
+            }
 
             // Sample 25% into the track when it's long enough — skips intros / fades.
             // For short tracks fall back to decoding from the start.
@@ -5713,10 +5826,14 @@ namespace Truedat
             }
 
             // Phase 4 — TruedatVerdict, computed inline. Emit only when at least one
-            // verdict applies; entries where both questions are "n/a" (legacy entries
-            // with no fingerprint.v1, weird-codec files, etc.) don't get a noise block.
+            // verdict produced a real yes/no decision. "unknown" without source signals
+            // (legacy 24-bit FLAC entries lacking Phase 2.5/3 fields, applicability gate
+            // passes but no votes -> ResolveVerdict returns "unknown") and "n/a" both
+            // suppress the block — neither carries usable information for consumers.
             var verdict = ComputeTruedatVerdict(path, entry);
-            if (verdict.HiresGenuine != "n/a" || verdict.LossyTranscodeLikely != "n/a")
+            bool hiresDecided = verdict.HiresGenuine == "yes" || verdict.HiresGenuine == "no";
+            bool transcodeDecided = verdict.LossyTranscodeLikely == "yes" || verdict.LossyTranscodeLikely == "no";
+            if (hiresDecided || transcodeDecided)
             {
                 jw.WritePropertyName("truedat");
                 jw.WriteStartObject();
