@@ -17,6 +17,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 - `mbxhub-fingerprints.json` - Chromaprint perceptual fingerprints and audio MD5 hashes
 - `mbxhub-details.json` - audio metadata from ffprobe (codec, bitrate, sample rate, etc.)
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
+- `mbxmoods-skipped.csv` - tracks skipped at scan entry because the codec isn't supported (currently `.dsf` / `.dff` / `.dsd` DSD streams). Columns: `path,extension,reason,timestamp`.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `mbxhub-fingerprints-errors.csv` - tracks that failed fingerprinting (`--fingerprint` mode)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)

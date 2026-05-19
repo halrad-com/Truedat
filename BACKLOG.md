@@ -91,7 +91,12 @@ Plan: [`docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md`](docs/pl
 1. ~~FFT-based hi-res signal to close the ffmpeg-upsample-fake gap~~ DONE (Phase 5)
 2. Encoder string whitelist/blacklist (helps LP rips, EAC, dBpoweramp)
 3. ML weight tuning spike (sklearn logistic regression → calibrated thresholds)
-4. DSD/DSF codec support (currently fails analysis) — **P4, deferred**
+4. DSD/DSF codec support (currently fails analysis) — **P4, deferred**.
+   Phase 5.1 catches `.dsf` / `.dff` / `.dsd` cleanly at scan entry: rows
+   land in `mbxmoods-skipped.csv` with reason `unsupported codec: DSD`,
+   no entry in `mbxmoods.json` or `mbxmoods-errors.csv`, console emits
+   `[skipped DSD]`. User-visible failures are gone; full DSD-to-PCM
+   support (likely via an ffmpeg `dsd2pcm` bridge) is still P4.
 5. AAC ESDS-box encoder fingerprint (MP3 LAME tag equivalent for AAC/M4A)
 6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
 7. LAME→LAME re-encode chain detection (the remaining transcode gap)
