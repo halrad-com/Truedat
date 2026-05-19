@@ -32,11 +32,19 @@ namespace Truedat
         private readonly string _modelPath;
         private readonly string _inputName;
         private readonly string _outputName;
+        private readonly bool _isSkeleton;
         private bool _disposed;
 
         public string ModelPath => _modelPath;
         public string InputName => _inputName;
         public string OutputName => _outputName;
+
+        /// <summary>True when the loaded model is the development Identity
+        /// stub (auto-materialised when the model file was missing, or
+        /// detected on load via a single-float-in / single-float-out heuristic).
+        /// The S2.4 batch smoke records this per-row so the spreadsheet
+        /// distinguishes skeleton runs from real-model runs.</summary>
+        public bool IsSkeleton => _isSkeleton;
 
         public VocalAffectStage(string modelPath, TextWriter log)
         {
@@ -64,6 +72,19 @@ namespace Truedat
 
             _inputName  = _session.InputMetadata.Keys.First();
             _outputName = _session.OutputMetadata.Keys.First();
+
+            // Skeleton-marker heuristic (same as VadStage): a real wav2vec2
+            // SER export has either multiple outputs (V/A/D heads) or a
+            // [1,3]-ish output shape, NOT a [1, T] Identity echo. A single
+            // float input with a single float output that matches the input
+            // shape symbolically IS the skeleton. False positives here just
+            // mean a tiny real model gets tagged 'skeleton' in the rig CSV —
+            // acceptable cost vs the alternative (false negatives reporting
+            // skeleton numbers as real SER output).
+            _isSkeleton = _session.InputMetadata.Count == 1
+                && _session.OutputMetadata.Count == 1
+                && _session.InputMetadata[_inputName].ElementType == typeof(float)
+                && _session.OutputMetadata[_outputName].ElementType == typeof(float);
         }
 
         /// <summary>Human-readable dump of the loaded model's I/O contract.
