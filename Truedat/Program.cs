@@ -1307,7 +1307,8 @@ namespace Truedat
                         FileMd5 = afFileMd5,
                         AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
                         AudioStreamSha256Source = afAudioStreamSha256Source,
-                        FingerprintV1 = afFingerprintV1
+                        FingerprintV1 = afFingerprintV1,
+                        Vocal = afVocalResult
                     };
 
                     // Carry forward legacy fields if entry already exists in the moods file.
@@ -1316,6 +1317,8 @@ namespace Truedat
                         trackEntry.AudioMd5 ??= afPrior.AudioMd5;
                         trackEntry.Chromaprint ??= afPrior.Chromaprint;
                         trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
+                        // Federation merge — preserve other backends' entries from prior runs.
+                        trackEntry.Vocal = MergeVocalBlock(afPrior.Vocal, trackEntry.Vocal);
                     }
                 }
 
@@ -2391,7 +2394,10 @@ namespace Truedat
                                         AudioStreamSha256Source = xp.Entry.AudioStreamSha256Source,
                                         FingerprintV1 = xp.Entry.FingerprintV1,
                                         Chromaprint = xp.Entry.Chromaprint,
-                                        ChromaprintDuration = xp.Entry.ChromaprintDuration
+                                        ChromaprintDuration = xp.Entry.ChromaprintDuration,
+                                        // VAM S2.5 \u2014 preserve vocal block across cross-MD5 cache reuse
+                                        // (audio bytes match, so vocal analysis still applies).
+                                        Vocal = xp.Entry.Vocal
                                     };
                                     allTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref crossPathMoods);
