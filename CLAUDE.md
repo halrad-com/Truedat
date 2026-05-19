@@ -77,14 +77,22 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 
 `--verify` (read-only) walks `mbxmoods.json`, recomputes `audioStreamSha256` per entry, and writes `mbxmoods-verify.csv` (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Exit 1 on any drift / missing / error so it's CI-friendly. Pure diagnostic — no auto-repair (the right action depends on cause: tag edit → rescan, re-encode → reanalyze, file gone → drop).
 
-`--verify --backfill` extends the same walker to populate missing identity fields in-place. **No Essentia re-run, no audio decode** — TagLib + cheap file IO only. Three tiers per entry, all gated by the SHA drift check (drifted entries become `REANALYZE_NEEDED` and are NOT modified):
+`--verify --backfill` extends the same walker to populate missing fields in-place. Two tiers, both gated by the SHA drift check (drifted entries become `REANALYZE_NEEDED` and are NOT modified):
+
+**Identity tier — TagLib + cheap file IO, no audio decode:**
 
 - **Tier A** — entry-level: `audioStreamSha256` (computed if absent), `fileMd5` (computed if absent).
 - **Tier B** — whole `fingerprint.v1` block, when null (legacy 2012-era entries). Calls `ComputeFingerprintV1` directly; a fresh fingerprint contains every IdentityField so Tier C is moot for that entry.
 - **Tier C** — sub-fields inside an existing `fingerprint.v1`, driven by the `IdentityFields[]` spec list (one entry per field). Adding a future TagLib-readable identity field = one new `IdentityFieldSpec` + one new class field + matching read/write — same four-surfaces rule.
 - **Tier C/Phase 2 — MP3 LAME tag (FileBytesShallow)**: when `codec=="mp3"` and the LAME-tag fields are unpopulated, `ApplyBackfillIdentity` invokes `Mp3LameTagParser.TryParse` (pure-managed, reads ~8 KB from file start, skips any ID3v2, finds first MPEG frame, locates Xing/Info magic, decodes the appended LAME tag). Off the `IdentityFields[]` list because it doesn't use TagLib — kept as a separate guarded branch to preserve the spec list's "TagLib-only" contract.
 
-Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR. See `docs/plans/2026-05-18-data-plumbing-phase1.md` for the per-entry decision loop, merge invariant, and Phase 2 hooks; `docs/plans/2026-05-18-data-plumbing-phase2.md` for the LAME tag spec, deferred items (`bitUsage`, `spectralCeilingHz`), and Phase 3 scope.
+**Features tier — ffmpeg-driven, no Essentia (`ApplyBackfillFeatures`):**
+
+- `bitUsage` and `hfEnergyRatio` — when missing on entries the source helpers consider applicable (codec ∈ {flac,alac,wav,aiff} ∧ bitDepth ≥ 24 for bitUsage; sourceSampleRate > 44.1k for hfEnergyRatio). Each applicable track costs ~30 s of ffmpeg decode, so this tier is the slow path. Silently skips entries when ffmpeg is absent.
+
+`--backfill-level identity|features|all` selects scope; default is `all`. Use `identity` to keep backfill fast / ffmpeg-independent; use `features` to backfill only the ffmpeg tier on a library whose identity is already complete.
+
+Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR. See `docs/plans/2026-05-18-data-plumbing-phase1.md` for the per-entry decision loop, merge invariant, and Phase 2 hooks; `docs/plans/2026-05-18-data-plumbing-phase2.md` for the LAME tag spec.
 
 ## Conventions
 
