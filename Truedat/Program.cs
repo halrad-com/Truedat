@@ -124,11 +124,18 @@ namespace Truedat
         // Nyquist. Genuine hi-res content typically lands in 0.001–0.05; upsampled content
         // lands at 0 or essentially-zero.
         public double? HfEnergyRatio { get; set; }
-        public string? HfEnergyMethod { get; set; }   // frozen tag: "ffmpeg-rms-hp22050-30s-mid"
+        public string? HfEnergyMethod { get; set; }   // frozen tag: "managed-fft-radix2-30s-mid-native" (Phase 5); legacy: "ffmpeg-rms-hp22050-30s-mid" (Phase 3)
+
+        // Phase 5 — FFT-derived spectral-structure for the HF band. Distinguishes
+        // genuine broadband hi-res content (high flatness, low symmetry) from
+        // ffmpeg-upsampled fakes whose energy is concentrated in narrow mirror
+        // spikes (low flatness, high peak-to-mean, high symmetry). Same gating
+        // as HfEnergyRatio (sourceSampleRate > 44100 + ffmpeg present).
+        public HfSpectralStructure? HfSpectralStructure { get; set; }
     }
 
     /// <summary>--backfill-level scope. Identity = TagLib + cheap file IO; Features =
-    /// ffmpeg-driven bitUsage / hfEnergyRatio; All = both (default).</summary>
+    /// ffmpeg-driven bitUsage / hfEnergyRatio / hfSpectralStructure; All = both (default).</summary>
     public enum BackfillLevel { Identity, Features, All }
 
     /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
@@ -157,7 +164,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = "truedat-v1-corpus1-2026-05-18";  // bumps when thresholds change; corpus1 = first calibration pass against the 17-file test corpus
+        public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23 files; 8/8 hi-res classified correctly: 5/5 real → "yes", 3/3 fake-upsampled → "unknown")
     }
 
     class TrackEntry
@@ -591,7 +598,7 @@ namespace Truedat
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
-            // dependent fields (bitUsage, hfEnergyRatio). All = both.
+            // dependent fields (bitUsage, hfEnergyRatio, hfSpectralStructure). All = both.
             BackfillLevel backfillLevel = BackfillLevel.All;
             bool retryErrors = false;
             bool migrateMode = false;
@@ -654,6 +661,7 @@ namespace Truedat
             string? hashOutputPath = null;
 
             bool showHelp = false;
+            bool selfTest = false;
             int cpuLimit = 0; // 0 = no limit
 
             // --chunk M/N: split the scan list across machines. Two boxes with the
@@ -736,12 +744,19 @@ namespace Truedat
                     hashOutputPath = args[++i];
                 else if (canonical == "chunk" && i + 1 < args.Length && TryParseChunk(args[i + 1], out var cIdx, out var cTot))
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
+                else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
             }
 
             _audit = auditLog;
+
+            if (selfTest)
+            {
+                Environment.ExitCode = RunSelfTest();
+                return;
+            }
 
             if (fileListMode && analyzeFileMode)
             {
@@ -850,12 +865,13 @@ namespace Truedat
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
                 Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
-                Console.WriteLine("                      features (bitUsage, hfEnergyRatio — requires ffmpeg, ~30s per applicable");
+                Console.WriteLine("                      features (bitUsage, hfEnergyRatio, hfSpectralStructure — requires ffmpeg,");
+                Console.WriteLine("                      ~30s per applicable");
                 Console.WriteLine("                      track). Use --backfill-level to scope down.");
                 Console.WriteLine("  --backfill-level    With --backfill: which tier runs. Values:");
                 Console.WriteLine("                        all       (default) identity + features");
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
-                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio)");
+                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -865,6 +881,7 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
+                Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -1156,8 +1173,8 @@ namespace Truedat
                         try { using var tf = TagLib.File.Create(analyzeFilePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                         return ComputeBitUsage(analyzeFilePath!, dur, _ffmpegPath.Value);
                     });
-                    // Phase 3 — HF energy ratio in parallel; self-contained TagLib probe inside the helper.
-                    var afHfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(analyzeFilePath!, _ffmpegPath.Value));
+                    // Phase 5 — combined HF energy + spectral structure (FFT pipe).
+                    var afHfEnergyTask = Task.Run(() => ComputeHfAnalysis(analyzeFilePath!, _ffmpegPath.Value));
                     Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask });
 
                     var (features, error) = afEssentiaTask.Result;
@@ -1168,7 +1185,7 @@ namespace Truedat
                     afAudioStreamSha256Source = shaSrc;
                     var afTags = afTagsTask.Result;
                     var afBitUsage = afBitUsageTask.Result;
-                    var (afHfRatio, afHfMethod) = afHfEnergyTask.Result;
+                    var (afHfRatio, afHfMethod, afHfStructure) = afHfEnergyTask.Result;
 
                     if (features == null)
                     {
@@ -1184,6 +1201,7 @@ namespace Truedat
                     features.FilePath = analyzeFilePath!;
                     if (afBitUsage != null) features.BitUsage = afBitUsage;
                     if (afHfRatio.HasValue) { features.HfEnergyRatio = afHfRatio; features.HfEnergyMethod = afHfMethod; }
+                    if (afHfStructure != null) features.HfSpectralStructure = afHfStructure;
 
                     trackEntry = new TrackEntry
                     {
@@ -1646,8 +1664,8 @@ namespace Truedat
                             try { using var tf = TagLib.File.Create(filePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                             return ComputeBitUsage(filePath, dur, _ffmpegPath.Value);
                         });
-                        // Phase 3 — HF energy ratio in parallel.
-                        var hfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(filePath, _ffmpegPath.Value));
+                        // Phase 5 — combined HF energy + spectral structure (FFT pipe).
+                        var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(filePath, _ffmpegPath.Value));
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask });
 
                         var (features, error) = essentiaTask.Result;
@@ -1656,7 +1674,7 @@ namespace Truedat
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var tags = tagsTask.Result;
                         var bitUsage = bitUsageTask.Result;
-                        var (hfRatio, hfMethod) = hfEnergyTask.Result;
+                        var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
 
                         if (features == null)
                         {
@@ -1673,6 +1691,7 @@ namespace Truedat
                         features.FilePath = filePath;
                         if (bitUsage != null) features.BitUsage = bitUsage;
                         if (hfRatio.HasValue) { features.HfEnergyRatio = hfRatio; features.HfEnergyMethod = hfMethod; }
+                        if (hfStructure != null) features.HfSpectralStructure = hfStructure;
 
                         var trackEntry = new TrackEntry
                         {
@@ -1765,12 +1784,13 @@ namespace Truedat
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
                 Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
-                Console.WriteLine("                      features (bitUsage, hfEnergyRatio — requires ffmpeg, ~30s per applicable");
+                Console.WriteLine("                      features (bitUsage, hfEnergyRatio, hfSpectralStructure — requires ffmpeg,");
+                Console.WriteLine("                      ~30s per applicable");
                 Console.WriteLine("                      track). Use --backfill-level to scope down.");
                 Console.WriteLine("  --backfill-level    With --backfill: which tier runs. Values:");
                 Console.WriteLine("                        all       (default) identity + features");
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
-                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio)");
+                Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -1780,6 +1800,7 @@ namespace Truedat
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json), combinable with --fingerprint/--details");
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
+                Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -2159,7 +2180,8 @@ namespace Truedat
                                             HpcpEntropy = xf.HpcpEntropy,
                                             BitUsage = xf.BitUsage,    // Phase 2.5 — preserve on cross-MD5 cache reuse
                                             HfEnergyRatio = xf.HfEnergyRatio,    // Phase 3 — preserve on cross-MD5 cache reuse
-                                            HfEnergyMethod = xf.HfEnergyMethod
+                                            HfEnergyMethod = xf.HfEnergyMethod,
+                                            HfSpectralStructure = xf.HfSpectralStructure,    // Phase 5 — preserve on cross-MD5 cache reuse
                                         },
                                         LastModified = currentLastMod,
                                         AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
@@ -2284,8 +2306,8 @@ namespace Truedat
                         // so we don't need a TagLib probe inside the task.
                         double bitUsageDurSec = trackDurationSecs;
                         var bitUsageTask = Task.Run(() => ComputeBitUsage(t.Location, bitUsageDurSec, _ffmpegPath.Value));
-                        // Phase 3 — HF energy ratio in parallel.
-                        var hfEnergyTask = Task.Run(() => ComputeHfEnergyRatio(t.Location, _ffmpegPath.Value));
+                        // Phase 5 — combined HF energy + spectral structure (FFT pipe).
+                        var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(t.Location, _ffmpegPath.Value));
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
@@ -2297,7 +2319,7 @@ namespace Truedat
                         var fingerprintV1 = fingerprintTask.Result;
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var bitUsageResult = bitUsageTask.Result;
-                        var (hfRatioResult, hfMethodResult) = hfEnergyTask.Result;
+                        var (hfRatioResult, hfMethodResult, hfStructureResult) = hfEnergyTask.Result;
 
                         if (feat == null)
                         {
@@ -2318,6 +2340,7 @@ namespace Truedat
                         feat.FilePath = t.Location;
                         if (bitUsageResult != null) feat.BitUsage = bitUsageResult;
                         if (hfRatioResult.HasValue) { feat.HfEnergyRatio = hfRatioResult; feat.HfEnergyMethod = hfMethodResult; }
+                        if (hfStructureResult != null) feat.HfSpectralStructure = hfStructureResult;
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
@@ -3071,7 +3094,7 @@ namespace Truedat
                 string scope = level switch
                 {
                     BackfillLevel.Identity => "identity only (TagLib + cheap file IO)",
-                    BackfillLevel.Features => "features only (ffmpeg — bitUsage / hfEnergyRatio)",
+                    BackfillLevel.Features => "features only (ffmpeg — bitUsage / hfEnergyRatio / hfSpectralStructure)",
                     _ => "identity + features (ffmpeg engaged; ~30s per applicable lossless 24-bit track)",
                 };
                 Console.WriteLine($"Backfill scope: {scope}");
@@ -3244,7 +3267,7 @@ namespace Truedat
 
         /// <summary>Per-entry backfill. Identity tier: TagLib + cheap file IO (Tier A
         /// fileMd5, Tier B whole fingerprint.v1, Tier C sub-fields, MP3 LAME tag).
-        /// Features tier: ffmpeg-driven bitUsage + hfEnergyRatio. Level selects which
+        /// Features tier: ffmpeg-driven bitUsage + hfEnergyRatio + hfSpectralStructure. Level selects which
         /// tiers run; All (default) does both. Caller must have already SHA-validated
         /// that audio bytes match before invoking — backfill MUST NOT touch entries
         /// whose audio drifted.</summary>
@@ -3329,7 +3352,7 @@ namespace Truedat
             }
         }
 
-        /// <summary>Features-tier backfill — ffmpeg-driven bitUsage + hfEnergyRatio.
+        /// <summary>Features-tier backfill — ffmpeg-driven bitUsage + hfEnergyRatio + hfSpectralStructure.
         /// Runs only when fields are currently missing AND the helpers return non-null
         /// (which they self-gate on ffmpeg presence, codec / bit-depth / sample-rate
         /// applicability). Pulls duration from fingerprint.v1 to avoid an extra TagLib
@@ -3355,14 +3378,25 @@ namespace Truedat
                 }
             }
 
-            if (!entry.Features.HfEnergyRatio.HasValue)
+            // Phase 5 — single FFT analysis backfills hfEnergyRatio AND hfSpectralStructure
+            // at once. Both are populated/null together; either being absent triggers the
+            // ffmpeg pass. (After fresh analysis they're always co-populated; gap arises
+            // only on entries last-touched by Phase-3 code that wrote hfEnergyRatio
+            // without the structure block.)
+            bool hfMissing = !entry.Features.HfEnergyRatio.HasValue || entry.Features.HfSpectralStructure == null;
+            if (hfMissing)
             {
-                var (hr, hm) = ComputeHfEnergyRatio(path, ffmpeg);
-                if (hr.HasValue)
+                var (hr, hm, hs) = ComputeHfAnalysis(path, ffmpeg);
+                if (hr.HasValue && !entry.Features.HfEnergyRatio.HasValue)
                 {
                     entry.Features.HfEnergyRatio = hr;
                     entry.Features.HfEnergyMethod = hm;
                     filled.Add("hfEnergyRatio");
+                }
+                if (hs != null && entry.Features.HfSpectralStructure == null)
+                {
+                    entry.Features.HfSpectralStructure = hs;
+                    filled.Add("hfSpectralStructure");
                 }
             }
         }
@@ -4626,9 +4660,17 @@ namespace Truedat
         /// signal that dither evasion can't fabricate.
         /// Self-contained: opens TagLib internally for duration + sample rate so call
         /// sites are one line, same pattern as ComputeBitUsage.</summary>
-        static (double? Ratio, string? Method) ComputeHfEnergyRatio(string filePath, string? ffmpegExe)
+        /// <summary>Phase 5 — single-pass FFT analysis of a 30 s mid-track segment.
+        /// Returns the Phase-3 HF energy ratio (now bin-sharp Parseval over FFT bins,
+        /// not IIR-highpass RMS) AND the Phase-5 spectral-structure scalars
+        /// (flatness / peak-to-mean / imaging symmetry). One ffmpeg subprocess
+        /// replaces the two Phase-3 highpass/total invocations — net −1 subprocess
+        /// per track. Same applicability gate (sourceSampleRate &gt; 44100; ffmpeg
+        /// required); all return values are null on gate-miss or analysis failure.
+        /// Window: 4096 samples Hann, 50 % overlap, mean aggregation across windows.</summary>
+        static (double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure) ComputeHfAnalysis(string filePath, string? ffmpegExe)
         {
-            if (string.IsNullOrEmpty(ffmpegExe)) return (null, null);
+            if (string.IsNullOrEmpty(ffmpegExe)) return (null, null, null);
 
             int sourceSampleRate = 0;
             double durationSec = 0;
@@ -4638,47 +4680,143 @@ namespace Truedat
                 sourceSampleRate = tf.Properties?.AudioSampleRate ?? 0;
                 durationSec = tf.Properties?.Duration.TotalSeconds ?? 0;
             }
-            catch { return (null, null); }
+            catch { return (null, null, null); }
 
-            if (sourceSampleRate <= 44100) return (null, null);   // no Nyquist headroom above 22 kHz
+            if (sourceSampleRate <= 44100) return (null, null, null);   // no Nyquist headroom above 22 kHz
 
             double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
             string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
-            string srArg = $"-ar {sourceSampleRate}";
+            string args = $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -ac 1 -ar {sourceSampleRate} -f s32le pipe:1";
 
-            try
+            const int FftSize = 4096;
+            const int Hop = FftSize / 2; // 50% overlap
+            int halfBins = FftSize / 2;
+            // Bin spacing in Hz: sampleRate / FftSize. HF band starts at the first
+            // bin whose centre is >= 22050 Hz. Mirror axis sits at the original
+            // CD-rate Nyquist (22050 Hz); only bins in [hfStart, mirrorEnd] have
+            // a partner in the source band for the imaging-symmetry test.
+            double binHz = (double)sourceSampleRate / FftSize;
+            int hfStart = (int)Math.Ceiling(22050.0 / binHz);
+            int origNyqBin = (int)Math.Round(22050.0 / binHz); // mirror axis
+            int mirrorEnd = Math.Min(2 * origNyqBin, halfBins); // upper end of bins with a source-band partner
+            if (hfStart >= halfBins) return (null, null, null);  // shouldn't happen given the >44.1k gate
+
+            var hann = Fft.Hann(FftSize);
+            var real = new double[FftSize];
+            var imag = new double[FftSize];
+            var mag2 = new double[FftSize];
+            // Rolling input buffer holds the most recent FftSize samples in [0, fill).
+            // After each window we memmove the back Hop samples to the front and refill
+            // — one shift per window, not per sample.
+            var rolling = new double[FftSize];
+            int rollingFill = 0;
+            const double SampleScale = 1.0 / 2147483648.0; // s32 -> [-1, 1)
+
+            // Per-window metric accumulators (means across windows aggregated at end).
+            double sumFlatness = 0;
+            double sumPeakToMean = 0;
+            double sumImaging = 0;
+            int windowsValid = 0;          // windows that produced finite flatness/peakToMean
+            int windowsValidImaging = 0;   // windows that produced a finite Pearson r
+            // Energy ratio aggregator: energy-weighted (sum HF / sum total across all windows,
+            // matches Parseval intent). Bin 0 (DC) excluded from total denominator per spec.
+            double sumHfEnergy = 0;
+            double sumTotalEnergy = 0;
+
+            void ProcessWindow()
             {
-                // Two concurrent ffmpeg invocations: total RMS and highpass-filtered RMS.
-                var totalTask = Task.Run(() => RmsFromFfmpegPipe(ffmpegExe!,
-                    $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -ac 1 {srArg} -f s32le pipe:1"));
-                var hpTask = Task.Run(() => RmsFromFfmpegPipe(ffmpegExe!,
-                    $"-v error {ssArg}-t 30 -i {PathHelper.QuoteArg(filePath)} -af highpass=f=22050 -ac 1 {srArg} -f s32le pipe:1"));
-                Task.WaitAll(new Task[] { totalTask, hpTask });
+                // Apply Hann + copy to FFT buffers.
+                for (int i = 0; i < FftSize; i++)
+                {
+                    real[i] = rolling[i] * hann[i];
+                    imag[i] = 0;
+                }
+                Fft.Forward(real, imag);
+                Fft.Magnitude2(real, imag, mag2);
 
-                double totalRms = totalTask.Result;
-                double hpRms = hpTask.Result;
-                if (totalRms <= 0 || double.IsNaN(totalRms)) return (null, null);
+                // HF band statistics.
+                double hfMax = 0, hfMean = 0;
+                int hfCount = halfBins - hfStart;
+                if (hfCount <= 0) return;
+                double sumHf = 0;
+                for (int k = hfStart; k < halfBins; k++)
+                {
+                    double v = mag2[k];
+                    sumHf += v;
+                    if (v > hfMax) hfMax = v;
+                }
+                hfMean = sumHf / hfCount;
 
-                double ratio = hpRms / totalRms;
-                if (double.IsNaN(ratio) || double.IsInfinity(ratio)) return (null, null);
-                if (ratio < 0) ratio = 0;
-                // Clamp upward slack — filter overshoot can technically exceed 1; round-trip clip.
-                if (ratio > 2) ratio = 2;
-                return (Math.Round(ratio, 6), "ffmpeg-rms-hp22050-30s-mid");
+                // Total energy (exclude DC bin 0 per spec); HF subset within total.
+                double sumTotal = 0;
+                for (int k = 1; k < halfBins; k++) sumTotal += mag2[k];
+                if (sumTotal > 0)
+                {
+                    sumTotalEnergy += sumTotal;
+                    sumHfEnergy += sumHf;
+                }
+
+                if (hfMean <= 0) return;  // silent window — skip structural metrics
+
+                // Flatness — Wiener entropy: geomean(mag2) / arithmean(mag2).
+                // Log-floor at 1e-12 * window-max prevents log(0) on near-empty bins.
+                double floor = 1e-12 * hfMax;
+                if (floor <= 0) return;
+                double logSum = 0;
+                for (int k = hfStart; k < halfBins; k++)
+                {
+                    double v = mag2[k];
+                    if (v < floor) v = floor;
+                    logSum += Math.Log(v);
+                }
+                double geomean = Math.Exp(logSum / hfCount);
+                double flatness = geomean / hfMean;
+                if (double.IsNaN(flatness) || double.IsInfinity(flatness)) return;
+                if (flatness < 0) flatness = 0;
+                if (flatness > 1) flatness = 1;
+
+                double peakToMean = hfMax / hfMean;
+                if (double.IsNaN(peakToMean) || double.IsInfinity(peakToMean)) return;
+
+                sumFlatness += flatness;
+                sumPeakToMean += peakToMean;
+                windowsValid++;
+
+                // Imaging symmetry — Pearson r between mag2[i] and mag2[mirror(i)] over
+                // bins in [hfStart, mirrorEnd). Single-pass formula; skip windows where
+                // either band lacks variance (all bins equal → undefined r).
+                int n = mirrorEnd - hfStart;
+                if (n >= 4)
+                {
+                    double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+                    for (int i = hfStart; i < mirrorEnd; i++)
+                    {
+                        int mirror = 2 * origNyqBin - i;
+                        if (mirror < 1 || mirror >= hfStart) continue; // partner must be in the source band, not in HF itself
+                        double x = mag2[i];
+                        double y = mag2[mirror];
+                        sx += x; sy += y;
+                        sxx += x * x; syy += y * y;
+                        sxy += x * y;
+                    }
+                    double denom2 = (n * sxx - sx * sx) * (n * syy - sy * sy);
+                    if (denom2 > 0)
+                    {
+                        double r = (n * sxy - sx * sy) / Math.Sqrt(denom2);
+                        if (!double.IsNaN(r) && !double.IsInfinity(r))
+                        {
+                            if (r < -1) r = -1;
+                            if (r > 1) r = 1;
+                            sumImaging += r;
+                            windowsValidImaging++;
+                        }
+                    }
+                }
             }
-            catch
-            {
-                return (null, null);
-            }
-        }
 
-        /// <summary>Run ffmpeg with the given args, stream s32le mono out via stdout,
-        /// walk samples computing RMS. Returns 0 on any failure (caller treats as "no data").</summary>
-        static double RmsFromFfmpegPipe(string ffmpegExe, string args)
-        {
             var psi = new ProcessStartInfo
             {
-                FileName = ffmpegExe,
+                FileName = ffmpegExe!,
                 Arguments = args,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -4688,42 +4826,165 @@ namespace Truedat
             try
             {
                 using var proc = Process.Start(psi);
-                if (proc == null) return 0;
+                if (proc == null) return (null, null, null);
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
-                double sumSq = 0;
-                long count = 0;
                 var buf = new byte[64 * 1024];
                 var stream = proc.StandardOutput.BaseStream;
-                int residue = 0;
+                int byteResidue = 0;
                 while (true)
                 {
-                    int got = stream.Read(buf, residue, buf.Length - residue);
+                    int got = stream.Read(buf, byteResidue, buf.Length - byteResidue);
                     if (got <= 0) break;
-                    int total = residue + got;
+                    int total = byteResidue + got;
                     int wholeSamples = total / 4;
-                    for (int i = 0; i < wholeSamples; i++)
+                    int srcIdx = 0;
+                    while (srcIdx < wholeSamples)
                     {
-                        int s = BitConverter.ToInt32(buf, i * 4);
-                        sumSq += (double)s * s;
-                        count++;
+                        int room = FftSize - rollingFill;
+                        int take = Math.Min(room, wholeSamples - srcIdx);
+                        for (int i = 0; i < take; i++)
+                        {
+                            int s = BitConverter.ToInt32(buf, (srcIdx + i) * 4);
+                            rolling[rollingFill + i] = s * SampleScale;
+                        }
+                        rollingFill += take;
+                        srcIdx += take;
+                        if (rollingFill == FftSize)
+                        {
+                            ProcessWindow();
+                            // Shift back half to front for 50% overlap: next window starts
+                            // FftSize-Hop samples back. One memmove per window.
+                            Buffer.BlockCopy(rolling, Hop * sizeof(double), rolling, 0, (FftSize - Hop) * sizeof(double));
+                            rollingFill = FftSize - Hop;
+                        }
                     }
                     int used = wholeSamples * 4;
-                    residue = total - used;
-                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                    byteResidue = total - used;
+                    if (byteResidue > 0) Buffer.BlockCopy(buf, used, buf, 0, byteResidue);
                 }
                 if (!proc.WaitForExit(60000))
                 {
                     try { proc.Kill(); } catch { }
-                    return 0;
+                    return (null, null, null);
                 }
-                if (count == 0) return 0;
-                return Math.Sqrt(sumSq / count);
+                stderrTask.Wait(5000);
             }
             catch
             {
-                return 0;
+                return (null, null, null);
             }
+
+            const string method = "managed-fft-radix2-30s-mid-native";
+            if (windowsValid == 0)
+            {
+                // Got audio bytes but no windows produced finite metrics (silent / all-DC).
+                // Treat as analysis-success-but-no-signal: return zero ratio, no structure.
+                double? ratio = sumTotalEnergy > 0 ? (double?)Math.Round(sumHfEnergy / sumTotalEnergy, 6) : null;
+                return (ratio, ratio.HasValue ? method : null, null);
+            }
+
+            double hfRatio = sumTotalEnergy > 0 ? sumHfEnergy / sumTotalEnergy : 0;
+            if (hfRatio < 0) hfRatio = 0;
+            if (hfRatio > 2) hfRatio = 2;
+
+            var structure = new HfSpectralStructure
+            {
+                Flatness = Math.Round(sumFlatness / windowsValid, 4),
+                PeakToMean = Math.Round(sumPeakToMean / windowsValid, 2),
+                ImagingSymmetry = windowsValidImaging > 0
+                    ? Math.Round(sumImaging / windowsValidImaging, 4)
+                    : 0.0,
+                Method = method,
+            };
+            if (_audit)
+            {
+                Console.Error.WriteLine($"[AUDIT] hfAnalysis file=\"{Path.GetFileName(filePath)}\" sr={sourceSampleRate} hfStart={hfStart} bins=[{hfStart}..{halfBins}) hfRatioRaw={hfRatio:E4} winValid={windowsValid} winValidSym={windowsValidImaging} sumHF={sumHfEnergy:E4} sumTot={sumTotalEnergy:E4}");
+            }
+            return (Math.Round(hfRatio, 6), method, structure);
+        }
+
+        /// <summary>Inline FFT sanity checks. Run via --self-test; exits 0 on
+        /// success, 1 on first failure. No external test project — kept here
+        /// so the merged single-file exe is fully self-contained.</summary>
+        static int RunSelfTest()
+        {
+            int failures = 0;
+            void Assert(bool cond, string msg)
+            {
+                if (cond) { Console.WriteLine($"  PASS  {msg}"); return; }
+                Console.WriteLine($"  FAIL  {msg}");
+                failures++;
+            }
+
+            Console.WriteLine("Truedat FFT self-test");
+
+            // Hann cache: same array reference on repeat calls at the same size.
+            var h1 = Fft.Hann(4096);
+            var h2 = Fft.Hann(4096);
+            Assert(ReferenceEquals(h1, h2), "Hann(4096) cached by size");
+            Assert(Math.Abs(h1[0]) < 1e-12 && Math.Abs(h1[4095]) < 1e-12, "Hann tapers to 0 at both ends");
+
+            // 1 kHz sine at 44.1 kHz over 4096 samples → energy in bin ~93.
+            const int N = 4096;
+            const int Sr = 44100;
+            double binHz = (double)Sr / N;
+            int expectedBin1k = (int)Math.Round(1000.0 / binHz);
+            var real = new double[N];
+            var imag = new double[N];
+            for (int i = 0; i < N; i++)
+                real[i] = Math.Sin(2 * Math.PI * 1000.0 * i / Sr);
+            // Time-domain energy first, for Parseval below.
+            double timeEnergy = 0;
+            for (int i = 0; i < N; i++) timeEnergy += real[i] * real[i];
+            Fft.Forward(real, imag);
+            var mag2 = new double[N];
+            Fft.Magnitude2(real, imag, mag2);
+            int peakBin = 0;
+            double peakMag = 0;
+            for (int k = 1; k < N / 2; k++)
+            {
+                if (mag2[k] > peakMag) { peakMag = mag2[k]; peakBin = k; }
+            }
+            Assert(Math.Abs(peakBin - expectedBin1k) <= 1, $"1 kHz sine peaks at bin {peakBin} (expected {expectedBin1k})");
+
+            // Parseval: Σ|X[k]|² == N · Σ|x[n]|² for our unnormalized FFT.
+            double specEnergy = 0;
+            for (int k = 0; k < N; k++) specEnergy += mag2[k];
+            double parsevalLhs = specEnergy;
+            double parsevalRhs = N * timeEnergy;
+            double parsevalErr = Math.Abs(parsevalLhs - parsevalRhs) / parsevalRhs;
+            Assert(parsevalErr < 1e-9, $"Parseval holds (relative error {parsevalErr:E2})");
+
+            // Two-tone: 1 kHz + 10 kHz → both bins populated, rest near zero.
+            int expectedBin10k = (int)Math.Round(10000.0 / binHz);
+            for (int i = 0; i < N; i++)
+            {
+                real[i] = Math.Sin(2 * Math.PI * 1000.0 * i / Sr) +
+                          Math.Sin(2 * Math.PI * 10000.0 * i / Sr);
+                imag[i] = 0;
+            }
+            Fft.Forward(real, imag);
+            Fft.Magnitude2(real, imag, mag2);
+            double e1k = mag2[expectedBin1k];
+            double e10k = mag2[expectedBin10k];
+            double offBand = 0;
+            // Off-band reference: pick a bin midway between the two tones.
+            int midBin = (expectedBin1k + expectedBin10k) / 2;
+            offBand = mag2[midBin];
+            Assert(e1k > 100 * offBand, $"two-tone: 1 kHz bin energy ({e1k:E2}) >> off-band ({offBand:E2})");
+            Assert(e10k > 100 * offBand, $"two-tone: 10 kHz bin energy ({e10k:E2}) >> off-band ({offBand:E2})");
+
+            // Wrong-size input throws.
+            bool threw = false;
+            try { Fft.Forward(new double[100], new double[100]); }
+            catch (ArgumentException) { threw = true; }
+            Assert(threw, "non-power-of-2 size throws ArgumentException");
+
+            Console.WriteLine(failures == 0
+                ? "All self-tests passed."
+                : $"{failures} self-test(s) FAILED.");
+            return failures == 0 ? 0 : 1;
         }
 
         /// <summary>Trailing-zero count for a uint32 value; returns 32 for zero.
@@ -5582,14 +5843,19 @@ namespace Truedat
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT hires lowestNonZeroBit={lnz} vote={vote:+#;-#;0} weight=0.40");
                 }
 
-                // Signal: hfEnergyRatio. Genuine hi-res lands at 0.001-0.05; upsampled
-                // content lands at ~0. Only populated when sourceSampleRate > 44100.
+                // Signal: hfEnergyRatio. Phase 5 corpus1 retune: bin-sharp FFT
+                // values are 3 orders of magnitude smaller than the old IIR-highpass
+                // values the original Phase 3 threshold was calibrated against
+                // (genuine 24/96 hi-res lands at ~1e-5; upsampled fakes round to 0
+                // due to Lanczos suppression at 22 kHz). Real hi-res with a narrow
+                // HF band (e.g. 24/48) can also round to 0, so the "fake" vote is
+                // dropped — Signal F handles fake-hi-res discrimination instead.
                 if (f.HfEnergyRatio.HasValue)
                 {
                     double hr = f.HfEnergyRatio.Value;
-                    int vote = hr >= 0.0010 ? 1 : hr <= 0.0001 ? -1 : 0;
+                    int vote = hr >= 1e-5 ? 1 : 0;
                     if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfEnergyRatio={hr:F6} vote={vote:+#;-#;0} weight=0.40");
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfEnergyRatio={hr:E2} vote={vote:+#;-#;0} weight=0.40");
                 }
 
                 // Signal: bitUsage.effectiveBits. Real 24-bit easily exceeds 18 bits
@@ -5600,6 +5866,32 @@ namespace Truedat
                     int vote = eb >= 18 ? 1 : eb <= 14 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT hires effectiveBits={eb:F2} vote={vote:+#;-#;0} weight=0.20");
+                }
+
+                // Signal F: hfSpectralStructure (Phase 5 — FFT-derived). Distinguishes
+                // ffmpeg-upsampled fake hi-res (very low flatness AND high peak-to-mean
+                // — narrow imaging spikes against an otherwise-empty HF band) from
+                // genuine broadband or narrow-harmonic HF content. Corpus1 retune
+                // (2026-05-18): imagingSymmetry was useless on this corpus (Lanczos
+                // suppresses imaging enough that mirror correlation never fires) so
+                // dropped from the vote. Flatness alone can't separate NIN's peaky-
+                // but-genuine cymbal content (fl=0.011) from upsamples (fl=0.001-
+                // 0.003), so the "fake" vote pairs flatness with peak-to-mean: NIN
+                // has p2m=478 from a single strong harmonic, while imagings spread
+                // over multiple mirrored bins land at p2m ~80-180 — different shape.
+                // The "real" vote requires fl > 0.5 (only broadband real HF qualifies,
+                // e.g. orchestral 24/48); most real hi-res abstains on Signal F and
+                // relies on bitUsage / hfEnergyRatio to vote +1.
+                if (f.HfSpectralStructure != null)
+                {
+                    double fl = f.HfSpectralStructure.Flatness;
+                    double pm = f.HfSpectralStructure.PeakToMean;
+                    double sy = f.HfSpectralStructure.ImagingSymmetry;
+                    int vote = 0;
+                    if (fl < 0.005 && pm > 50) vote = -1;                  // imaging-spike signature → fake
+                    else if (fl > 0.5) vote = +1;                          // broadband HF → reinforce real
+                    if (vote != 0) { score += vote * 0.35; maxWeight += 0.35; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfSpectralStructure: flatness={fl:F4} peakToMean={pm:F2} imagingSymmetry={sy:F4} vote={vote:+#;-#;0} weight=0.35");
                 }
 
                 (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
@@ -5792,6 +6084,18 @@ namespace Truedat
                 jw.WriteNumber("hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, 6));
             if (!string.IsNullOrEmpty(f.HfEnergyMethod))
                 jw.WriteString("hfEnergyMethod", f.HfEnergyMethod);
+            // Phase 5 — HF spectral structure (FFT-derived); omit-when-null.
+            if (f.HfSpectralStructure != null)
+            {
+                jw.WritePropertyName("hfSpectralStructure");
+                jw.WriteStartObject();
+                jw.WriteNumber("flatness", Math.Round(f.HfSpectralStructure.Flatness, 4));
+                jw.WriteNumber("peakToMean", Math.Round(f.HfSpectralStructure.PeakToMean, 2));
+                jw.WriteNumber("imagingSymmetry", Math.Round(f.HfSpectralStructure.ImagingSymmetry, 4));
+                if (!string.IsNullOrEmpty(f.HfSpectralStructure.Method))
+                    jw.WriteString("method", f.HfSpectralStructure.Method);
+                jw.WriteEndObject();
+            }
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -6031,8 +6335,28 @@ namespace Truedat
                 HpcpEntropy = GetNullableDbl(track, "hpcpEntropy"),
                 BitUsage = ParseBitUsageFromJson(track),
                 HfEnergyRatio = GetNullableDbl(track, "hfEnergyRatio"),
-                HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null
+                HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
+                HfSpectralStructure = ParseHfSpectralStructureFromJson(track),
             };
+        }
+
+        /// <summary>Phase 5 — read the nested hfSpectralStructure block back from
+        /// mbxmoods.json. Returns null when absent (legacy entries) or malformed.
+        /// Tolerant of missing fields within the block.</summary>
+        static HfSpectralStructure? ParseHfSpectralStructureFromJson(JsonElement track)
+        {
+            if (!track.TryGetProperty("hfSpectralStructure", out var b) || b.ValueKind != JsonValueKind.Object) return null;
+            try
+            {
+                return new HfSpectralStructure
+                {
+                    Flatness = GetDbl(b, "flatness"),
+                    PeakToMean = GetDbl(b, "peakToMean"),
+                    ImagingSymmetry = GetDbl(b, "imagingSymmetry"),
+                    Method = GetStr(b, "method"),
+                };
+            }
+            catch { return null; }
         }
 
         /// <summary>Phase 2.5 — read the nested bitUsage block back from mbxmoods.json.
@@ -7391,7 +7715,8 @@ namespace Truedat
                     HpcpEntropy = sf.HpcpEntropy,
                     BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
-                    HfEnergyMethod = sf.HfEnergyMethod
+                    HfEnergyMethod = sf.HfEnergyMethod,
+                    HfSpectralStructure = sf.HfSpectralStructure,    // Phase 5 — preserve across cache hits
                 },
                 LastModified = newLastMod,
                 AnalysisDurationSecs = source.AnalysisDurationSecs,
