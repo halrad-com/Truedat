@@ -667,16 +667,24 @@ namespace Truedat
             bool selfTest = false;
             int cpuLimit = 0; // 0 = no limit
 
-            // --vam-smoke <audio>  S2.2 end-to-end smoke for VocalAffectStage:
-            //   load model → ffmpeg-decode 30 s @ 16 kHz mono → run inference →
-            //   print I/O metadata + output head/tail. No mbxmoods write,
-            //   no worker-pool integration (T-A3 is its own dispatch).
-            // --vam-model <path>   optional model path override; default is
-            //   <truedat.exe dir>/_models/vam-skeleton.onnx (auto-created from
-            //   the in-tree skeleton bytes if absent).
+            // --vam-smoke <audio>  S2.2/S2.3 end-to-end smoke: load VadStage +
+            //   VocalAffectStage, ffmpeg-decode 30 s @ 16 kHz mono, run VAD,
+            //   gate VAM on vocalCoverage >= threshold, print model I/O +
+            //   output. Diagnostic only — no mbxmoods write, no worker-pool
+            //   integration (T-A3 is its own dispatch).
+            // --vam-model <path>   override VAM model path. Default:
+            //   <exe-dir>/_models/vam-skeleton.onnx (auto-created if missing).
+            // --vad-model <path>   override VAD model path. Default:
+            //   <exe-dir>/_models/silero-vad-skeleton.onnx (auto-created if missing).
+            // --vam-force          run VAM regardless of VAD result. Diagnostic
+            //   only — bypasses the production gate so the VAM wiring can be
+            //   exercised even when VAD reports vocalCoverage = 0 (which is
+            //   what the skeleton VAD reports for every track).
             bool vamSmokeMode = false;
             string? vamSmokePath = null;
             string? vamModelPath = null;
+            string? vadModelPath = null;
+            bool vamForce = false;
 
             // --chunk M/N: split the scan list across machines. Two boxes with the
             // same library run `--chunk 1/2` and `--chunk 2/2` and produce two
@@ -761,6 +769,8 @@ namespace Truedat
                 else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "vam-smoke" && i + 1 < args.Length) { vamSmokeMode = true; vamSmokePath = args[++i]; }
                 else if (canonical == "vam-model" && i + 1 < args.Length) vamModelPath = args[++i];
+                else if (canonical == "vad-model" && i + 1 < args.Length) vadModelPath = args[++i];
+                else if (canonical == "vam-force") vamForce = true;
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -776,7 +786,7 @@ namespace Truedat
 
             if (vamSmokeMode)
             {
-                Environment.ExitCode = RunVamSmoke(vamSmokePath!, vamModelPath);
+                Environment.ExitCode = RunVamSmoke(vamSmokePath!, vamModelPath, vadModelPath, vamForce);
                 return;
             }
 
@@ -904,9 +914,11 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
-                Console.WriteLine("  --vam-smoke <f>     VAM S2.2 single-track smoke: load VocalAffectStage, decode <f> @ 16 kHz mono,");
-                Console.WriteLine("                      run one inference, print model I/O + output. Diagnostic only.");
+                Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
+                Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
                 Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
+                Console.WriteLine("  --vad-model <path>  Override VAD model path (default: <exe-dir>/_models/silero-vad-skeleton.onnx)");
+                Console.WriteLine("  --vam-force         With --vam-smoke: run VAM even when VAD reports vocalCoverage = 0 (diagnostic)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -1871,9 +1883,11 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
-                Console.WriteLine("  --vam-smoke <f>     VAM S2.2 single-track smoke: load VocalAffectStage, decode <f> @ 16 kHz mono,");
-                Console.WriteLine("                      run one inference, print model I/O + output. Diagnostic only.");
+                Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
+                Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
                 Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
+                Console.WriteLine("  --vad-model <path>  Override VAD model path (default: <exe-dir>/_models/silero-vad-skeleton.onnx)");
+                Console.WriteLine("  --vam-force         With --vam-smoke: run VAM even when VAD reports vocalCoverage = 0 (diagnostic)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -5110,12 +5124,18 @@ namespace Truedat
             return failures == 0 ? 0 : 1;
         }
 
-        /// <summary>VAM S2.2 end-to-end smoke. Loads the VocalAffectStage,
-        /// ffmpeg-decodes 30 s of mid-track audio @ 16 kHz mono float32,
-        /// runs one inference, and prints the model contract + output
-        /// head/tail. Diagnostic only — no mbxmoods.json, no TrackFeatures
-        /// field, no schema commit. Schema additions land in S2.5.</summary>
-        static int RunVamSmoke(string audioPath, string? modelPathOverride)
+        /// <summary>VAM end-to-end smoke (S2.2 + S2.3). Loads VadStage and
+        /// VocalAffectStage, ffmpeg-decodes 30 s of mid-track audio @ 16 kHz
+        /// mono float32, runs VAD first, gates VAM on vocalCoverage >=
+        /// <see cref="VadStage.DefaultGateThreshold"/>, prints both model
+        /// contracts and outputs. Diagnostic only — no mbxmoods.json, no
+        /// TrackFeatures field, no schema commit. Schema additions land in S2.5.
+        ///
+        /// <paramref name="force"/> bypasses the VAD gate (runs VAM even when
+        /// vocalCoverage is below threshold) so the VAM wiring can still be
+        /// exercised while VadStage is the skeleton (which always reports
+        /// vocalCoverage = 0).</summary>
+        static int RunVamSmoke(string audioPath, string? vamModelOverride, string? vadModelOverride, bool force)
         {
             if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
             {
@@ -5129,19 +5149,20 @@ namespace Truedat
                 return 1;
             }
 
-            // Default: <truedat.exe dir>/_models/vam-skeleton.onnx. Resolves
-            // correctly whether the exe is invoked from dist/truedat/ or via
-            // an absolute path.
-            string modelPath = !string.IsNullOrEmpty(modelPathOverride)
-                ? modelPathOverride!
+            // Defaults resolved relative to truedat.exe so invocation path
+            // doesn't matter (dist/truedat/ run, absolute path, current dir).
+            string vamModelPath = !string.IsNullOrEmpty(vamModelOverride)
+                ? vamModelOverride!
                 : Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
+            string vadModelPath = !string.IsNullOrEmpty(vadModelOverride)
+                ? vadModelOverride!
+                : Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
 
             Console.WriteLine($"[vam-smoke] audio: {audioPath}");
-            Console.WriteLine($"[vam-smoke] model: {modelPath}");
+            Console.WriteLine($"[vam-smoke] vad model: {vadModelPath}");
+            Console.WriteLine($"[vam-smoke] vam model: {vamModelPath}");
 
-            using var vam = new VocalAffectStage(modelPath, Console.Out);
-            Console.WriteLine(vam.Describe());
-
+            // Decode once; both stages consume the same 30 s mid-track buffer.
             var pcm = DecodeMidTrackPcm16kMono(audioPath, ffmpeg!, durationSec: 30);
             if (pcm == null || pcm.Length == 0)
             {
@@ -5150,10 +5171,30 @@ namespace Truedat
             }
             Console.WriteLine($"[vam-smoke] decoded {pcm.Length} samples ({pcm.Length / 16000.0:F2} s @ 16 kHz mono float32)");
 
+            using var vad = new VadStage(vadModelPath, Console.Out);
+            Console.WriteLine(vad.Describe());
+            var vr = vad.Run(pcm);
+            Console.WriteLine($"[vam-smoke] VAD: vocalCoverage={vr.VocalCoverage:F4} method={vr.Method} inference={vr.InferenceMs:F1} ms");
+
+            bool gatePassed = vr.VocalCoverage >= VadStage.DefaultGateThreshold;
+            if (!gatePassed && !force)
+            {
+                Console.WriteLine($"[vam-smoke] VAM SKIPPED — vocalCoverage {vr.VocalCoverage:F4} < gate {VadStage.DefaultGateThreshold:F4} (track treated as instrumental).");
+                Console.WriteLine($"[vam-smoke] (use --vam-force to bypass the gate and exercise VAM anyway.)");
+                return 0;
+            }
+            if (!gatePassed && force)
+            {
+                Console.WriteLine($"[vam-smoke] gate would have skipped VAM (coverage {vr.VocalCoverage:F4} < {VadStage.DefaultGateThreshold:F4}); --vam-force overrides.");
+            }
+
+            using var vam = new VocalAffectStage(vamModelPath, Console.Out);
+            Console.WriteLine(vam.Describe());
+
             var sw = Stopwatch.StartNew();
             var output = vam.Run(pcm);
             sw.Stop();
-            Console.WriteLine($"[vam-smoke] inference: {output.Length} output float(s) in {sw.Elapsed.TotalMilliseconds:F1} ms");
+            Console.WriteLine($"[vam-smoke] VAM inference: {output.Length} output float(s) in {sw.Elapsed.TotalMilliseconds:F1} ms");
 
             // Skeleton model is Identity, so output should equal input bit-for-bit.
             // Real wav2vec2 model output will be V/A/D scalars; head/tail still
@@ -5166,8 +5207,6 @@ namespace Truedat
             if (output.Length > 2 * tailN)
                 Console.WriteLine($"[vam-smoke] output tail[{tailN}]: [{tail}]");
 
-            // Skeleton-only sanity check: Identity model means out == in. Surface
-            // any divergence loudly so a misconfigured smoke can't quietly pass.
             if (output.Length == pcm.Length)
             {
                 int mismatches = 0;

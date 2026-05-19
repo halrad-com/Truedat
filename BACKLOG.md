@@ -184,6 +184,29 @@ VAM-only); VADER ships independently.
 
 **Parent roadmap:** [`docs/plans/2026-05-16-vader-vam-roadmap.md`](docs/plans/2026-05-16-vader-vam-roadmap.md)
 
+## Energy-threshold VAD for podcasts / audiobooks (future)
+
+Idea captured 2026-05-19. Not on the active VAM roadmap.
+
+The VAM roadmap deliberately skips energy-threshold VAD because energy is
+the wrong signal for music — music has continuous full-band energy whether
+vocals are present or not, so RMS thresholding tags every track as
+"vocal-everywhere" and the gate (`pure-instrumental returns no V/A`) fails.
+Silero VAD is the right tool for music and is what S2.3 / S2.3.5 ship.
+
+**But** for podcast / audiobook material, energy thresholding is the
+*correct* baseline: real speech has silence between utterances, the
+silence-vs-utterance contrast is exactly what RMS thresholding picks out,
+and Silero would be overkill (and slower). A future `--content-type
+podcast|audiobook|music` flag could pick the VAD strategy:
+- `music` (default) → Silero VAD
+- `podcast` / `audiobook` → energy threshold with a per-content-type
+  silence-floor (e.g. -45 dBFS, 100 ms hangover)
+
+Out of scope for the current VAM sprint. File when a podcast/audiobook
+analysis use case actually materialises — Truedat's current scope is
+music libraries (iTunes XML / MBXHub).
+
 ## ~~Opus support via ffmpeg transcode~~ DONE
 
 Two changes layered on the existing ffmpeg-transcode pattern (the one that
