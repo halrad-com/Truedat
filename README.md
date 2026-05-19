@@ -1,14 +1,15 @@
-# Truedat - Music Mood Extractor, Fingerprinter & Test Toolkit
+# Truedat - Music Mood Extractor & Fingerprinter
 
-Truedat serves two purposes:
+Truedat is a Windows .NET CLI that analyzes a music library and writes the data MBXHub's AutoQ engine consumes — mood-aware shuffle, fake-hi-res detection, and lossy-transcode detection. It bundles [Essentia](https://essentia.upf.edu/) for mood extraction (55 acoustic features per track + valence/arousal mapping) and adds its own pure-managed analyses on top:
 
-### 1. Production: Audio Analysis for MBXHub
+- **Composite track identity** — `fingerprint.v1` (file size + path tail + audio properties + 64 KB head MD5 + MP3 LAME tag block), `audioStreamSha256` (SHA-256 over TagLib's invariant audio region; cross-machine portable, tag-edit resilient), and traditional file/audio MD5.
+- **Authenticity signals** — `bitUsage` (ffmpeg-driven LSB walk that catches fake-hi-res 24-bit padding), `hfEnergyRatio` (bin-sharp energy above 22.05 kHz via managed FFT), `hfSpectralStructure` (flatness / peak-to-mean / mirror-imaging from the same FFT pass — catches ffmpeg-upsampled fakes the bit-level signals miss), MP3 LAME-tag parsing (pure-managed Xing/Info+LAME decoder for transcode detection).
+- **`truedat.*` verdict block** — multi-signal voted hi-res / lossy-transcode verdicts (`yes` / `no` / `unknown` / `n/a`) computed inline at write time, so threshold changes ship without rescanning.
+- **Library-scale operations** — incremental & cache-aware scanning across four cache tiers (path+mtime, path+sha, cross-md5, cross-sha), `--verify` / `--verify --backfill` (identity + features tiers), `--merge-moods`, deterministic multi-machine `--chunk M/N`, `--hash-only` NDJSON manifest mode, opus auto-retry, and a standalone `--transcode` utility.
 
-Runs [Essentia](https://essentia.upf.edu/) against your music library to extract 55 acoustic features per track (15 core mood features + 40 extended descriptors), maps every song onto a 2D emotion space (valence/arousal), and optionally generates perceptual fingerprints and audio-data hashes. The output (`mbxmoods.json`) is the mood data file that MBXHub's AutoQ engine uses for mood-aware shuffle.
+The output (`mbxmoods.json`) carries all of this in a single per-track object that MBXHub reads directly.
 
-### 2. Test Tooling: Synthetic Library Generation & Mood Seeding
-
-Generates large synthetic libraries (100k-500k+ tracks) with real metadata from [MusicBrainz](https://musicbrainz.org/) and real acoustic features from [AcousticBrainz](https://acousticbrainz.org/). Used to test MBXHub at scale — exercising AutoQ scoring, mood channels, diversity quotas, and performance — before real users with large libraries report issues. Can also seed `mbxmoods.json` from the AcousticBrainz catalog, providing instant mood data for tracks that match by artist+title without running Essentia.
+Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library generation and AcousticBrainz-driven mood seeding for scale-testing MBXHub — see [Test Tooling](#test-tooling) at the bottom of this doc.
 
 **Output:**
 
@@ -16,33 +17,45 @@ Generates large synthetic libraries (100k-500k+ tracks) with real metadata from 
 - `mbxhub-fingerprints.json` - Chromaprint perceptual fingerprints and audio MD5 hashes
 - `mbxhub-details.json` - audio metadata from ffprobe (codec, bitrate, sample rate, etc.)
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxhub-fingerprints-errors.csv` - tracks that failed fingerprinting
+- `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
+- `mbxhub-fingerprints-errors.csv` - tracks that failed fingerprinting (`--fingerprint` mode)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
 ## What It Does
 
-Truedat reads an iTunes Music Library XML file and runs each audio file through Essentia tools:
+Truedat reads an iTunes Music Library XML file (or a `--folder`, `--file-list`, or single `--analyze-file`) and runs each track through Essentia plus its own analyses. Per-track work is parallelized across cores; everything is cache-aware so re-runs only touch what changed.
 
-### Mood Analysis (default mode)
+### Default scan (analysis + identity + authenticity)
 
-- **Valence** (0-1): Sad ← → Happy (8 input features)
-- **Arousal** (0-1): Calm ← → Energetic (7 input features)
-- **15 core + 40 extended Essentia features** stored per track for runtime recomputation (extended set covers loudness envelope, silence profile, spectral shape, psychoacoustic bands, rhythm/tonal aggregates)
+A single default invocation produces the full per-track record:
 
-This enables mood-based selection in MBXHub - pick a vibe like "Energetic" or "Chill" and the AutoQ engine filters your library accordingly.
+- **Mood features (Essentia)** — Valence (0-1, sad ↔ happy; 8 input features), Arousal (0-1, calm ↔ energetic; 7 input features), and 15 core + 40 extended Essentia features stored per track for runtime recomputation (extended set covers loudness envelope, silence profile, spectral shape, psychoacoustic bands, rhythm/tonal aggregates).
+- **Identity (truedat-native, pure-managed)** — `fingerprint.v1` composite, `audioStreamSha256` (TagLib invariant audio region), `fileMd5`. All computed concurrently with the Essentia decode so they're effectively free.
+- **Authenticity signals (truedat-native, ffmpeg-driven)** — `bitUsage` block (LSB walk for fake-hi-res detection on lossless 24-bit files), `hfEnergyRatio` + `hfSpectralStructure` (single managed-FFT pass over the same 30 s mid-track segment — bin-sharp HF energy ratio plus Wiener-entropy flatness, peak-to-mean, and mid↔HF mirror correlation; catches ffmpeg-upsampled fakes the bit-level signals miss), MP3 LAME-tag parsing (Xing/Info+LAME header decode for transcode detection).
+- **`truedat.*` verdict block** — multi-signal voted hi-res / lossy-transcode verdicts computed inline at write time from the signals above. Threshold changes ship without rescanning.
 
-### Fingerprint Mode (`--fingerprint`)
+MBXHub consumes the whole record: mood features drive AutoQ vibe selection; identity drives cross-cache matching; authenticity drives the hi-res / transcode classifiers.
 
-- **Chromaprint** - Perceptual audio fingerprint (AcoustID). Identifies the same *song* regardless of encoding, bitrate, or format.
-- **Audio MD5** - Hash of raw decoded audio data (ignores metadata tags). Identifies the exact same *audio data*.
+### Fingerprint mode (`--fingerprint`) — legacy
+
+The original identity pipeline, still available for compatibility:
+
+- **Chromaprint** — Perceptual audio fingerprint (AcoustID). Identifies the same *song* regardless of encoding, bitrate, or format.
+- **Audio MD5** — Hash of raw decoded audio data (ignores metadata tags). Identifies the exact same *audio data*.
+
+The default scan's `fingerprint.v1` + `audioStreamSha256` have superseded this for new work; `--fingerprint` is kept for libraries that still depend on `mbxhub-fingerprints.json`.
+
+### Verify & backfill (`--verify`, `--verify --backfill`)
+
+Walks an existing `mbxmoods.json` and either reports drift (read-only) or repairs missing fields in place (no Essentia re-run). Two backfill tiers — identity (TagLib + cheap IO) and features (ffmpeg-driven `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure`) — both gated by an SHA drift check so drifted entries are flagged for re-analysis rather than touched. See [Verify & Backfill](#large-libraries) for tier scoping via `--backfill-level`.
 
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
 
-- **Errors** - Fullwidth Unicode substitution characters (e.g. `⧸` `：` `＂`) that are known to break Essentia's ANSI argv parsing. These files will always fail analysis.
-- **Warnings** - Other non-ASCII characters where 8.3 short path fallback is unavailable. These files may fail depending on system configuration.
-- **Suspects** - Audio files under 50 KB that may be corrupt or truncated.
+- **Errors** — Fullwidth Unicode substitution characters (e.g. `⧸` `：` `＂`) that are known to break Essentia's ANSI argv parsing. These files will always fail analysis.
+- **Warnings** — Other non-ASCII characters where 8.3 short path fallback is unavailable. These files may fail depending on system configuration.
+- **Suspects** — Audio files under 50 KB that may be corrupt or truncated.
 
 ## Quick Start
 
@@ -65,11 +78,24 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --fixup                 Validate and remap paths in mbxmoods.json without re-analyzing
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
                           (read-only; writes mbxmoods-verify.csv next to the moods file)
-  --verify --backfill     Also fill in missing identity fields (audioStreamSha256, fileMd5,
-                          whole fingerprint.v1, plus sub-fields bitDepth / encoder, plus the
-                          MP3 LAME tag block for codec=mp3 entries) from TagLib and cheap
-                          file IO for entries whose audio bytes are unchanged. No Essentia
-                          re-run. Idempotent. Safe on 70k+ track libraries.
+  --verify --backfill     Fill in missing fields for entries whose audio bytes are
+                          unchanged. Drifted entries are flagged as REANALYZE_NEEDED,
+                          never modified. No Essentia re-run. Idempotent. Two tiers,
+                          both run by default — scope down with --backfill-level:
+                            identity tier (TagLib + cheap file IO; fast):
+                              audioStreamSha256, fileMd5, whole fingerprint.v1, sub-fields
+                              (bitDepth, encoder, ...), and the MP3 LAME tag block for
+                              codec=mp3 entries.
+                            features tier (ffmpeg-driven; slow — ~30s of decode per
+                              applicable track):
+                              bitUsage (lossless ∧ bitDepth >= 24 only),
+                              hfEnergyRatio + hfSpectralStructure (single FFT pass;
+                              sourceSampleRate > 44.1k only). Silently skipped when
+                              ffmpeg is absent.
+  --backfill-level <name> With --verify --backfill: scope which tier runs.
+                            all       (default) identity + features
+                            identity  fast tier only (TagLib + cheap file IO)
+                            features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
@@ -82,6 +108,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
   --audit                 Write all console output to truedat.log (for debugging)
+  --self-test             Run inline FFT sanity checks and exit (no library scan)
   --analyze-file <path> Analyze a single audio file with Essentia (no iTunes XML needed)
   --file-list <path>    Analyze files listed in a text file (one path per line, UTF-8, # comments)
                         Mutually exclusive with --analyze-file; -p sets parallelism
@@ -108,7 +135,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fin
 - **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
-- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair entries missing identity fields (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder) in place without re-running Essentia — drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
+- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - Shows per-track rate and estimated completion time.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
@@ -149,9 +176,16 @@ truedat.exe --hash-only --level stream --file-list files.txt --output manifest.n
 REM Verify the cache against disk (read-only — recomputes audioStreamSha256 per entry)
 truedat.exe --verify --moods C:\Music\mbxmoods.json
 
-REM Backfill missing identity fields (bitDepth, encoder, fingerprint.v1, file/audio hashes)
-REM from TagLib — no Essentia re-run, safe on big libraries
+REM Backfill ALL missing fields — identity (TagLib, fast) + features (ffmpeg, slow).
+REM No Essentia re-run; drifted entries are flagged, not modified.
 truedat.exe --verify --backfill --moods C:\Music\mbxmoods.json
+
+REM Identity tier only — fast first pass that doesn't need ffmpeg
+truedat.exe --verify --backfill --backfill-level identity --moods C:\Music\mbxmoods.json
+
+REM Features tier only — fill ffmpeg-driven bitUsage / hfEnergyRatio on a library
+REM whose identity is already complete (e.g., after the identity-only pass above)
+truedat.exe --verify --backfill --backfill-level features --moods C:\Music\mbxmoods.json
 
 REM Transcode opus (or any ffmpeg-readable input) to uncompressed FLAC at source rate/depth
 truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.flac"
@@ -165,111 +199,33 @@ truedat.exe "iTunes Music Library.xml" --chunk 2/2     REM machine B
 truedat.exe --merge-moods --merge-source mbxmoods.machineA.json --merge-source mbxmoods.machineB.json --merge-output mbxmoods.json
 ```
 
-## Synthetic Library Generation (Test Tooling)
+## Test Tooling
 
-Generate a synthetic MusicBee library from a prepared catalog of real MusicBrainz metadata and AcousticBrainz acoustic features:
+Two minor utility modes that exist to exercise MBXHub at scale or bootstrap mood data without running Essentia. Both depend on a catalog file built from [AcousticBrainz](https://acousticbrainz.org/) + [MusicBrainz](https://musicbrainz.org/) data dumps (`data/synthlib-catalog.jsonl.gz`). Build it once via `src/catalog-prep.py` (~21 GB of one-time downloads; see the script's docstring for the exact invocation).
+
+### `--synthesize` — synthetic library
+
+Generates stub MP3s (~12 KB each, 3 s of silence) with real ID3 metadata from MusicBrainz, organized as `{output}/{Artist}/{Album}/{NN} {Title}.mp3`. Used to scale-test MBXHub's AutoQ against 100k–500k tracks before real users hit those numbers. Every synthetic track is tagged with `Grouping = Synthetic` and `Comment = SYNTH:{seed}:{mbid}` for easy filtering. Add the output folder to MusicBee as a monitored library; remove it when done.
 
 ```cmd
-REM Dry run — preview what would be created
+REM Preview
 truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --count 100 --dry-run
 
-REM Generate 430,000 synthetic tracks
-truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --count 430000
-
-REM Generate and merge mood data into an existing mbxmoods.json
-truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --synth-moods C:\path\to\mbxmoods.json
+REM Generate 100k tracks and merge their mood data into an existing moods file
+truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --count 100000 --synth-moods C:\Music\mbxmoods.json
 ```
 
-### Synthesize Options
+Flags: `--synthesize`, `--catalog <path>`, `--synth-output <dir>`, `--count <n>` (default 430000), `--album-ratio <r>` (default 0.5), `--synth-moods <path>`, `--seed <n>` (default 42), `--dry-run`.
 
-```
-  --synthesize            Generate a synthetic MusicBee library from a catalog
-  --catalog <path>        Path to catalog JSONL (.jsonl or .jsonl.gz)
-  --synth-output <dir>    Output directory for synthesized library
-  --count <n>             Number of tracks to generate (default: 430000)
-  --album-ratio <r>       Fraction of tracks in albums vs singles (default: 0.5)
-  --synth-moods <path>    Path to existing mbxmoods.json to merge into
-  --seed <n>              Random seed for reproducibility (default: 42)
-  --dry-run               Preview without writing files
-```
+### `--seed-moods` — mood seeding from AcousticBrainz
 
-Each generated track is a stub MP3 (~12 KB, 3 seconds of silence) with real ID3 metadata (Title, Artist, Album, Genre, Year, BPM) written via TagLib#. Tracks are organized as `{output}\{Artist}\{Album}\{NN} {Title}.mp3`.
-
-### Identifying Synthetic Tracks
-
-All synthetic tracks are marked for easy identification:
-
-- **ID3 Grouping tag** = `Synthetic` — filterable in MusicBee column browser
-- **ID3 Comment tag** = `SYNTH:{seed}:{mbid}` — searchable, links to source recording MBID
-- **File path** — all generated files live under the `--synth-output` directory
-
-### Building the Catalog
-
-The catalog is built using a developer-only Python script that joins AcousticBrainz acoustic features with MusicBrainz metadata. This downloads ~21 GB of data dumps:
+Populates `mbxmoods.json` with pre-computed acoustic features matched by normalized artist+title — instant mood data for matched tracks without running Essentia. Seeded entries carry `_confidence: 0.6` / `_source: "ab-metadata"`; local Essentia analysis (`_confidence: 1.0`) is never overwritten.
 
 ```cmd
-cd src
-pip install -r requirements-catalog.txt
-python catalog-prep.py --download --build --stats
-```
-
-Output: `data/synthlib-catalog.jsonl.gz` — a gzipped JSON Lines file where each line contains one track with full metadata and 15 Essentia acoustic features.
-
-### Playbook: Expanding a Real Library for Scale Testing
-
-End-to-end steps to combine your real library with synthetic tracks for testing MBXHub at scale.
-
-**1. Build the catalog** (one-time, ~21 GB download):
-
-```cmd
-cd src
-pip install -r requirements-catalog.txt
-python catalog-prep.py --download --build --stats
-```
-
-**2. Generate synthetic tracks with mood data merged into your existing moods file:**
-
-```cmd
-truedat.exe --synthesize --catalog data\synthlib-catalog.jsonl.gz --synth-output D:\synthlib --count 100000 --synth-moods C:\MusicBee\mbxmoods.json
-```
-
-This creates 100k stub MP3s with real metadata and writes their acoustic features directly into your `mbxmoods.json`. Real analysis data is preserved — synthetic entries are added alongside existing entries in a single file.
-
-**3. Add the synthetic folder to MusicBee:**
-
-In MusicBee, go to **Edit > Preferences > Library** and add `D:\synthlib` as a monitored folder. MusicBee scans it and includes synthetic tracks in your unified library and iTunes XML export.
-
-**4. Test at scale:**
-
-MBXHub loads one `mbxmoods.json` containing both real and synthetic tracks. AutoQ, mood channels, diversity quotas, and performance can now be exercised against a much larger library.
-
-**5. Clean up when done:**
-
-Remove `D:\synthlib` from MusicBee's monitored folders. Orphaned synthetic entries in `mbxmoods.json` are harmless (MBXHub ignores paths not in the XML), or delete `D:\synthlib` and restore your moods file from backup.
-
-Synthetic tracks are identifiable by their `Grouping = Synthetic` ID3 tag — use MusicBee's column browser or a smart playlist (`Grouping IS Synthetic`) to filter them.
-
-## Mood Seeding from AcousticBrainz
-
-Seed `mbxmoods.json` with pre-computed acoustic features from the AcousticBrainz catalog, matched by normalized artist+title. Faster than running Essentia on every file — instant mood data for matched tracks.
-
-```cmd
-REM Seed moods for your library from the AcousticBrainz catalog
 truedat.exe "iTunes Music Library.xml" --seed-moods --seed-catalog data\synthlib-catalog.jsonl.gz
-
-REM Specify a target moods file
-truedat.exe "iTunes Music Library.xml" --seed-moods --seed-catalog data\synthlib-catalog.jsonl.gz --seed-target C:\path\to\mbxmoods.json
 ```
 
-### Seed Options
-
-```
-  --seed-moods              Seed mbxmoods.json from AcousticBrainz catalog
-  --seed-catalog <path>     Path to synthlib-catalog.jsonl.gz
-  --seed-target <path>      Target mbxmoods.json path (default: next to library XML)
-```
-
-Seeded entries have `_confidence: 0.6` and `_source: "ab-metadata"`. Local Essentia analysis (confidence 1.0) is never overwritten — seeding only adds new entries or upgrades lower-confidence data.
+Flags: `--seed-moods`, `--seed-catalog <path>`, `--seed-target <path>` (default: next to library XML).
 
 ## Installation
 
@@ -437,10 +393,63 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
       "erbCrest": 11.2, "erbFlatness": -8.7, "erbKurtosis": 5.8, "erbSkewness": 1.9, "erbSpread": 18.2,
       "melCrest": 10.6, "melFlatness": -8.4, "melKurtosis": 6.1, "melSkewness": 2.0, "melSpread": 19.5,
       "beatsLoudness": -14.1, "chordsStrength": 0.61, "hpcpCrest": 6.2, "hpcpEntropy": 2.87,
+      "bitUsage": {
+        "lowestNonZeroBit": 8,
+        "bottomBitActivity": 0.4123,
+        "effectiveBits": 19.47,
+        "samplesAnalyzed": 1323000,
+        "method": "ffmpeg-s32le-30s-mid-native"
+      },
+      "hfEnergyRatio": 0.013421,
+      "hfEnergyMethod": "ffmpeg-rms-pair-22050",
       "lastModified": "2025-12-01T00:00:00.0000000Z",
       "analysisDuration": 4.2,
       "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
-      "audioMd5": "8a7d9c0b1e2f3a4b5c6d7e8f9a0b1c2d"
+      "audioStreamSha256": "3a0be88f7ea54faa66f9e092ac40e0820197377d59a1b2c8c2d3a4b5c6d7e8f9",
+      "fingerprint": {
+        "v1": {
+          "fileSize": 8421376,
+          "pathTail": "Artist/Album/Song.flac",
+          "durationMs": 245123,
+          "sampleRate": 96000,
+          "channels": 2,
+          "bitDepth": 24,
+          "codec": "flac",
+          "codecRaw": "audio/flac",
+          "bitrate": 2745,
+          "encoder": "reference libFLAC 1.3.2 20170101",
+          "encoderRaw": "reference libFLAC 1.3.2 20170101",
+          "audioHead64kMd5": "ab12cd34ef56789012abcdef34567890"
+        }
+      },
+      "truedat": {
+        "hiresGenuine": "yes",
+        "hiresConfidence": 1.0,
+        "lossyTranscodeLikely": "n/a",
+        "method": "truedat-v1-corpus1-2026-05-18"
+      }
+    }
+  }
+}
+```
+
+For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when the file has a Xing/Info+LAME header:
+
+```json
+"fingerprint": {
+  "v1": {
+    "...": "...",
+    "codec": "mp3",
+    "encoder": "LAME3.100",
+    "mp3LameTag": {
+      "version": "LAME3.100",
+      "vbrMethodCode": 4,
+      "vbrMethod": "VBR Method 4 (Two Pass)",
+      "lowpassHz": 19500,
+      "encoderDelay": 576,
+      "encoderPadding": 1656,
+      "musicCrc": 12345,
+      "infoTagRevision": 0
     }
   }
 }
@@ -448,15 +457,15 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
 
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
-`fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
+`fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`, plus the nested `mp3LameTag` block for MP3s), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
 
-The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) and whose `spectralRolloff` sits at 16 kHz is almost certainly transcoded from a low-bitrate lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `spectralRolloff` doesn't extend past 22 kHz is upsampled CD audio. Detection logic (the future `truedat.*` verdict block) consumes these fields without needing to decode audio again.
+The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) is almost certainly transcoded from a lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `bitUsage.lowestNonZeroBit` lands at 16 is upsampled CD audio. The `truedat.*` verdict block (see below) consumes these fields plus the `bitUsage` / `hfEnergyRatio` signals to produce a per-track classification.
 
-For MP3 specifically, Phase 2 adds a nested `mp3LameTag` block inside `fingerprint.v1` when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
+For MP3 specifically, the `mp3LameTag` block inside `fingerprint.v1` is populated when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`, `infoTagRevision`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
 
-For lossless containers claiming ≥24-bit depth, Phase 2.5 adds the `bitUsage` block to track features: a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity`, `effectiveBits` (continuous signal for confidence scoring), `samplesAnalyzed`, `method` (frozen tag `ffmpeg-s32le-30s-mid` for future-method tracking). Populated only during fresh analysis (cache hits preserve cached values; legacy entries pick it up on the next full scan). Null on ffmpeg-absent installs.
+For lossless containers claiming ≥24-bit depth, the `bitUsage` block carries a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity` (fraction of non-zero samples at the resolution boundary), `effectiveBits` (continuous signal for confidence scoring, clipped to [0, 32] — the s32le sample-space ceiling), `samplesAnalyzed`, `method` (currently `ffmpeg-s32le-30s-mid-native`; the trailing `-native` records that the walk runs at the source's native sample rate rather than a forced 44.1k — earlier values without the suffix were biased by resample interpolation noise). The applicability gate runs as a ~5 ms TagLib peek **before** the ffmpeg decode so lossy / sub-24-bit files are skipped without spending 30 s of decode on data that would be meaningless. Populated only during fresh analysis or via `--verify --backfill --backfill-level features|all`. Null on ffmpeg-absent installs.
 
-Phase 3 adds the orthogonal `hfEnergyRatio` signal — fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via two concurrent ffmpeg passes (total RMS vs `highpass=f=22050` filtered RMS). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Genuine hi-res music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0 or essentially zero. Together, `bitUsage` and `hfEnergyRatio` are two independent signals the Phase 4 verdict block weights to answer "is this 24/96 claim genuine?".
+The orthogonal `hfEnergyRatio` signal is the fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via two concurrent ffmpeg passes (total RMS vs `highpass=f=22050` filtered RMS). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Genuine hi-res music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0 or essentially zero. The `hfEnergyMethod` companion field carries the algorithm identifier (currently `ffmpeg-rms-pair-22050`). Together, `bitUsage` and `hfEnergyRatio` are the two independent signals the verdict block weights to answer "is this 24/96 claim genuine?".
 
 ### Authenticity verdict (`truedat.*` block)
 
@@ -468,17 +477,19 @@ Each track in `mbxmoods.json` carries a nested `truedat` block with two verdicts
   "hiresConfidence":         0.85,
   "lossyTranscodeLikely":    "yes" | "no" | "unknown" | "n/a",
   "lossyTranscodeConfidence": 0.92,
-  "method":                  "truedat-v1-untuned-2026-05-18"
+  "method":                  "truedat-v1-corpus1-2026-05-18"
 }
 ```
 
 Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
 
-Multi-signal weighted voting per question. Hi-res verdict combines `bitUsage.lowestNonZeroBit`, `hfEnergyRatio`, and `bitUsage.effectiveBits` with weights 0.40 / 0.40 / 0.20. Transcode verdict (MP3 only currently) combines encoder string, MP3 LAME tag lowpass, LAME tag presence, and spectralRolloff with weights 0.30 / 0.35 / 0.20 / 0.15. ±0.7 normalized-score threshold means at least two full-weight signals must agree for a verdict — one strong signal alone produces `"unknown"`.
+The block is **omitted entirely** when both questions would be `"n/a"` (legacy entries without `fingerprint.v1`, weird-codec files) OR when both would be `"unknown"` from lack of signal (legacy lossless 24-bit entries that predate the `bitUsage` / `hfEnergyRatio` work). Run `--verify --backfill` to populate those fields and pick up a real verdict on the next pass.
+
+Multi-signal weighted voting per question. Hi-res verdict combines `bitUsage.lowestNonZeroBit`, `hfEnergyRatio`, and `bitUsage.effectiveBits` with weights 0.40 / 0.40 / 0.20. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 normalized-score threshold means at least two full-weight signals must agree for a verdict — one strong signal alone produces `"unknown"`.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tag bumps when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
-**The thresholds are currently untuned** — the method tag `truedat-v1-untuned-2026-05-18` signals this. Phase 4 plan ([`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md)) calls out a hand-labeled ~24-track test corpus as the gating step for proper threshold tuning. Consumers should treat all verdicts as advisory until the tag flips to `truedat-v1-YYYY-MM-DD` (corpus-validated).
+**Current method tag: `truedat-v1-corpus1-2026-05-18`** — first calibration pass against a 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`). Two known signal gaps survived this pass (ffmpeg-upsampled fake-hi-res FLACs, LAME-to-LAME re-encode chains) — see CLAUDE.md "Authenticity sprint state" for the Phase 5+ followups. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-YYYY-MM-DD` on each subsequent calibration pass.
 
 ### Fingerprint Output
 
@@ -598,7 +609,7 @@ Place `mbxmoods.json` in your MusicBee Library folder (sibling to `AppData`) or 
 
 - **truedat.exe**: MIT - Copyright (c) 2026 Halrad LLC
 - **System.Text.Json**: MIT - Copyright (c) .NET Foundation (merged into exe)
-- **TagLibSharp**: LGPL-2.1 - [TagLibSharp](https://github.com/mono/taglib-sharp) (merged into exe, used for synthetic track metadata)
+- **TagLibSharp**: LGPL-2.1 - [TagLibSharp](https://github.com/mono/taglib-sharp) (merged into exe; used by fingerprint.v1, codec detection, identity backfill, bitUsage applicability peek, and synthetic-track metadata)
 - **Essentia tools**: AGPL-3.0 - [Essentia](https://github.com/MTG/essentia) by Music Technology Group, Universitat Pompeu Fabra
 - **FFmpeg tools**: GPL-3.0+ - [FFmpeg](https://ffmpeg.org/) (optional dependency)
 
