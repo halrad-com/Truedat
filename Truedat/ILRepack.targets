@@ -1,0 +1,80 @@
+<Project>
+  <!--
+    Truedat ILRepack target.
+
+    The package (ILRepack.Lib.MSBuild.Task) auto-imports this file when it
+    exists, AND defines its own `ILRepack` target *after* the import — its
+    target wins for that name. Its target is no-op'd by an Exists() condition
+    when this file is present, but the name `ILRepack` is taken. So we use a
+    distinct target name (`ILRepackTruedat`) wired AfterTargets="Build".
+
+    What's merged into truedat.exe:
+      - $(TargetName)$(TargetExt) itself
+      - System.Text.Json + transitive deps
+      - TagLibSharp
+      - Microsoft.ML.OnnxRuntime (managed wrapper)
+      - 4 BCL polyfills the ORT wrapper drags in:
+        System.Buffers, System.Memory, System.Numerics.Vectors,
+        System.Runtime.CompilerServices.Unsafe
+      i.e. every managed .dll the build copied to $(OutputPath).
+
+    What's filtered OUT (left as siblings, picked up by build-truedat.cmd):
+      - onnxruntime.dll                (~17 MB)
+      - onnxruntime_providers_shared.dll (~21 KB)
+      - DirectML.dll                   (~18 MB)
+      - DirectML.Debug.dll             (~2 MB, dev-only — dropped before dist)
+
+    ILRepack errors on native DLLs (it merges managed assemblies only), so the
+    filter is mandatory. The 3 production native DLLs ride alongside truedat.exe,
+    the same shape as essentia_streaming_extractor_music.exe / ffmpeg.exe today.
+
+    Filter pattern is the production-twin of tools/ort-spike/ILRepack.targets
+    used in the §5.0 ORT verification spike — see docs/reviews/2026-05-18-ort-net48-spike.md.
+  -->
+
+  <Target Name="ILRepackTruedat" AfterTargets="Build" Condition="$(Configuration.Contains('Release'))">
+    <ItemGroup>
+      <_TruedatMergeInputs Include="$(OutputPath)$(TargetName)$(TargetExt)" />
+      <_TruedatMergeInputs Include="$(OutputPath)*.dll"
+                            Exclude="$(OutputPath)onnxruntime.dll;
+                                     $(OutputPath)onnxruntime_providers_shared.dll;
+                                     $(OutputPath)DirectML.dll;
+                                     $(OutputPath)DirectML.Debug.dll" />
+    </ItemGroup>
+
+    <Message Importance="high" Text="ILRepack (truedat): merging @(_TruedatMergeInputs->Count()) managed assemblies into $(TargetName)$(TargetExt)" />
+    <Message Importance="normal" Text="  input: %(_TruedatMergeInputs.Identity)" />
+
+    <ILRepack
+        Parallel="true"
+        DebugInfo="true"
+        Internalize="true"
+        AllowDuplicateResources="false"
+        InputAssemblies="@(_TruedatMergeInputs)"
+        TargetKind="SameAsPrimaryAssembly"
+        OutputFile="$(OutputPath)$(TargetName)$(TargetExt)"
+    />
+
+    <Message Importance="high" Text="ILRepack (truedat): merged exe produced. 4 native ORT/DirectML DLLs remain as siblings for build-truedat.cmd." />
+  </Target>
+
+  <!--
+    Mirror the package's default CleanReferenceCopyLocalPaths: after the merge,
+    delete the managed DLLs that got folded in, so bin/Release/net48 ends up
+    with just truedat.exe + the 4 native ORT/DirectML DLLs (+ pdb/config).
+
+    Keeps the 4 native DLLs in place so build-truedat.cmd can copy them to
+    dist/truedat/.
+  -->
+  <Target Name="CleanMergedManagedDlls" AfterTargets="ILRepackTruedat"
+          Condition="$(Configuration.Contains('Release')) and '$(ClearOutputDirectory)' != 'False'">
+    <ItemGroup>
+      <_TruedatDllsToDelete Include="$(OutputPath)*.dll"
+                            Exclude="$(OutputPath)onnxruntime.dll;
+                                     $(OutputPath)onnxruntime_providers_shared.dll;
+                                     $(OutputPath)DirectML.dll;
+                                     $(OutputPath)DirectML.Debug.dll" />
+    </ItemGroup>
+    <Delete Files="@(_TruedatDllsToDelete)" />
+  </Target>
+</Project>
