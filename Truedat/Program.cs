@@ -183,6 +183,13 @@ namespace Truedat
         public Program.FingerprintV1? FingerprintV1;
         public string? Chromaprint;
         public double? ChromaprintDuration;
+        // VAM S2.5 — per-track vocal-affect block. Sits on the entry rather than
+        // on Features because it isn't an Essentia output and carries its own
+        // versioning + per-backend nesting (federation policy). Null when VAM
+        // hasn't run on this entry yet (legacy entries, ffmpeg-absent installs,
+        // tracks the pipeline silently skipped). Deliberately NOT joined to the
+        // re-extract canary list — see CLAUDE.md "Re-extract gate".
+        public VocalBlock? Vocal;
     }
 
     public class TrackFingerprint
@@ -1257,7 +1264,13 @@ namespace Truedat
                     });
                     // Phase 5 — combined HF energy + spectral structure (FFT pipe).
                     var afHfEnergyTask = Task.Run(() => ComputeHfAnalysis(analyzeFilePath!, _ffmpegPath.Value));
-                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask });
+                    // S2.5 — single-track VAM. Constructed per --analyze-file
+                    // invocation (one track => one pipeline); disposed at end.
+                    using var afVamPipeline = TryCreateVamPipelineForScan();
+                    var afVocalTask = afVamPipeline != null
+                        ? Task.Run(() => afVamPipeline.AnalyzeTrack(analyzeFilePath!))
+                        : Task.FromResult<VocalBlock?>(null);
+                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask, afVocalTask });
 
                     var (features, error) = afEssentiaTask.Result;
                     var afFileMd5 = afFileMd5Task.Result;
@@ -1268,6 +1281,7 @@ namespace Truedat
                     var afTags = afTagsTask.Result;
                     var afBitUsage = afBitUsageTask.Result;
                     var (afHfRatio, afHfMethod, afHfStructure) = afHfEnergyTask.Result;
+                    var afVocalResult = afVocalTask.Result;
 
                     if (features == null)
                     {
@@ -1617,6 +1631,11 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (md5={flMoodMd5Index?.Count ?? 0}, sha={flMoodShaIndex?.Count ?? 0})");
 
+                // S2.5 — scan-lifetime VAM pipeline shared across worker tasks.
+                using var flVamPipeline = TryCreateVamPipelineForScan();
+                if (flVamPipeline != null && flVamPipeline.BothStagesSkeleton)
+                    Console.Error.WriteLine("  Note: VAM running with skeleton VAD + SER — every track lands instrumental (vocalCoverage=0). Real models arrive in S2.2.5 / S2.3.5.");
+
                 Parallel.ForEach(filePaths, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
@@ -1777,7 +1796,12 @@ namespace Truedat
                         });
                         // Phase 5 — combined HF energy + spectral structure (FFT pipe).
                         var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(filePath, _ffmpegPath.Value));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask });
+                        // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg
+                        // pipe per track at 16 kHz mono float32.
+                        var flVocalTask = flVamPipeline != null
+                            ? Task.Run(() => flVamPipeline.AnalyzeTrack(filePath))
+                            : Task.FromResult<VocalBlock?>(null);
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, flVocalTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
@@ -1786,6 +1810,7 @@ namespace Truedat
                         var tags = tagsTask.Result;
                         var bitUsage = bitUsageTask.Result;
                         var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
+                        var flVocalResult = flVocalTask.Result;
 
                         if (features == null)
                         {
@@ -1812,7 +1837,8 @@ namespace Truedat
                             FileMd5 = fileMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
-                            FingerprintV1 = fingerprintV1
+                            FingerprintV1 = fingerprintV1,
+                            Vocal = flVocalResult
                         };
 
                         // Accumulate for moods file (only saved if --moods is set).
@@ -1826,6 +1852,8 @@ namespace Truedat
                                 trackEntry.AudioMd5 ??= flPrior.AudioMd5;
                                 trackEntry.Chromaprint ??= flPrior.Chromaprint;
                                 trackEntry.ChromaprintDuration ??= flPrior.ChromaprintDuration;
+                                // Federation merge — preserve other backends' entries from prior runs.
+                                trackEntry.Vocal = MergeVocalBlock(flPrior.Vocal, trackEntry.Vocal);
                             }
                             flMoodsTracks[flKey] = trackEntry;
                         }
@@ -2146,6 +2174,15 @@ namespace Truedat
             WarnLowDiskSpace(outputDir);
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Parallelism: {parallelism} threads");
+
+            // S2.5 — scan-lifetime VAM pipeline (CPU EP). Constructed once,
+            // ORT sessions shared across worker tasks (InferenceSession.Run
+            // is internally thread-safe). Null when ffmpeg is absent —
+            // workers handle null gracefully and leave TrackEntry.Vocal null.
+            // Disposed in the finally block at scan end.
+            VamPipeline? vamPipeline = TryCreateVamPipelineForScan();
+            if (vamPipeline != null && vamPipeline.BothStagesSkeleton)
+                Console.WriteLine("  Note: VAM running with skeleton VAD + SER — every track lands instrumental (vocalCoverage=0). Real models arrive in S2.2.5 / S2.3.5.");
             Console.WriteLine();
 
             try
@@ -2469,7 +2506,13 @@ namespace Truedat
                         var bitUsageTask = Task.Run(() => ComputeBitUsage(t.Location, bitUsageDurSec, _ffmpegPath.Value));
                         // Phase 5 — combined HF energy + spectral structure (FFT pipe).
                         var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(t.Location, _ffmpegPath.Value));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask });
+                        // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg pipe per
+                        // track at 16 kHz mono float32. Null pipeline (ffmpeg absent)
+                        // → null block; entry's Vocal stays null.
+                        var vocalTask = vamPipeline != null
+                            ? Task.Run(() => vamPipeline.AnalyzeTrack(t.Location))
+                            : Task.FromResult<VocalBlock?>(null);
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask, vocalTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -2481,6 +2524,7 @@ namespace Truedat
                         var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
                         var bitUsageResult = bitUsageTask.Result;
                         var (hfRatioResult, hfMethodResult, hfStructureResult) = hfEnergyTask.Result;
+                        var vocalResult = vocalTask.Result;
 
                         if (feat == null)
                         {
@@ -2523,7 +2567,11 @@ namespace Truedat
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
                             Chromaprint = priorEntry?.Chromaprint,
-                            ChromaprintDuration = priorEntry?.ChromaprintDuration
+                            ChromaprintDuration = priorEntry?.ChromaprintDuration,
+                            // Federation policy: per-backend nested. Merge into any
+                            // prior block (preserve other backends' entries from
+                            // earlier runs / other machines).
+                            Vocal = MergeVocalBlock(priorEntry?.Vocal, vocalResult)
                         };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -2555,6 +2603,12 @@ namespace Truedat
                 });
             }
             catch (OperationCanceledException) { }
+            finally
+            {
+                // Release VAM ORT sessions back to the runtime. Safe-no-op
+                // when vamPipeline is null (ffmpeg-absent install).
+                vamPipeline?.Dispose();
+            }
 
             sw.Stop();
             var endTime = DateTime.Now;
@@ -5259,6 +5313,65 @@ namespace Truedat
             return 0;
         }
 
+        /// <summary>S2.5 scan-lifetime VAM pipeline factory. Returns null when
+        /// ffmpeg.exe isn't available — VAM needs the s16le 16 kHz mono decode
+        /// pipe, so without ffmpeg there's nothing to feed the model. Workers
+        /// short-circuit on null and leave TrackEntry.Vocal null.
+        ///
+        /// Model paths default to <see cref="AppContext.BaseDirectory"/>/_models/
+        /// (the auto-bootstrap skeleton location); explicit override paths would
+        /// go through a future --vam-model / --vad-model on the production scan
+        /// (currently only the --vam-smoke entry points expose those flags).</summary>
+        static VamPipeline? TryCreateVamPipelineForScan()
+        {
+            var ffmpeg = _ffmpegPath.Value;
+            if (string.IsNullOrEmpty(ffmpeg)) return null;
+            var vadModelPath = Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
+            var vamModelPath = Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
+            try
+            {
+                return new VamPipeline(vadModelPath, vamModelPath, ffmpeg!, Console.Out);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"WARNING: VAM pipeline construction failed ({ex.GetType().Name}: {ex.Message}). Tracks will land with vocal=null.");
+                return null;
+            }
+        }
+
+        /// <summary>Merge a freshly-computed <see cref="VocalBlock"/> into the
+        /// prior entry's block per the per-backend federation policy:
+        /// <list type="bullet">
+        ///   <item>Fresh wins for vocalCoverage + vad audit-trail (newest VAD
+        ///         run reflects the current audio state).</item>
+        ///   <item>Per-backend entries in <c>ByBackend</c> are merged key-by-key.
+        ///         Fresh entry for this backend overwrites the prior entry for
+        ///         that backend; entries for OTHER backends carry forward
+        ///         untouched (so a CPU re-scan doesn't wipe last week's NPU
+        ///         result, and vice versa).</item>
+        /// </list>
+        /// When <paramref name="fresh"/> is null (ffmpeg-absent / pipeline
+        /// failure), the prior block is preserved unchanged. When the prior
+        /// is null and fresh is set, fresh wins.</summary>
+        static VocalBlock? MergeVocalBlock(VocalBlock? prior, VocalBlock? fresh)
+        {
+            if (fresh == null) return prior;
+            if (prior == null || prior.ByBackend == null || prior.ByBackend.Count == 0)
+                return fresh;
+            // Carry forward prior per-backend entries that fresh didn't recompute.
+            if (fresh.ByBackend == null)
+                fresh.ByBackend = new Dictionary<string, VocalBackendResult>(prior.ByBackend, StringComparer.OrdinalIgnoreCase);
+            else
+            {
+                foreach (var kv in prior.ByBackend)
+                {
+                    if (!fresh.ByBackend.ContainsKey(kv.Key))
+                        fresh.ByBackend[kv.Key] = kv.Value;
+                }
+            }
+            return fresh;
+        }
+
         /// <summary>VAM S2.4 multi-track sanity rig. Reads a UTF-8 file list
         /// (one audio path per line, # comments, '-' for stdin), runs the
         /// same decode + VAD + (gated) VAM pipeline as RunVamSmoke per track,
@@ -5460,7 +5573,7 @@ namespace Truedat
         /// Mid-track 30 s window when the track is long enough; otherwise
         /// decode from the start. Mirrors the ComputeBitUsage / ComputeHfAnalysis
         /// subprocess pattern (stderr drained async, 60 s WaitForExit watchdog).</summary>
-        static float[]? DecodeMidTrackPcm16kMono(string audioPath, string ffmpegExe, int durationSec)
+        internal static float[]? DecodeMidTrackPcm16kMono(string audioPath, string ffmpegExe, int durationSec)
         {
             // Use TagLib to peek total duration; pick a mid-track offset when
             // there's enough headroom. Fall back to start when unknown / short.
@@ -6711,6 +6824,11 @@ namespace Truedat
                     jw.WriteNumber("chromaprintDuration", entry.ChromaprintDuration.Value);
             }
 
+            // VAM S2.5 — vocal-affect block. Omitted when null (pipeline absent
+            // / pre-S2.5 entries). Per-backend nesting matches the federation
+            // policy decision (see VocalBlock.cs).
+            WriteVocalBlock(jw, entry.Vocal);
+
             // Phase 4 — TruedatVerdict, computed inline. Emit only when at least one
             // verdict produced a real yes/no decision. "unknown" without source signals
             // (legacy 24-bit FLAC entries lacking Phase 2.5/3 fields, applicability gate
@@ -6782,7 +6900,8 @@ namespace Truedat
                         AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
                         FingerprintV1 = ParseFingerprintV1FromJson(track),
                         Chromaprint = GetStr(track, "chromaprint") is var cpStr && cpStr.Length > 0 ? cpStr : null,
-                        ChromaprintDuration = GetNullableDbl(track, "chromaprintDuration")
+                        ChromaprintDuration = GetNullableDbl(track, "chromaprintDuration"),
+                        Vocal = ParseVocalBlockFromJson(track)
                     };
                 }
                 return allTracks.Count;
@@ -6920,6 +7039,98 @@ namespace Truedat
                 HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
                 HfSpectralStructure = ParseHfSpectralStructureFromJson(track),
             };
+        }
+
+        /// <summary>VAM S2.5 — emit the persisted <c>vocal</c> block. Shape
+        /// matches docs/plans/2026-05-16-vader-vam-roadmap.md §3 with per-backend
+        /// nesting under <c>byBackend</c>. Whole block omitted when null
+        /// (pre-S2.5 entries / pipeline-absent installs).</summary>
+        static void WriteVocalBlock(Utf8JsonWriter jw, VocalBlock? v)
+        {
+            if (v == null) return;
+            jw.WritePropertyName("vocal");
+            jw.WriteStartObject();
+            jw.WriteNumber("vocalCoverage", Math.Round(v.VocalCoverage, 4));
+            if (v.Vad != null)
+            {
+                jw.WritePropertyName("vad");
+                jw.WriteStartObject();
+                if (!string.IsNullOrEmpty(v.Vad.Method))
+                    jw.WriteString("method", v.Vad.Method);
+                if (!string.IsNullOrEmpty(v.Vad.ModelVersion))
+                    jw.WriteString("modelVersion", v.Vad.ModelVersion);
+                jw.WriteNumber("threshold", Math.Round(v.Vad.Threshold, 4));
+                jw.WriteNumber("inferenceMs", Math.Round(v.Vad.InferenceMs, 1));
+                jw.WriteEndObject();
+            }
+            if (v.ByBackend != null && v.ByBackend.Count > 0)
+            {
+                jw.WritePropertyName("byBackend");
+                jw.WriteStartObject();
+                foreach (var kv in v.ByBackend)
+                {
+                    jw.WritePropertyName(kv.Key);
+                    jw.WriteStartObject();
+                    jw.WriteNumber("valence", Math.Round(kv.Value.Valence, 4));
+                    jw.WriteNumber("arousal", Math.Round(kv.Value.Arousal, 4));
+                    jw.WriteNumber("dominance", Math.Round(kv.Value.Dominance, 4));
+                    if (!string.IsNullOrEmpty(kv.Value.ModelVersion))
+                        jw.WriteString("modelVersion", kv.Value.ModelVersion);
+                    jw.WriteNumber("inferenceMs", Math.Round(kv.Value.InferenceMs, 1));
+                    jw.WriteString("analyzedAt", kv.Value.AnalyzedAt.ToString("o"));
+                    jw.WriteEndObject();
+                }
+                jw.WriteEndObject();
+            }
+            jw.WriteEndObject();
+        }
+
+        /// <summary>VAM S2.5 — read the persisted <c>vocal</c> block back from
+        /// mbxmoods.json. Returns null when absent (pre-S2.5 entries) or
+        /// malformed. Tolerant of missing sub-fields — never throws.</summary>
+        static VocalBlock? ParseVocalBlockFromJson(JsonElement track)
+        {
+            if (!track.TryGetProperty("vocal", out var v) || v.ValueKind != JsonValueKind.Object) return null;
+            try
+            {
+                var block = new VocalBlock
+                {
+                    VocalCoverage = GetDbl(v, "vocalCoverage"),
+                };
+                if (v.TryGetProperty("vad", out var vad) && vad.ValueKind == JsonValueKind.Object)
+                {
+                    block.Vad = new VadInfo
+                    {
+                        Method = GetStr(vad, "method"),
+                        ModelVersion = GetStr(vad, "modelVersion") is var mv && mv.Length > 0 ? mv : null,
+                        Threshold = GetDbl(vad, "threshold"),
+                        InferenceMs = GetDbl(vad, "inferenceMs"),
+                    };
+                }
+                if (v.TryGetProperty("byBackend", out var bb) && bb.ValueKind == JsonValueKind.Object)
+                {
+                    block.ByBackend = new Dictionary<string, VocalBackendResult>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var be in bb.EnumerateObject())
+                    {
+                        if (be.Value.ValueKind != JsonValueKind.Object) continue;
+                        DateTime analyzedAt = DateTime.MinValue;
+                        var atStr = GetStr(be.Value, "analyzedAt");
+                        if (!string.IsNullOrEmpty(atStr))
+                            DateTime.TryParse(atStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out analyzedAt);
+                        block.ByBackend[be.Name] = new VocalBackendResult
+                        {
+                            Valence = GetDbl(be.Value, "valence"),
+                            Arousal = GetDbl(be.Value, "arousal"),
+                            Dominance = GetDbl(be.Value, "dominance"),
+                            ModelVersion = GetStr(be.Value, "modelVersion"),
+                            InferenceMs = GetDbl(be.Value, "inferenceMs"),
+                            AnalyzedAt = analyzedAt,
+                        };
+                    }
+                }
+                return block;
+            }
+            catch { return null; }
         }
 
         /// <summary>Phase 5 — read the nested hfSpectralStructure block back from
@@ -8314,7 +8525,11 @@ namespace Truedat
                 AudioStreamSha256Source = refreshedShaSource ?? source.AudioStreamSha256Source,
                 FingerprintV1 = refreshedFp ?? source.FingerprintV1,
                 Chromaprint = source.Chromaprint,
-                ChromaprintDuration = source.ChromaprintDuration
+                ChromaprintDuration = source.ChromaprintDuration,
+                // VAM S2.5 — preserve across cache reuse. The vocal block
+                // is tied to audio content, not metadata, so it survives
+                // tag-edit re-keys and cross-MD5 / cross-SHA path moves.
+                Vocal = source.Vocal,
             };
         }
 
