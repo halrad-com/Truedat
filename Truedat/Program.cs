@@ -667,6 +667,17 @@ namespace Truedat
             bool selfTest = false;
             int cpuLimit = 0; // 0 = no limit
 
+            // --vam-smoke <audio>  S2.2 end-to-end smoke for VocalAffectStage:
+            //   load model → ffmpeg-decode 30 s @ 16 kHz mono → run inference →
+            //   print I/O metadata + output head/tail. No mbxmoods write,
+            //   no worker-pool integration (T-A3 is its own dispatch).
+            // --vam-model <path>   optional model path override; default is
+            //   <truedat.exe dir>/_models/vam-skeleton.onnx (auto-created from
+            //   the in-tree skeleton bytes if absent).
+            bool vamSmokeMode = false;
+            string? vamSmokePath = null;
+            string? vamModelPath = null;
+
             // --chunk M/N: split the scan list across machines. Two boxes with the
             // same library run `--chunk 1/2` and `--chunk 2/2` and produce two
             // non-overlapping output files keyed by hostname. Sort + range-slice
@@ -748,6 +759,8 @@ namespace Truedat
                 else if (canonical == "chunk" && i + 1 < args.Length && TryParseChunk(args[i + 1], out var cIdx, out var cTot))
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "self-test") selfTest = true;
+                else if (canonical == "vam-smoke" && i + 1 < args.Length) { vamSmokeMode = true; vamSmokePath = args[++i]; }
+                else if (canonical == "vam-model" && i + 1 < args.Length) vamModelPath = args[++i];
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -758,6 +771,12 @@ namespace Truedat
             if (selfTest)
             {
                 Environment.ExitCode = RunSelfTest();
+                return;
+            }
+
+            if (vamSmokeMode)
+            {
+                Environment.ExitCode = RunVamSmoke(vamSmokePath!, vamModelPath);
                 return;
             }
 
@@ -885,6 +904,9 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --vam-smoke <f>     VAM S2.2 single-track smoke: load VocalAffectStage, decode <f> @ 16 kHz mono,");
+                Console.WriteLine("                      run one inference, print model I/O + output. Diagnostic only.");
+                Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -1849,6 +1871,9 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --vam-smoke <f>     VAM S2.2 single-track smoke: load VocalAffectStage, decode <f> @ 16 kHz mono,");
+                Console.WriteLine("                      run one inference, print model I/O + output. Diagnostic only.");
+                Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -5083,6 +5108,146 @@ namespace Truedat
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
             return failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>VAM S2.2 end-to-end smoke. Loads the VocalAffectStage,
+        /// ffmpeg-decodes 30 s of mid-track audio @ 16 kHz mono float32,
+        /// runs one inference, and prints the model contract + output
+        /// head/tail. Diagnostic only — no mbxmoods.json, no TrackFeatures
+        /// field, no schema commit. Schema additions land in S2.5.</summary>
+        static int RunVamSmoke(string audioPath, string? modelPathOverride)
+        {
+            if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
+            {
+                Console.Error.WriteLine($"Error: audio file not found: {audioPath}");
+                return 1;
+            }
+            var ffmpeg = _ffmpegPath.Value;
+            if (string.IsNullOrEmpty(ffmpeg))
+            {
+                Console.Error.WriteLine("Error: ffmpeg.exe required for --vam-smoke (audio decode path).");
+                return 1;
+            }
+
+            // Default: <truedat.exe dir>/_models/vam-skeleton.onnx. Resolves
+            // correctly whether the exe is invoked from dist/truedat/ or via
+            // an absolute path.
+            string modelPath = !string.IsNullOrEmpty(modelPathOverride)
+                ? modelPathOverride!
+                : Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
+
+            Console.WriteLine($"[vam-smoke] audio: {audioPath}");
+            Console.WriteLine($"[vam-smoke] model: {modelPath}");
+
+            using var vam = new VocalAffectStage(modelPath, Console.Out);
+            Console.WriteLine(vam.Describe());
+
+            var pcm = DecodeMidTrackPcm16kMono(audioPath, ffmpeg!, durationSec: 30);
+            if (pcm == null || pcm.Length == 0)
+            {
+                Console.Error.WriteLine("Error: ffmpeg returned no audio samples.");
+                return 1;
+            }
+            Console.WriteLine($"[vam-smoke] decoded {pcm.Length} samples ({pcm.Length / 16000.0:F2} s @ 16 kHz mono float32)");
+
+            var sw = Stopwatch.StartNew();
+            var output = vam.Run(pcm);
+            sw.Stop();
+            Console.WriteLine($"[vam-smoke] inference: {output.Length} output float(s) in {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            // Skeleton model is Identity, so output should equal input bit-for-bit.
+            // Real wav2vec2 model output will be V/A/D scalars; head/tail still
+            // shows them. This is sanity-check noise, not the gate.
+            int headN = Math.Min(6, output.Length);
+            int tailN = Math.Min(6, output.Length);
+            var head = string.Join(", ", output.Take(headN).Select(f => f.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)));
+            var tail = string.Join(", ", output.Skip(Math.Max(0, output.Length - tailN)).Select(f => f.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)));
+            Console.WriteLine($"[vam-smoke] output head[{headN}]: [{head}]");
+            if (output.Length > 2 * tailN)
+                Console.WriteLine($"[vam-smoke] output tail[{tailN}]: [{tail}]");
+
+            // Skeleton-only sanity check: Identity model means out == in. Surface
+            // any divergence loudly so a misconfigured smoke can't quietly pass.
+            if (output.Length == pcm.Length)
+            {
+                int mismatches = 0;
+                for (int i = 0; i < output.Length; i++)
+                {
+                    if (output[i] != pcm[i]) mismatches++;
+                }
+                if (mismatches == 0)
+                    Console.WriteLine("[vam-smoke] Identity check: PASS (output bit-identical to input — skeleton wiring confirmed)");
+                else
+                    Console.WriteLine($"[vam-smoke] Identity check: {mismatches} sample(s) diverged — model is NOT the skeleton (real SER model probably loaded)");
+            }
+            else
+            {
+                Console.WriteLine($"[vam-smoke] output length ({output.Length}) differs from input length ({pcm.Length}) — non-Identity model loaded");
+            }
+            return 0;
+        }
+
+        /// <summary>ffmpeg-pipe → s16le mono 16 kHz → float32 in [-1, +1].
+        /// Mid-track 30 s window when the track is long enough; otherwise
+        /// decode from the start. Mirrors the ComputeBitUsage / ComputeHfAnalysis
+        /// subprocess pattern (stderr drained async, 60 s WaitForExit watchdog).</summary>
+        static float[]? DecodeMidTrackPcm16kMono(string audioPath, string ffmpegExe, int durationSec)
+        {
+            // Use TagLib to peek total duration; pick a mid-track offset when
+            // there's enough headroom. Fall back to start when unknown / short.
+            double totalDur = 0;
+            try
+            {
+                using var f = TagLib.File.Create(audioPath);
+                totalDur = f.Properties?.Duration.TotalSeconds ?? 0;
+            }
+            catch { /* unreadable → start at 0 */ }
+            double startSec = totalDur > durationSec + 5 ? (totalDur - durationSec) / 2.0 : 0;
+            string ssArg = startSec > 0
+                ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} "
+                : "";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegExe,
+                Arguments = $"-v error {ssArg}-t {durationSec} -i {PathHelper.QuoteArg(audioPath)} -f s16le -ac 1 -ar 16000 pipe:1",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            try
+            {
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
+                using var ms = new MemoryStream();
+                proc.StandardOutput.BaseStream.CopyTo(ms);
+
+                if (!proc.WaitForExit(60_000))
+                {
+                    try { proc.Kill(); } catch { }
+                    return null;
+                }
+                if (proc.ExitCode != 0 && ms.Length == 0) return null;
+
+                var raw = ms.ToArray();
+                int sampleCount = raw.Length / 2;          // int16 = 2 bytes/sample
+                var pcm = new float[sampleCount];
+                const float scale = 1.0f / 32768.0f;
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    short s = (short)(raw[i * 2] | (raw[i * 2 + 1] << 8));
+                    pcm[i] = s * scale;
+                }
+                return pcm;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>Trailing-zero count for a uint32 value; returns 32 for zero.
