@@ -365,6 +365,12 @@ namespace Truedat
         static long _analyzeTicksTotal;
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
+
+        // VAM (vocal affect) is opt-in for scan modes — set by the --vam flag.
+        // When false, TryCreateVamPipelineForScan returns null and no scan path
+        // (MoodsMode / --file-list / --analyze-file) runs the VAM pipeline.
+        // Standalone VAM is the separate --vam-smoke / --vam-smoke-list modes.
+        static bool _vamEnabled = false;
         static bool _audit;
 
 
@@ -791,6 +797,7 @@ namespace Truedat
                 else if (canonical == "vam-model" && i + 1 < args.Length) vamModelPath = args[++i];
                 else if (canonical == "vad-model" && i + 1 < args.Length) vadModelPath = args[++i];
                 else if (canonical == "vam-force") vamForce = true;
+                else if (canonical == "vam") _vamEnabled = true;
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -948,6 +955,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
                 Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
                 Console.WriteLine("  --vam-smoke-list <p> VAM multi-track sanity rig (S2.4). One audio path per line in <p> (UTF-8, # comments,");
@@ -1944,6 +1952,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
                 Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
                 Console.WriteLine("  --vam-smoke-list <p> VAM multi-track sanity rig (S2.4). One audio path per line in <p> (UTF-8, # comments,");
@@ -5330,6 +5339,8 @@ namespace Truedat
         /// (currently only the --vam-smoke entry points expose those flags).</summary>
         static VamPipeline? TryCreateVamPipelineForScan()
         {
+            // Opt-in gate: VAM only runs in a scan when --vam was passed.
+            if (!_vamEnabled) return null;
             var ffmpeg = _ffmpegPath.Value;
             if (string.IsNullOrEmpty(ffmpeg)) return null;
             var vadModelPath = Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
