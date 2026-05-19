@@ -101,6 +101,19 @@ Plan: [`docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md`](docs/pl
 6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
 7. LAME→LAME re-encode chain detection (the remaining transcode gap)
 
+**Mood-enhancement axes** (decided 2026-05-18 — most are cross-repo handoffs
+or deferred; see [`docs/plans/2026-05-18-mood-axes-mbxhub-handoff.md`](docs/plans/2026-05-18-mood-axes-mbxhub-handoff.md)
+for the Path A architecture):
+
+| Axis | Owner | Status |
+|---|---|---|
+| **Tension** (P1) | MBXHub `mood-formulas` spec | In flight via dispatch B-20260518-204500 — all inputs already in `mbxmoods.json`; Path A |
+| **Dominance** (P1) | MBXHub `mood-formulas` spec | Same dispatch as Tension; ships as a follow-on commit per "one at a time" |
+| **Genre fingerprint** | — | **CUT.** Existing ID3 `genre` tag is already in `mbxmoods.json`; audio-derived prediction would need either ~50-200 MB Essentia SVM models (blows up the single-exe distribution) or an ONNX classifier (gated on the §5.0 ORT spike). Maybe revisit as part of a future ML extension once the ORT path is unlocked for VAM. |
+| **Section-aware mood** (P2) | Truedat extraction | Parked — structural schema change (per-section arrays vs scalars); needs MBXHub-side consumer changes and a new validation corpus. Future phase. |
+| **VADER lyrical sentiment** | — | **PARKED indefinitely.** Lyrics supply chain — runtime fetching is off-limits per offline-first invariant; library coverage = whatever fraction has tagged USLT/SYLT (low). Revisit only if a lyrics-curation flow exists upstream. |
+| **VAM (vocal affect)** | Truedat (in-process ONNX) | Active design exists at [`docs/plans/2026-05-16-vader-vam-roadmap.md`](docs/plans/2026-05-16-vader-vam-roadmap.md); gated on the §5.0 ORT verification spike (1 day, not yet run). |
+
 **Phase 5 — ML-derived weights for the explicit voter** (spike, not a
 rewrite): once the explicit voter from Phase 4 is running on the live
 library, every scanned track becomes a candidate for a labeled corpus.
