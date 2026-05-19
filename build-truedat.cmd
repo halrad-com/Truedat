@@ -15,6 +15,7 @@ where dotnet >nul 2>&1
 if errorlevel 1 (
     echo ERROR: .NET SDK not found in PATH
     echo Install with: winget install Microsoft.DotNet.SDK.8
+    pause
     exit /b 1
 )
 
@@ -41,16 +42,19 @@ echo Copying ORT/DirectML native siblings...
 copy /Y "%ORTBIN%\onnxruntime.dll" "dist\truedat\" >nul
 if errorlevel 1 (
     echo ERROR: onnxruntime.dll not produced by build
+    pause
     exit /b 1
 )
 copy /Y "%ORTBIN%\onnxruntime_providers_shared.dll" "dist\truedat\" >nul
 if errorlevel 1 (
     echo ERROR: onnxruntime_providers_shared.dll not produced by build
+    pause
     exit /b 1
 )
 copy /Y "%ORTBIN%\DirectML.dll" "dist\truedat\" >nul
 if errorlevel 1 (
     echo ERROR: DirectML.dll not produced by build
+    pause
     exit /b 1
 )
 echo Done: onnxruntime.dll, onnxruntime_providers_shared.dll, DirectML.dll
@@ -66,4 +70,3 @@ echo Copy dist\truedat\ contents to any folder and run:
 echo   truedat.exe "iTunes Music Library.xml"
 echo   truedat.exe "iTunes Music Library.xml" --fingerprint
 echo.
-pause
