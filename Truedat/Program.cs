@@ -164,7 +164,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23 files; 8/8 hi-res classified correctly: 5/5 real → "yes", 3/3 fake-upsampled → "unknown")
+        public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
     }
 
     class TrackEntry
@@ -4853,10 +4853,13 @@ namespace Truedat
                 // Imaging symmetry — Pearson r between mag2[i] and mag2[mirror(i)] over
                 // bins in [hfStart, mirrorEnd). Single-pass formula; skip windows where
                 // either band lacks variance (all bins equal → undefined r).
-                int n = mirrorEnd - hfStart;
-                if (n >= 4)
+                // usedN tracks pairs ACTUALLY accumulated (some `i` get skipped when the
+                // partner falls outside the source band); using the loop iteration count
+                // in the Pearson denominator produces a biased r.
+                if (mirrorEnd - hfStart >= 4)
                 {
                     double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+                    int usedN = 0;
                     for (int i = hfStart; i < mirrorEnd; i++)
                     {
                         int mirror = 2 * origNyqBin - i;
@@ -4866,11 +4869,13 @@ namespace Truedat
                         sx += x; sy += y;
                         sxx += x * x; syy += y * y;
                         sxy += x * y;
+                        usedN++;
                     }
-                    double denom2 = (n * sxx - sx * sx) * (n * syy - sy * sy);
+                    if (usedN < 4) return;
+                    double denom2 = (usedN * sxx - sx * sx) * (usedN * syy - sy * sy);
                     if (denom2 > 0)
                     {
-                        double r = (n * sxy - sx * sy) / Math.Sqrt(denom2);
+                        double r = (usedN * sxy - sx * sy) / Math.Sqrt(denom2);
                         if (!double.IsNaN(r) && !double.IsInfinity(r))
                         {
                             if (r < -1) r = -1;
