@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+// SkeletonOnnx (shared with VadStage) lives in SkeletonOnnx.cs — same namespace.
 
 namespace Truedat
 {
@@ -52,7 +53,8 @@ namespace Truedat
                 log.WriteLine(
                     $"[vam] model file not found at '{modelPath}' — writing development skeleton " +
                     $"(Identity op, NOT a real SER model). Replace before S2.5 ship.");
-                File.WriteAllBytes(modelPath, SkeletonOnnx.BuildIdentityModel());
+                File.WriteAllBytes(modelPath, SkeletonOnnx.BuildIdentityModel(
+                    inputName: "audio", outputName: "audio_out", graphName: "vam_skeleton"));
             }
 
             // CPU EP only for S2.2. DirectML EP (GPU/NPU) is S3 — explicitly
@@ -124,134 +126,6 @@ namespace Truedat
             if (_disposed) return;
             _session?.Dispose();
             _disposed = true;
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // SkeletonOnnx — minimal in-tree ONNX byte builder.
-        //
-        // Adapted from tools/ort-spike/Program.cs TinyOnnx (the §5.0 verification
-        // spike), with the second dim switched from a fixed int (dim_value) to
-        // a symbolic name (dim_param "T") so the skeleton accepts any audio
-        // length. ~150 bytes of ONNX, all literal.
-        //
-        // This whole class disappears when the real SER model lands in S2.2.5+.
-        // ─────────────────────────────────────────────────────────────────────
-        private static class SkeletonOnnx
-        {
-            public static byte[] BuildIdentityModel()
-            {
-                // TensorShapeProto.Dimension messages
-                var dim1 = WriteMessage(w => WriteVarintField(w, fieldNumber: 1, value: 1));   // dim_value = 1
-                var dimT = WriteMessage(w =>                                                    // dim_param = "T"
-                {
-                    WriteTag(w, fieldNumber: 2, wireType: 2);
-                    WriteLengthDelimitedString(w, "T");
-                });
-
-                // TensorShapeProto: dim (repeated, field 1, message)
-                var shape = WriteMessage(w =>
-                {
-                    WriteTag(w, 1, 2); WriteLengthDelimitedBytes(w, dim1);
-                    WriteTag(w, 1, 2); WriteLengthDelimitedBytes(w, dimT);
-                });
-
-                // TypeProto.Tensor: elem_type=1 (FLOAT, field 1), shape (field 2, message)
-                var tensorTypeInner = WriteMessage(w =>
-                {
-                    WriteVarintField(w, fieldNumber: 1, value: 1);
-                    WriteTag(w, 2, 2); WriteLengthDelimitedBytes(w, shape);
-                });
-
-                // TypeProto: tensor_type (field 1, message)
-                var typeProto = WriteMessage(w =>
-                {
-                    WriteTag(w, 1, 2); WriteLengthDelimitedBytes(w, tensorTypeInner);
-                });
-
-                byte[] makeValueInfo(string name) => WriteMessage(w =>
-                {
-                    WriteTag(w, 1, 2); WriteLengthDelimitedString(w, name);
-                    WriteTag(w, 2, 2); WriteLengthDelimitedBytes(w, typeProto);
-                });
-                var vinIn  = makeValueInfo("audio");
-                var vinOut = makeValueInfo("audio_out");
-
-                // NodeProto: input[0]="audio" (field 1, repeated string),
-                //            output[0]="audio_out" (field 2, repeated string),
-                //            op_type="Identity" (field 4)
-                var node = WriteMessage(w =>
-                {
-                    WriteTag(w, 1, 2); WriteLengthDelimitedString(w, "audio");
-                    WriteTag(w, 2, 2); WriteLengthDelimitedString(w, "audio_out");
-                    WriteTag(w, 4, 2); WriteLengthDelimitedString(w, "Identity");
-                });
-
-                // GraphProto: node (1, repeated message), name (2, string),
-                //             input (11, repeated message), output (12, repeated message)
-                var graph = WriteMessage(w =>
-                {
-                    WriteTag(w, 1, 2);  WriteLengthDelimitedBytes(w, node);
-                    WriteTag(w, 2, 2);  WriteLengthDelimitedString(w, "vam_skeleton");
-                    WriteTag(w, 11, 2); WriteLengthDelimitedBytes(w, vinIn);
-                    WriteTag(w, 12, 2); WriteLengthDelimitedBytes(w, vinOut);
-                });
-
-                // OperatorSetIdProto: version=18 (field 2). Domain "" omitted (proto3 default).
-                var opsetImport = WriteMessage(w =>
-                {
-                    WriteVarintField(w, fieldNumber: 2, value: 18);
-                });
-
-                // ModelProto: ir_version=8 (1), producer_name (2), graph (7), opset_import (8)
-                var model = WriteMessage(w =>
-                {
-                    WriteVarintField(w, fieldNumber: 1, value: 8);
-                    WriteTag(w, 2, 2); WriteLengthDelimitedString(w, "truedat-vam-skeleton");
-                    WriteTag(w, 7, 2); WriteLengthDelimitedBytes(w, graph);
-                    WriteTag(w, 8, 2); WriteLengthDelimitedBytes(w, opsetImport);
-                });
-
-                return model;
-            }
-
-            private static byte[] WriteMessage(Action<MemoryStream> body)
-            {
-                using var ms = new MemoryStream();
-                body(ms);
-                return ms.ToArray();
-            }
-
-            private static void WriteTag(Stream s, int fieldNumber, int wireType)
-                => WriteVarintRaw(s, (ulong)((fieldNumber << 3) | wireType));
-
-            private static void WriteVarintField(Stream s, int fieldNumber, long value)
-            {
-                WriteTag(s, fieldNumber, 0);     // wire type 0 = varint
-                WriteVarintRaw(s, (ulong)value);
-            }
-
-            private static void WriteVarintRaw(Stream s, ulong value)
-            {
-                while (value >= 0x80)
-                {
-                    s.WriteByte((byte)(value | 0x80));
-                    value >>= 7;
-                }
-                s.WriteByte((byte)value);
-            }
-
-            private static void WriteLengthDelimitedString(Stream s, string str)
-            {
-                var bytes = Encoding.UTF8.GetBytes(str);
-                WriteVarintRaw(s, (ulong)bytes.Length);
-                s.Write(bytes, 0, bytes.Length);
-            }
-
-            private static void WriteLengthDelimitedBytes(Stream s, byte[] bytes)
-            {
-                WriteVarintRaw(s, (ulong)bytes.Length);
-                s.Write(bytes, 0, bytes.Length);
-            }
         }
     }
 }
