@@ -1,0 +1,46 @@
+<Project>
+  <!--
+    Custom ILRepack target for the ORT spike (Step 6 verification).
+
+    Differs from the default ILRepack.Lib.MSBuild.Task target in two ways:
+
+    1. Output filename is `ilrepacked-ortspike.exe` (NOT $(TargetName)$(TargetExt)),
+       so the un-merged `ortspike.exe` is preserved alongside. The spike's
+       Step 6 code spawns the merged exe to prove it still runs inference.
+
+    2. Native ORT/DirectML DLLs are filtered out of InputAssemblies. ILRepack
+       only merges managed assemblies; passing native DLLs to it errors out.
+       Native DLLs (onnxruntime.dll, DirectML.dll, etc.) stay as siblings — same
+       deployment shape as essentia/ffmpeg today.
+
+    Skipping CleanReferenceCopyLocalPaths too — we WANT the native DLLs to stay
+    in the output directory next to both exes.
+  -->
+
+  <Target Name="ILRepackSpike" AfterTargets="Build" Condition="$(Configuration.Contains('Release'))">
+    <ItemGroup>
+      <SpikeMergeInputs Include="$(OutputPath)$(TargetName)$(TargetExt)" />
+      <SpikeMergeInputs Include="$(OutputPath)Microsoft.ML.OnnxRuntime.dll" Condition="Exists('$(OutputPath)Microsoft.ML.OnnxRuntime.dll')" />
+      <SpikeMergeInputs Include="$(OutputPath)System.Buffers.dll" Condition="Exists('$(OutputPath)System.Buffers.dll')" />
+      <SpikeMergeInputs Include="$(OutputPath)System.Memory.dll" Condition="Exists('$(OutputPath)System.Memory.dll')" />
+      <SpikeMergeInputs Include="$(OutputPath)System.Numerics.Vectors.dll" Condition="Exists('$(OutputPath)System.Numerics.Vectors.dll')" />
+      <SpikeMergeInputs Include="$(OutputPath)System.Runtime.CompilerServices.Unsafe.dll" Condition="Exists('$(OutputPath)System.Runtime.CompilerServices.Unsafe.dll')" />
+    </ItemGroup>
+
+    <Message Importance="high" Text="ILRepackSpike: merging @(SpikeMergeInputs->Count()) assemblies into ilrepacked-ortspike.exe" />
+    <Message Importance="normal" Text="  input: %(SpikeMergeInputs.Identity)" />
+
+    <ILRepack
+        Parallel="true"
+        DebugInfo="true"
+        Internalize="true"
+        AllowDuplicateResources="false"
+        InputAssemblies="@(SpikeMergeInputs)"
+        TargetKind="Exe"
+        OutputFile="$(OutputPath)ilrepacked-ortspike.exe"
+    />
+
+    <Message Importance="high" Text="ILRepackSpike: produced $(OutputPath)ilrepacked-ortspike.exe (native DLLs stay as siblings)" />
+  </Target>
+
+</Project>
