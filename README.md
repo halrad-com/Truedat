@@ -135,7 +135,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fin
 - **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
-- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
+- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - Shows per-track rate and estimated completion time.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
@@ -183,7 +183,7 @@ truedat.exe --verify --backfill --moods C:\Music\mbxmoods.json
 REM Identity tier only — fast first pass that doesn't need ffmpeg
 truedat.exe --verify --backfill --backfill-level identity --moods C:\Music\mbxmoods.json
 
-REM Features tier only — fill ffmpeg-driven bitUsage / hfEnergyRatio on a library
+REM Features tier only — fill ffmpeg-driven bitUsage / hfEnergyRatio / hfSpectralStructure on a library
 REM whose identity is already complete (e.g., after the identity-only pass above)
 truedat.exe --verify --backfill --backfill-level features --moods C:\Music\mbxmoods.json
 
@@ -400,8 +400,14 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
         "samplesAnalyzed": 1323000,
         "method": "ffmpeg-s32le-30s-mid-native"
       },
-      "hfEnergyRatio": 0.013421,
-      "hfEnergyMethod": "ffmpeg-rms-pair-22050",
+      "hfEnergyRatio": 0.000028,
+      "hfEnergyMethod": "managed-fft-radix2-30s-mid-native",
+      "hfSpectralStructure": {
+        "flatness": 0.1326,
+        "peakToMean": 41.8,
+        "imagingSymmetry": -0.0408,
+        "method": "managed-fft-radix2-30s-mid-native"
+      },
       "lastModified": "2025-12-01T00:00:00.0000000Z",
       "analysisDuration": 4.2,
       "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
@@ -426,7 +432,7 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
         "hiresGenuine": "yes",
         "hiresConfidence": 1.0,
         "lossyTranscodeLikely": "n/a",
-        "method": "truedat-v1-corpus1-2026-05-18"
+        "method": "truedat-v1-fft-corpus1-2026-05-18"
       }
     }
   }
@@ -459,13 +465,15 @@ Raw features are stored so MBXHub can compute valence/arousal at runtime with tu
 
 `fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`, plus the nested `mp3LameTag` block for MP3s), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
 
-The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) is almost certainly transcoded from a lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `bitUsage.lowestNonZeroBit` lands at 16 is upsampled CD audio. The `truedat.*` verdict block (see below) consumes these fields plus the `bitUsage` / `hfEnergyRatio` signals to produce a per-track classification.
+The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) is almost certainly transcoded from a lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `bitUsage.lowestNonZeroBit` lands at 16 is upsampled CD audio. The `truedat.*` verdict block (see below) consumes these fields plus the `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure` signals to produce a per-track classification.
 
 For MP3 specifically, the `mp3LameTag` block inside `fingerprint.v1` is populated when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`, `infoTagRevision`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
 
 For lossless containers claiming ≥24-bit depth, the `bitUsage` block carries a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity` (fraction of non-zero samples at the resolution boundary), `effectiveBits` (continuous signal for confidence scoring, clipped to [0, 32] — the s32le sample-space ceiling), `samplesAnalyzed`, `method` (currently `ffmpeg-s32le-30s-mid-native`; the trailing `-native` records that the walk runs at the source's native sample rate rather than a forced 44.1k — earlier values without the suffix were biased by resample interpolation noise). The applicability gate runs as a ~5 ms TagLib peek **before** the ffmpeg decode so lossy / sub-24-bit files are skipped without spending 30 s of decode on data that would be meaningless. Populated only during fresh analysis or via `--verify --backfill --backfill-level features|all`. Null on ffmpeg-absent installs.
 
-The orthogonal `hfEnergyRatio` signal is the fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via two concurrent ffmpeg passes (total RMS vs `highpass=f=22050` filtered RMS). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Genuine hi-res music typically lands at 0.001–0.05; upsampled-from-44.1 content lands at 0 or essentially zero. The `hfEnergyMethod` companion field carries the algorithm identifier (currently `ffmpeg-rms-pair-22050`). Together, `bitUsage` and `hfEnergyRatio` are the two independent signals the verdict block weights to answer "is this 24/96 claim genuine?".
+The orthogonal `hfEnergyRatio` signal is the fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via a hand-rolled radix-2 FFT walk over 4096-sample Hann-windowed frames (50 % overlap). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Bin-sharp values run small (genuine 24/96 hi-res lands at ~1e-5; upsampled-from-44.1 content lands at literal 0 after Lanczos suppression). The `hfEnergyMethod` companion field carries the algorithm identifier (currently `managed-fft-radix2-30s-mid-native`).
+
+The same FFT pass also emits `hfSpectralStructure: { flatness, peakToMean, imagingSymmetry, method }` — Wiener-entropy flatness over the HF band, peak-to-mean ratio of HF bins, and Pearson correlation of HF bins against their mirror partners in the source band. The Phase 5 signal catches ffmpeg-upsampled fake hi-res that the bit-level signals (`bitUsage`) miss entirely: upsampled content has very low flatness (energy in a few narrow imaging spikes against an otherwise-empty HF band) and high peak-to-mean (often 80–180), while genuine HF content lands either broadband (orchestral, flatness ~0.5) or peaky-but-uncorrelated-with-mid-band (synthesised cymbals, flatness ~0.01 but with one dominant harmonic). Together, `bitUsage`, `hfEnergyRatio`, and `hfSpectralStructure` are the three independent signals the verdict block weights to answer "is this 24/96 claim genuine?".
 
 ### Authenticity verdict (`truedat.*` block)
 

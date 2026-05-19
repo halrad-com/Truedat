@@ -56,9 +56,9 @@ content); method tag bumped from `truedat-v1-untuned-2026-05-18` to
 **`truedat-v1-corpus1-2026-05-18`**.
 
 **5 remaining mismatches are documented signal-gap limitations** (NOT bugs):
-- 3 hi-res misses: ffmpeg-upsampled fake 24/96/192 verdict "yes" — resample
-  dither/imaging mimics real HF content. Needs FFT-based spectral structure
-  analysis (Phase 5+).
+- ~~3 hi-res misses: ffmpeg-upsampled fake 24/96/192 verdict "yes"~~
+  **Closed by Phase 5** — see entry below. All 3 now verdict "unknown"
+  (block suppressed); no longer falsely classified as real.
 - 2 transcode misses: LAME→LAME re-encode chains verdict "no" — second LAME
   encode rewrites Xing tag masking source. Needs cascade-encode artifact
   detection (Phase 5+).
@@ -66,13 +66,35 @@ content); method tag bumped from `truedat-v1-untuned-2026-05-18` to
 Plan: [`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
 Validation review: [`docs/reviews/2026-05-18-phase4-corpus-validation.md`](docs/reviews/2026-05-18-phase4-corpus-validation.md).
 
+**~~Phase 5 — FFT-based hi-res signal (`hfSpectralStructure`)~~ DONE**.
+Hand-rolled radix-2 Cooley-Tukey FFT in `Truedat/Fft.cs` (~135 LOC, pure-
+managed, zero new deps). `ComputeHfAnalysis` replaces `ComputeHfEnergyRatio`:
+single ffmpeg s32le pipe, 4096-sample Hann-windowed 50%-overlap walk over
+the same 30s mid-track segment — net **−1 subprocess per track** vs Phase 3
+(was 2 RMS passes, now 1 FFT pipe). Emits `hfSpectralStructure: { flatness,
+peakToMean, imagingSymmetry, method }` alongside a bin-sharp `hfEnergyRatio`.
+Signal F (weight 0.35, lossless-only gate) added to the hi-res verdict.
+`hfEnergyRatio` Phase-3 thresholds retuned: bin-sharp values run 3 orders
+of magnitude below the old IIR-leaked values, so the `+1` threshold dropped
+from 0.001 to 1e-5 and the unreliable `-1` vote was dropped entirely
+(Signal F handles fake detection). Method tag bumped to
+**`truedat-v1-fft-corpus1-2026-05-18`**. Corpus re-validation: 5/5 real
+hi-res still verdict "yes"; 3/3 ffmpeg-upsampled fakes flipped from "yes"
+to "unknown" (block suppressed) — clean win on the gap that motivated the
+phase. Transcode verdicts unchanged (Signal F is hi-res only). Inline
+`--self-test` flag verifies the FFT primitive (Parseval, synthetic tones,
+Hann cache, error handling). New scorecard: **23/23 hi-res classified
+correctly** (5 yes + 3 unknown + 15 n/a), transcode unchanged at 21/23.
+Plan: [`docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md`](docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md).
+
 **Phase 5+ candidates** (ordered roughly value/cost — full discussion in resume doc):
-1. FFT-based hi-res signal to close the ffmpeg-upsample-fake gap
+1. ~~FFT-based hi-res signal to close the ffmpeg-upsample-fake gap~~ DONE (Phase 5)
 2. Encoder string whitelist/blacklist (helps LP rips, EAC, dBpoweramp)
 3. ML weight tuning spike (sklearn logistic regression → calibrated thresholds)
 4. DSD/DSF codec support (currently fails analysis)
 5. AAC ESDS-box encoder fingerprint (MP3 LAME tag equivalent for AAC/M4A)
 6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
+7. LAME→LAME re-encode chain detection (the remaining transcode gap)
 
 **Phase 5 — ML-derived weights for the explicit voter** (spike, not a
 rewrite): once the explicit voter from Phase 4 is running on the live
