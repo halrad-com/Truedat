@@ -553,12 +553,15 @@ namespace Truedat
         /// File extensions for audio formats Essentia cannot decode. Surfaced as a
         /// distinct "unsupported format" bucket by --check-filenames so users can
         /// see them up-front rather than discovering analysis failures one-by-one.
-        /// Also skipped during --folder enumeration.
+        /// Also filtered out during --folder enumeration and skipped at scan entry
+        /// by --analyze-file, --file-list, and MoodsMode (Phase 5.1) — rows land
+        /// in mbxmoods-skipped.csv with reason "unsupported codec: DSD".
         /// </summary>
         static readonly HashSet<string> UnsupportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             ".dsf",   // Sony DSD format
-            ".dff"    // Philips DSDIFF format
+            ".dff",   // Philips DSDIFF format
+            ".dsd"    // raw DSD stream
         };
 
         /// <summary>
@@ -1024,6 +1027,21 @@ namespace Truedat
                     return;
                 }
 
+                // Phase 5.1 — DSD/DSF skip: ffmpeg + this Essentia build can't decode DSD;
+                // bail before invoking TagLib / Essentia / fingerprint helpers.
+                if (IsUnsupportedExtensionForAnalysis(analyzeFilePath))
+                {
+                    var afSkipExt = Path.GetExtension(analyzeFilePath);
+                    var afSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                        ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
+                        : Environment.CurrentDirectory;
+                    var afSkippedPath = Path.Combine(afSkippedDir, "mbxmoods-skipped.csv");
+                    AppendSkipped(afSkippedPath, analyzeFilePath!, afSkipExt ?? "", "unsupported codec: DSD");
+                    Console.Error.WriteLine($"[skipped DSD] {analyzeFilePath}");
+                    Environment.ExitCode = 0;
+                    return;
+                }
+
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
@@ -1430,6 +1448,16 @@ namespace Truedat
             {
                 List<string> filePaths;
 
+                // Phase 5.1 — skipped-CSV resolves like errors.csv would: next to the
+                // moods file if --moods is set, else under the folder for --folder mode,
+                // else current dir. Folder walk and worker both append rows here.
+                string flSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                    ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
+                    : (folderMode && !string.IsNullOrEmpty(folderPath)
+                        ? Path.GetFullPath(folderPath)
+                        : Environment.CurrentDirectory);
+                var flSkippedPath = Path.Combine(flSkippedDir, "mbxmoods-skipped.csv");
+
                 if (folderMode)
                 {
                     Console.Error.WriteLine($"Walking folder: {folderPath}");
@@ -1439,7 +1467,13 @@ namespace Truedat
                     {
                         var ext = Path.GetExtension(p);
                         if (string.IsNullOrEmpty(ext)) continue;
-                        if (UnsupportedExtensions.Contains(ext)) { unsupportedCount++; continue; }
+                        if (UnsupportedExtensions.Contains(ext))
+                        {
+                            unsupportedCount++;
+                            AppendSkipped(flSkippedPath, p, ext, "unsupported codec: DSD");
+                            Console.Error.WriteLine($"[skipped DSD] {p}");
+                            continue;
+                        }
                         if (AudioExtensions.Contains(ext)) walked.Add(p);
                     }
                     filePaths = walked;
@@ -1499,6 +1533,7 @@ namespace Truedat
                 var flCachedByMd5Cross = 0;
                 var flCachedByShaCross = 0;
                 var flFailed = 0;
+                var flDsdSkipped = 0;
                 var flErrors = new ConcurrentBag<string>();
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1529,6 +1564,18 @@ namespace Truedat
                         Interlocked.Increment(ref flFailed);
                         flErrors.Add($"{filePath}: file not found");
                         Console.Error.WriteLine($"[SKIP] {filePath}: file not found");
+                        return;
+                    }
+
+                    // Phase 5.1 — DSD/DSF skip: bail before any TagLib / Essentia /
+                    // fingerprint work. (--folder mode already filters at walk time;
+                    // this catches --file-list and stdin sources.)
+                    if (IsUnsupportedExtensionForAnalysis(filePath))
+                    {
+                        var flSkipExt = Path.GetExtension(filePath);
+                        AppendSkipped(flSkippedPath, filePath, flSkipExt, "unsupported codec: DSD");
+                        Console.Error.WriteLine($"[skipped DSD] {Path.GetFileName(filePath)}");
+                        Interlocked.Increment(ref flDsdSkipped);
                         return;
                     }
 
@@ -1755,6 +1802,7 @@ namespace Truedat
                         cachedByMd5Cross = flCachedByMd5Cross,
                         cachedByShaCross = flCachedByShaCross,
                         failed = flFailed,
+                        skipped = flDsdSkipped,
                         elapsed = flSw.Elapsed.TotalSeconds,
                         errors = flErrors.ToArray()
                     };
@@ -1763,7 +1811,7 @@ namespace Truedat
                     Console.WriteLine(summaryJson);
                 }
 
-                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed in {flSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped in {flSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -1920,6 +1968,11 @@ namespace Truedat
             var errorsPath = Path.Combine(outputDir, "mbxmoods-errors.csv");
             if (chunkHostSuffix != null)
                 errorsPath = InsertFilenameSuffix(errorsPath, chunkHostSuffix);
+            // Phase 5.1 — DSD/DSF skip ledger. Same dir / chunk-suffix convention
+            // as errors.csv so two-machine scans don't stomp each other.
+            var skippedPath = Path.Combine(outputDir, "mbxmoods-skipped.csv");
+            if (chunkHostSuffix != null)
+                skippedPath = InsertFilenameSuffix(skippedPath, chunkHostSuffix);
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues);
@@ -1988,6 +2041,7 @@ namespace Truedat
             int cachedCount = 0;
             int analyzed = 0;
             int skipped = 0;
+            int dsdSkipped = 0;
             int failed = 0;
             int timedOut = 0;
             int processed = 0;
@@ -2032,6 +2086,18 @@ namespace Truedat
                     {
                         var pct = (current * 100) / total;
                         var eta = FormatEta(sw.Elapsed, current, total);
+
+                        // Phase 5.1 — DSD/DSF skip: bail before any cache lookup,
+                        // TagLib, Essentia, or fingerprint helper. Existing entries
+                        // in allTracks (if any) pass through unchanged on save.
+                        if (IsUnsupportedExtensionForAnalysis(t.Location))
+                        {
+                            var skipExt = Path.GetExtension(t.Location);
+                            AppendSkipped(skippedPath, t.Location, skipExt, "unsupported codec: DSD");
+                            Console.WriteLine($"[skipped DSD] {t.Location}");
+                            Interlocked.Increment(ref dsdSkipped);
+                            return;
+                        }
 
                         if (existingErrors.TryGetValue(t.Location, out var prevError))
                         {
@@ -2417,9 +2483,11 @@ namespace Truedat
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
+            if (dsdSkipped > 0)
+                Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + failed}");
+            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
@@ -5731,6 +5799,56 @@ namespace Truedat
             }
             result.Add(sb.ToString());
             return result.ToArray();
+        }
+
+        static readonly object _skippedCsvLock = new object();
+
+        /// <summary>
+        /// True when <paramref name="filePath"/>'s extension is in <see cref="UnsupportedExtensions"/>
+        /// (case-insensitive). Scan-entry helper for Phase 5.1 DSD/DSF skip — guards
+        /// Essentia/TagLib/fingerprint helpers in all three scan modes.
+        /// </summary>
+        static bool IsUnsupportedExtensionForAnalysis(string? filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return false;
+            var ext = Path.GetExtension(filePath);
+            return !string.IsNullOrEmpty(ext) && UnsupportedExtensions.Contains(ext);
+        }
+
+        /// <summary>
+        /// Append a row to mbxmoods-skipped.csv (Phase 5.1). Mirrors AppendError's
+        /// retry + append-with-header pattern. Thread-safe via a dedicated static
+        /// lock so worker pools across modes can call this concurrently.
+        /// </summary>
+        static void AppendSkipped(string skippedPath, string filePath, string ext, string reason)
+        {
+            if (string.IsNullOrEmpty(skippedPath)) return;
+            lock (_skippedCsvLock)
+            {
+                for (int attempt = 0; attempt < 5; attempt++)
+                {
+                    try
+                    {
+                        bool needsHeader = !File.Exists(skippedPath) || new FileInfo(skippedPath).Length == 0;
+                        using (var fs = new FileStream(skippedPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                        using (var writer = new StreamWriter(fs, new UTF8Encoding(false)))
+                        {
+                            if (needsHeader) writer.WriteLine("path,extension,reason,timestamp");
+                            writer.WriteLine($"{CsvEscape(filePath)},{CsvEscape(ext)},{CsvEscape(reason)},{DateTime.UtcNow:o}");
+                        }
+                        return;
+                    }
+                    catch (IOException) when (attempt < 4)
+                    {
+                        Thread.Sleep(200 * (attempt + 1));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  Warning: Could not write to skipped CSV: {ex.Message}");
+                        return;
+                    }
+                }
+            }
         }
 
         static void AppendError(string errorsPath, string filePath, string artist, string title,
