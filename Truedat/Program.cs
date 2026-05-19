@@ -2021,6 +2021,7 @@ namespace Truedat
             int crossPathMoods = 0;
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
+            int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
@@ -2127,9 +2128,31 @@ namespace Truedat
                                         // Path-cache hit: same path, same mtime, canary passed.
                                         // Backfill fileMd5 if older entry lacked it.
                                         var refreshedMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location);
-                                        allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null);
+                                        // Backfill canonical audioStreamSha256 if missing — legacy entries
+                                        // from before the Phase 2 identity layer lack it, which silently
+                                        // weakens the cross-SHA cache tier on future runs. Cheap (~50ms).
+                                        string? backfilledSha = null;
+                                        string? backfilledShaSource = null;
+                                        string backfillTag = "";
+                                        if (string.IsNullOrEmpty(existing.AudioStreamSha256))
+                                        {
+                                            long fileSizeForBackfill = 0;
+                                            try { fileSizeForBackfill = new FileInfo(t.Location).Length; } catch { }
+                                            if (fileSizeForBackfill > 0)
+                                            {
+                                                var (sha, shaSource) = ComputeAudioStreamSha256FromFile(t.Location, fileSizeForBackfill, out _);
+                                                if (!string.IsNullOrEmpty(sha))
+                                                {
+                                                    backfilledSha = sha;
+                                                    backfilledShaSource = shaSource;
+                                                    backfillTag = " +sha";
+                                                    Interlocked.Increment(ref shaBackfilled);
+                                                }
+                                            }
+                                        }
+                                        allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
                                         Interlocked.Increment(ref cachedCount);
-                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached)");
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag})");
                                         return;
                                     }
                                 }
@@ -2481,6 +2504,8 @@ namespace Truedat
                 Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
+            if (shaBackfilled > 0)
+                Console.WriteLine($"  SHA backfill: {shaBackfilled}  (legacy cache hits gained audioStreamSha256)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             if (dsdSkipped > 0)
@@ -7752,9 +7777,11 @@ namespace Truedat
             ITunesTrack t,
             DateTime newLastMod,
             string? refreshedFileMd5,
-            FingerprintV1? refreshedFp)
+            FingerprintV1? refreshedFp,
+            string? refreshedSha = null,
+            string? refreshedShaSource = null)
         {
-            return RebuildCacheEntryCore(source, t.TrackId, t.Artist, t.Name, t.Album, t.Genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp);
+            return RebuildCacheEntryCore(source, t.TrackId, t.Artist, t.Name, t.Album, t.Genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
         }
 
         /// <summary>
@@ -7768,9 +7795,11 @@ namespace Truedat
             string artist, string title, string album, string genre, string filePath,
             DateTime newLastMod,
             string? refreshedFileMd5,
-            FingerprintV1? refreshedFp)
+            FingerprintV1? refreshedFp,
+            string? refreshedSha = null,
+            string? refreshedShaSource = null)
         {
-            return RebuildCacheEntryCore(source, source.Features.TrackId, artist, title, album, genre, filePath, newLastMod, refreshedFileMd5, refreshedFp);
+            return RebuildCacheEntryCore(source, source.Features.TrackId, artist, title, album, genre, filePath, newLastMod, refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
         }
 
         static TrackEntry RebuildCacheEntryCore(
@@ -7779,7 +7808,9 @@ namespace Truedat
             string artist, string title, string album, string genre, string filePath,
             DateTime newLastMod,
             string? refreshedFileMd5,
-            FingerprintV1? refreshedFp)
+            FingerprintV1? refreshedFp,
+            string? refreshedSha = null,
+            string? refreshedShaSource = null)
         {
             var sf = source.Features;
             return new TrackEntry
@@ -7845,8 +7876,8 @@ namespace Truedat
                 AnalysisDurationSecs = source.AnalysisDurationSecs,
                 FileMd5 = refreshedFileMd5 ?? source.FileMd5,
                 AudioMd5 = source.AudioMd5,
-                AudioStreamSha256 = source.AudioStreamSha256,
-                AudioStreamSha256Source = source.AudioStreamSha256Source,
+                AudioStreamSha256 = refreshedSha ?? source.AudioStreamSha256,
+                AudioStreamSha256Source = refreshedShaSource ?? source.AudioStreamSha256Source,
                 FingerprintV1 = refreshedFp ?? source.FingerprintV1,
                 Chromaprint = source.Chromaprint,
                 ChromaprintDuration = source.ChromaprintDuration
