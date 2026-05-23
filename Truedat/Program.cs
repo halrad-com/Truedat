@@ -791,6 +791,12 @@ namespace Truedat
                 else if (canonical == "chunk" && i + 1 < args.Length && TryParseChunk(args[i + 1], out var cIdx, out var cTot))
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "self-test") selfTest = true;
+                else if (canonical == "version" || canonical == "v")
+                {
+                    Console.WriteLine(VersionInfo.Display);
+                    Environment.ExitCode = 0;
+                    return;
+                }
                 else if (canonical == "vam-smoke" && i + 1 < args.Length) { vamSmokeMode = true; vamSmokePath = args[++i]; }
                 else if (canonical == "vam-smoke-list" && i + 1 < args.Length) { vamSmokeListMode = true; vamSmokeListPath = args[++i]; }
                 else if (canonical == "vam-csv-out" && i + 1 < args.Length) vamCsvOutPath = args[++i];
@@ -816,6 +822,19 @@ namespace Truedat
                 Console.Error.WriteLine("Error: --vam-smoke and --vam-smoke-list are mutually exclusive.");
                 Environment.ExitCode = 1;
                 return;
+            }
+            // ORT native DLLs are ILRepack-excluded (see ILRepack.targets) and must sit
+            // next to truedat.exe; without them the first VAM/VAD call throws an
+            // unhandled DllNotFoundException at JIT time. Preflight here so any --vam*
+            // mode exits cleanly with a message instead of crashing later.
+            if (vamSmokeMode || vamSmokeListMode || _vamEnabled)
+            {
+                var vamModeLabel = vamSmokeMode ? "--vam-smoke" : vamSmokeListMode ? "--vam-smoke-list" : "--vam";
+                if (!OnnxRuntimePresent(vamModeLabel))
+                {
+                    Environment.ExitCode = 1;
+                    return;
+                }
             }
             if (vamSmokeMode)
             {
@@ -955,6 +974,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
                 Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
@@ -1952,6 +1972,7 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
                 Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
@@ -2062,6 +2083,7 @@ namespace Truedat
                 Path.GetDirectoryName(Path.GetDirectoryName(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))) ?? "");
 
             Console.WriteLine("=== Tool Check ===");
+            Console.WriteLine($"  truedat:    {VersionInfo.Display}");
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
@@ -2071,8 +2093,9 @@ namespace Truedat
 
             if (essentiaExe == null)
             {
-                Console.WriteLine("Essentia extractor not found in any search directory.");
-                Console.WriteLine("Download from: https://essentia.upf.edu/extractors/");
+                Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found in any search directory.");
+                Console.Error.WriteLine("Download from: https://essentia.upf.edu/extractors/");
+                Environment.ExitCode = 2;
                 tee?.Dispose();
                 return;
             }
@@ -3785,6 +3808,23 @@ namespace Truedat
                 if (File.Exists(path)) return path;
             }
             return null;
+        }
+
+        // Verify ORT native DLLs sit next to the exe before any VAM/VAD path touches them.
+        // Excluded from ILRepack by design; absence otherwise surfaces as an unhandled
+        // DllNotFoundException from the first ORT P/Invoke.
+        static bool OnnxRuntimePresent(string mode)
+        {
+            var baseDir = AppContext.BaseDirectory;
+            var ort = Path.Combine(baseDir, "onnxruntime.dll");
+            var shared = Path.Combine(baseDir, "onnxruntime_providers_shared.dll");
+            bool ortOk = File.Exists(ort);
+            bool sharedOk = File.Exists(shared);
+            if (ortOk && sharedOk) return true;
+            Console.Error.WriteLine($"Error: {mode} requires the ONNX Runtime native DLLs next to truedat.exe.");
+            if (!ortOk) Console.Error.WriteLine($"  missing: {ort}");
+            if (!sharedOk) Console.Error.WriteLine($"  missing: {shared}");
+            return false;
         }
 
         /// <summary>

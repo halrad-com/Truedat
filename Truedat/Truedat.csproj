@@ -7,7 +7,40 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <AssemblyName>truedat</AssemblyName>
+    <Version>1.0.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Copyright>Copyright (c) 2026 Halrad LLC</Copyright>
   </PropertyGroup>
+
+  <!-- Stamp git branch + build epoch into a generated source file so VersionInfo.Display
+       can read them at runtime. Pattern mirrors MBXHub.Core's GenerateBranchInfo target.
+       ContinueOnError keeps a missing-git / detached-HEAD build working (branch falls
+       back to "unknown" and VersionInfo treats that the same as main — branch omitted). -->
+  <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
+    <Exec Command="git rev-parse --abbrev-ref HEAD"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitBranchRaw" />
+    </Exec>
+    <PropertyGroup>
+      <_GitBranch Condition="'$(_GitBranchRaw)' != ''">$(_GitBranchRaw)</_GitBranch>
+      <_GitBranch Condition="'$(_GitBranchRaw)' == ''">unknown</_GitBranch>
+      <_BuildEpoch>$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds())</_BuildEpoch>
+      <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
+      <_BuildInfoContent>// &lt;auto-generated/&gt; — written by Truedat.csproj GenerateBuildInfo target.
+namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const long Epoch = $(_BuildEpoch)%3B } }</_BuildInfoContent>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_BuildInfoFile)"
+                      Lines="$(_BuildInfoContent)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(_BuildInfoFile)" Exclude="@(Compile)" />
+    </ItemGroup>
+  </Target>
 
   <!-- ILRepack: Merge System.Text.Json + TagLibSharp + Microsoft.ML.OnnxRuntime
        (managed) + BCL polyfills into single exe. Native ORT/DirectML DLLs ship as
