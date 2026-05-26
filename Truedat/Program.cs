@@ -132,6 +132,13 @@ namespace Truedat
         // spikes (low flatness, high peak-to-mean, high symmetry). Same gating
         // as HfEnergyRatio (sourceSampleRate > 44100 + ffmpeg present).
         public HfSpectralStructure? HfSpectralStructure { get; set; }
+
+        // Sony SensMe / 12 TONE — read fresh on every scan (MC analyses files progressively).
+        // Not stored in the Essentia cache; never copied in RebuildCacheEntryCore.
+        public int[]?   SensmeScores;       // STMO channel scores 0-255, null when no MC analysis
+        public int?     SensmeChannel;      // dominant channel index (argmax of scores)
+        public string?  SensmeChannelName;  // confirmed name, null for unconfirmed indices
+        public double?  SmfmBpm;            // GBPM float32 BPM
     }
 
     /// <summary>--backfill-level scope. Identity = TagLib + cheap file IO; Features =
@@ -1298,7 +1305,9 @@ namespace Truedat
                     var afVocalTask = afVamPipeline != null
                         ? Task.Run(() => afVamPipeline.AnalyzeTrack(analyzeFilePath!))
                         : Task.FromResult<VocalBlock?>(null);
-                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask, afVocalTask });
+                    // SMFM — read fresh every scan; MC analyses files progressively.
+                    var afSmfmTask = Task.Run(() => SmfmReader.TryRead(analyzeFilePath!));
+                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask, afVocalTask, afSmfmTask });
 
                     var (features, error) = afEssentiaTask.Result;
                     var afFileMd5 = afFileMd5Task.Result;
@@ -1310,6 +1319,7 @@ namespace Truedat
                     var afBitUsage = afBitUsageTask.Result;
                     var (afHfRatio, afHfMethod, afHfStructure) = afHfEnergyTask.Result;
                     var afVocalResult = afVocalTask.Result;
+                    var afSmfmResult = afSmfmTask.Result;
 
                     if (features == null)
                     {
@@ -1326,6 +1336,13 @@ namespace Truedat
                     if (afBitUsage != null) features.BitUsage = afBitUsage;
                     if (afHfRatio.HasValue) { features.HfEnergyRatio = afHfRatio; features.HfEnergyMethod = afHfMethod; }
                     if (afHfStructure != null) features.HfSpectralStructure = afHfStructure;
+                    if (afSmfmResult.HasValue)
+                    {
+                        features.SensmeScores      = afSmfmResult.Value.Scores;
+                        features.SensmeChannel     = afSmfmResult.Value.Channel;
+                        features.SensmeChannelName = SmfmReader.ChannelName(afSmfmResult.Value.Channel);
+                        features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, 3);
+                    }
 
                     trackEntry = new TrackEntry
                     {
@@ -1349,6 +1366,11 @@ namespace Truedat
                         trackEntry.Vocal = MergeVocalBlock(afPrior.Vocal, trackEntry.Vocal);
                     }
                 }
+
+                // For cache-hit paths, SMFM wasn't in the concurrent task batch — apply now.
+                // For cache-miss, SensmeScores is already set from afSmfmTask.Result above.
+                if (trackEntry!.Features.SensmeScores == null)
+                    ApplySmfmInPlace(trackEntry.Features, analyzeFilePath!);
 
                 afSw.Stop();
 
@@ -1713,9 +1735,11 @@ namespace Truedat
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(fEx.LastModified))
                                 {
                                     var freshTags = ExtractFileTags(filePath);
-                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                    var flMtimeEntry = RebuildCacheEntryFromTags(
                                         fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, null, null);
+                                    ApplySmfmInPlace(flMtimeEntry.Features, filePath);
+                                    flMoodsTracks[fullPath] = flMtimeEntry;
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMtime);
                                     Console.Error.WriteLine($"[CACHED] {Path.GetFileName(filePath)}");
@@ -1733,9 +1757,11 @@ namespace Truedat
                                         var refreshedMd5 = ComputeFileMd5(filePath);
                                         var refreshedFp = ComputeFingerprintV1(filePath, fileSize2, out _);
                                         var freshTags = ExtractFileTags(filePath);
-                                        flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                        var flShaPathEntry = RebuildCacheEntryFromTags(
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                        ApplySmfmInPlace(flShaPathEntry.Features, filePath);
+                                        flMoodsTracks[fullPath] = flShaPathEntry;
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByShaPath);
                                         Console.Error.WriteLine($"[CACHED·sha] {Path.GetFileName(filePath)}");
@@ -1754,9 +1780,11 @@ namespace Truedat
                                     && xp.Entry.Features.LoudnessMomentary.HasValue)
                                 {
                                     var freshTags = ExtractFileTags(filePath);
-                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                    var flCrossMd5Entry = RebuildCacheEntryFromTags(
                                         xp.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, localMd5, null);
+                                    ApplySmfmInPlace(flCrossMd5Entry.Features, filePath);
+                                    flMoodsTracks[fullPath] = flCrossMd5Entry;
                                     flMoodsTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMd5Cross);
@@ -1778,9 +1806,11 @@ namespace Truedat
                                     var refreshedMd5 = ComputeFileMd5(filePath);
                                     var refreshedFp = ComputeFingerprintV1(filePath, fileSize3, out _);
                                     var freshTags = ExtractFileTags(filePath);
-                                    flMoodsTracks[fullPath] = RebuildCacheEntryFromTags(
+                                    var flCrossShaEntry = RebuildCacheEntryFromTags(
                                         xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                    ApplySmfmInPlace(flCrossShaEntry.Features, filePath);
+                                    flMoodsTracks[fullPath] = flCrossShaEntry;
                                     flMoodsTracks.TryRemove(xs.OldKey, out _);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByShaCross);
@@ -1832,7 +1862,9 @@ namespace Truedat
                         var flVocalTask = flVamPipeline != null
                             ? Task.Run(() => flVamPipeline.AnalyzeTrack(filePath))
                             : Task.FromResult<VocalBlock?>(null);
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, flVocalTask });
+                        // SMFM — read fresh every scan; MC analyses files progressively.
+                        var flSmfmTask = Task.Run(() => SmfmReader.TryRead(filePath));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, flVocalTask, flSmfmTask });
 
                         var (features, error) = essentiaTask.Result;
                         var fileMd5 = fileMd5Task.Result;
@@ -1842,6 +1874,7 @@ namespace Truedat
                         var bitUsage = bitUsageTask.Result;
                         var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
                         var flVocalResult = flVocalTask.Result;
+                        var flSmfmResult = flSmfmTask.Result;
 
                         if (features == null)
                         {
@@ -1859,6 +1892,13 @@ namespace Truedat
                         if (bitUsage != null) features.BitUsage = bitUsage;
                         if (hfRatio.HasValue) { features.HfEnergyRatio = hfRatio; features.HfEnergyMethod = hfMethod; }
                         if (hfStructure != null) features.HfSpectralStructure = hfStructure;
+                        if (flSmfmResult.HasValue)
+                        {
+                            features.SensmeScores      = flSmfmResult.Value.Scores;
+                            features.SensmeChannel     = flSmfmResult.Value.Channel;
+                            features.SensmeChannelName = SmfmReader.ChannelName(flSmfmResult.Value.Channel);
+                            features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, 3);
+                        }
 
                         var trackEntry = new TrackEntry
                         {
@@ -2294,7 +2334,9 @@ namespace Truedat
                                                 }
                                             }
                                         }
-                                        allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
+                                        var mtimeEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
+                                        ApplySmfmInPlace(mtimeEntry.Features, t.Location);
+                                        allTracks[t.Location] = mtimeEntry;
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag})");
                                         return;
@@ -2323,7 +2365,9 @@ namespace Truedat
                                                 // reuse everything else.
                                                 var refreshedMd5 = ComputeFileMd5(t.Location);
                                                 var refreshedFp = ComputeFingerprintV1(t.Location, fileSize, out _);
-                                                allTracks[t.Location] = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
+                                                var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
+                                                ApplySmfmInPlace(shaPathEntry.Features, t.Location);
+                                                allTracks[t.Location] = shaPathEntry;
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByShaPath);
                                                 Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha)");
@@ -2431,6 +2475,7 @@ namespace Truedat
                                         // (audio bytes match, so vocal analysis still applies).
                                         Vocal = xp.Entry.Vocal
                                     };
+                                    ApplySmfmInPlace(allTracks[t.Location].Features, t.Location);
                                     allTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref crossPathMoods);
                                     Interlocked.Increment(ref cachedCount);
@@ -2467,7 +2512,9 @@ namespace Truedat
                                         var refreshedFp = ComputeFingerprintV1(t.Location, fileSizeForSha, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                                        allTracks[t.Location] = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        ApplySmfmInPlace(crossShaEntry.Features, t.Location);
+                                        allTracks[t.Location] = crossShaEntry;
                                         allTracks.TryRemove(xs.OldKey, out _);
                                         Interlocked.Increment(ref crossPathMoods);
                                         Interlocked.Increment(ref cachedByShaCross);
@@ -2550,7 +2597,9 @@ namespace Truedat
                         var vocalTask = vamPipeline != null
                             ? Task.Run(() => vamPipeline.AnalyzeTrack(t.Location))
                             : Task.FromResult<VocalBlock?>(null);
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask, vocalTask });
+                        // SMFM — read fresh every scan; MC analyses files progressively.
+                        var smfmTask = Task.Run(() => SmfmReader.TryRead(t.Location));
+                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask, vocalTask, smfmTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
                         Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
@@ -2563,6 +2612,7 @@ namespace Truedat
                         var bitUsageResult = bitUsageTask.Result;
                         var (hfRatioResult, hfMethodResult, hfStructureResult) = hfEnergyTask.Result;
                         var vocalResult = vocalTask.Result;
+                        var smfmResult = smfmTask.Result;
 
                         if (feat == null)
                         {
@@ -2584,6 +2634,13 @@ namespace Truedat
                         if (bitUsageResult != null) feat.BitUsage = bitUsageResult;
                         if (hfRatioResult.HasValue) { feat.HfEnergyRatio = hfRatioResult; feat.HfEnergyMethod = hfMethodResult; }
                         if (hfStructureResult != null) feat.HfSpectralStructure = hfStructureResult;
+                        if (smfmResult.HasValue)
+                        {
+                            feat.SensmeScores      = smfmResult.Value.Scores;
+                            feat.SensmeChannel     = smfmResult.Value.Channel;
+                            feat.SensmeChannelName = SmfmReader.ChannelName(smfmResult.Value.Channel);
+                            feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, 3);
+                        }
 
                         var lastMod = DateTime.MinValue;
                         try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
@@ -3524,6 +3581,18 @@ namespace Truedat
 
         /// <summary>Per-entry backfill. Identity tier: TagLib + cheap file IO (Tier A
         /// fileMd5, Tier B whole fingerprint.v1, Tier C sub-fields, MP3 LAME tag).
+        /// <summary>Apply a fresh SMFM read to the features of an already-resolved cache entry.
+        /// Called inline at every cache-hit return point. Fast (~5 ms header-only read).</summary>
+        static void ApplySmfmInPlace(TrackFeatures f, string filePath)
+        {
+            var smfm = SmfmReader.TryRead(filePath);
+            if (!smfm.HasValue) return;
+            f.SensmeScores      = smfm.Value.Scores;
+            f.SensmeChannel     = smfm.Value.Channel;
+            f.SensmeChannelName = SmfmReader.ChannelName(smfm.Value.Channel);
+            f.SmfmBpm           = Math.Round(smfm.Value.Bpm, 3);
+        }
+
         /// Features tier: ffmpeg-driven bitUsage + hfEnergyRatio + hfSpectralStructure. Level selects which
         /// tiers run; All (default) does both. Caller must have already SHA-validated
         /// that audio bytes match before invoking — backfill MUST NOT touch entries
@@ -6848,6 +6917,18 @@ namespace Truedat
                     jw.WriteString("method", f.HfSpectralStructure.Method);
                 jw.WriteEndObject();
             }
+            // Sony SensMe / 12 TONE — omit-when-null (tracks MC has not yet analysed).
+            static void WriteOptStr(Utf8JsonWriter w, string name, string? v) { if (v != null) w.WriteString(name, v); }
+            if (f.SensmeScores != null)
+            {
+                jw.WritePropertyName("sensmeScores");
+                jw.WriteStartArray();
+                foreach (var s in f.SensmeScores) jw.WriteNumberValue(s);
+                jw.WriteEndArray();
+                WriteOpt(jw, "sensmeChannel", (double?)f.SensmeChannel);
+                WriteOptStr(jw, "sensmeChannelName", f.SensmeChannelName);
+                if (f.SmfmBpm.HasValue) jw.WriteNumber("smfmBpm", Math.Round(f.SmfmBpm.Value, 3));
+            }
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
@@ -7095,6 +7176,12 @@ namespace Truedat
                 HfEnergyRatio = GetNullableDbl(track, "hfEnergyRatio"),
                 HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
                 HfSpectralStructure = ParseHfSpectralStructureFromJson(track),
+                SensmeScores = track.TryGetProperty("sensmeScores", out var ssEl) && ssEl.ValueKind == JsonValueKind.Array
+                    ? ssEl.EnumerateArray().Select(e => e.GetInt32()).ToArray()
+                    : null,
+                SensmeChannel     = GetNullableInt(track, "sensmeChannel"),
+                SensmeChannelName = GetStr(track, "sensmeChannelName") is var scn && scn.Length > 0 ? scn : null,
+                SmfmBpm           = GetNullableDbl(track, "smfmBpm"),
             };
         }
 
@@ -7676,6 +7763,11 @@ namespace Truedat
         static double? GetNullableDbl(JsonElement el, string name)
         {
             return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : (double?)null;
+        }
+
+        static int? GetNullableInt(JsonElement el, string name)
+        {
+            return el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : (int?)null;
         }
 
         // -- Utility helpers --------------------------------------------------
