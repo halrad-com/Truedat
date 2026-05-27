@@ -17,19 +17,35 @@ namespace Truedat
             public float Bpm;      // GBPM big-endian float32
         }
 
+        // STMO channel -> SensMe tile-name mapping.
+        // Audit trail: smfm/sensme_channels.json (schema_version 2, 2026-05-26 device-Q&A session).
+        // ch0 is ambiguous: both Night and Midnight elevate ch0 with similar floor patterns.
+        //   Left null; consumers must not rely on this index being named until a separator is
+        //   identified. (13 device tiles vs 10 STMO slots = 3 tiles must be derived combinations;
+        //   one of Night/Midnight is likely a derived tile rather than the direct ch0 slot.)
+        // ch6 is unmapped: no single device tile uses ch6 as a primary marker. It is anti-correlated
+        //   with Relax (floor 7) but spikes in some Extreme tracks (Pigs on the Wing 1: ch6=83).
+        //   Likely participates in Sony's multi-channel threshold rules for the 3 derived tiles
+        //   (Extreme / Mellow / Daytime), rather than being a direct tile marker itself.
+        // Prior schema-v1 stub had ch5="Extreme" and ch6="Upbeat"; device-Q&A evidence shows both
+        //   were wrong: ch5 is Morning, Upbeat is ch8. Stub-era ch2/ch3/ch4 names re-validated.
         private static readonly string[] _names = new string[10];
         static SmfmReader()
         {
+            // _names[0] = null;          // Night|Midnight (ambiguous, see audit notes above)
+            _names[1] = "Energetic";
             _names[2] = "Emotional";
             _names[3] = "Lounge";
             _names[4] = "Dance";
-            _names[5] = "Extreme";
-            _names[6] = "Upbeat";
-            // ch0, ch1, ch7, ch8, ch9 remain null until confirmed via device Q&A
+            _names[5] = "Morning";        // schema-v1 stub had "Extreme" — wrong per device Q&A
+            // _names[6] = null;          // unmapped (stub had "Upbeat" — wrong; Upbeat is ch8)
+            _names[7] = "Relax";
+            _names[8] = "Upbeat";
+            _names[9] = "Evening";
         }
 
         /// <summary>Returns the confirmed SensMe channel name for the given index,
-        /// or null for unconfirmed indices (0, 1, 7, 8, 9).</summary>
+        /// or null for unconfirmed/ambiguous indices (currently ch0 and ch6).</summary>
         internal static string? ChannelName(int index) =>
             (uint)index < (uint)_names.Length ? _names[index] : null;
 
