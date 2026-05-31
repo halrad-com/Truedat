@@ -44,27 +44,35 @@ python -c "import numpy, sklearn, scipy; print(numpy.__version__, sklearn.__vers
 
 ## Building your baseline — overview
 
-A V/A baseline is a pair of files **you** produce against **your** library:
+A V/A baseline is a model **you** produce by training against your own
+hand-annotations. The pipeline produces a few intermediate files; **you
+do not construct any of them by hand** — the tools and MBXHub do all
+the file-shaped work, you just listen and tap keys.
 
-| File | Produced by | Purpose |
-|---|---|---|
-| `my-baseline-labels-vN.json` | You, by hand-annotating in step 3 below | Source of truth — your V/A scores for a representative set of your tracks. Keep this; it's the input that lets you retrain whenever the model needs updating. |
-| `my-baseline-model-vN.json`  | `calibrate-valence-arousal.py` (step 4) | Trained Ridge/PCA model. Drop into MBXHub at the AutoQ-expected path. Regenerable from the labels file at any time. |
+| File                        | Produced by                                                     | Purpose                                                                                                                                            |
+| --------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mbxmoods.json`             | `truedat.exe`                                                   | Feature cache for your library (Essentia + identity).                                                                                              |
+| `auto-cal-seed.json`        | `seed-autocal-from-extremes.py` (step 2)                        | 100 quadrant-balanced extreme-track picks chosen analytically from `mbxmoods.json`.                                                                |
+| `auto-cal.m3u`              | `picks-to-m3u.py` (step 2.5)                                    | Playlist of the picks — load this in MusicBee so MBXHub's annotate / tune pages have something to drive playback over.                             |
+| `mbxvam-labels.json`        | MBXHub `/pages/annotate.html` (step 3)                          | Scalar V/A scores per track. **MBXHub writes this automatically** as you annotate — appears in MBXHub's AppData storage path.                      |
+| `mbxtune-pairs.json`        | MBXHub `/pages/tune.html` (step 3, optional)                    | Pairwise A/B comparisons for V/A. **MBXHub writes this automatically.** Optional supplemental signal for the trainer.                              |
+| `my-baseline-model-vN.json` | `calibrate-valence-arousal.py` (step 4)                         | Trained Ridge + PCA model. Drop into MBXHub at the AutoQ-expected path. Regenerable from labels + pairs at any time.                               |
 
-Versioning is your call — bump `vN` whenever you re-annotate or change
-training parameters. The trainer stamps the model with `trainedAt` and
-`anchorsUsed` so you can always trace a model back to a label set.
+Versioning is your call — bump `vN` on the model whenever you re-train.
+The trainer stamps every model with `trainedAt` and `anchorsUsed` so
+you can always trace a model back to a label set.
 
 ## End-to-end workflow
 
 ```
-┌─────────────────┐    ┌────────────────────────────┐    ┌──────────────────┐    ┌──────────────────────────┐    ┌────────────────────────┐
-│ truedat.exe     │ →  │ seed-autocal-from-extremes │ →  │ annotation       │ →  │ calibrate-valence-arousal│ →  │ my-baseline-model-vN   │
-│ (already run)   │    │ .py                        │    │ (mbxhub UI)      │    │ .py                      │    │ .json                  │
-│ mbxmoods.json   │    │ auto-cal-seed.json         │    │ my-baseline-     │    │ Ridge + PCA regression   │    │ → drop into MBXHub     │
-│                 │    │ (corner candidates)        │    │ labels-vN.json   │    │                          │    │   AutoQ resources path │
-└─────────────────┘    └────────────────────────────┘    └──────────────────┘    └──────────────────────────┘    └────────────────────────┘
-   step 1                  step 2                            step 3                  step 4                          step 5 (deploy)
+┌─────────────────┐  ┌────────────────────────────┐  ┌──────────────────┐  ┌────────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────┐
+│ truedat.exe     │→ │ seed-autocal-from-extremes │→ │ picks-to-m3u.py  │→ │ MBXHub /pages/annotate     │→ │ calibrate-valence-arousal│→ │ my-baseline-model-vN │
+│ (already run)   │  │ .py                        │  │                  │  │  + /pages/tune (browser)   │  │ .py                      │  │ .json                │
+│ mbxmoods.json   │  │ auto-cal-seed.json         │  │ auto-cal.m3u     │  │ MBXHub auto-writes:        │  │ Ridge + PCA regression   │  │ → drop into MBXHub   │
+│                 │  │ (corner candidates)        │  │ load in MusicBee │  │  mbxvam-labels.json        │  │                          │  │   AutoQ resources    │
+│                 │  │                            │  │                  │  │  mbxtune-pairs.json (opt)  │  │                          │  │   path               │
+└─────────────────┘  └────────────────────────────┘  └──────────────────┘  └────────────────────────────┘  └──────────────────────────┘  └──────────────────────┘
+   step 1                step 2                          step 2.5             step 3                          step 4                         step 5 (deploy)
 ```
 
 ### Step 1 — produce `mbxmoods.json` with truedat
@@ -93,29 +101,57 @@ Output: `auto-cal-seed.json` (a list of paths to annotate, per quadrant).
 Flags: `--per-quadrant N` (default 25), `--no-artist-dedupe`, `--show-top N`
 (echo top picks per quadrant to stdout).
 
-### Step 3 — hand-annotate those tracks (V/A scores)
+### Step 2.5 — turn the picks into a playlist you can load
 
-**This is the gap in the toolset.** The interactive annotation surface
-currently lives in the MBXHub server (`/annotate` page in a running MBXH
-instance), not in `vam-tools/`. To produce a labels file you currently
-need to:
+```
+python picks-to-m3u.py --picks auto-cal-seed.json --out auto-cal.m3u
+```
 
-1. Run MBXHub locally.
-2. Load the picks from `auto-cal-seed.json` into the annotate page.
-3. Score each track on valence (-1..+1) and arousal (-1..+1).
-4. Export the resulting labels as JSON.
+Emits a single `auto-cal.m3u` containing all 100 picks (25 per quadrant)
+in happy / angry / calm / sad order, grouped via `#EXTGRP`. UTF-8,
+absolute paths emitted verbatim from the picks file, with `#EXTINF`
+lines carrying duration + artist + title for player display.
 
-A standalone CLI/local-web annotator may land here later; until then,
-MBXHub is the annotation tool.
+Load `auto-cal.m3u` in MusicBee (or whichever player you'll annotate
+against). MBXHub's annotate and tune pages drive playback through your
+player, so a queued playlist is the practical hand-off between picks
+and annotation.
+
+### Step 3 — annotate via MBXHub (annotate page + tune page)
+
+Open MBXHub in a browser. **You don't construct any files by hand here**;
+both pages persist their output automatically into MBXHub's AppData
+storage path:
+
+- **`/pages/annotate.html`** — scalar V/A annotation. For each track you
+  score valence (-1..+1) and arousal (-1..+1). Verdicts accumulate to
+  `mbxvam-labels.json`. This is the primary input to the trainer.
+
+- **`/pages/tune.html`** — pairwise A/B comparisons (optional). MBXHub
+  picks two tracks and asks which is more positive (valence) or more
+  intense (arousal); use keys 1/2/3/0 (or A/B to listen). Verdicts
+  accumulate to `mbxtune-pairs.json` and become a Bradley-Terry-ranked
+  supplemental signal the trainer blends in if it improves cross-
+  validation.
+
+Annotate as many of the m3u picks as you've got patience for — 100 is
+a strong baseline; more is better. The trainer requires at least 10
+joinable labels but the LOO-CV r curve doesn't really stabilise until
+the high tens.
+
+When you're done, locate `mbxvam-labels.json` (and optionally
+`mbxtune-pairs.json`) in MBXHub's AppData folder — those are the
+inputs to step 4. A standalone annotator may land in `vam-tools/`
+later; until then, MBXHub is the annotation surface.
 
 ### Step 4 — train your baseline model
 
 ```
 python calibrate-valence-arousal.py \
-    --moods path/to/mbxmoods.json \
-    --labels path/to/my-baseline-labels-v1.json \
-    --out   path/to/my-baseline-model-v1.json \
-    [--pairs path/to/pairs.json] \
+    --moods  path/to/mbxmoods.json \
+    --labels path/to/mbxvam-labels.json \
+    --pairs  path/to/mbxtune-pairs.json     # optional
+    --out    path/to/my-baseline-model-v1.json \
     [--alpha-v 1.0] [--alpha-a 10.0] [--pca-k 6]
 ```
 
