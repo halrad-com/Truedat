@@ -134,10 +134,13 @@ storage path:
   supplemental signal the trainer blends in if it improves cross-
   validation.
 
-Annotate as many of the m3u picks as you've got patience for — 100 is
-a strong baseline; more is better. The trainer requires at least 10
-joinable labels but the LOO-CV r curve doesn't really stabilise until
-the high tens.
+More labels is **not** necessarily better. What matters is **diversity**
+(coverage of the full V/A space — which is exactly what the quadrant-
+balanced picks give you) and **consistency** (rate similar tracks
+similarly; don't drift mid-session). The 100 picks are placed at the
+extremes precisely so a smaller, well-rated set is enough — annotate
+as many as you can rate confidently, stop before fatigue erodes
+consistency. The trainer requires at least 10 joinable labels.
 
 When you're done, locate `mbxvam-labels.json` (and optionally
 `mbxtune-pairs.json`) in MBXHub's AppData folder — those are the
