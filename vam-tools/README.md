@@ -134,13 +134,15 @@ storage path:
   supplemental signal the trainer blends in if it improves cross-
   validation.
 
-More labels is **not** necessarily better. What matters is **diversity**
-(coverage of the full V/A space — which is exactly what the quadrant-
-balanced picks give you) and **consistency** (rate similar tracks
-similarly; don't drift mid-session). The 100 picks are placed at the
-extremes precisely so a smaller, well-rated set is enough — annotate
-as many as you can rate confidently, stop before fatigue erodes
-consistency. The trainer requires at least 10 joinable labels.
+More verdicts — annotations or tune-page pairs — is **not** necessarily
+better. What matters in both surfaces is **diversity** (coverage of the
+full V/A space, which is exactly what the quadrant-balanced picks give
+you) and **consistency** (rate similar tracks similarly, judge similar
+A/B pairs the same way, don't drift mid-session). The 100 picks are
+placed at the extremes precisely so a smaller, well-rated set is enough
+— annotate or tune as many as you can judge confidently, then stop
+before fatigue erodes consistency. The trainer requires at least 10
+joinable labels; everything above that is about quality, not count.
 
 When you're done, locate `mbxvam-labels.json` (and optionally
 `mbxtune-pairs.json`) in MBXHub's AppData folder — those are the
