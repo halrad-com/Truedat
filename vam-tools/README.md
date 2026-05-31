@@ -117,12 +117,12 @@ against). MBXHub's annotate and tune pages drive playback through your
 player, so a queued playlist is the practical hand-off between picks
 and annotation.
 
-**You're not locked to the script's picks.** The m3u is just a regular
-playlist — edit it, append tracks you specifically want labeled, drop
-ones you don't, or build your own from scratch in MusicBee. The
-quadrant-balanced extremes are a *starting* coverage; adding tracks
-you know well or that fill perceived gaps in your library's space is
-strictly an improvement.
+**`auto-cal.m3u` is the input to the annotation pass — that's all it
+is.** Add tracks you specifically want labeled, swap ones out, drop
+the ones you don't have an opinion on, or build the playlist from
+scratch in MusicBee. The script's quadrant-balanced picks are a
+ready-made starter; what actually gets annotated is whatever ends up
+in the playlist you bring to MBXHub.
 
 ### Step 3 — annotate via MBXHub (annotate page + tune page)
 
