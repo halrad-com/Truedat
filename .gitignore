@@ -11,8 +11,12 @@ dist/truedat/ffplay.exe
 # Synthetic library data (large downloads)
 data/
 
-# Internal docs (_ prefix = not published)
+# Internal docs — never published
 _docs/
+docs/
+
+# Scrub helper scripts (local only)
+.scrub-*.ps1
 
 # Python cache
 src/__pycache__/

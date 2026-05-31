@@ -1,6 +1,6 @@
 # Truedat — LLM Session Context
 
-This file is loaded automatically by Claude Code / Claude Agent sessions scoped to this repo. Keep it short and decision-making-focused; deep reference material belongs in `README.md`, `SBOM.md`, and `docs/`.
+This file is loaded automatically by Claude Code / Claude Agent sessions scoped to this repo. Keep it short and decision-making-focused; deep reference material belongs in `README.md` and `SBOM.md`. Internal design notes and session journals live in the local `docs/` directory, which is gitignored — never reference them from any file that ships in the repo.
 
 ## What this project is
 
@@ -92,7 +92,7 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 
 `--backfill-level identity|features|all` selects scope; default is `all`. Use `identity` to keep backfill fast / ffmpeg-independent; use `features` to backfill only the ffmpeg tier on a library whose identity is already complete.
 
-Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR. See `docs/plans/2026-05-18-data-plumbing-phase1.md` for the per-entry decision loop, merge invariant, and Phase 2 hooks; `docs/plans/2026-05-18-data-plumbing-phase2.md` for the LAME tag spec.
+Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR.
 
 ## Conventions
 
@@ -102,8 +102,7 @@ Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at 
 - **Never add Co-Authored-By lines to commits.** This is a hard rule in the user's global CLAUDE.md.
 - **Commit convention:** `feat(scope):`, `fix(scope):`, `docs:`, `build:` (for exe rebuilds). Keep messages short; body explains *why* not *what*.
 - **Don't rebuild `truedat.exe`** unless the user asks — the solo-dev workflow handles rebuilds in separate "build: update truedat.exe" commits.
-- **Local code reviews go to `docs/reviews/YYYY-MM-DD-<topic>.md`**, not console. Short console summary is fine.
-- **Implementation plans go to `docs/plans/YYYY-MM-DD-<topic>.md`** for non-trivial features.
+- **Local code reviews, plans, and other working notes go under the local `docs/` directory (gitignored).** Short console summary back to the user is fine. Never commit these.
 
 ## Things that aren't what they look like
 
@@ -114,16 +113,16 @@ Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at 
 
 ## When in doubt
 
-Read `docs/plans/` and `docs/reviews/` before touching the scan pipeline. Every non-trivial change in recent history has a plan or review doc capturing the design rationale.
+Read the local (gitignored) `docs/plans/` and `docs/reviews/` before touching the scan pipeline. Every non-trivial change in recent history has a plan or review doc capturing the design rationale.
 
 ## Authenticity sprint state (2026-05-18)
 
 Phases 1–5 shipped — `bitDepth` + `encoder` in `fingerprint.v1` (Phase 1), `mp3LameTag` block (Phase 2), `bitUsage` block (Phase 2.5), `hfEnergyRatio` (Phase 3), `truedat.*` verdict block (Phase 4), `hfSpectralStructure` FFT-derived signal block (Phase 5 — adds Signal F at weight 0.35 to the hi-res vote, consolidates the Phase-3 two-ffmpeg pipeline into a single managed-FFT pipe). Current verdict method tag: **`truedat-v1-fft-corpus1-2026-05-18`**.
 
-Test corpus at `C:\Users\scott\Music\_truedat-corpus\` — 23 files, documented in `docs/reviews/2026-05-18-phase4-corpus-validation.md`. External tools used for corpus generation (NOT in PATH): `C:\test\MB3\Codec\lame.exe` (LAME 3.100) and `C:\test\MB3\Codec\flac.exe` (FLAC 1.3.2). Phase 5 retune scorecard: 23/23 hi-res classifications correct (the 3 ffmpeg-upsampled-fake FLAC misses from Phase 4 are now suppressed or correctly classified).
+A local test corpus exists; details are recorded in the gitignored `docs/reviews/` tree. Phase 5 retune scorecard: 23/23 hi-res classifications correct (the 3 ffmpeg-upsampled-fake FLAC misses from Phase 4 are now suppressed or correctly classified).
 
 Known signal gaps remaining (Phase 5+ work, NOT bugs):
 - LAME-to-LAME re-encode chains verdict "no" (second LAME encode rewrites Xing tag) — needs cascade-encode artifact detection.
 - `hfSpectralStructure.imagingSymmetry` is currently unused in the vote (Lanczos suppression neutralized it on corpus-1); the field is still emitted and tracked for future-corpus tuning.
 
-For session resume: read `docs/SESSION-RESUME-2026-05-18.md` first.
+For session resume: read the latest `SESSION-RESUME-*.md` in the local (gitignored) `docs/` directory first.
