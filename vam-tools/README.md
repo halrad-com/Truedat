@@ -155,7 +155,7 @@ later; until then, MBXHub is the annotation surface.
 python calibrate-valence-arousal.py \
     --moods  path/to/mbxmoods.json \
     --labels path/to/mbxvam-labels.json \
-    --pairs  path/to/mbxtune-pairs.json     # optional
+    --pairs  path/to/mbxtune-pairs.json     # optional — pairs from /pages/tune.html, used to further define + tune the model
     --out    path/to/my-baseline-model-v1.json \
     [--alpha-v 1.0] [--alpha-a 10.0] [--pca-k 6]
 ```
