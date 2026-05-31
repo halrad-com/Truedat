@@ -56,7 +56,7 @@ the file-shaped work, you just listen and tap keys.
 | `auto-cal.m3u`              | `picks-to-m3u.py` (step 2.5)                                    | Playlist of the picks — load this in MusicBee so MBXHub's annotate / tune pages have something to drive playback over.                             |
 | `mbxvam-labels.json`        | MBXHub `/pages/annotate.html` (step 3)                          | Scalar V/A scores per track. **MBXHub writes this automatically** as you annotate — appears in MBXHub's AppData storage path.                      |
 | `mbxtune-pairs.json`        | MBXHub `/pages/tune.html` (step 3, optional)                    | Pairwise A/B comparisons for V/A. **MBXHub writes this automatically.** Optional supplemental signal for the trainer.                              |
-| `my-baseline-model-vN.json` | `calibrate-valence-arousal.py` (step 4)                         | Trained Ridge + PCA model. Drop into MBXHub at the AutoQ-expected path. Regenerable from labels + pairs at any time.                               |
+| `my-baseline-model-vN.json` | `calibrate-valence-arousal.py` (step 4)                         | Trained Ridge + PCA model. Drop into `%AppData%\MBXHub\mood-model.json` (default; defer to MBXHub README for the canonical path). Regenerable from labels + pairs at any time. |
 
 Versioning is your call — bump `vN` on the model whenever you re-train.
 The trainer stamps every model with `trainedAt` and `anchorsUsed` so
@@ -177,9 +177,11 @@ LOO-CV r.
 The 21 features used as inputs are listed in `FEATURES` at the top of
 the script. Adding/removing features means regenerating models.
 
-Output: `my-baseline-model-v1.json` — drop into MBXHub at the path
-AutoQ expects (`MBXH/Core/Resources/mood-model.json` in the current
-MBXH layout). The next MBXHub restart picks it up.
+Output: `my-baseline-model-v1.json` — drop into MBXHub. Default path
+is `%AppData%\MBXHub\mood-model.json`, which supersedes the model
+embedded in `mb_MBXHub.dll` when present (defer to the MBXHub README
+for the canonical / current path). Pick it up live with
+`POST /vam/model/reload`, or it loads at the next plugin startup.
 
 ### Re-training later
 
