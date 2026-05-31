@@ -1,0 +1,21 @@
+# AutoQ V/A model trainer dependencies — pinned for reproducibility.
+#
+# Trainer entry: tools/calibrate-valence-arousal.py
+#
+# Tested under: Python 3.12+
+#
+# Setup (one-time per machine):
+#   cd C:\Users\scott\source\repos\MBX\restfulbee
+#   python -m venv .venv-trainer
+#   .venv-trainer\Scripts\activate
+#   pip install -r tools/requirements.txt
+#
+# Verify:
+#   python -c "import numpy, sklearn, scipy; print(numpy.__version__, sklearn.__version__, scipy.__version__)"
+#
+# These three are the only hard third-party deps. The trainer also uses
+# Python stdlib (json, math, os, sys, argparse, io, datetime, collections).
+
+numpy==2.1.3
+scikit-learn==1.5.2
+scipy==1.14.1
