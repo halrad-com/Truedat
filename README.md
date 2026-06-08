@@ -22,6 +22,12 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 - `mbxhub-fingerprints-errors.csv` - tracks that failed fingerprinting (`--fingerprint` mode)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
+## Download
+
+[**truedat.zip**](https://halrad.com/truedat/truedat.zip) — full self-contained bundle (`truedat.exe` + Essentia + ffmpeg + ONNX Runtime / DirectML). Runs offline, no install. Unzip anywhere and run `truedat.exe`.
+
+Source tree and tagged snapshots are on [GitHub](https://github.com/halrad-com/Truedat).
+
 ## What It Does
 
 Truedat reads an iTunes Music Library XML file (or a `--folder`, `--file-list`, or single `--analyze-file`) and runs each track through Essentia plus its own analyses. Per-track work is parallelized across cores; everything is cache-aware so re-runs only touch what changed.
