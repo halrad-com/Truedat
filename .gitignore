@@ -8,6 +8,9 @@ dist/truedat/ffmpeg.exe
 dist/truedat/ffprobe.exe
 dist/truedat/ffplay.exe
 
+# Release bundle — too large for GitHub (>100MB), ship via Releases instead
+dist/truedat/truedat.zip
+
 # Synthetic library data (large downloads)
 data/
 

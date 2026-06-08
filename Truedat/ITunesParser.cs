@@ -335,7 +335,14 @@ namespace Truedat
                 var path = uri.LocalPath;
                 // Uri treats file://localhost/ as UNC \\localhost\ — convert back to local path
                 if (path.StartsWith(@"\\localhost\", StringComparison.OrdinalIgnoreCase))
+                {
                     path = path.Substring(@"\\localhost\".Length);
+                    // iTunes encodes a real UNC path as file://localhost//server/share/... which
+                    // .NET parses to \\localhost\\server\share\... — stripping leaves a single
+                    // leading backslash. Restore the second one to form a valid UNC path.
+                    if (path.StartsWith(@"\") && !path.StartsWith(@"\\"))
+                        path = @"\" + path;
+                }
                 return PathHelper.NormalizeSeparators(path);
             }
             catch
