@@ -1861,12 +1861,14 @@ namespace Truedat
 
                         // Identity ride-along — same concurrency pattern as MoodsMode at :1497-1513.
                         // Without this, --file-list mode was POSTing identity:{} (features-only).
-                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(flEssentiaExe, filePath, fileSize, CancellationToken.None));
-                        var fileMd5Task = Task.Run(() => ComputeFileMd5(filePath));
+                        using var flSrc = OpenStagedSource(filePath, _stageOpts);
+                        var flReadPath = flSrc.Path;
+                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(flEssentiaExe, flReadPath, fileSize, CancellationToken.None));
+                        var fileMd5Task = Task.Run(() => ComputeFileMd5(flReadPath));
                         var fingerprintTask = Task.Run(() =>
                         {
                             var swFp = Stopwatch.StartNew();
-                            var fp = ComputeFingerprintV1(filePath, fileSize, out _);
+                            var fp = ComputeFingerprintV1(flReadPath, fileSize, out _);
                             swFp.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
@@ -1875,7 +1877,7 @@ namespace Truedat
                         var audioStreamSha256Task = Task.Run(() =>
                         {
                             var swSha = Stopwatch.StartNew();
-                            var result = ComputeAudioStreamSha256FromFile(filePath, fileSize, out _);
+                            var result = ComputeAudioStreamSha256FromFile(flReadPath, fileSize, out _);
                             swSha.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
@@ -1884,23 +1886,27 @@ namespace Truedat
                         // Tags ride-along — --file-list has no iTunes XML source, so populate
                         // artist/title/album/genre/duration from TagLib tags. Without this,
                         // identity.metadataKey on the server is empty for every local scan.
-                        var tagsTask = Task.Run(() => ExtractFileTags(filePath));
+                        var tagsTask = Task.Run(() => ExtractFileTags(flReadPath));
                         // Phase 2.5 — bitUsage in parallel; self-contained duration probe.
-                        var bitUsageTask = Task.Run(() =>
-                        {
-                            double dur = 0;
-                            try { using var tf = TagLib.File.Create(filePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
-                            return ComputeBitUsage(filePath, dur, _ffmpegPath.Value);
-                        });
+                        var bitUsageTask = _noBitUsage
+                            ? Task.FromResult<BitUsageSummary?>(null)
+                            : Task.Run(() =>
+                            {
+                                double dur = 0;
+                                try { using var tf = TagLib.File.Create(flReadPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
+                                return ComputeBitUsage(flReadPath, dur, _ffmpegPath.Value);
+                            });
                         // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                        var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(filePath, _ffmpegPath.Value));
+                        var hfEnergyTask = _noHfAnalysis
+                            ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
+                            : Task.Run(() => ComputeHfAnalysis(flReadPath, _ffmpegPath.Value));
                         // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg
                         // pipe per track at 16 kHz mono float32.
                         var flVocalTask = flVamPipeline != null
-                            ? Task.Run(() => flVamPipeline.AnalyzeTrack(filePath))
+                            ? Task.Run(() => flVamPipeline.AnalyzeTrack(flReadPath))
                             : Task.FromResult<VocalBlock?>(null);
                         // SMFM — read fresh every scan; MC analyses files progressively.
-                        var flSmfmTask = Task.Run(() => SmfmReader.TryRead(filePath));
+                        var flSmfmTask = Task.Run(() => SmfmReader.TryRead(flReadPath));
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, flVocalTask, flSmfmTask });
 
                         var (features, error) = essentiaTask.Result;
