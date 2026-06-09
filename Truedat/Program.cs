@@ -2638,14 +2638,16 @@ namespace Truedat
                         // and chromaprint subprocesses (essentia_streaming_md5, fpcalc) are no
                         // longer in the default codepath — see --fingerprint mode for those.
                         var analyzeStart = Stopwatch.GetTimestamp();
-                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, t.Location, fileSizeBytes, cts.Token));
-                        var fileMd5Task = Task.Run(() => ComputeFileMd5(t.Location));
+                        using var src = OpenStagedSource(t.Location, _stageOpts);
+                        var readPath = src.Path;
+                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSizeBytes, cts.Token));
+                        var fileMd5Task = Task.Run(() => ComputeFileMd5(readPath));
                         // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
                         // Phase 2 cheap identity signal; cost is negligible vs Essentia.
                         var fingerprintTask = Task.Run(() =>
                         {
                             var swFp = Stopwatch.StartNew();
-                            var fp = ComputeFingerprintV1(t.Location, fileSizeBytes, out _);
+                            var fp = ComputeFingerprintV1(readPath, fileSizeBytes, out _);
                             swFp.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
@@ -2659,7 +2661,7 @@ namespace Truedat
                         var audioStreamSha256Task = Task.Run(() =>
                         {
                             var swSha = Stopwatch.StartNew();
-                            var result = ComputeAudioStreamSha256FromFile(t.Location, fileSizeBytes, out _);
+                            var result = ComputeAudioStreamSha256FromFile(readPath, fileSizeBytes, out _);
                             swSha.Stop();
                             if (_audit)
                                 Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
@@ -2668,17 +2670,21 @@ namespace Truedat
                         // Phase 2.5 — bitUsage in parallel. iTunes XML gives us duration up front,
                         // so we don't need a TagLib probe inside the task.
                         double bitUsageDurSec = trackDurationSecs;
-                        var bitUsageTask = Task.Run(() => ComputeBitUsage(t.Location, bitUsageDurSec, _ffmpegPath.Value));
+                        var bitUsageTask = _noBitUsage
+                            ? Task.FromResult<BitUsageSummary?>(null)
+                            : Task.Run(() => ComputeBitUsage(readPath, bitUsageDurSec, _ffmpegPath.Value));
                         // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                        var hfEnergyTask = Task.Run(() => ComputeHfAnalysis(t.Location, _ffmpegPath.Value));
+                        var hfEnergyTask = _noHfAnalysis
+                            ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
+                            : Task.Run(() => ComputeHfAnalysis(readPath, _ffmpegPath.Value));
                         // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg pipe per
                         // track at 16 kHz mono float32. Null pipeline (ffmpeg absent)
                         // → null block; entry's Vocal stays null.
                         var vocalTask = vamPipeline != null
-                            ? Task.Run(() => vamPipeline.AnalyzeTrack(t.Location))
+                            ? Task.Run(() => vamPipeline.AnalyzeTrack(readPath))
                             : Task.FromResult<VocalBlock?>(null);
                         // SMFM — read fresh every scan; MC analyses files progressively.
-                        var smfmTask = Task.Run(() => SmfmReader.TryRead(t.Location));
+                        var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
                         Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask, vocalTask, smfmTask });
                         var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
                         var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
