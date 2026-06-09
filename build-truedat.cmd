@@ -32,39 +32,28 @@ if errorlevel 1 (
 copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\
 echo Done: truedat.exe
 
-REM Native ORT / DirectML siblings (~35 MB). The managed wrapper +
-REM BCL polyfills are merged INTO truedat.exe by ILRepack; the natives
-REM cannot be merged into a managed exe and ship beside it — same shape
-REM as essentia_streaming_extractor_music.exe / ffmpeg.exe / fpcalc.exe.
-REM DirectML.Debug.dll is intentionally NOT shipped (dev-time tracing only).
+REM Native onnxruntime.dll sibling (~17 MB). The managed wrapper + BCL
+REM polyfills are merged INTO truedat.exe by ILRepack; the native cannot
+REM be merged into a managed exe and ships beside it — same shape as
+REM essentia_streaming_extractor_music.exe / ffmpeg.exe / fpcalc.exe.
+REM VAM uses CPU EP only (see project memory vam-models-no-gpu-benefit):
+REM no DirectML.dll, no onnxruntime_providers_shared.dll, no NPU.
 set "ORTBIN=Truedat\bin\Release\net48"
-echo Copying ORT/DirectML native siblings...
+echo Copying onnxruntime.dll sibling...
 copy /Y "%ORTBIN%\onnxruntime.dll" "dist\truedat\" >nul
 if errorlevel 1 (
     echo ERROR: onnxruntime.dll not produced by build
     pause
     exit /b 1
 )
-copy /Y "%ORTBIN%\onnxruntime_providers_shared.dll" "dist\truedat\" >nul
-if errorlevel 1 (
-    echo ERROR: onnxruntime_providers_shared.dll not produced by build
-    pause
-    exit /b 1
-)
-copy /Y "%ORTBIN%\DirectML.dll" "dist\truedat\" >nul
-if errorlevel 1 (
-    echo ERROR: DirectML.dll not produced by build
-    pause
-    exit /b 1
-)
-echo Done: onnxruntime.dll, onnxruntime_providers_shared.dll, DirectML.dll
+echo Done: onnxruntime.dll
 
 echo.
 echo ========================================
 echo Build complete!
 echo ========================================
 echo.
-echo Output: dist\truedat\truedat.exe (+ native ORT/DirectML siblings)
+echo Output: dist\truedat\truedat.exe (+ onnxruntime.dll sibling)
 echo.
 echo Copy dist\truedat\ contents to any folder and run:
 echo   truedat.exe "iTunes Music Library.xml"
