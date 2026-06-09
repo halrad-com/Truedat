@@ -1299,12 +1299,14 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
-                    var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, analyzeFilePath!, afFileSize, CancellationToken.None));
-                    var afFileMd5Task = Task.Run(() => ComputeFileMd5(analyzeFilePath!));
+                    using var afSrc = OpenStagedSource(analyzeFilePath!, _stageOpts);
+                    var afReadPath = afSrc.Path;
+                    var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, afReadPath, afFileSize, CancellationToken.None));
+                    var afFileMd5Task = Task.Run(() => ComputeFileMd5(afReadPath));
                     var afFingerprintTask = Task.Run(() =>
                     {
                         var swFp = Stopwatch.StartNew();
-                        var fp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                        var fp = ComputeFingerprintV1(afReadPath, afFileSize, out _);
                         swFp.Stop();
                         if (_audit)
                             Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
@@ -1313,31 +1315,35 @@ namespace Truedat
                     var afAudioStreamSha256Task = Task.Run(() =>
                     {
                         var swSha = Stopwatch.StartNew();
-                        var result = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                        var result = ComputeAudioStreamSha256FromFile(afReadPath, afFileSize, out _);
                         swSha.Stop();
                         if (_audit)
                             Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
                         return result;
                     });
-                    var afTagsTask = Task.Run(() => ExtractFileTags(analyzeFilePath!));
+                    var afTagsTask = Task.Run(() => ExtractFileTags(afReadPath));
                     // Phase 2.5 — bitUsage runs in parallel with everything else. Self-contained
                     // duration probe so it doesn't depend on other tasks' completion.
-                    var afBitUsageTask = Task.Run(() =>
-                    {
-                        double dur = 0;
-                        try { using var tf = TagLib.File.Create(analyzeFilePath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
-                        return ComputeBitUsage(analyzeFilePath!, dur, _ffmpegPath.Value);
-                    });
+                    var afBitUsageTask = _noBitUsage
+                        ? Task.FromResult<BitUsageSummary?>(null)
+                        : Task.Run(() =>
+                        {
+                            double dur = 0;
+                            try { using var tf = TagLib.File.Create(afReadPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
+                            return ComputeBitUsage(afReadPath, dur, _ffmpegPath.Value);
+                        });
                     // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                    var afHfEnergyTask = Task.Run(() => ComputeHfAnalysis(analyzeFilePath!, _ffmpegPath.Value));
+                    var afHfEnergyTask = _noHfAnalysis
+                        ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
+                        : Task.Run(() => ComputeHfAnalysis(afReadPath, _ffmpegPath.Value));
                     // S2.5 — single-track VAM. Constructed per --analyze-file
                     // invocation (one track => one pipeline); disposed at end.
                     using var afVamPipeline = TryCreateVamPipelineForScan();
                     var afVocalTask = afVamPipeline != null
-                        ? Task.Run(() => afVamPipeline.AnalyzeTrack(analyzeFilePath!))
+                        ? Task.Run(() => afVamPipeline.AnalyzeTrack(afReadPath))
                         : Task.FromResult<VocalBlock?>(null);
                     // SMFM — read fresh every scan; MC analyses files progressively.
-                    var afSmfmTask = Task.Run(() => SmfmReader.TryRead(analyzeFilePath!));
+                    var afSmfmTask = Task.Run(() => SmfmReader.TryRead(afReadPath));
                     Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask, afVocalTask, afSmfmTask });
 
                     var (features, error) = afEssentiaTask.Result;
