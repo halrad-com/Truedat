@@ -207,6 +207,40 @@ Out of scope for the current VAM sprint. File when a podcast/audiobook
 analysis use case actually materialises — Truedat's current scope is
 music libraries (iTunes XML / MBXHub).
 
+## ~~UNC source staging + experimental-signal opt-outs~~ DONE
+
+Shipped 2026-06-09. Three changes in one feature branch (`feat/source-staging`,
+8 commits, fast-forwarded to main):
+
+- **UNC source staging.** `OpenStagedSource` copies UNC-sourced (and
+  hardlink-failed local-source) audio files once to
+  `%TEMP%\.truedat-stage\<guid>.<ext>`, then the 8-9 concurrent workers per
+  track all read from the local copy. Wired at all three fan-out sites:
+  `--analyze-file`, `--file-list`, MoodsMode. Net: 1× full network read per
+  track instead of ~3× full + ≥3× partial. GUID-based ASCII-only staged
+  filename also eliminates the 8.3 / non-ASCII downstream-tool footgun on
+  UNC paths (hardlinks can't span volumes, so the existing
+  `TryCreateHardlink` mitigation didn't help UNC). Per-track `using`-based
+  cleanup keeps steady-state disk footprint at `parallel_worker_count`
+  files; `CleanupOrphanedFiles` sweeps the staging dir at startup for
+  crash-recovery.
+- **Failure semantics: robocopy-style.** Per-track stage failures emit a
+  single `  Warning:` stderr line, append a row to the errors CSV, and
+  fall through to a direct read — scans never abort. Unwritable
+  `--stage-dir` at startup is a hard error before the scan begins.
+- **`--no-bitusage` and `--no-hf-analysis` opt-outs.** Suppress
+  `ComputeBitUsage` / `ComputeHfAnalysis` at all three fan-out sites. JSON
+  schema unchanged (same omit-when-null shape as the ffmpeg-absent case).
+  The `truedat` verdict block still emits but with a reduced signal set —
+  Signal A drops with `--no-bitusage`; Signals B + F drop with
+  `--no-hf-analysis`. Cache canary is **not** widened to recognise these
+  as "partial" — the fields are explicitly optional, matching the existing
+  ffmpeg-absent install pattern; backfill via
+  `--verify --backfill --backfill-level features`.
+
+Flags: `--no-stage`, `--stage-dir <path>`, `--no-bitusage`,
+`--no-hf-analysis` (documented in both `--help` blocks).
+
 ## ~~Opus support via ffmpeg transcode~~ DONE
 
 Two changes layered on the existing ffmpeg-transcode pattern (the one that

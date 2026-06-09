@@ -127,7 +127,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --transcode-out <path>  Output FLAC path for --transcode mode.
   --sample-rate <hz>      With --transcode: override output sample rate (default: match source).
   --bit-depth <16|24>     With --transcode: override output bit depth (default: match source).
+  --no-stage              Disable UNC source staging; workers read source directly.
+  --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
+  --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
 ```
+
+**UNC libraries:** when the source path is a UNC share (`\\server\share\…`), truedat stages each file once to a local temp copy and runs the 8-9 concurrent per-track workers against the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. Local-ASCII paths are unaffected (read directly). Use `--no-stage` to opt out, or `--stage-dir` to relocate the staging directory (e.g. to a fast scratch volume when `%TEMP%` is on a small SSD). Per-track stage failures fall back to direct read with a one-line warning — scans never abort over a staging hiccup.
 
 **Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
 - Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
