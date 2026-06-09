@@ -5,7 +5,7 @@ REM
 REM Run on a fresh box to re-execute the spike (e.g., AMD Ryzen AI to validate NPU dispatch).
 
 setlocal
-cd /d %~dp0
+cd /d %~dp0..
 
 echo ========================================
 echo Building ORT Spike (§5.0)

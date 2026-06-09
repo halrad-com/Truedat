@@ -7,7 +7,7 @@ REM whether the NPU surfaces via the MCDM-aware DXGI API. Subcommand:
 REM   ortspike-npu.exe list-adapters
 
 setlocal
-cd /d %~dp0
+cd /d %~dp0..
 
 echo ========================================
 echo Building ORT NPU Spike (MCDM)
