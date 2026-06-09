@@ -801,6 +801,10 @@ namespace Truedat
                 else if (canonical == "chunk" && i + 1 < args.Length && TryParseChunk(args[i + 1], out var cIdx, out var cTot))
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "self-test") selfTest = true;
+                else if (canonical == "no-stage") _stageOpts.NoStage = true;
+                else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
+                else if (canonical == "no-bitusage") _noBitUsage = true;
+                else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
                 else if (canonical == "version" || canonical == "v")
                 {
                     Console.WriteLine(VersionInfo.Display);
@@ -984,6 +988,10 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
+                Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
+                Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
@@ -2015,6 +2023,10 @@ namespace Truedat
                 Console.WriteLine("  --all               Run all modes: fingerprint + details + analysis");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
+                Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
+                Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
+                Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
                 Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
@@ -2131,6 +2143,39 @@ namespace Truedat
             Console.WriteLine($"  Output dir: {outputDir}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
+
+            // --- Source staging config summary + validation -----------------
+            if (_stageOpts.NoStage)
+            {
+                Console.WriteLine("  Source staging: DISABLED (--no-stage)");
+            }
+            else
+            {
+                // Validate the staging dir is writable. Per-track failures are
+                // robocopy semantics; an unusable dir at startup is a config bug.
+                try
+                {
+                    Directory.CreateDirectory(_stageOpts.StageDir);
+                    var probe = Path.Combine(_stageOpts.StageDir, $".truedat-write-probe-{Guid.NewGuid():N}");
+                    File.WriteAllBytes(probe, new byte[] { 0 });
+                    File.Delete(probe);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error: --stage-dir is not writable: {_stageOpts.StageDir}: {ex.Message}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Console.WriteLine($"  Source staging: enabled, dir={_stageOpts.StageDir}");
+            }
+
+            // Signal-extraction opt-outs — only print when at least one is set.
+            if (_noBitUsage || _noHfAnalysis)
+            {
+                string bu = _noBitUsage   ? "DISABLED" : "enabled";
+                string hf = _noHfAnalysis ? "DISABLED" : "enabled";
+                Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf}");
+            }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found (run: python src/catalog-prep.py --download --build)")}");
             Console.WriteLine();
 
