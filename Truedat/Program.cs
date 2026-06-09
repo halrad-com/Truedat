@@ -379,6 +379,9 @@ namespace Truedat
         // Standalone VAM is the separate --vam-smoke / --vam-smoke-list modes.
         static bool _vamEnabled = false;
         static bool _audit;
+        internal static StageOptions _stageOpts = new StageOptions();
+        internal static bool _noBitUsage;
+        internal static bool _noHfAnalysis;
 
 
         // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
@@ -4664,6 +4667,104 @@ namespace Truedat
             return (null, "original (hardlink failed)");
         }
 
+        // -- Source staging (UNC + hardlink-failure fallback) ----------------
+
+        /// <summary>
+        /// CLI-derived staging configuration. Default: staging enabled,
+        /// dir = %TEMP%\.truedat-stage. Override via --no-stage / --stage-dir.
+        /// </summary>
+        internal sealed class StageOptions
+        {
+            public bool NoStage { get; set; }
+            public string StageDir { get; set; } = Path.Combine(Path.GetTempPath(), ".truedat-stage");
+        }
+
+        /// <summary>
+        /// Handle returned by SourceStager.Open. The Path property is what
+        /// every worker should read; Dispose deletes the staged copy if any.
+        /// Always non-null — on stage failure, Method="direct" and Path is
+        /// the original source.
+        /// </summary>
+        internal sealed class SourceHandle : IDisposable
+        {
+            public string Path { get; }
+            public string Method { get; }    // "direct" | "hardlink" | "staged" | "staged-fallback"
+            public long StageMs { get; }
+            public long StageBytes { get; }
+            private readonly string? _toDelete;
+
+            public SourceHandle(string path, string method, long stageMs, long stageBytes, string? toDelete)
+            {
+                Path = path;
+                Method = method;
+                StageMs = stageMs;
+                StageBytes = stageBytes;
+                _toDelete = toDelete;
+            }
+
+            public void Dispose()
+            {
+                if (_toDelete == null) return;
+                try { File.Delete(_toDelete); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Decide whether to stage, hardlink, or pass through the source path.
+        /// Always returns a non-null handle.
+        ///
+        /// Decision matrix:
+        ///   Local NTFS, ASCII   -> direct (Method="direct")
+        ///   Local NTFS, non-ASCII -> existing hardlink path is upstream of this
+        ///                            helper (RunTool); SourceStager.Open is only
+        ///                            called by the per-track fan-out, which today
+        ///                            does NOT hardlink. So a non-ASCII local path
+        ///                            here is staged (Method="staged-fallback")
+        ///                            unless --no-stage is set.
+        ///   UNC, any            -> stage (Method="staged")
+        ///
+        /// On stage failure: emits a stderr WARN, returns Method="direct" with
+        /// the original sourcePath, so the workers fall back to direct read.
+        /// </summary>
+        internal static SourceHandle OpenStagedSource(string sourcePath, StageOptions opts)
+        {
+            // Pass-through #1: staging is disabled globally.
+            if (opts.NoStage)
+                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+
+            // Pass-through #2: local ASCII path — nothing to gain.
+            bool isUnc = sourcePath.StartsWith(@"\\", StringComparison.Ordinal);
+            bool hasNonAscii = HasNonAscii(sourcePath);
+            if (!isUnc && !hasNonAscii)
+                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+
+            // Otherwise: stage. The staged filename is GUID-based so the staged
+            // path is always ASCII regardless of the source.
+            string method = isUnc ? "staged" : "staged-fallback";
+            string ext = Path.GetExtension(sourcePath);
+            string dest = Path.Combine(opts.StageDir, $"{Guid.NewGuid():N}{ext}");
+
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                Directory.CreateDirectory(opts.StageDir);
+                File.Copy(sourcePath, dest, overwrite: false);
+                sw.Stop();
+                long bytes = 0;
+                try { bytes = new FileInfo(dest).Length; } catch { }
+                if (_audit)
+                    Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {bytes / (1024 * 1024)}MB)");
+                return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                Console.Error.WriteLine($"WARN: stage failed: {sourcePath} -> {dest}: {ex.Message}; falling back to direct read");
+                try { File.Delete(dest); } catch { }
+                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+            }
+        }
+
         // -- External tool runner (shared by chromaprinter and md5) ----------
 
         /// <summary>
@@ -5328,6 +5429,65 @@ namespace Truedat
             try { Fft.Forward(new double[100], new double[100]); }
             catch (ArgumentException) { threw = true; }
             Assert(threw, "non-power-of-2 size throws ArgumentException");
+
+            // -- SourceStager: pass-through / staging / failure ----------------
+            Console.WriteLine("SourceStager");
+
+            // Pass-through: --no-stage disables everything.
+            var optsDisabled = new StageOptions { NoStage = true };
+            using (var h = OpenStagedSource(@"\\server\share\test.mp3", optsDisabled))
+            {
+                Assert(h.Method == "direct", $"--no-stage returns direct (got {h.Method})");
+                Assert(h.Path == @"\\server\share\test.mp3", "--no-stage preserves source path");
+            }
+
+            // Pass-through: local ASCII path is left alone.
+            var stStageDir = Path.Combine(Path.GetTempPath(), $".truedat-stage-test-{Guid.NewGuid():N}");
+            var optsEnabled = new StageOptions { StageDir = stStageDir };
+            string localAscii = Path.Combine(Path.GetTempPath(), $"truedat-test-{Guid.NewGuid():N}.bin");
+            File.WriteAllBytes(localAscii, new byte[] { 1, 2, 3, 4 });
+            try
+            {
+                using (var h = OpenStagedSource(localAscii, optsEnabled))
+                {
+                    Assert(h.Method == "direct", $"local-ASCII returns direct (got {h.Method})");
+                    Assert(h.Path == localAscii, "local-ASCII preserves source path");
+                }
+            }
+            finally { try { File.Delete(localAscii); } catch { } }
+
+            // Happy path: non-ASCII local source is staged, file is copied,
+            // staged path differs, and Dispose cleans up.
+            string nonAsciiSrc = Path.Combine(Path.GetTempPath(), $"truedat-tëst-{Guid.NewGuid():N}.bin");
+            File.WriteAllBytes(nonAsciiSrc, new byte[] { 9, 8, 7, 6, 5 });
+            string? stagedPathSeen = null;
+            try
+            {
+                using (var h = OpenStagedSource(nonAsciiSrc, optsEnabled))
+                {
+                    Assert(h.Method == "staged-fallback", $"non-ASCII local stages with fallback method (got {h.Method})");
+                    Assert(h.Path != nonAsciiSrc, "staged Path differs from source");
+                    Assert(File.Exists(h.Path), "staged file exists during use");
+                    Assert(new FileInfo(h.Path).Length == 5, "staged file has the source's bytes");
+                    Assert(h.StageBytes == 5, $"StageBytes == file size (got {h.StageBytes})");
+                    stagedPathSeen = h.Path;
+                }
+                Assert(stagedPathSeen != null && !File.Exists(stagedPathSeen), "staged file is deleted after Dispose");
+            }
+            finally
+            {
+                try { File.Delete(nonAsciiSrc); } catch { }
+                try { if (Directory.Exists(stStageDir)) Directory.Delete(stStageDir, recursive: true); } catch { }
+            }
+
+            // Failure mode: unwritable staging dir -> direct fallback, no throw.
+            // Trigger by pointing StageDir at a path under a non-existent volume.
+            var optsBadDir = new StageOptions { StageDir = @"Z:\nonexistent-volume-stage-test\.truedat-stage" };
+            using (var h = OpenStagedSource(@"\\server\share\test.mp3", optsBadDir))
+            {
+                Assert(h.Method == "direct", $"stage failure falls back to direct (got {h.Method})");
+                Assert(h.Path == @"\\server\share\test.mp3", "stage failure preserves source path");
+            }
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
