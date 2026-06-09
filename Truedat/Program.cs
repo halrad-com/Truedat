@@ -525,6 +525,26 @@ namespace Truedat
                 }
             }
             catch { }
+
+            // Clean up orphaned staged files from the source-staging directory
+            // (created by OpenStagedSource when staging UNC sources). Honours --stage-dir.
+            try
+            {
+                var stageDir = _stageOpts.StageDir;
+                if (Directory.Exists(stageDir))
+                {
+                    var orphans = Directory.GetFiles(stageDir);
+                    if (orphans.Length > 0)
+                    {
+                        Console.WriteLine($"  Cleaning {orphans.Length} orphaned staged file(s) from {stageDir}");
+                        foreach (var f in orphans)
+                            try { File.Delete(f); } catch { }
+                    }
+                    if (Directory.GetFiles(stageDir).Length == 0)
+                        try { Directory.Delete(stageDir); } catch { }
+                }
+            }
+            catch { }
         }
 
         /// <summary>Remove podcast episodes from a parsed track list and log the count.</summary>
