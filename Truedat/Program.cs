@@ -4716,7 +4716,7 @@ namespace Truedat
         /// Decision matrix:
         ///   Local NTFS, ASCII   -> direct (Method="direct")
         ///   Local NTFS, non-ASCII -> existing hardlink path is upstream of this
-        ///                            helper (RunTool); SourceStager.Open is only
+        ///                            helper (RunTool); OpenStagedSource is only
         ///                            called by the per-track fan-out, which today
         ///                            does NOT hardlink. So a non-ASCII local path
         ///                            here is staged (Method="staged-fallback")
@@ -4741,26 +4741,26 @@ namespace Truedat
             // Otherwise: stage. The staged filename is GUID-based so the staged
             // path is always ASCII regardless of the source.
             string method = isUnc ? "staged" : "staged-fallback";
-            string ext = Path.GetExtension(sourcePath);
-            string dest = Path.Combine(opts.StageDir, $"{Guid.NewGuid():N}{ext}");
-
+            string dest = "";
             var sw = Stopwatch.StartNew();
             try
             {
+                string ext = Path.GetExtension(sourcePath);
+                dest = Path.Combine(opts.StageDir, $"{Guid.NewGuid():N}{ext}");
                 Directory.CreateDirectory(opts.StageDir);
                 File.Copy(sourcePath, dest, overwrite: false);
                 sw.Stop();
                 long bytes = 0;
                 try { bytes = new FileInfo(dest).Length; } catch { }
                 if (_audit)
-                    Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {bytes / (1024 * 1024)}MB)");
+                    Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {(bytes / 1024.0 / 1024.0):F1}MB)");
                 return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest);
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                Console.Error.WriteLine($"WARN: stage failed: {sourcePath} -> {dest}: {ex.Message}; falling back to direct read");
-                try { File.Delete(dest); } catch { }
+                Console.Error.WriteLine($"  Warning: stage failed: {sourcePath} -> {dest}: {ex.Message}; falling back to direct read");
+                try { if (dest.Length > 0) File.Delete(dest); } catch { }
                 return new SourceHandle(sourcePath, "direct", 0, 0, null);
             }
         }
