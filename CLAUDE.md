@@ -38,6 +38,10 @@ Each worker runs Essentia + `ComputeFileMd5` + `ComputeFingerprintV1` + `Compute
 
 The legacy `essentia_streaming_md5.exe` and `fpcalc.exe` subprocesses are **no longer in the default codepath**. They're invoked only by `--fingerprint`, `--md5-only`, and `--quick-fingerprint`, where they still run via `RunTool` (with the `SafePath`/`TryCreateHardlink` path-escape fallback).
 
+## Source staging
+
+When the source path is UNC (`\\server\share\…`) — or when the existing non-ASCII hardlink mitigation can't help because the volume doesn't host hardlinks — `OpenStagedSource` copies the file once to `%TEMP%\.truedat-stage\<guid>.<ext>` and points every worker at the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. The GUID name is always ASCII, so the non-ASCII / 8.3-disabled footgun on UNC sources disappears for free. `--no-stage` opts out; `--stage-dir <path>` overrides the staging directory (default `%TEMP%\.truedat-stage`). Steady-state disk footprint = at most `parallel_worker_count` staged files (per-track `using var src` / `try/finally` cleans up); orphans from killed scans are swept at the next startup by `CleanupOrphanedFiles`. The original source path stays the cache key, JSON output path, and errors-CSV identifier — the GUID staging name never leaks out of the worker fan-out.
+
 ## Hash-only mode (offline NDJSON manifest)
 
 `--hash-only --level fingerprint|stream --file-list <paths.txt> --output <manifest.ndjson>` runs identity-only passes without Essentia and appends one envelope per file to an NDJSON manifest. Used by the determinism rig at `tools/verify-audiosha-determinism.ps1`.
@@ -124,5 +128,7 @@ A local test corpus exists; details are recorded in the gitignored `docs/reviews
 Known signal gaps remaining (Phase 5+ work, NOT bugs):
 - LAME-to-LAME re-encode chains verdict "no" (second LAME encode rewrites Xing tag) — needs cascade-encode artifact detection.
 - `hfSpectralStructure.imagingSymmetry` is currently unused in the vote (Lanczos suppression neutralized it on corpus-1); the field is still emitted and tracked for future-corpus tuning.
+
+**Opt-outs for slow scans.** `--no-bitusage` suppresses `ComputeBitUsage` (omits the `bitUsage` JSON block); `--no-hf-analysis` suppresses `ComputeHfAnalysis` (omits `hfEnergyRatio` / `hfEnergyMethod` / `hfSpectralStructure`). Each saves one ffmpeg subprocess + 30 s mid-track decode per track at all three fan-out sites. The `truedat` verdict block still emits but with a reduced signal set (Signal A lost with `--no-bitusage`; Signals B + F with `--no-hf-analysis`) — borderline cases more often return `"unknown"`. `truedat.method` carries the algorithm-version stamp regardless of which signals fed in. Both flags are orthogonal to staging — combine with `--no-stage` for forensic runs, or use alone to cut wall-clock without giving up source caching. The cache canary is **not** widened to recognise entries scanned with these flags as "partial" — the bitUsage / hf fields are explicitly optional, matching the existing ffmpeg-absent install pattern. Backfill these fields with `truedat --verify --backfill --backfill-level features`.
 
 For session resume: read the latest `SESSION-RESUME-*.md` in the local (gitignored) `docs/` directory first.
