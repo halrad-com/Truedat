@@ -78,6 +78,8 @@ truedat.exe "iTunes Music Library.xml" --fingerprint
 
 Output: `mbxmoods.json` / `mbxhub-fingerprints.json` (next to the XML file)
 
+**Auto-discovery:** if you omit the positional XML arg, truedat probes (first hit wins): `<exe-dir>\..\iTunes Music Library.xml` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>\iTunes Music Library.xml`, then `.\iTunes Music Library.xml` (cwd). The error message lists the probed locations so a no-hit failure is self-diagnosing.
+
 ### Options
 
 ```
@@ -257,6 +259,8 @@ Flags: `--seed-moods`, `--seed-catalog <path>`, `--seed-target <path>` (default:
 ## Installation
 
 Place `truedat.exe` and the required tools in the same folder. No additional runtime needed on Windows 10+.
+
+**Recommended layout** for use alongside MusicBee/iTunes: drop the truedat folder under your library directory (e.g. `<library>\truedat\`). The exe will auto-discover the iTunes XML one level up — no need to pass the XML path or `cd` anywhere first. Output (`mbxmoods.json` etc.) lands next to the XML.
 
 ### Dependencies
 
