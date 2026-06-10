@@ -48,6 +48,16 @@ if errorlevel 1 (
 )
 echo Done: onnxruntime.dll
 
+REM Ship README.md alongside the binary so the distributed bundle is self-documenting.
+echo Copying README.md...
+copy /Y README.md "dist\truedat\" >nul
+if errorlevel 1 (
+    echo ERROR: README.md copy failed
+    pause
+    exit /b 1
+)
+echo Done: README.md
+
 echo.
 echo ========================================
 echo Build complete!

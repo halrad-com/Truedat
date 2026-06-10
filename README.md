@@ -84,7 +84,14 @@ Output: `mbxmoods.json` / `mbxhub-fingerprints.json` (next to the XML file)
 truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 
   -p, --parallel <N>      Number of parallel threads (default: all cores)
-  --fixup                 Validate and remap paths in mbxmoods.json without re-analyzing
+  --fixup                 Validate and remap paths in mbxmoods.json without re-analyzing.
+                          With --remap, performs a pure prefix swap (see --remap below).
+  --remap <old>=<new>     With --fixup: wholesale prefix swap on mbxmoods.json keys.
+                          Pass the moods file as the positional arg (no iTunes XML
+                          needed). Case-insensitive prefix match; entries that don't
+                          start with the old prefix pass through unchanged. Writes a
+                          .bak.<timestamp> before atomic replace. Example:
+                          truedat --fixup --remap "D:\Music\=\\nas\share\Music\" mbxmoods.json
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
                           (read-only; writes mbxmoods-verify.csv next to the moods file)
   --verify --backfill     Fill in missing fields for entries whose audio bytes are
@@ -164,6 +171,10 @@ truedat.exe "iTunes Music Library.xml" -p 4
 
 REM Fix path separators without re-analyzing (e.g., after moving files)
 truedat.exe "iTunes Music Library.xml" --fixup
+
+REM Re-key mbxmoods.json from one root to another (e.g., scanned local copy of
+REM a NAS mirror, need entries keyed by the UNC path). No iTunes XML needed.
+truedat.exe --fixup --remap "D:\Music\=\\nas\share\Music\" mbxmoods.json
 
 REM Generate fingerprints for the whole library
 truedat.exe "iTunes Music Library.xml" --fingerprint
