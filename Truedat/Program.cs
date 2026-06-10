@@ -2035,11 +2035,12 @@ namespace Truedat
                 return;
             }
 
-            xmlPath = xmlPath ?? "iTunes Music Library.xml";
+            xmlPath = ResolveITunesXml(xmlPath);
 
             if (!File.Exists(xmlPath))
             {
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
+                Console.WriteLine("Probed: exe-dir parent, exe-dir, current working directory.");
                 Console.WriteLine("Usage: truedat.exe <path-to-iTunes-Music-Library.xml> [options]");
                 Console.WriteLine();
                 Console.WriteLine("Options:");
@@ -4064,6 +4065,47 @@ namespace Truedat
                 if (File.Exists(path)) return path;
             }
             return null;
+        }
+
+        // Resolve the iTunes Music Library.xml location with a fallback probe order.
+        // Supports the "drop the truedat folder into musicbee\library\ and run it"
+        // install pattern: the exe-dir-parent probe picks up the XML that sits one
+        // level up from where the exe lives, regardless of cwd.
+        //
+        // Probe order (first hit wins):
+        //   1. Explicit positional arg (caller's responsibility to pass)
+        //   2. <exe-dir>\..\iTunes Music Library.xml   (install-parent — primary case)
+        //   3. <exe-dir>\iTunes Music Library.xml      (alongside the exe)
+        //   4. <cwd>\iTunes Music Library.xml          (legacy behavior — backward compat)
+        //
+        // On no hit: returns "iTunes Music Library.xml" so the caller's File.Exists
+        // check fails with the same shape as before. moodsPath continues to derive
+        // from Path.GetDirectoryName(xmlPath), so the output lands next to whichever
+        // copy was found.
+        static string ResolveITunesXml(string? explicitArg)
+        {
+            const string XmlName = "iTunes Music Library.xml";
+            if (!string.IsNullOrEmpty(explicitArg)) return explicitArg!;
+
+            string exeDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string? exeParent = null;
+            try { exeParent = Path.GetDirectoryName(exeDir); } catch { }
+
+            // 1. Exe-dir parent (musicbee\library\ when installed at musicbee\library\truedat\)
+            if (!string.IsNullOrEmpty(exeParent))
+            {
+                var cand = Path.Combine(exeParent!, XmlName);
+                if (File.Exists(cand)) return cand;
+            }
+            // 2. Exe-dir
+            var exeCand = Path.Combine(exeDir, XmlName);
+            if (File.Exists(exeCand)) return exeCand;
+            // 3. Cwd (legacy)
+            if (File.Exists(XmlName)) return XmlName;
+
+            // No hit — return the cwd-relative name so the caller's File.Exists check
+            // surfaces a familiar error.
+            return XmlName;
         }
 
         // Verify ORT native DLLs sit next to the exe before any VAM/VAD path touches them.
