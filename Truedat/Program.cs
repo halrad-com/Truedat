@@ -661,6 +661,7 @@ namespace Truedat
             var parallelism = Environment.ProcessorCount;
             string? xmlPath = null;
             bool fixupMode = false;
+            string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
             bool verifyMode = false;
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
@@ -783,6 +784,7 @@ namespace Truedat
                 if (canonical == "?" || canonical == "h" || canonical == "help")
                     showHelp = true;
                 else if (canonical == "fixup") fixupMode = true;
+                else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
@@ -1005,7 +1007,11 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine("Options:");
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
-                Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
+                Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing.");
+                Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
+                Console.WriteLine("  --remap <old>=<new> With --fixup: wholesale prefix swap on mbxmoods.json keys. Pass the");
+                Console.WriteLine("                      moods file as the positional arg (no iTunes XML needed). Example:");
+                Console.WriteLine("                      truedat --fixup --remap \"D:\\Music\\=\\\\nas\\share\\Music\\\" mbxmoods.json");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
@@ -2010,6 +2016,25 @@ namespace Truedat
                 return;
             }
 
+            // --fixup --remap "<old>=<new>" — wholesale prefix swap on mbxmoods.json keys,
+            // no iTunes XML required. Positional arg is the moods file path directly
+            // (defaults to ./mbxmoods.json when omitted). Use case: library scanned at
+            // one path (e.g. local copy at D:\Music\) needs to be re-keyed to a different
+            // root (e.g. \\nas\share\Music\) so a downstream consumer reads the right paths.
+            if (fixupMode && !string.IsNullOrEmpty(remapPrefix))
+            {
+                var parts = remapPrefix!.Split(new[] { '=' }, 2);
+                if (parts.Length != 2 || parts[0].Length == 0)
+                {
+                    Console.WriteLine("Error: --remap requires the form <oldPrefix>=<newPrefix> (oldPrefix must be non-empty).");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+                var moodsForRemap = xmlPath ?? "mbxmoods.json";
+                RunFixupRemap(moodsForRemap, parts[0], parts[1]);
+                return;
+            }
+
             xmlPath = xmlPath ?? "iTunes Music Library.xml";
 
             if (!File.Exists(xmlPath))
@@ -2019,7 +2044,11 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine("Options:");
                 Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
-                Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing");
+                Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing.");
+                Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
+                Console.WriteLine("  --remap <old>=<new> With --fixup: wholesale prefix swap on mbxmoods.json keys. Pass the");
+                Console.WriteLine("                      moods file as the positional arg (no iTunes XML needed). Example:");
+                Console.WriteLine("                      truedat --fixup --remap \"D:\\Music\\=\\\\nas\\share\\Music\\\" mbxmoods.json");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
@@ -3440,6 +3469,107 @@ namespace Truedat
                 Console.WriteLine($"Updated: {moodsPath}");
             }
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
+        }
+
+        /// <summary>
+        /// Wholesale prefix-swap on mbxmoods.json keys. Case-insensitive prefix match
+        /// (Windows convention). Use case: library was scanned at one path (e.g. a
+        /// robocopy mirror at D:\music\) but downstream consumers (iTunes XML, MBXHub)
+        /// expect the canonical path (e.g. \\nas\share\music\). Entries that don't start
+        /// with the oldPrefix are left untouched. No iTunes XML required, no per-file
+        /// existence check on the new path — this is a pure key rewrite.
+        ///
+        /// On collision (two old keys remap to the same new key), the later one wins —
+        /// reported in the summary. Backup is written as &lt;moodsPath&gt;.bak.&lt;timestamp&gt;
+        /// before the atomic replace.
+        /// </summary>
+        static void RunFixupRemap(string moodsPath, string oldPrefix, string newPrefix)
+        {
+            Console.WriteLine("=== Fixup Mode (prefix remap) ===");
+            Console.WriteLine($"  Moods file:  {moodsPath}");
+            Console.WriteLine($"  Old prefix:  {oldPrefix}");
+            Console.WriteLine($"  New prefix:  {newPrefix}");
+            Console.WriteLine();
+
+            if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
+            if (string.Equals(oldPrefix, newPrefix, StringComparison.Ordinal))
+            { Console.WriteLine("Old prefix equals new prefix; nothing to do."); return; }
+
+            var json = File.ReadAllText(moodsPath);
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
+            var tracks = root["tracks"]?.AsObject();
+            if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+            Console.WriteLine($"Moods entries: {tracks.Count}");
+
+            int remapped = 0, unchanged = 0, collided = 0;
+            var newTracks = new JsonObject();
+            var collisionExamples = new List<(string OldKey, string NewKey)>();
+
+            foreach (var kv in tracks.ToList())
+            {
+                var oldKey = kv.Key;
+                var trackNode = kv.Value;
+                if (trackNode == null) continue;
+                tracks.Remove(oldKey);  // detach so it can be re-parented
+                var trackData = trackNode.AsObject();
+
+                if (oldKey.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var newKey = newPrefix + oldKey.Substring(oldPrefix.Length);
+                    if (newTracks.ContainsKey(newKey))
+                    {
+                        collided++;
+                        if (collisionExamples.Count < 10) collisionExamples.Add((oldKey, newKey));
+                        newTracks.Remove(newKey);  // later-wins
+                    }
+                    newTracks[newKey] = trackData;
+                    remapped++;
+                }
+                else
+                {
+                    newTracks[oldKey] = trackData;
+                    unchanged++;
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("=== Results ===");
+            Console.WriteLine($"  Remapped:   {remapped}");
+            Console.WriteLine($"  Unchanged:  {unchanged} (did not start with old prefix)");
+            if (collided > 0)
+            {
+                Console.WriteLine($"  Collisions: {collided} (later entry overwrote earlier — verify your old/new prefixes are exact)");
+                foreach (var (o, n) in collisionExamples)
+                {
+                    Console.WriteLine($"    {o}");
+                    Console.WriteLine($"      -> {n}");
+                }
+                if (collided > collisionExamples.Count)
+                    Console.WriteLine($"    ... and {collided - collisionExamples.Count} more");
+            }
+            Console.WriteLine($"  Total out:  {newTracks.Count}");
+
+            if (remapped == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("No entries matched the old prefix; no changes written.");
+                return;
+            }
+
+            var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+            var bakPath = $"{moodsPath}.bak.{timestamp}";
+            File.Copy(moodsPath, bakPath);
+            Console.WriteLine();
+            Console.WriteLine($"Backup: {bakPath}");
+            root["tracks"] = newTracks;
+            root["trackCount"] = newTracks.Count;
+            root["generatedAt"] = DateTime.UtcNow.ToString("o");
+            var tmpPath = moodsPath + ".tmp";
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            AtomicReplace(tmpPath, moodsPath);
+            Console.WriteLine($"Updated: {moodsPath}");
         }
 
         /// <summary>
