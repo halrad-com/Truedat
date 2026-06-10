@@ -4108,20 +4108,19 @@ namespace Truedat
             return XmlName;
         }
 
-        // Verify ORT native DLLs sit next to the exe before any VAM/VAD path touches them.
-        // Excluded from ILRepack by design; absence otherwise surfaces as an unhandled
-        // DllNotFoundException from the first ORT P/Invoke.
+        // Verify the ORT native DLL sits next to the exe before any VAM/VAD path
+        // touches it. Excluded from ILRepack by design; absence otherwise surfaces
+        // as an unhandled DllNotFoundException from the first ORT P/Invoke.
+        //
+        // CPU EP only (see project memory vam-models-no-gpu-benefit). DirectML and
+        // onnxruntime_providers_shared.dll were dropped in 28be76e — only the core
+        // onnxruntime.dll is required.
         static bool OnnxRuntimePresent(string mode)
         {
-            var baseDir = AppContext.BaseDirectory;
-            var ort = Path.Combine(baseDir, "onnxruntime.dll");
-            var shared = Path.Combine(baseDir, "onnxruntime_providers_shared.dll");
-            bool ortOk = File.Exists(ort);
-            bool sharedOk = File.Exists(shared);
-            if (ortOk && sharedOk) return true;
-            Console.Error.WriteLine($"Error: {mode} requires the ONNX Runtime native DLLs next to truedat.exe.");
-            if (!ortOk) Console.Error.WriteLine($"  missing: {ort}");
-            if (!sharedOk) Console.Error.WriteLine($"  missing: {shared}");
+            var ort = Path.Combine(AppContext.BaseDirectory, "onnxruntime.dll");
+            if (File.Exists(ort)) return true;
+            Console.Error.WriteLine($"Error: {mode} requires the ONNX Runtime native DLL next to truedat.exe.");
+            Console.Error.WriteLine($"  missing: {ort}");
             return false;
         }
 
