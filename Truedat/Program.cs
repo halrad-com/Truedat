@@ -380,8 +380,23 @@ namespace Truedat
         static bool _vamEnabled = false;
         static bool _audit;
         internal static StageOptions _stageOpts = new StageOptions();
-        internal static bool _noBitUsage;
-        internal static bool _noHfAnalysis;
+        // CLI signal-disable toggles live on StageOptions (siblings of the staging
+        // knobs they share an end-of-scan cost profile with). Loose static bools
+        // remain as forwarding properties for the few call sites that haven't been
+        // threaded yet — touching one source of truth is enough.
+        internal static bool _noBitUsage   { get => _stageOpts.NoBitUsage;   set => _stageOpts.NoBitUsage   = value; }
+        internal static bool _noHfAnalysis { get => _stageOpts.NoHfAnalysis; set => _stageOpts.NoHfAnalysis = value; }
+
+        // Per-process cache: drive root -> isNetwork. DriveInfo.DriveType is a Win32
+        // call (~µs per hit but it touches the mount table). One lookup per unique
+        // root, then memoized. Concurrent-safe; readers don't lock.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _networkDriveCache
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+        // Source-staging telemetry. Set during the per-track fan-out, summarised
+        // at end-of-scan. Reset at start of each scan mode.
+        internal static int _stageSuccessCount;
+        internal static int _stageFallbackCount;
 
 
         // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
@@ -485,6 +500,11 @@ namespace Truedat
             return path;
         }
 
+        // Startup orphan sweep — single-instance only. Concurrent truedat invocations
+        // sharing the same stage-dir (or .truedat-tmp / temp downmix area) is not a
+        // supported model: this sweep would race the other instance's staged files
+        // mid-scan. The supported model for cross-machine scaling is `--chunk M/N`
+        // shard-and-merge, where each chunk runs on its own machine.
         static void CleanupOrphanedFiles()
         {
             // Clean up orphaned hardlinks from .truedat-tmp directories on all drives
@@ -504,8 +524,10 @@ namespace Truedat
                             foreach (var f in files)
                                 try { File.Delete(f); } catch { }
                         }
-                        if (Directory.GetFiles(tmpDir).Length == 0)
-                            try { Directory.Delete(tmpDir); } catch { }
+                        // Attempt removal unconditionally; the call fails if anything
+                        // remained (e.g. permission denied on a stuck file) and we
+                        // move on — cheaper than a second GetFiles.
+                        try { Directory.Delete(tmpDir); } catch { }
                     }
                     catch { }
                 }
@@ -540,8 +562,7 @@ namespace Truedat
                         foreach (var f in orphans)
                             try { File.Delete(f); } catch { }
                     }
-                    if (Directory.GetFiles(stageDir).Length == 0)
-                        try { Directory.Delete(stageDir); } catch { }
+                    try { Directory.Delete(stageDir); } catch { }
                 }
             }
             catch { }
@@ -1212,6 +1233,21 @@ namespace Truedat
                 string? afAudioStreamSha256 = null;
                 string afAudioStreamSha256Source = "";
 
+                // FIX 4 — staging handle opened lazily by EnsureStagedSrc() on the first
+                // body read after a tier-1 miss. Reused by every tier-2/3/4 body read and
+                // the cache-miss worker fan-out. Dispose runs at end of the analyze-file
+                // block (after the JSON-write / moods-save), so the worker fan-out and the
+                // identity write both see the same staged copy. Tier-1 (mtime-equality)
+                // does NOT trigger staging.
+                SourceHandle? afStagedSrc = null;
+                string EnsureStagedSrc()
+                {
+                    afStagedSrc ??= OpenStagedSource(analyzeFilePath!, _stageOpts, afFileSize);
+                    return afStagedSrc.Path;
+                }
+                try
+                {
+
                 // Cache hierarchy — same tiers as MoodsMode and --file-list.
                 if (afMoodsTracks != null)
                 {
@@ -1222,7 +1258,7 @@ namespace Truedat
                         && afEx.Features.DynamicRange.HasValue
                         && afEx.Features.LoudnessMomentary.HasValue)
                     {
-                        // Tier 1: path-mtime
+                        // Tier 1: path-mtime. No body read — staging not opened.
                         if (TruncateToSeconds(afCurrentLastMod) == TruncateToSeconds(afEx.LastModified))
                         {
                             var freshTags = ExtractFileTags(analyzeFilePath!);
@@ -1233,16 +1269,18 @@ namespace Truedat
                             afAudioStreamSha256 = trackEntry.AudioStreamSha256;
                             afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
                         }
-                        // Tier 2: path-sha (mtime drifted, audio bytes unchanged)
+                        // Tier 2: path-sha (mtime drifted, audio bytes unchanged).
+                        // Body reads go through the staged copy.
                         else if (!string.IsNullOrEmpty(afEx.AudioStreamSha256))
                         {
-                            var (recompSha, _) = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                            var afStagedPath = EnsureStagedSrc();
+                            var (recompSha, _) = ComputeAudioStreamSha256FromFile(afStagedPath, afFileSize, out _);
                             if (!string.IsNullOrEmpty(recompSha)
                                 && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                             {
-                                var refreshedMd5 = ComputeFileMd5(analyzeFilePath!);
-                                var refreshedFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
-                                var freshTags = ExtractFileTags(analyzeFilePath!);
+                                var refreshedMd5 = ComputeFileMd5(afStagedPath);
+                                var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
+                                var freshTags = ExtractFileTags(afStagedPath);
                                 trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
                                 afHitTag = "cached·sha";
@@ -1256,13 +1294,14 @@ namespace Truedat
                     // Tier 3: cross-MD5
                     if (trackEntry == null && afMoodMd5Index != null)
                     {
-                        var localMd5 = ComputeFileMd5(analyzeFilePath!);
+                        var afStagedPath = EnsureStagedSrc();
+                        var localMd5 = ComputeFileMd5(afStagedPath);
                         if (!string.IsNullOrEmpty(localMd5)
                             && afMoodMd5Index.TryGetValue(localMd5!, out var xp)
                             && xp.Entry.Features.DynamicRange.HasValue
                             && xp.Entry.Features.LoudnessMomentary.HasValue)
                         {
-                            var freshTags = ExtractFileTags(analyzeFilePath!);
+                            var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xp.Entry, freshTags.Artist, freshTags.Title,
                                 freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, localMd5, null);
                             afMoodsTracks.TryRemove(xp.OldKey, out _);
@@ -1276,15 +1315,16 @@ namespace Truedat
                     // Tier 4: cross-SHA
                     if (trackEntry == null && afMoodShaIndex != null)
                     {
-                        var (localSha, _) = ComputeAudioStreamSha256FromFile(analyzeFilePath!, afFileSize, out _);
+                        var afStagedPath = EnsureStagedSrc();
+                        var (localSha, _) = ComputeAudioStreamSha256FromFile(afStagedPath, afFileSize, out _);
                         if (!string.IsNullOrEmpty(localSha)
                             && afMoodShaIndex.TryGetValue(localSha!, out var xs)
                             && xs.Entry.Features.DynamicRange.HasValue
                             && xs.Entry.Features.LoudnessMomentary.HasValue)
                         {
-                            var refreshedMd5 = ComputeFileMd5(analyzeFilePath!);
-                            var refreshedFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
-                            var freshTags = ExtractFileTags(analyzeFilePath!);
+                            var refreshedMd5 = ComputeFileMd5(afStagedPath);
+                            var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
+                            var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                 freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
                             afMoodsTracks.TryRemove(xs.OldKey, out _);
@@ -1299,68 +1339,25 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
-                    using var afSrc = OpenStagedSource(analyzeFilePath!, _stageOpts);
-                    var afReadPath = afSrc.Path;
-                    var afEssentiaTask = Task.Run(() => AnalyzeWithEssentia(afEssentiaExe, afReadPath, afFileSize, CancellationToken.None));
-                    var afFileMd5Task = Task.Run(() => ComputeFileMd5(afReadPath));
-                    var afFingerprintTask = Task.Run(() =>
-                    {
-                        var swFp = Stopwatch.StartNew();
-                        var fp = ComputeFingerprintV1(afReadPath, afFileSize, out _);
-                        swFp.Stop();
-                        if (_audit)
-                            Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
-                        return fp;
-                    });
-                    var afAudioStreamSha256Task = Task.Run(() =>
-                    {
-                        var swSha = Stopwatch.StartNew();
-                        var result = ComputeAudioStreamSha256FromFile(afReadPath, afFileSize, out _);
-                        swSha.Stop();
-                        if (_audit)
-                            Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(analyzeFilePath)}\"");
-                        return result;
-                    });
-                    var afTagsTask = Task.Run(() => ExtractFileTags(afReadPath));
-                    // Phase 2.5 — bitUsage runs in parallel with everything else. Self-contained
-                    // duration probe so it doesn't depend on other tasks' completion.
-                    var afBitUsageTask = _noBitUsage
-                        ? Task.FromResult<BitUsageSummary?>(null)
-                        : Task.Run(() =>
-                        {
-                            double dur = 0;
-                            try { using var tf = TagLib.File.Create(afReadPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
-                            return ComputeBitUsage(afReadPath, dur, _ffmpegPath.Value);
-                        });
-                    // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                    var afHfEnergyTask = _noHfAnalysis
-                        ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
-                        : Task.Run(() => ComputeHfAnalysis(afReadPath, _ffmpegPath.Value));
-                    // S2.5 — single-track VAM. Constructed per --analyze-file
-                    // invocation (one track => one pipeline); disposed at end.
+                    EnsureStagedSrc();  // open if a no-moods scan skipped the cache hierarchy
                     using var afVamPipeline = TryCreateVamPipelineForScan();
-                    var afVocalTask = afVamPipeline != null
-                        ? Task.Run(() => afVamPipeline.AnalyzeTrack(afReadPath))
-                        : Task.FromResult<VocalBlock?>(null);
-                    // SMFM — read fresh every scan; MC analyses files progressively.
-                    var afSmfmTask = Task.Run(() => SmfmReader.TryRead(afReadPath));
-                    Task.WaitAll(new Task[] { afEssentiaTask, afFileMd5Task, afFingerprintTask, afAudioStreamSha256Task, afTagsTask, afBitUsageTask, afHfEnergyTask, afVocalTask, afSmfmTask });
+                    var afResults = RunSourceWorkers(
+                        afEssentiaExe, afStagedSrc!, afFileSize, analyzeFilePath!, knownDurationSec: 0,
+                        afVamPipeline, extractTags: true, _stageOpts, CancellationToken.None);
 
-                    var (features, error) = afEssentiaTask.Result;
-                    var afFileMd5 = afFileMd5Task.Result;
-                    afFingerprintV1 = afFingerprintTask.Result;
-                    var (sha, shaSrc) = afAudioStreamSha256Task.Result;
-                    afAudioStreamSha256 = sha;
-                    afAudioStreamSha256Source = shaSrc;
-                    var afTags = afTagsTask.Result;
-                    var afBitUsage = afBitUsageTask.Result;
-                    var (afHfRatio, afHfMethod, afHfStructure) = afHfEnergyTask.Result;
-                    var afVocalResult = afVocalTask.Result;
-                    var afSmfmResult = afSmfmTask.Result;
+                    var features = afResults.Features;
+                    var afFileMd5 = afResults.FileMd5;
+                    afFingerprintV1 = afResults.FingerprintV1;
+                    afAudioStreamSha256 = afResults.AudioStreamSha256;
+                    afAudioStreamSha256Source = afResults.AudioStreamSha256Source;
+                    var afTags = afResults.Tags!;  // extractTags: true
+                    var afBitUsage = afResults.BitUsage;
+                    var afVocalResult = afResults.Vocal;
+                    var afSmfmResult = afResults.Smfm;
 
                     if (features == null)
                     {
-                        Console.Error.WriteLine($"Error: {error}");
+                        Console.Error.WriteLine($"Error: {afResults.EssentiaError}");
                         Environment.ExitCode = 3;
                         return;
                     }
@@ -1371,8 +1368,8 @@ namespace Truedat
                     features.Genre = afTags.Genre;
                     features.FilePath = analyzeFilePath!;
                     if (afBitUsage != null) features.BitUsage = afBitUsage;
-                    if (afHfRatio.HasValue) { features.HfEnergyRatio = afHfRatio; features.HfEnergyMethod = afHfMethod; }
-                    if (afHfStructure != null) features.HfSpectralStructure = afHfStructure;
+                    if (afResults.HfEnergyRatio.HasValue) { features.HfEnergyRatio = afResults.HfEnergyRatio; features.HfEnergyMethod = afResults.HfEnergyMethod; }
+                    if (afResults.HfSpectralStructure != null) features.HfSpectralStructure = afResults.HfSpectralStructure;
                     if (afSmfmResult.HasValue)
                     {
                         features.SensmeScores      = afSmfmResult.Value.Scores;
@@ -1381,10 +1378,19 @@ namespace Truedat
                         features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, 3);
                     }
 
+                    // FIX 5 — record the mtime that was true when we captured the
+                    // bytes we analyzed (snapshot from SourceHandle). Falls back to
+                    // afCurrentLastMod if the snapshot failed (e.g. stat threw).
+                    DateTime afLastMod = afStagedSrc!.SourceLastWriteUtc != DateTime.MinValue
+                        ? afStagedSrc.SourceLastWriteUtc
+                        : afCurrentLastMod;
+                    if (afLastMod == DateTime.MinValue)
+                        afLastMod = File.GetLastWriteTimeUtc(analyzeFilePath);
+
                     trackEntry = new TrackEntry
                     {
                         Features = features,
-                        LastModified = afCurrentLastMod == DateTime.MinValue ? File.GetLastWriteTimeUtc(analyzeFilePath) : afCurrentLastMod,
+                        LastModified = afLastMod,
                         AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
                         FileMd5 = afFileMd5,
                         AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
@@ -1443,6 +1449,8 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = 0;
+                }
+                finally { afStagedSrc?.Dispose(); }
                 return;
             }
 
@@ -1752,19 +1760,36 @@ namespace Truedat
                         return;
                     }
 
+                    SourceHandle? flStagedSrc = null;
                     try
                     {
                         var fullPath = Path.GetFullPath(filePath);
                         var hasMoods = !string.IsNullOrEmpty(analyzeFileMoods);
+
+                        // Capture mtime ONCE at entry; threaded through every tier so the
+                        // recorded mtime matches the bytes any tier-2/3/4 body read or
+                        // worker block analyzes. (FIX 5 — pairs with the source-handle
+                        // snapshot for the staging happy path; this is the non-staged
+                        // fallback / cache-hit path.)
+                        DateTime currentLastMod = DateTime.MinValue;
+                        try { currentLastMod = File.GetLastWriteTimeUtc(filePath); } catch { }
+                        long flFileSize = 0;
+                        try { flFileSize = new FileInfo(filePath).Length; } catch { }
+
+                        // Lazy staging — opened on first tier-2/3/4 body read or at cache miss.
+                        // Tier-1 (path-mtime equality) doesn't open it.
+                        string EnsureStagedSrc()
+                        {
+                            flStagedSrc ??= OpenStagedSource(filePath, _stageOpts, flFileSize);
+                            return flStagedSrc.Path;
+                        }
 
                         // Cache hierarchy — same tiers as MoodsMode. Plugin-driven
                         // workflows (re-invoke after MusicBee scan finds new files) get
                         // path-mtime hits ~free; only new / changed audio runs Essentia.
                         if (hasMoods)
                         {
-                            // Tier 1: path-mtime hit
-                            DateTime currentLastMod = DateTime.MinValue;
-                            try { currentLastMod = File.GetLastWriteTimeUtc(filePath); } catch { }
+                            // Tier 1: path-mtime hit — no body read, staging not opened.
                             if (flMoodsTracks.TryGetValue(fullPath, out var fEx)
                                 && fEx.Features.DynamicRange.HasValue
                                 && fEx.Features.LoudnessMomentary.HasValue)
@@ -1783,17 +1808,18 @@ namespace Truedat
                                     return;
                                 }
 
-                                // Tier 2: path-sha hit (mtime drifted but audio bytes unchanged)
+                                // Tier 2: path-sha hit (mtime drifted but audio bytes unchanged).
+                                // Body reads go through the staged copy.
                                 if (!string.IsNullOrEmpty(fEx.AudioStreamSha256))
                                 {
-                                    var fileSize2 = new FileInfo(filePath).Length;
-                                    var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(filePath, fileSize2, out _);
+                                    var flStagedPath = EnsureStagedSrc();
+                                    var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(flStagedPath, flFileSize, out _);
                                     if (!string.IsNullOrEmpty(recomputedSha)
                                         && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                                     {
-                                        var refreshedMd5 = ComputeFileMd5(filePath);
-                                        var refreshedFp = ComputeFingerprintV1(filePath, fileSize2, out _);
-                                        var freshTags = ExtractFileTags(filePath);
+                                        var refreshedMd5 = ComputeFileMd5(flStagedPath);
+                                        var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
+                                        var freshTags = ExtractFileTags(flStagedPath);
                                         var flShaPathEntry = RebuildCacheEntryFromTags(
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
@@ -1810,13 +1836,14 @@ namespace Truedat
                             // Tier 3: cross-MD5 hit (file at a different path, same bytes)
                             if (flMoodMd5Index != null)
                             {
-                                var localMd5 = ComputeFileMd5(filePath);
+                                var flStagedPath = EnsureStagedSrc();
+                                var localMd5 = ComputeFileMd5(flStagedPath);
                                 if (!string.IsNullOrEmpty(localMd5)
                                     && flMoodMd5Index.TryGetValue(localMd5!, out var xp)
                                     && xp.Entry.Features.DynamicRange.HasValue
                                     && xp.Entry.Features.LoudnessMomentary.HasValue)
                                 {
-                                    var freshTags = ExtractFileTags(filePath);
+                                    var freshTags = ExtractFileTags(flStagedPath);
                                     var flCrossMd5Entry = RebuildCacheEntryFromTags(
                                         xp.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, localMd5, null);
@@ -1833,16 +1860,16 @@ namespace Truedat
                             // Tier 4: cross-SHA hit (file moved AND tag-edited)
                             if (flMoodShaIndex != null)
                             {
-                                var fileSize3 = new FileInfo(filePath).Length;
-                                var (localSha, _) = ComputeAudioStreamSha256FromFile(filePath, fileSize3, out _);
+                                var flStagedPath = EnsureStagedSrc();
+                                var (localSha, _) = ComputeAudioStreamSha256FromFile(flStagedPath, flFileSize, out _);
                                 if (!string.IsNullOrEmpty(localSha)
                                     && flMoodShaIndex.TryGetValue(localSha!, out var xs)
                                     && xs.Entry.Features.DynamicRange.HasValue
                                     && xs.Entry.Features.LoudnessMomentary.HasValue)
                                 {
-                                    var refreshedMd5 = ComputeFileMd5(filePath);
-                                    var refreshedFp = ComputeFingerprintV1(filePath, fileSize3, out _);
-                                    var freshTags = ExtractFileTags(filePath);
+                                    var refreshedMd5 = ComputeFileMd5(flStagedPath);
+                                    var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
+                                    var freshTags = ExtractFileTags(flStagedPath);
                                     var flCrossShaEntry = RebuildCacheEntryFromTags(
                                         xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
@@ -1857,73 +1884,27 @@ namespace Truedat
                             }
                         }
 
-                        var fileSize = new FileInfo(filePath).Length;
+                        // Cache miss — full Essentia + identity ride-along on the staged copy.
+                        EnsureStagedSrc();
+                        var flResults = RunSourceWorkers(
+                            flEssentiaExe, flStagedSrc!, flFileSize, filePath, knownDurationSec: 0,
+                            flVamPipeline, extractTags: true, _stageOpts, CancellationToken.None);
 
-                        // Identity ride-along — same concurrency pattern as MoodsMode at :1497-1513.
-                        // Without this, --file-list mode was POSTing identity:{} (features-only).
-                        using var flSrc = OpenStagedSource(filePath, _stageOpts);
-                        var flReadPath = flSrc.Path;
-                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(flEssentiaExe, flReadPath, fileSize, CancellationToken.None));
-                        var fileMd5Task = Task.Run(() => ComputeFileMd5(flReadPath));
-                        var fingerprintTask = Task.Run(() =>
-                        {
-                            var swFp = Stopwatch.StartNew();
-                            var fp = ComputeFingerprintV1(flReadPath, fileSize, out _);
-                            swFp.Stop();
-                            if (_audit)
-                                Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
-                            return fp;
-                        });
-                        var audioStreamSha256Task = Task.Run(() =>
-                        {
-                            var swSha = Stopwatch.StartNew();
-                            var result = ComputeAudioStreamSha256FromFile(flReadPath, fileSize, out _);
-                            swSha.Stop();
-                            if (_audit)
-                                Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(filePath)}\"");
-                            return result;
-                        });
-                        // Tags ride-along — --file-list has no iTunes XML source, so populate
-                        // artist/title/album/genre/duration from TagLib tags. Without this,
-                        // identity.metadataKey on the server is empty for every local scan.
-                        var tagsTask = Task.Run(() => ExtractFileTags(flReadPath));
-                        // Phase 2.5 — bitUsage in parallel; self-contained duration probe.
-                        var bitUsageTask = _noBitUsage
-                            ? Task.FromResult<BitUsageSummary?>(null)
-                            : Task.Run(() =>
-                            {
-                                double dur = 0;
-                                try { using var tf = TagLib.File.Create(flReadPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
-                                return ComputeBitUsage(flReadPath, dur, _ffmpegPath.Value);
-                            });
-                        // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                        var hfEnergyTask = _noHfAnalysis
-                            ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
-                            : Task.Run(() => ComputeHfAnalysis(flReadPath, _ffmpegPath.Value));
-                        // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg
-                        // pipe per track at 16 kHz mono float32.
-                        var flVocalTask = flVamPipeline != null
-                            ? Task.Run(() => flVamPipeline.AnalyzeTrack(flReadPath))
-                            : Task.FromResult<VocalBlock?>(null);
-                        // SMFM — read fresh every scan; MC analyses files progressively.
-                        var flSmfmTask = Task.Run(() => SmfmReader.TryRead(flReadPath));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, flVocalTask, flSmfmTask });
-
-                        var (features, error) = essentiaTask.Result;
-                        var fileMd5 = fileMd5Task.Result;
-                        var fingerprintV1 = fingerprintTask.Result;
-                        var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
-                        var tags = tagsTask.Result;
-                        var bitUsage = bitUsageTask.Result;
-                        var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
-                        var flVocalResult = flVocalTask.Result;
-                        var flSmfmResult = flSmfmTask.Result;
+                        var features = flResults.Features;
+                        var fileMd5 = flResults.FileMd5;
+                        var fingerprintV1 = flResults.FingerprintV1;
+                        var audioStreamSha256 = flResults.AudioStreamSha256;
+                        var audioStreamSha256Source = flResults.AudioStreamSha256Source;
+                        var tags = flResults.Tags!;  // extractTags: true
+                        var bitUsage = flResults.BitUsage;
+                        var flVocalResult = flResults.Vocal;
+                        var flSmfmResult = flResults.Smfm;
 
                         if (features == null)
                         {
                             Interlocked.Increment(ref flFailed);
-                            flErrors.Add($"{filePath}: {error}");
-                            Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {error}");
+                            flErrors.Add($"{filePath}: {flResults.EssentiaError}");
+                            Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {flResults.EssentiaError}");
                             return;
                         }
 
@@ -1933,8 +1914,8 @@ namespace Truedat
                         features.Genre = tags.Genre;
                         features.FilePath = filePath;
                         if (bitUsage != null) features.BitUsage = bitUsage;
-                        if (hfRatio.HasValue) { features.HfEnergyRatio = hfRatio; features.HfEnergyMethod = hfMethod; }
-                        if (hfStructure != null) features.HfSpectralStructure = hfStructure;
+                        if (flResults.HfEnergyRatio.HasValue) { features.HfEnergyRatio = flResults.HfEnergyRatio; features.HfEnergyMethod = flResults.HfEnergyMethod; }
+                        if (flResults.HfSpectralStructure != null) features.HfSpectralStructure = flResults.HfSpectralStructure;
                         if (flSmfmResult.HasValue)
                         {
                             features.SensmeScores      = flSmfmResult.Value.Scores;
@@ -1943,10 +1924,15 @@ namespace Truedat
                             features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, 3);
                         }
 
+                        // FIX 5 — snapshot from SourceHandle. Falls back to the entry-time
+                        // capture if the snapshot threw (DateTime.MinValue).
+                        DateTime flLastMod = flStagedSrc!.SourceLastWriteUtc != DateTime.MinValue
+                            ? flStagedSrc.SourceLastWriteUtc
+                            : currentLastMod;
                         var trackEntry = new TrackEntry
                         {
                             Features = features,
-                            LastModified = File.GetLastWriteTimeUtc(filePath),
+                            LastModified = flLastMod,
                             AnalysisDurationSecs = 0, // individual timing not tracked in batch
                             FileMd5 = fileMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
@@ -1982,6 +1968,7 @@ namespace Truedat
                         flErrors.Add($"{filePath}: {ex.Message}");
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
                     }
+                    finally { flStagedSrc?.Dispose(); }
                 });
 
                 flSw.Stop();
@@ -2018,6 +2005,7 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped in {flSw.Elapsed.TotalSeconds:F1}s");
+                EmitStagingSummary();
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -2347,6 +2335,19 @@ namespace Truedat
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
 
+                    // FIX 4 — lazy-opened staging handle, reused by every tier-2/3/4
+                    // body read and the cache-miss worker fan-out. Tier-1 (path-mtime
+                    // equality) does NOT open it; SHA-backfill within tier-1 still
+                    // reads the original source so a single legacy-backfill body read
+                    // doesn't trigger a stage (the savings come on tier-2/3/4 misses
+                    // and full re-analysis, where the file is read multiple times).
+                    SourceHandle? msStagedSrc = null;
+                    long msSourceSize = 0;
+                    string EnsureStagedSrc()
+                    {
+                        msStagedSrc ??= OpenStagedSource(t.Location, _stageOpts, msSourceSize);
+                        return msStagedSrc.Path;
+                    }
                     try
                     {
                         var pct = (current * 100) / total;
@@ -2427,24 +2428,25 @@ namespace Truedat
                                     // Mtime mismatched. Try the audioStreamSha256 path-tier:
                                     // if the audio bytes are unchanged (only tags / container
                                     // metadata drifted), reuse Essentia features and refresh
-                                    // identity fields the tag edit invalidated.
+                                    // identity fields the tag edit invalidated. Body reads
+                                    // go through the staged copy (FIX 4).
                                     if (!string.IsNullOrEmpty(existing.AudioStreamSha256)
                                         && existing.Features.DynamicRange.HasValue
                                         && existing.Features.LoudnessMomentary.HasValue)
                                     {
-                                        long fileSize = 0;
-                                        try { fileSize = new FileInfo(t.Location).Length; } catch { }
-                                        if (fileSize > 0)
+                                        try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                        if (msSourceSize > 0)
                                         {
-                                            var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(t.Location, fileSize, out _);
+                                            var msStagedPath = EnsureStagedSrc();
+                                            var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(msStagedPath, msSourceSize, out _);
                                             if (!string.IsNullOrEmpty(recomputedSha)
                                                 && string.Equals(recomputedSha, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                                             {
                                                 // Audio bytes unchanged — tag edit only. Refresh
                                                 // fileMd5 + fingerprint.v1 (both tag-affected),
                                                 // reuse everything else.
-                                                var refreshedMd5 = ComputeFileMd5(t.Location);
-                                                var refreshedFp = ComputeFingerprintV1(t.Location, fileSize, out _);
+                                                var refreshedMd5 = ComputeFileMd5(msStagedPath);
+                                                var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 ApplySmfmInPlace(shaPathEntry.Features, t.Location);
                                                 allTracks[t.Location] = shaPathEntry;
@@ -2462,10 +2464,13 @@ namespace Truedat
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
                         }
 
-                        // Cross-machine MD5 fallback — same file at a different path
+                        // Cross-machine MD5 fallback — same file at a different path.
+                        // Body read goes through the staged copy (FIX 4).
                         if (moodMd5Index != null)
                         {
-                            var localMd5 = ComputeFileMd5(t.Location);
+                            if (msSourceSize == 0)
+                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                            var localMd5 = ComputeFileMd5(EnsureStagedSrc());
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
                                 var xf = xp.Entry.Features;
@@ -2567,15 +2572,16 @@ namespace Truedat
 
                         // Cross-machine SHA fallback \u2014 same audio bytes (invariant region) at
                         // a different path. Catches "moved + tag-edited" where cross-MD5 misses
-                        // because fileMd5 covers the whole file. Cost is ~50ms managed SHA-NI
-                        // per cache miss that gets here.
+                        // because fileMd5 covers the whole file. Body read goes through the
+                        // staged copy (FIX 4).
                         if (moodShaIndex != null)
                         {
-                            long fileSizeForSha = 0;
-                            try { fileSizeForSha = new FileInfo(t.Location).Length; } catch { }
-                            if (fileSizeForSha > 0)
+                            if (msSourceSize == 0)
+                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                            if (msSourceSize > 0)
                             {
-                                var (localSha, _) = ComputeAudioStreamSha256FromFile(t.Location, fileSizeForSha, out _);
+                                var msStagedPath = EnsureStagedSrc();
+                                var (localSha, _) = ComputeAudioStreamSha256FromFile(msStagedPath, msSourceSize, out _);
                                 if (!string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out var xs))
                                 {
                                     var xsf = xs.Entry.Features;
@@ -2588,8 +2594,8 @@ namespace Truedat
                                         // Audio bytes match. fileMd5 likely differs (else cross-MD5
                                         // would have caught it); fingerprint.v1 is also tag-affected.
                                         // Recompute both, reuse Essentia features.
-                                        var refreshedMd5 = ComputeFileMd5(t.Location);
-                                        var refreshedFp = ComputeFingerprintV1(t.Location, fileSizeForSha, out _);
+                                        var refreshedMd5 = ComputeFileMd5(msStagedPath);
+                                        var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                                         var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
@@ -2632,77 +2638,32 @@ namespace Truedat
                             return;
                         }
 
-                        // Run Essentia analysis and the managed hashes concurrently — disk/CPU
-                        // profiles overlap so wall-clock per track is roughly max(analysis, hash)
-                        // rather than the sum. All hashes are pure-managed I/O; the audio MD5
-                        // and chromaprint subprocesses (essentia_streaming_md5, fpcalc) are no
-                        // longer in the default codepath — see --fingerprint mode for those.
-                        var analyzeStart = Stopwatch.GetTimestamp();
-                        using var src = OpenStagedSource(t.Location, _stageOpts);
-                        var readPath = src.Path;
-                        var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSizeBytes, cts.Token));
-                        var fileMd5Task = Task.Run(() => ComputeFileMd5(readPath));
-                        // fingerprint.v1 ride-along — ~5ms TagLib parse + 64KB MD5.
-                        // Phase 2 cheap identity signal; cost is negligible vs Essentia.
-                        var fingerprintTask = Task.Run(() =>
-                        {
-                            var swFp = Stopwatch.StartNew();
-                            var fp = ComputeFingerprintV1(readPath, fileSizeBytes, out _);
-                            swFp.Stop();
-                            if (_audit)
-                                Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
-                            return fp;
-                        });
-                        // audioStreamSha256 ride-along — ~100ms/file with SHA-NI over the audio
-                        // region. Persisted on the TrackEntry alongside the other identity
-                        // signals (fingerprint.v1, chromaprint, fileMd5, audioMd5) so a default
-                        // `truedat <iTunes-XML>` produces max output in one pass. Runs
-                        // concurrently so it overlaps Essentia's much longer decode.
-                        var audioStreamSha256Task = Task.Run(() =>
-                        {
-                            var swSha = Stopwatch.StartNew();
-                            var result = ComputeAudioStreamSha256FromFile(readPath, fileSizeBytes, out _);
-                            swSha.Stop();
-                            if (_audit)
-                                Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{Path.GetFileName(t.Location)}\"");
-                            return result;
-                        });
-                        // Phase 2.5 — bitUsage in parallel. iTunes XML gives us duration up front,
-                        // so we don't need a TagLib probe inside the task.
-                        double bitUsageDurSec = trackDurationSecs;
-                        var bitUsageTask = _noBitUsage
-                            ? Task.FromResult<BitUsageSummary?>(null)
-                            : Task.Run(() => ComputeBitUsage(readPath, bitUsageDurSec, _ffmpegPath.Value));
-                        // Phase 5 — combined HF energy + spectral structure (FFT pipe).
-                        var hfEnergyTask = _noHfAnalysis
-                            ? Task.FromResult<(double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure)>((null, null, null))
-                            : Task.Run(() => ComputeHfAnalysis(readPath, _ffmpegPath.Value));
-                        // S2.5 — VAM pipeline (VAD + skeleton SER). One ffmpeg pipe per
-                        // track at 16 kHz mono float32. Null pipeline (ffmpeg absent)
-                        // → null block; entry's Vocal stays null.
-                        var vocalTask = vamPipeline != null
-                            ? Task.Run(() => vamPipeline.AnalyzeTrack(readPath))
-                            : Task.FromResult<VocalBlock?>(null);
-                        // SMFM — read fresh every scan; MC analyses files progressively.
-                        var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
-                        Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, bitUsageTask, hfEnergyTask, vocalTask, smfmTask });
-                        var analyzeTicks = Stopwatch.GetTimestamp() - analyzeStart;
-                        var analyzeDuration = StopwatchTicksToTimeSpan(analyzeTicks);
-                        Interlocked.Add(ref _analyzeTicksTotal, analyzeTicks);
+                        // Cache miss — full Essentia + ride-along, all reads through the
+                        // staged copy (FIX 4 / FIX 7). Wall-clock per track ≈ max(analysis,
+                        // slowest-task). Legacy audio MD5 / chromaprint subprocesses live in
+                        // --fingerprint mode now.
+                        msSourceSize = fileSizeBytes;
+                        EnsureStagedSrc();
+                        var msResults = RunSourceWorkers(
+                            essentiaExe, msStagedSrc!, fileSizeBytes, t.Location,
+                            knownDurationSec: trackDurationSecs,
+                            vamPipeline, extractTags: false, _stageOpts, cts.Token);
+                        Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
 
-                        var (feat, errorReason) = essentiaTask.Result;
-                        var fileMd5 = fileMd5Task.Result;
-                        var fingerprintV1 = fingerprintTask.Result;
-                        var (audioStreamSha256, audioStreamSha256Source) = audioStreamSha256Task.Result;
-                        var bitUsageResult = bitUsageTask.Result;
-                        var (hfRatioResult, hfMethodResult, hfStructureResult) = hfEnergyTask.Result;
-                        var vocalResult = vocalTask.Result;
-                        var smfmResult = smfmTask.Result;
+                        var feat = msResults.Features;
+                        var fileMd5 = msResults.FileMd5;
+                        var fingerprintV1 = msResults.FingerprintV1;
+                        var audioStreamSha256 = msResults.AudioStreamSha256;
+                        var audioStreamSha256Source = msResults.AudioStreamSha256Source;
+                        var bitUsageResult = msResults.BitUsage;
+                        var vocalResult = msResults.Vocal;
+                        var smfmResult = msResults.Smfm;
+                        var analyzeDuration = msResults.AnalyzeDuration;
 
                         if (feat == null)
                         {
-                            var err = errorReason ?? "Unknown error";
+                            var err = msResults.EssentiaError ?? "Unknown error";
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, saveLock);
                             Console.WriteLine($"  FAILED: {err}");
@@ -2718,8 +2679,8 @@ namespace Truedat
                         feat.Genre = t.Genre;
                         feat.FilePath = t.Location;
                         if (bitUsageResult != null) feat.BitUsage = bitUsageResult;
-                        if (hfRatioResult.HasValue) { feat.HfEnergyRatio = hfRatioResult; feat.HfEnergyMethod = hfMethodResult; }
-                        if (hfStructureResult != null) feat.HfSpectralStructure = hfStructureResult;
+                        if (msResults.HfEnergyRatio.HasValue) { feat.HfEnergyRatio = msResults.HfEnergyRatio; feat.HfEnergyMethod = msResults.HfEnergyMethod; }
+                        if (msResults.HfSpectralStructure != null) feat.HfSpectralStructure = msResults.HfSpectralStructure;
                         if (smfmResult.HasValue)
                         {
                             feat.SensmeScores      = smfmResult.Value.Scores;
@@ -2728,8 +2689,12 @@ namespace Truedat
                             feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, 3);
                         }
 
-                        var lastMod = DateTime.MinValue;
-                        try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                        // FIX 5 — record the mtime captured inside OpenStagedSource right
+                        // after File.Copy. Falls back to a fresh stat if the snapshot
+                        // failed (kept for the rare case both stats throw).
+                        var lastMod = msStagedSrc!.SourceLastWriteUtc;
+                        if (lastMod == DateTime.MinValue)
+                            try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
 
                         // Carry forward legacy fields the default codepath doesn't compute
                         // (audioMd5, chromaprint), so a re-extract triggered by the cache
@@ -2781,6 +2746,7 @@ namespace Truedat
                         catch { }
                         Interlocked.Increment(ref failed);
                     }
+                    finally { msStagedSrc?.Dispose(); }
                 });
             }
             catch (OperationCanceledException) { }
@@ -2835,6 +2801,7 @@ namespace Truedat
                 Console.WriteLine($"  Peak mem:   {peakMb:F0} MB");
             }
             catch { }
+            EmitStagingSummary();
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
@@ -3485,6 +3452,10 @@ namespace Truedat
         /// Prints summary; writes mbxmoods-verify.csv next to the moods file with
         /// per-entry detail. No writes to the moods file itself.
         /// </summary>
+        // Staging deliberately not applied here — verify is a single-pass read
+        // (one SHA per entry) and backfill features-tier already gates its ffmpeg
+        // cost via the --backfill-level flag. Adding staging to verify-mode would
+        // pay one File.Copy per track to save zero downstream reads.
         static int RunVerify(string moodsPath, int parallelism, bool backfill, BackfillLevel level)
         {
             Console.WriteLine(backfill ? "=== Verify + Backfill Mode ===" : "=== Verify Mode ===");
@@ -4753,13 +4724,17 @@ namespace Truedat
         // -- Source staging (UNC + hardlink-failure fallback) ----------------
 
         /// <summary>
-        /// CLI-derived staging configuration. Default: staging enabled,
+        /// CLI-derived staging + signal configuration. Default: staging enabled,
         /// dir = %TEMP%\.truedat-stage. Override via --no-stage / --stage-dir.
+        /// NoBitUsage / NoHfAnalysis live here too — same per-scan lifetime,
+        /// same end-of-scan cost surface.
         /// </summary>
         internal sealed class StageOptions
         {
             public bool NoStage { get; set; }
             public string StageDir { get; set; } = Path.Combine(Path.GetTempPath(), ".truedat-stage");
+            public bool NoBitUsage { get; set; }
+            public bool NoHfAnalysis { get; set; }
         }
 
         /// <summary>
@@ -4767,6 +4742,13 @@ namespace Truedat
         /// every worker should read; Dispose deletes the staged copy if any.
         /// Always non-null — on stage failure, Method="direct" and Path is
         /// the original source.
+        ///
+        /// SourceLastWriteUtc is a snapshot of the source file's mtime captured
+        /// inside OpenStagedSource (after copy when staging, at entry otherwise).
+        /// Scan modes record this on the TrackEntry instead of re-stat'ing at
+        /// end-of-work — guards against an mtime touch between the copy and
+        /// the entry being persisted (the analyzed bytes match the recorded mtime).
+        /// DateTime.MinValue when the stat call threw.
         /// </summary>
         internal sealed class SourceHandle : IDisposable
         {
@@ -4774,14 +4756,16 @@ namespace Truedat
             public string Method { get; }    // "direct" | "hardlink" | "staged" | "staged-fallback"
             public long StageMs { get; }
             public long StageBytes { get; }
+            public DateTime SourceLastWriteUtc { get; }
             private readonly string? _toDelete;
 
-            public SourceHandle(string path, string method, long stageMs, long stageBytes, string? toDelete)
+            public SourceHandle(string path, string method, long stageMs, long stageBytes, string? toDelete, DateTime sourceLastWriteUtc)
             {
                 Path = path;
                 Method = method;
                 StageMs = stageMs;
                 StageBytes = stageBytes;
+                SourceLastWriteUtc = sourceLastWriteUtc;
                 _toDelete = toDelete;
             }
 
@@ -4793,59 +4777,282 @@ namespace Truedat
         }
 
         /// <summary>
+        /// Return true if <paramref name="path"/> lives on a network drive (drive
+        /// letter mapped to a remote share). UNC paths (`\\server\share\…`) are
+        /// handled by the caller's prefix check — this covers the conceptually-UNC
+        /// case where the user mapped Z:\ to a share. Per-root memoized so the
+        /// fan-out only pays the DriveInfo cost once per unique drive root.
+        /// Failures (unmounted drive, GetPathRoot throws) are cached as false.
+        /// </summary>
+        static bool IsNetworkDrivePath(string sourcePath)
+        {
+            string root;
+            try
+            {
+                root = Path.GetPathRoot(Path.GetFullPath(sourcePath)) ?? "";
+            }
+            catch { return false; }
+            if (string.IsNullOrEmpty(root)) return false;
+            return _networkDriveCache.GetOrAdd(root, r =>
+            {
+                try { return new DriveInfo(r).DriveType == DriveType.Network; }
+                catch { return false; }
+            });
+        }
+
+        /// <summary>
+        /// Validate that every char of <paramref name="ext"/> is ASCII printable
+        /// (0x20..0x7E). Music extensions in the wild are all ASCII (.mp3, .flac,
+        /// .m4a, .wav, .aiff, .ogg, .opus, .wma) so the common case is unchanged.
+        /// </summary>
+        static bool IsAsciiPrintable(string ext)
+        {
+            for (int i = 0; i < ext.Length; i++)
+            {
+                char c = ext[i];
+                if (c < 0x20 || c > 0x7E) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
         /// Decide whether to stage, hardlink, or pass through the source path.
         /// Always returns a non-null handle.
         ///
         /// Decision matrix:
-        ///   Local NTFS, ASCII   -> direct (Method="direct")
-        ///   Local NTFS, non-ASCII -> existing hardlink path is upstream of this
-        ///                            helper (RunTool); OpenStagedSource is only
-        ///                            called by the per-track fan-out, which today
-        ///                            does NOT hardlink. So a non-ASCII local path
-        ///                            here is staged (Method="staged-fallback")
-        ///                            unless --no-stage is set.
-        ///   UNC, any            -> stage (Method="staged")
+        ///   Local NTFS, ASCII             -> direct (Method="direct")
+        ///   Local NTFS, non-ASCII path     -> stage (Method="staged-fallback")
+        ///   UNC (\\server\share\…)         -> stage (Method="staged")
+        ///   Mapped network drive (Z:\ etc) -> stage (Method="staged")
         ///
         /// On stage failure: emits a stderr WARN, returns Method="direct" with
         /// the original sourcePath, so the workers fall back to direct read.
+        ///
+        /// <paramref name="sourceSize"/> is the file size the caller already has
+        /// from its own FileInfo lookup — passed in for the audit log so we don't
+        /// re-stat the staged destination. Pass 0 if unknown; the audit line falls
+        /// back to the staged-file size (still one stat in that case).
         /// </summary>
-        internal static SourceHandle OpenStagedSource(string sourcePath, StageOptions opts)
+        internal static SourceHandle OpenStagedSource(string sourcePath, StageOptions opts, long sourceSize = 0)
         {
+            // Snapshot mtime once at entry. Used by the staging happy path AFTER the
+            // copy so it reflects "the mtime that was true when we captured the bytes".
+            // Used by direct-passthrough as the uniform mtime contract on the handle.
+            DateTime mtime = DateTime.MinValue;
+
             // Pass-through #1: staging is disabled globally.
             if (opts.NoStage)
-                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+            {
+                try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
+                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
+            }
 
-            // Pass-through #2: local ASCII path — nothing to gain.
+            // Pass-through #2: purely local ASCII path — nothing to gain.
             bool isUnc = sourcePath.StartsWith(@"\\", StringComparison.Ordinal);
+            bool isNetworkDrive = !isUnc && IsNetworkDrivePath(sourcePath);
+            bool isNetwork = isUnc || isNetworkDrive;
             bool hasNonAscii = HasNonAscii(sourcePath);
-            if (!isUnc && !hasNonAscii)
-                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+            bool shouldStage = isNetwork || hasNonAscii;
+            if (!shouldStage)
+            {
+                try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
+                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
+            }
 
             // Otherwise: stage. The staged filename is GUID-based so the staged
             // path is always ASCII regardless of the source.
-            string method = isUnc ? "staged" : "staged-fallback";
+            string method = isNetwork ? "staged" : "staged-fallback";
             string dest = "";
             var sw = Stopwatch.StartNew();
             try
             {
+                // Sanitize the extension to ASCII printable. Music extensions in
+                // the wild are all ASCII; a non-ASCII or empty ext lands on .bin
+                // and TagLib / Essentia / ffmpeg fall back to magic-byte probing.
                 string ext = Path.GetExtension(sourcePath);
+                if (string.IsNullOrEmpty(ext) || !IsAsciiPrintable(ext))
+                    ext = ".bin";
                 dest = Path.Combine(opts.StageDir, $"{Guid.NewGuid():N}{ext}");
                 Directory.CreateDirectory(opts.StageDir);
                 File.Copy(sourcePath, dest, overwrite: false);
+                // Capture mtime IMMEDIATELY after the copy completes. If the file
+                // is tag-touched between now and end-of-work, the snapshot still
+                // matches the bytes we just copied — preventing TrackEntry from
+                // recording an mtime that's newer than the analyzed audio.
+                try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
                 sw.Stop();
-                long bytes = 0;
-                try { bytes = new FileInfo(dest).Length; } catch { }
+                long bytes = sourceSize;
+                if (bytes <= 0)
+                {
+                    try { bytes = new FileInfo(dest).Length; } catch { }
+                }
                 if (_audit)
                     Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {(bytes / 1024.0 / 1024.0):F1}MB)");
-                return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest);
+                Interlocked.Increment(ref _stageSuccessCount);
+                return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest, mtime);
             }
             catch (Exception ex)
             {
                 sw.Stop();
                 Console.Error.WriteLine($"  Warning: stage failed: {sourcePath} -> {dest}: {ex.Message}; falling back to direct read");
                 try { if (dest.Length > 0) File.Delete(dest); } catch { }
-                return new SourceHandle(sourcePath, "direct", 0, 0, null);
+                try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
+                Interlocked.Increment(ref _stageFallbackCount);
+                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
             }
+        }
+
+        /// <summary>
+        /// Emit the end-of-scan staging summary to stdout, and a stderr WARNING if
+        /// staging fell back to direct read for >5% of attempted stages. Suppressed
+        /// when no staging was attempted (happy path stays quiet on local-only scans).
+        /// Resets the counters so back-to-back scan modes report independently.
+        /// </summary>
+        static void EmitStagingSummary()
+        {
+            int success = Interlocked.Exchange(ref _stageSuccessCount, 0);
+            int fallback = Interlocked.Exchange(ref _stageFallbackCount, 0);
+            int total = success + fallback;
+            if (total == 0) return;
+            if (fallback == 0)
+            {
+                Console.WriteLine($"  staging:    {success} staged");
+                return;
+            }
+            Console.WriteLine($"  staging:    {success} staged, {fallback} direct-fallback");
+            if ((double)fallback / total > 0.05)
+            {
+                Console.Error.WriteLine(
+                    $"WARNING: staging degraded ({fallback} of {total} tracks fell back to direct read) — check stage-dir disk space / permissions");
+            }
+        }
+
+        /// <summary>
+        /// Result bundle returned by RunSourceWorkers. Named fields so callers don't
+        /// have to remember positional unpacking. Tags is nullable — null means the
+        /// caller passed extractTags=false (MoodsMode has iTunes XML metadata
+        /// already; it skips TagLib re-read to save one parse per track).
+        /// </summary>
+        internal sealed class WorkerResults
+        {
+            public TrackFeatures? Features;
+            public string? EssentiaError;
+            public string? FileMd5;
+            public FingerprintV1? FingerprintV1;
+            public string? AudioStreamSha256;
+            public string AudioStreamSha256Source = "";
+            public FileTags? Tags;
+            public BitUsageSummary? BitUsage;
+            public double? HfEnergyRatio;
+            public string? HfEnergyMethod;
+            public HfSpectralStructure? HfSpectralStructure;
+            public VocalBlock? Vocal;
+            public SmfmReader.SmfmResult? Smfm;
+            public TimeSpan AnalyzeDuration;
+            public long AnalyzeTicks;
+        }
+
+        /// <summary>Skip-or-run helper for the optional-signal pattern.
+        /// `skip=true` returns a completed task with the disabled value (no thread
+        /// pool spin). `skip=false` runs <paramref name="work"/> on the pool.</summary>
+        internal static Task<T> ConditionalTask<T>(bool skip, Func<T> work, T disabledValue)
+            => skip ? Task.FromResult(disabledValue) : Task.Run(work);
+
+        /// <summary>
+        /// Run the per-track concurrent worker fan-out: Essentia + ComputeFileMd5 +
+        /// ComputeFingerprintV1 + ComputeAudioStreamSha256FromFile + ComputeBitUsage
+        /// + ComputeHfAnalysis + VAM + SMFM (+ optional ExtractFileTags). Wall-clock
+        /// ≈ max(analysis, slowest-task). All workers read from <c>src.Path</c>
+        /// (the staged copy if staging happened, the original otherwise).
+        ///
+        /// <paramref name="auditDisplayPath"/> is what appears in the [AUDIT] file=
+        /// label — typically the original source path so audit lines stay readable
+        /// regardless of staging.
+        /// <paramref name="knownDurationSec"/> short-circuits the bitUsage probe's
+        /// TagLib re-parse when the caller already has duration (e.g. MoodsMode
+        /// pulls it from the iTunes XML). 0 means "no known duration; probe inline".
+        /// <paramref name="extractTags"/>: MoodsMode passes false (XML supplies
+        /// metadata); --file-list / --analyze-file pass true.
+        /// </summary>
+        internal static WorkerResults RunSourceWorkers(
+            string essentiaExe,
+            SourceHandle src,
+            long fileSize,
+            string auditDisplayPath,
+            double knownDurationSec,
+            VamPipeline? vamPipeline,
+            bool extractTags,
+            StageOptions stageOpts,
+            CancellationToken ct)
+        {
+            string readPath = src.Path;
+            string auditName = Path.GetFileName(auditDisplayPath);
+            var analyzeStart = Stopwatch.GetTimestamp();
+
+            var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct));
+            var fileMd5Task = Task.Run(() => ComputeFileMd5(readPath));
+            var fingerprintTask = Task.Run(() =>
+            {
+                var swFp = Stopwatch.StartNew();
+                var fp = ComputeFingerprintV1(readPath, fileSize, out _);
+                swFp.Stop();
+                if (_audit)
+                    Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{auditName}\"");
+                return fp;
+            });
+            var audioStreamSha256Task = Task.Run(() =>
+            {
+                var swSha = Stopwatch.StartNew();
+                var r = ComputeAudioStreamSha256FromFile(readPath, fileSize, out _);
+                swSha.Stop();
+                if (_audit)
+                    Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{auditName}\"");
+                return r;
+            });
+            var tagsTask = extractTags
+                ? Task.Run(() => (FileTags?)ExtractFileTags(readPath))
+                : Task.FromResult<FileTags?>(null);
+            var bitUsageTask = ConditionalTask<BitUsageSummary?>(stageOpts.NoBitUsage, () =>
+            {
+                double dur = knownDurationSec;
+                if (dur <= 0)
+                {
+                    try { using var tf = TagLib.File.Create(readPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
+                }
+                return ComputeBitUsage(readPath, dur, _ffmpegPath.Value);
+            }, null);
+            var hfEnergyTask = ConditionalTask(stageOpts.NoHfAnalysis,
+                () => ComputeHfAnalysis(readPath, _ffmpegPath.Value),
+                ((double?)null, (string?)null, (HfSpectralStructure?)null));
+            var vocalTask = vamPipeline != null
+                ? Task.Run(() => vamPipeline.AnalyzeTrack(readPath))
+                : Task.FromResult<VocalBlock?>(null);
+            var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
+
+            Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, vocalTask, smfmTask });
+
+            long ticks = Stopwatch.GetTimestamp() - analyzeStart;
+            var (features, error) = essentiaTask.Result;
+            var (sha, shaSource) = audioStreamSha256Task.Result;
+            var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
+            return new WorkerResults
+            {
+                Features = features,
+                EssentiaError = error,
+                FileMd5 = fileMd5Task.Result,
+                FingerprintV1 = fingerprintTask.Result,
+                AudioStreamSha256 = sha,
+                AudioStreamSha256Source = shaSource,
+                Tags = tagsTask.Result,
+                BitUsage = bitUsageTask.Result,
+                HfEnergyRatio = hfRatio,
+                HfEnergyMethod = hfMethod,
+                HfSpectralStructure = hfStructure,
+                Vocal = vocalTask.Result,
+                Smfm = smfmTask.Result,
+                AnalyzeDuration = StopwatchTicksToTimeSpan(ticks),
+                AnalyzeTicks = ticks,
+            };
         }
 
         // -- External tool runner (shared by chromaprinter and md5) ----------
@@ -5524,6 +5731,12 @@ namespace Truedat
                 Assert(h.Path == @"\\server\share\test.mp3", "--no-stage preserves source path");
             }
 
+            // IsAsciiPrintable — extension sanitization invariant.
+            Assert(IsAsciiPrintable(".mp3"), "ASCII ext passes");
+            Assert(IsAsciiPrintable(".flac"), "ASCII ext (multi-char) passes");
+            Assert(!IsAsciiPrintable(".tëst"), "non-ASCII ext rejected");
+            Assert(!IsAsciiPrintable(".½"), "vulgar-fraction ext rejected");
+
             // Pass-through: local ASCII path is left alone.
             var stStageDir = Path.Combine(Path.GetTempPath(), $".truedat-stage-test-{Guid.NewGuid():N}");
             var optsEnabled = new StageOptions { StageDir = stStageDir };
@@ -5553,6 +5766,12 @@ namespace Truedat
                     Assert(File.Exists(h.Path), "staged file exists during use");
                     Assert(new FileInfo(h.Path).Length == 5, "staged file has the source's bytes");
                     Assert(h.StageBytes == 5, $"StageBytes == file size (got {h.StageBytes})");
+                    Assert(h.SourceLastWriteUtc != DateTime.MinValue, "SourceLastWriteUtc captured after copy");
+                    // The non-ASCII source has a `.bin` ext already so the sanitize
+                    // pass is a no-op here. Use a non-ASCII ext to exercise the .bin
+                    // fallback explicitly.
+                    string stagedExt = Path.GetExtension(h.Path);
+                    Assert(IsAsciiPrintable(stagedExt), $"staged ext is ASCII printable (got {stagedExt})");
                     stagedPathSeen = h.Path;
                 }
                 Assert(stagedPathSeen != null && !File.Exists(stagedPathSeen), "staged file is deleted after Dispose");
@@ -5562,6 +5781,38 @@ namespace Truedat
                 try { File.Delete(nonAsciiSrc); } catch { }
                 try { if (Directory.Exists(stStageDir)) Directory.Delete(stStageDir, recursive: true); } catch { }
             }
+
+            // Non-ASCII extension: source's `.tëst` ext is replaced by `.bin` on the staged path.
+            var stStageDirExt = Path.Combine(Path.GetTempPath(), $".truedat-stage-test-{Guid.NewGuid():N}");
+            var optsExt = new StageOptions { StageDir = stStageDirExt };
+            string nonAsciiExtSrc = Path.Combine(Path.GetTempPath(), $"truedat-test-{Guid.NewGuid():N}.tëst");
+            File.WriteAllBytes(nonAsciiExtSrc, new byte[] { 1, 2 });
+            try
+            {
+                using (var h = OpenStagedSource(nonAsciiExtSrc, optsExt))
+                {
+                    Assert(h.Method == "staged-fallback", $"non-ASCII ext stages (got {h.Method})");
+                    Assert(Path.GetExtension(h.Path) == ".bin", $"non-ASCII ext sanitised to .bin (got {Path.GetExtension(h.Path)})");
+                }
+            }
+            finally
+            {
+                try { File.Delete(nonAsciiExtSrc); } catch { }
+                try { if (Directory.Exists(stStageDirExt)) Directory.Delete(stStageDirExt, recursive: true); } catch { }
+            }
+
+            // Direct-passthrough still captures mtime once at entry.
+            string mtimeProbe = Path.Combine(Path.GetTempPath(), $"truedat-mtime-{Guid.NewGuid():N}.bin");
+            File.WriteAllBytes(mtimeProbe, new byte[] { 7 });
+            try
+            {
+                using (var h = OpenStagedSource(mtimeProbe, optsEnabled))
+                {
+                    Assert(h.Method == "direct", "local-ASCII still direct");
+                    Assert(h.SourceLastWriteUtc != DateTime.MinValue, "direct-passthrough SourceLastWriteUtc captured");
+                }
+            }
+            finally { try { File.Delete(mtimeProbe); } catch { } }
 
             // Failure mode: unwritable staging dir -> direct fallback, no throw.
             // Trigger by pointing StageDir at a path under a non-existent volume.
