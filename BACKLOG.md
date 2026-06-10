@@ -241,6 +241,25 @@ Shipped 2026-06-09. Three changes in one feature branch (`feat/source-staging`,
 Flags: `--no-stage`, `--stage-dir <path>`, `--no-bitusage`,
 `--no-hf-analysis` (documented in both `--help` blocks).
 
+**Review-fix follow-on (shipped 2026-06-09 as `fix(scan)` 353919d on
+`feat/source-staging-fixes`, fast-forwarded to main):**
+- Mapped network drives (`Z:\` mapped to `\\server\share`) now stage too —
+  per-root memoized `DriveInfo.DriveType == Network` check.
+- `SourceHandle.SourceLastWriteUtc` snapshot captured inside
+  `OpenStagedSource` immediately after `File.Copy`; recorded as
+  `TrackEntry.LastModified` so a tag touch between copy and persist can't
+  invalidate the recorded mtime against the analyzed bytes.
+- Staged extension sanitized to `.bin` when the source ext isn't ASCII
+  printable.
+- Cache tiers 2/3/4 + cache-miss share one lazily-opened staged copy via
+  `EnsureStagedSrc()` instead of re-reading the source N times across the
+  network. Tier-1 (path-mtime hit) still skips staging entirely.
+- Three near-identical per-track fan-outs collapsed into a shared
+  `RunSourceWorkers` helper returning a `WorkerResults` bundle.
+- End-of-scan `staging: N staged [, M direct-fallback]` summary; stderr
+  warning when >5% of stages fall back so wedged stage-dirs surface
+  visibly instead of silently slow.
+
 ## ~~Opus support via ffmpeg transcode~~ DONE
 
 Two changes layered on the existing ffmpeg-transcode pattern (the one that
