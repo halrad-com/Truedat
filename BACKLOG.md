@@ -364,6 +364,46 @@ cache preservation. Commits: `72d8e65` (DR), `a4424fe` (extended 39).
 
 Review: `docs/reviews/2026-04-18-extended-features-review.md`
 
+## Duplicate detection (cross-encode) without chromaprint
+
+Chromaprint (`fpcalc`) was the signal that matched *same recording, different
+encode/format* (FLAC vs MP3, V0 vs 320, resample). It was demoted to legacy-only
+chiefly for output size (~5–8 KB/track → hundreds of MB across a large library).
+Captured here so the design isn't re-derived. Detector would be a read-only
+JSON post-pass (no rescan/decode), sibling to `--verify` / `--merge-moods`,
+emitting clusters with a suggested keeper — never auto-deletes.
+
+Tiers, by difficulty:
+- **Exact, free, zero false-positive** — bucket by `fileMd5` (byte-identical
+  copies) and `audioStreamSha256` (same decoded audio, different container/tags).
+  truedat already does this *internally* (cross-MD5/SHA cache re-keying); just
+  never surfaced as a user report. Ship first — catches most real dupes.
+- **Cross-encode (the chromaprint gap)** — approximate with a **quantized-feature
+  hash** over the encode-robust descriptors already emitted (`mfcc[]`, `bpm`
+  octave-folded, `key`/`mode`). Quantize → hash → group; the hash is the blocking
+  key (O(n), no pairwise). EXCLUDE the authenticity/HF/`bitUsage`/loudness fields
+  — those are designed to differ between a lossless file and its lossy copy.
+
+Key facts that drive the design (don't re-learn):
+- MFCC is computed from *decoded PCM*, not stored metadata. **Lossless↔lossless
+  transcodes decode to identical PCM → identical features → exact feature-hash
+  match — and these are INVISIBLE to `audioStreamSha256`** (which hashes the
+  *compressed* bytes; FLAC vs ALAC differ). Real win unique to the feature-hash.
+- **Lossy** transcodes alter the spectrum (that's how they save bits), so MFCC
+  shifts slightly — raw hash won't collide; *quantization* absorbs the
+  perturbation. Granularity = the precision/recall knob.
+- **Precision ceiling**: truedat stores *aggregate* (mean) MFCC, so two different
+  songs sharing mean timbre+length+key+tempo can collide. → great recall,
+  imperfect precision → review-and-confirm, not blind delete.
+- **The precision fix = segmented MFCC** (N equal-*fraction* segments, ~8 → 104
+  numbers vs chromaprint's thousands). Recovers chromaprint's temporal
+  discrimination at a fraction of the size, alignment-tolerant. Requires a NEW
+  extraction + nullable schema field (`mfccSegments`) — not "current state."
+  This is the upgrade path if cross-encode dedup ever goes first-class.
+
+Analysis detail in the local (gitignored) plans tree:
+`2026-06-13-dedup-without-chromaprint.md`.
+
 ## DSD / Non-PCM Format Support
 
 Convert DSD, multi-channel, and other non-PCM formats via ffmpeg before Essentia
