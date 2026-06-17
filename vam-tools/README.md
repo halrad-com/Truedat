@@ -168,11 +168,12 @@ python calibrate-valence-arousal.py \
 ```
 
 Joins labels to feature vectors via track path, fits a StandardScaler +
-PCA + Ridge regression for valence and a StandardScaler + Ridge for
-arousal. Reports leave-one-out cross-validation RMSE and Pearson r per
-axis. Optionally blends a Bradley-Terry-derived pairwise comparison file
-(`--pairs`) as additional training rows; the blend wins if it improves
-LOO-CV r.
+Ridge regression for both valence and arousal (raw standardised features
+on both axes). Reports leave-one-out cross-validation RMSE and Pearson r
+per axis. Optionally blends a Bradley-Terry-derived pairwise comparison
+file (`--pairs`) as additional training rows; the blend wins if it
+improves LOO-CV r. `--pca-k` is still accepted but currently unused on
+the valence path.
 
 The 21 features used as inputs are listed in `FEATURES` at the top of
 the script. Adding/removing features means regenerating models.
@@ -262,8 +263,7 @@ fields are bookkeeping the trainer ignores.
   "features": [ ... 21 feature names ... ],
   "scaler": { "mean": [...], "std": [...] },
   "valence": {
-    "transform": "pca",
-    "pca": { "components": [[...]], "mean": [...] },
+    "transform": "raw",
     "coef": [...], "intercept": float,
     "alpha": float, "loocv_rmse": float, "loocv_r": float
   },
@@ -274,5 +274,10 @@ fields are bookkeeping the trainer ignores.
   }
 }
 ```
+
+Valence used to ride a PCA(K=6) latent bottleneck; as of 2026-06-16 the
+trainer fits raw-Ridge on both axes (the PCA path degraded LOO-CV vs raw
+on a 386-anchor bake-off). MBXHub's MoodModelLoader handles either
+transform — older `transform=pca` model files still load.
 
 MBXHub consumes this at the path documented in the MBXHub README.

@@ -23,3 +23,7 @@ docs/
 
 # Python cache
 src/__pycache__/
+vam-tools/__pycache__/
+
+# Trainer venv — one-time-per-machine, see vam-tools/README.md
+vam-tools/.venv/

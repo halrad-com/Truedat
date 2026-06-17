@@ -109,9 +109,12 @@ def main():
     Xs_l = scaler.transform(X)
     Zs_l = pca.transform(Xs_l)
 
-    rmse_v, r_v = loo_cv(Zs_l, yV, args.alpha_v)
-    print("  valence LOO-CV (PCA+Ridge): RMSE=" + format(rmse_v, ".3f") + " r=" + format(r_v, "+.3f"), file=sys.stderr)
-    mv = Ridge(alpha=args.alpha_v); mv.fit(Zs_l, yV)
+    # Raw-Ridge valence (skips the PCA-K=6 bottleneck; match arousal path).
+    # 2026-06-16: bake-off showed LOO-CV r 0.358 (PCA+Ridge) → 0.404 (raw) on
+    # 386 anchors. GBR / RF tested too — both underperform Ridge at this N.
+    rmse_v, r_v = loo_cv(Xs_l, yV, args.alpha_v)
+    print("  valence LOO-CV (raw Ridge): RMSE=" + format(rmse_v, ".3f") + " r=" + format(r_v, "+.3f"), file=sys.stderr)
+    mv = Ridge(alpha=args.alpha_v); mv.fit(Xs_l, yV)
 
     rmse_a, r_a = loo_cv(Xs_l, yA, args.alpha_a)
     print("  arousal LOO-CV (raw Ridge): RMSE=" + format(rmse_a, ".3f") + " r=" + format(r_a, "+.3f"), file=sys.stderr)
@@ -171,8 +174,8 @@ def main():
                 v = extract_feature_vector(e)
                 if v is None: continue
                 x = scaler.transform([v])[0]
-                z = pca.transform([x])[0]
-                preds_v[path] = float(mv.predict([z])[0])
+                # Both V and A use raw standardized features now (no PCA).
+                preds_v[path] = float(mv.predict([x])[0])
                 preds_a[path] = float(ma.predict([x])[0])
             v_c, v_t = pair_concordance(pairs, preds_v, "valence")
             a_c, a_t = pair_concordance(pairs, preds_a, "arousal")
@@ -211,9 +214,9 @@ def main():
                 X_v_all = np.vstack([X, np.array(X_v_extra)])
                 y_v_all = np.concatenate([yV, np.array(y_v_extra)])
                 Xs_v_all = scaler.transform(X_v_all)
-                Zs_v_all = pca.transform(Xs_v_all)
-                rmse_v2, r_v2 = loo_cv(Zs_v_all, y_v_all, args.alpha_v)
-                mv2 = Ridge(alpha=args.alpha_v); mv2.fit(Zs_v_all, y_v_all)
+                # Raw-Ridge (no PCA) to match the main valence path above.
+                rmse_v2, r_v2 = loo_cv(Xs_v_all, y_v_all, args.alpha_v)
+                mv2 = Ridge(alpha=args.alpha_v); mv2.fit(Xs_v_all, y_v_all)
                 print("  valence LOO-CV (anchors + BT, n=" + str(len(y_v_all)) + "): RMSE=" + format(rmse_v2, ".3f") + " r=" + format(r_v2, "+.3f"), file=sys.stderr)
                 if r_v2 > r_v:
                     print("  -> BLENDED valence wins by " + format(r_v2 - r_v, "+.3f") + " r; switching", file=sys.stderr)
@@ -241,8 +244,7 @@ def main():
         "features": FEATURES,
         "scaler": {"mean": scaler.mean_.tolist(), "std": scaler.scale_.tolist()},
         "valence": {
-            "transform": "pca",
-            "pca": {"components": pca.components_.tolist(), "mean": pca.mean_.tolist()},
+            "transform": "raw",
             "coef": mv.coef_.tolist(),
             "intercept": float(mv.intercept_),
             "alpha": args.alpha_v,
