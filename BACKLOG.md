@@ -109,10 +109,9 @@ for the Path A architecture):
 |---|---|---|
 | **Tension** (P1) | MBXHub `mood-formulas` spec | In flight via dispatch B-20260518-204500 — all inputs already in `mbxmoods.json`; Path A |
 | **Dominance** (P1) | MBXHub `mood-formulas` spec | Same dispatch as Tension; ships as a follow-on commit per "one at a time" |
-| **Genre fingerprint** | — | **CUT.** Existing ID3 `genre` tag is already in `mbxmoods.json`; audio-derived prediction would need either ~50-200 MB Essentia SVM models (blows up the single-exe distribution) or an ONNX classifier (gated on the §5.0 ORT spike). Maybe revisit as part of a future ML extension once the ORT path is unlocked for VAM. |
+| **Genre fingerprint** | — | **CUT.** Existing ID3 `genre` tag is already in `mbxmoods.json`; audio-derived prediction would need ~50-200 MB Essentia SVM models that would blow up the single-exe distribution. |
 | **Section-aware mood** (P2) | Truedat extraction | Parked — structural schema change (per-section arrays vs scalars); needs MBXHub-side consumer changes and a new validation corpus. Future phase. |
 | **VADER lyrical sentiment** | — | **PARKED indefinitely.** Lyrics supply chain — runtime fetching is off-limits per offline-first invariant; library coverage = whatever fraction has tagged USLT/SYLT (low). Revisit only if a lyrics-curation flow exists upstream. |
-| **VAM (vocal affect)** | Truedat (in-process ONNX) | Active design exists at [`docs/plans/2026-05-16-vader-vam-roadmap.md`](docs/plans/2026-05-16-vader-vam-roadmap.md); gated on the §5.0 ORT verification spike (1 day, not yet run). |
 
 **Phase 5 — ML-derived weights for the explicit voter** (spike, not a
 rewrite): once the explicit voter from Phase 4 is running on the live
@@ -158,54 +157,6 @@ shipping. At minimum: a CDDA rip flagged by naive detectors but genuine
 (e.g. Fakin the Funk), a known-good 24/96, a known-fake 24/96, a 128→320
 transcode, a 320→320 transcode, a deliberately-rolled-off modern
 production. Build this in Phase 4's planning sprint, not now.
-
-## Vader-sprint (next planned work) — VADER lyrical sentiment
-
-S1 of the VADER+VAM multimodal roadmap. Adds `lyrical.*` block to
-`mbxmoods.json` per track that has lyrics (USLT/SYLT tag or `.lrc` sidecar).
-
-**Decision recorded:** port VADER from Python to C# with trimmed lexicon
-(rather than VaderSharp2 NuGet or vendoring the BobLd C# source). Rationale,
-data, and the 3-option comparison live in
-[`docs/analysis/2026-05-17-vader-source-selection.md`](docs/analysis/2026-05-17-vader-source-selection.md).
-
-**Plan:** [`docs/plans/2026-05-17-vader-vendoring-port.md`](docs/plans/2026-05-17-vader-vendoring-port.md)
-— ~610 LOC port across 4 files, embedded trimmed lexicon (~85 KB),
-LICENSE/NOTICE/`--licenses` flag, integration hook in the scan pipeline.
-
-**Effort:** 1-2 focused days end-to-end. Not gated by the §5.0 SPIKE (that's
-VAM-only); VADER ships independently.
-
-**Out of scope for this sprint** (deferred to follow-up plans):
-- Tier-2 cache `lyricalSourceHash` re-run logic (S1.2)
-- `--enrich vader --file-list` mode (cross-cutting)
-- LRCLib fetch (MBXHub-side)
-- Everything VAM (S2+)
-
-**Parent roadmap:** [`docs/plans/2026-05-16-vader-vam-roadmap.md`](docs/plans/2026-05-16-vader-vam-roadmap.md)
-
-## Energy-threshold VAD for podcasts / audiobooks (future)
-
-Idea captured 2026-05-19. Not on the active VAM roadmap.
-
-The VAM roadmap deliberately skips energy-threshold VAD because energy is
-the wrong signal for music — music has continuous full-band energy whether
-vocals are present or not, so RMS thresholding tags every track as
-"vocal-everywhere" and the gate (`pure-instrumental returns no V/A`) fails.
-Silero VAD is the right tool for music and is what S2.3 / S2.3.5 ship.
-
-**But** for podcast / audiobook material, energy thresholding is the
-*correct* baseline: real speech has silence between utterances, the
-silence-vs-utterance contrast is exactly what RMS thresholding picks out,
-and Silero would be overkill (and slower). A future `--content-type
-podcast|audiobook|music` flag could pick the VAD strategy:
-- `music` (default) → Silero VAD
-- `podcast` / `audiobook` → energy threshold with a per-content-type
-  silence-floor (e.g. -45 dBFS, 100 ms hangover)
-
-Out of scope for the current VAM sprint. File when a podcast/audiobook
-analysis use case actually materialises — Truedat's current scope is
-music libraries (iTunes XML / MBXHub).
 
 ## ~~UNC source staging + experimental-signal opt-outs~~ DONE
 

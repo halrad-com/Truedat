@@ -190,13 +190,6 @@ namespace Truedat
         public Program.FingerprintV1? FingerprintV1;
         public string? Chromaprint;
         public double? ChromaprintDuration;
-        // VAM S2.5 — per-track vocal-affect block. Sits on the entry rather than
-        // on Features because it isn't an Essentia output and carries its own
-        // versioning + per-backend nesting (federation policy). Null when VAM
-        // hasn't run on this entry yet (legacy entries, ffmpeg-absent installs,
-        // tracks the pipeline silently skipped). Deliberately NOT joined to the
-        // re-extract canary list — see CLAUDE.md "Re-extract gate".
-        public VocalBlock? Vocal;
     }
 
     public class TrackFingerprint
@@ -373,11 +366,6 @@ namespace Truedat
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
-        // VAM (vocal affect) is opt-in for scan modes — set by the --vam flag.
-        // When false, TryCreateVamPipelineForScan returns null and no scan path
-        // (MoodsMode / --file-list / --analyze-file) runs the VAM pipeline.
-        // Standalone VAM is the separate --vam-smoke / --vam-smoke-list modes.
-        static bool _vamEnabled = false;
         static bool _audit;
         internal static StageOptions _stageOpts = new StageOptions();
         // CLI signal-disable toggles live on StageOptions (siblings of the staging
@@ -732,36 +720,6 @@ namespace Truedat
             bool selfTest = false;
             int cpuLimit = 0; // 0 = no limit
 
-            // --vam-smoke <audio>  S2.2/S2.3 end-to-end smoke: load VadStage +
-            //   VocalAffectStage, ffmpeg-decode 30 s @ 16 kHz mono, run VAD,
-            //   gate VAM on vocalCoverage >= threshold, print model I/O +
-            //   output. Diagnostic only — no mbxmoods write, no worker-pool
-            //   integration (T-A3 is its own dispatch).
-            // --vam-model <path>   override VAM model path. Default:
-            //   <exe-dir>/_models/vam-skeleton.onnx (auto-created if missing).
-            // --vad-model <path>   override VAD model path. Default:
-            //   <exe-dir>/_models/silero-vad-skeleton.onnx (auto-created if missing).
-            // --vam-force          run VAM regardless of VAD result. Diagnostic
-            //   only — bypasses the production gate so the VAM wiring can be
-            //   exercised even when VAD reports vocalCoverage = 0 (which is
-            //   what the skeleton VAD reports for every track).
-            bool vamSmokeMode = false;
-            string? vamSmokePath = null;
-            string? vamModelPath = null;
-            string? vadModelPath = null;
-            bool vamForce = false;
-
-            // --vam-smoke-list <paths.txt>  Multi-track variant of --vam-smoke
-            //   (S2.4 sanity-rig). One row per track in the TSV at --vam-csv-out.
-            //   Use '-' to read paths from stdin (matches --file-list convention).
-            //   Mutually exclusive with single-track --vam-smoke.
-            // --vam-csv-out <path>          Output TSV path for --vam-smoke-list.
-            //   Default: mbxhub-vam-smoke.csv in CWD. Tab-separated (matches the
-            //   existing mbxmoods-verify.csv convention).
-            bool vamSmokeListMode = false;
-            string? vamSmokeListPath = null;
-            string? vamCsvOutPath = null;
-
             // --chunk M/N: split the scan list across machines. Two boxes with the
             // same library run `--chunk 1/2` and `--chunk 2/2` and produce two
             // non-overlapping output files keyed by hostname. Sort + range-slice
@@ -854,13 +812,6 @@ namespace Truedat
                     Environment.ExitCode = 0;
                     return;
                 }
-                else if (canonical == "vam-smoke" && i + 1 < args.Length) { vamSmokeMode = true; vamSmokePath = args[++i]; }
-                else if (canonical == "vam-smoke-list" && i + 1 < args.Length) { vamSmokeListMode = true; vamSmokeListPath = args[++i]; }
-                else if (canonical == "vam-csv-out" && i + 1 < args.Length) vamCsvOutPath = args[++i];
-                else if (canonical == "vam-model" && i + 1 < args.Length) vamModelPath = args[++i];
-                else if (canonical == "vad-model" && i + 1 < args.Length) vadModelPath = args[++i];
-                else if (canonical == "vam-force") vamForce = true;
-                else if (canonical == "vam") _vamEnabled = true;
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
@@ -874,38 +825,7 @@ namespace Truedat
                 return;
             }
 
-            if (vamSmokeMode && vamSmokeListMode)
-            {
-                Console.Error.WriteLine("Error: --vam-smoke and --vam-smoke-list are mutually exclusive.");
-                Environment.ExitCode = 1;
-                return;
-            }
-            // ORT native DLLs are ILRepack-excluded (see ILRepack.targets) and must sit
-            // next to truedat.exe; without them the first VAM/VAD call throws an
-            // unhandled DllNotFoundException at JIT time. Preflight here so any --vam*
-            // mode exits cleanly with a message instead of crashing later.
-            if (vamSmokeMode || vamSmokeListMode || _vamEnabled)
-            {
-                var vamModeLabel = vamSmokeMode ? "--vam-smoke" : vamSmokeListMode ? "--vam-smoke-list" : "--vam";
-                if (!OnnxRuntimePresent(vamModeLabel))
-                {
-                    Environment.ExitCode = 1;
-                    return;
-                }
-            }
-            if (vamSmokeMode)
-            {
-                Environment.ExitCode = RunVamSmoke(vamSmokePath!, vamModelPath, vadModelPath, vamForce);
-                return;
-            }
-            if (vamSmokeListMode)
-            {
-                Environment.ExitCode = RunVamSmokeBatch(
-                    vamSmokeListPath!,
-                    vamCsvOutPath ?? Path.Combine(Directory.GetCurrentDirectory(), "mbxhub-vam-smoke.csv"),
-                    vamModelPath, vadModelPath, vamForce);
-                return;
-            }
+
 
             if (fileListMode && analyzeFileMode)
             {
@@ -1040,15 +960,6 @@ namespace Truedat
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
-                Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
-                Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
-                Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
-                Console.WriteLine("  --vam-smoke-list <p> VAM multi-track sanity rig (S2.4). One audio path per line in <p> (UTF-8, # comments,");
-                Console.WriteLine("                      '-' for stdin). Produces a TSV at --vam-csv-out with one row per track.");
-                Console.WriteLine("  --vam-csv-out <p>   With --vam-smoke-list: output TSV path (default: ./mbxhub-vam-smoke.csv)");
-                Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
-                Console.WriteLine("  --vad-model <path>  Override VAD model path (default: <exe-dir>/_models/silero-vad-skeleton.onnx)");
-                Console.WriteLine("  --vam-force         With --vam-smoke / --vam-smoke-list: run VAM even when VAD reports vocalCoverage = 0 (diagnostic)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -1346,10 +1257,9 @@ namespace Truedat
                 if (trackEntry == null)
                 {
                     EnsureStagedSrc();  // open if a no-moods scan skipped the cache hierarchy
-                    using var afVamPipeline = TryCreateVamPipelineForScan();
                     var afResults = RunSourceWorkers(
                         afEssentiaExe, afStagedSrc!, afFileSize, analyzeFilePath!, knownDurationSec: 0,
-                        afVamPipeline, extractTags: true, _stageOpts, CancellationToken.None);
+                        extractTags: true, _stageOpts, CancellationToken.None);
 
                     var features = afResults.Features;
                     var afFileMd5 = afResults.FileMd5;
@@ -1358,7 +1268,6 @@ namespace Truedat
                     afAudioStreamSha256Source = afResults.AudioStreamSha256Source;
                     var afTags = afResults.Tags!;  // extractTags: true
                     var afBitUsage = afResults.BitUsage;
-                    var afVocalResult = afResults.Vocal;
                     var afSmfmResult = afResults.Smfm;
 
                     if (features == null)
@@ -1402,7 +1311,6 @@ namespace Truedat
                         AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
                         AudioStreamSha256Source = afAudioStreamSha256Source,
                         FingerprintV1 = afFingerprintV1,
-                        Vocal = afVocalResult
                     };
 
                     // Carry forward legacy fields if entry already exists in the moods file.
@@ -1411,8 +1319,6 @@ namespace Truedat
                         trackEntry.AudioMd5 ??= afPrior.AudioMd5;
                         trackEntry.Chromaprint ??= afPrior.Chromaprint;
                         trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
-                        // Federation merge — preserve other backends' entries from prior runs.
-                        trackEntry.Vocal = MergeVocalBlock(afPrior.Vocal, trackEntry.Vocal);
                     }
                 }
 
@@ -1735,11 +1641,6 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (md5={flMoodMd5Index?.Count ?? 0}, sha={flMoodShaIndex?.Count ?? 0})");
 
-                // S2.5 — scan-lifetime VAM pipeline shared across worker tasks.
-                using var flVamPipeline = TryCreateVamPipelineForScan();
-                if (flVamPipeline != null && flVamPipeline.BothStagesSkeleton)
-                    Console.Error.WriteLine("  Note: VAM running with skeleton VAD + SER — every track lands instrumental (vocalCoverage=0). Real models arrive in S2.2.5 / S2.3.5.");
-
                 Parallel.ForEach(filePaths, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
@@ -1894,7 +1795,7 @@ namespace Truedat
                         EnsureStagedSrc();
                         var flResults = RunSourceWorkers(
                             flEssentiaExe, flStagedSrc!, flFileSize, filePath, knownDurationSec: 0,
-                            flVamPipeline, extractTags: true, _stageOpts, CancellationToken.None);
+                            extractTags: true, _stageOpts, CancellationToken.None);
 
                         var features = flResults.Features;
                         var fileMd5 = flResults.FileMd5;
@@ -1903,7 +1804,6 @@ namespace Truedat
                         var audioStreamSha256Source = flResults.AudioStreamSha256Source;
                         var tags = flResults.Tags!;  // extractTags: true
                         var bitUsage = flResults.BitUsage;
-                        var flVocalResult = flResults.Vocal;
                         var flSmfmResult = flResults.Smfm;
 
                         if (features == null)
@@ -1944,7 +1844,6 @@ namespace Truedat
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
-                            Vocal = flVocalResult
                         };
 
                         // Accumulate for moods file (only saved if --moods is set).
@@ -1958,8 +1857,6 @@ namespace Truedat
                                 trackEntry.AudioMd5 ??= flPrior.AudioMd5;
                                 trackEntry.Chromaprint ??= flPrior.Chromaprint;
                                 trackEntry.ChromaprintDuration ??= flPrior.ChromaprintDuration;
-                                // Federation merge — preserve other backends' entries from prior runs.
-                                trackEntry.Vocal = MergeVocalBlock(flPrior.Vocal, trackEntry.Vocal);
                             }
                             flMoodsTracks[flKey] = trackEntry;
                         }
@@ -2078,15 +1975,6 @@ namespace Truedat
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
-                Console.WriteLine("  --vam               Opt-in: run VAM (vocal affect) alongside a scan. Off by default. Standalone: --vam-smoke.");
-                Console.WriteLine("  --vam-smoke <f>     VAM single-track smoke: load VadStage + VocalAffectStage, decode <f> @ 16 kHz mono,");
-                Console.WriteLine("                      run VAD, gate VAM on vocalCoverage, print model I/O + output. Diagnostic only.");
-                Console.WriteLine("  --vam-smoke-list <p> VAM multi-track sanity rig (S2.4). One audio path per line in <p> (UTF-8, # comments,");
-                Console.WriteLine("                      '-' for stdin). Produces a TSV at --vam-csv-out with one row per track.");
-                Console.WriteLine("  --vam-csv-out <p>   With --vam-smoke-list: output TSV path (default: ./mbxhub-vam-smoke.csv)");
-                Console.WriteLine("  --vam-model <path>  Override VAM model path (default: <exe-dir>/_models/vam-skeleton.onnx)");
-                Console.WriteLine("  --vad-model <path>  Override VAD model path (default: <exe-dir>/_models/silero-vad-skeleton.onnx)");
-                Console.WriteLine("  --vam-force         With --vam-smoke / --vam-smoke-list: run VAM even when VAD reports vocalCoverage = 0 (diagnostic)");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -2348,14 +2236,6 @@ namespace Truedat
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Parallelism: {parallelism} threads");
 
-            // S2.5 — scan-lifetime VAM pipeline (CPU EP). Constructed once,
-            // ORT sessions shared across worker tasks (InferenceSession.Run
-            // is internally thread-safe). Null when ffmpeg is absent —
-            // workers handle null gracefully and leave TrackEntry.Vocal null.
-            // Disposed in the finally block at scan end.
-            VamPipeline? vamPipeline = TryCreateVamPipelineForScan();
-            if (vamPipeline != null && vamPipeline.BothStagesSkeleton)
-                Console.WriteLine("  Note: VAM running with skeleton VAD + SER — every track lands instrumental (vocalCoverage=0). Real models arrive in S2.2.5 / S2.3.5.");
             Console.WriteLine();
 
             try
@@ -2586,9 +2466,6 @@ namespace Truedat
                                         FingerprintV1 = xp.Entry.FingerprintV1,
                                         Chromaprint = xp.Entry.Chromaprint,
                                         ChromaprintDuration = xp.Entry.ChromaprintDuration,
-                                        // VAM S2.5 \u2014 preserve vocal block across cross-MD5 cache reuse
-                                        // (audio bytes match, so vocal analysis still applies).
-                                        Vocal = xp.Entry.Vocal
                                     };
                                     ApplySmfmInPlace(allTracks[t.Location].Features, t.Location);
                                     allTracks.TryRemove(xp.OldKey, out _);
@@ -2677,7 +2554,7 @@ namespace Truedat
                         var msResults = RunSourceWorkers(
                             essentiaExe, msStagedSrc!, fileSizeBytes, t.Location,
                             knownDurationSec: trackDurationSecs,
-                            vamPipeline, extractTags: false, _stageOpts, cts.Token);
+                            extractTags: false, _stageOpts, cts.Token);
                         Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
 
@@ -2687,7 +2564,6 @@ namespace Truedat
                         var audioStreamSha256 = msResults.AudioStreamSha256;
                         var audioStreamSha256Source = msResults.AudioStreamSha256Source;
                         var bitUsageResult = msResults.BitUsage;
-                        var vocalResult = msResults.Vocal;
                         var smfmResult = msResults.Smfm;
                         var analyzeDuration = msResults.AnalyzeDuration;
 
@@ -2744,10 +2620,6 @@ namespace Truedat
                             FingerprintV1 = fingerprintV1,
                             Chromaprint = priorEntry?.Chromaprint,
                             ChromaprintDuration = priorEntry?.ChromaprintDuration,
-                            // Federation policy: per-backend nested. Merge into any
-                            // prior block (preserve other backends' entries from
-                            // earlier runs / other machines).
-                            Vocal = MergeVocalBlock(priorEntry?.Vocal, vocalResult)
                         };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -2780,12 +2652,6 @@ namespace Truedat
                 });
             }
             catch (OperationCanceledException) { }
-            finally
-            {
-                // Release VAM ORT sessions back to the runtime. Safe-no-op
-                // when vamPipeline is null (ffmpeg-absent install).
-                vamPipeline?.Dispose();
-            }
 
             sw.Stop();
             var endTime = DateTime.Now;
@@ -4108,22 +3974,6 @@ namespace Truedat
             return XmlName;
         }
 
-        // Verify the ORT native DLL sits next to the exe before any VAM/VAD path
-        // touches it. Excluded from ILRepack by design; absence otherwise surfaces
-        // as an unhandled DllNotFoundException from the first ORT P/Invoke.
-        //
-        // CPU EP only (see project memory vam-models-no-gpu-benefit). DirectML and
-        // onnxruntime_providers_shared.dll were dropped in 28be76e — only the core
-        // onnxruntime.dll is required.
-        static bool OnnxRuntimePresent(string mode)
-        {
-            var ort = Path.Combine(AppContext.BaseDirectory, "onnxruntime.dll");
-            if (File.Exists(ort)) return true;
-            Console.Error.WriteLine($"Error: {mode} requires the ONNX Runtime native DLL next to truedat.exe.");
-            Console.Error.WriteLine($"  missing: {ort}");
-            return false;
-        }
-
         /// <summary>
         /// Search for the MusicBrainz/AcousticBrainz catalog file in standard locations.
         /// Checks data/ subdirectory and root of each search dir, for both .jsonl.gz and .jsonl.
@@ -5117,7 +4967,6 @@ namespace Truedat
             public double? HfEnergyRatio;
             public string? HfEnergyMethod;
             public HfSpectralStructure? HfSpectralStructure;
-            public VocalBlock? Vocal;
             public SmfmReader.SmfmResult? Smfm;
             public TimeSpan AnalyzeDuration;
             public long AnalyzeTicks;
@@ -5151,7 +5000,6 @@ namespace Truedat
             long fileSize,
             string auditDisplayPath,
             double knownDurationSec,
-            VamPipeline? vamPipeline,
             bool extractTags,
             StageOptions stageOpts,
             CancellationToken ct)
@@ -5195,12 +5043,9 @@ namespace Truedat
             var hfEnergyTask = ConditionalTask(stageOpts.NoHfAnalysis,
                 () => ComputeHfAnalysis(readPath, _ffmpegPath.Value),
                 ((double?)null, (string?)null, (HfSpectralStructure?)null));
-            var vocalTask = vamPipeline != null
-                ? Task.Run(() => vamPipeline.AnalyzeTrack(readPath))
-                : Task.FromResult<VocalBlock?>(null);
             var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
 
-            Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, vocalTask, smfmTask });
+            Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
 
             long ticks = Stopwatch.GetTimestamp() - analyzeStart;
             var (features, error) = essentiaTask.Result;
@@ -5219,7 +5064,6 @@ namespace Truedat
                 HfEnergyRatio = hfRatio,
                 HfEnergyMethod = hfMethod,
                 HfSpectralStructure = hfStructure,
-                Vocal = vocalTask.Result,
                 Smfm = smfmTask.Result,
                 AnalyzeDuration = StopwatchTicksToTimeSpan(ticks),
                 AnalyzeTicks = ticks,
@@ -5998,429 +5842,6 @@ namespace Truedat
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
             return failures == 0 ? 0 : 1;
-        }
-
-        /// <summary>VAM end-to-end smoke (S2.2 + S2.3). Loads VadStage and
-        /// VocalAffectStage, ffmpeg-decodes 30 s of mid-track audio @ 16 kHz
-        /// mono float32, runs VAD first, gates VAM on vocalCoverage >=
-        /// <see cref="VadStage.DefaultGateThreshold"/>, prints both model
-        /// contracts and outputs. Diagnostic only — no mbxmoods.json, no
-        /// TrackFeatures field, no schema commit. Schema additions land in S2.5.
-        ///
-        /// <paramref name="force"/> bypasses the VAD gate (runs VAM even when
-        /// vocalCoverage is below threshold) so the VAM wiring can still be
-        /// exercised while VadStage is the skeleton (which always reports
-        /// vocalCoverage = 0).</summary>
-        static int RunVamSmoke(string audioPath, string? vamModelOverride, string? vadModelOverride, bool force)
-        {
-            if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
-            {
-                Console.Error.WriteLine($"Error: audio file not found: {audioPath}");
-                return 1;
-            }
-            var ffmpeg = _ffmpegPath.Value;
-            if (string.IsNullOrEmpty(ffmpeg))
-            {
-                Console.Error.WriteLine("Error: ffmpeg.exe required for --vam-smoke (audio decode path).");
-                return 1;
-            }
-
-            // Defaults resolved relative to truedat.exe so invocation path
-            // doesn't matter (dist/truedat/ run, absolute path, current dir).
-            string vamModelPath = !string.IsNullOrEmpty(vamModelOverride)
-                ? vamModelOverride!
-                : Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
-            string vadModelPath = !string.IsNullOrEmpty(vadModelOverride)
-                ? vadModelOverride!
-                : Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
-
-            Console.WriteLine($"[vam-smoke] audio: {audioPath}");
-            Console.WriteLine($"[vam-smoke] vad model: {vadModelPath}");
-            Console.WriteLine($"[vam-smoke] vam model: {vamModelPath}");
-
-            // Decode once; both stages consume the same 30 s mid-track buffer.
-            var pcm = DecodeMidTrackPcm16kMono(audioPath, ffmpeg!, durationSec: 30);
-            if (pcm == null || pcm.Length == 0)
-            {
-                Console.Error.WriteLine("Error: ffmpeg returned no audio samples.");
-                return 1;
-            }
-            Console.WriteLine($"[vam-smoke] decoded {pcm.Length} samples ({pcm.Length / 16000.0:F2} s @ 16 kHz mono float32)");
-
-            using var vad = new VadStage(vadModelPath, Console.Out);
-            Console.WriteLine(vad.Describe());
-            var vr = vad.Run(pcm);
-            Console.WriteLine($"[vam-smoke] VAD: vocalCoverage={vr.VocalCoverage:F4} method={vr.Method} inference={vr.InferenceMs:F1} ms");
-
-            bool gatePassed = vr.VocalCoverage >= VadStage.DefaultGateThreshold;
-            if (!gatePassed && !force)
-            {
-                Console.WriteLine($"[vam-smoke] VAM SKIPPED — vocalCoverage {vr.VocalCoverage:F4} < gate {VadStage.DefaultGateThreshold:F4} (track treated as instrumental).");
-                Console.WriteLine($"[vam-smoke] (use --vam-force to bypass the gate and exercise VAM anyway.)");
-                return 0;
-            }
-            if (!gatePassed && force)
-            {
-                Console.WriteLine($"[vam-smoke] gate would have skipped VAM (coverage {vr.VocalCoverage:F4} < {VadStage.DefaultGateThreshold:F4}); --vam-force overrides.");
-            }
-
-            using var vam = new VocalAffectStage(vamModelPath, Console.Out);
-            Console.WriteLine(vam.Describe());
-
-            var sw = Stopwatch.StartNew();
-            var output = vam.Run(pcm);
-            sw.Stop();
-            Console.WriteLine($"[vam-smoke] VAM inference: {output.Length} output float(s) in {sw.Elapsed.TotalMilliseconds:F1} ms");
-
-            // Skeleton model is Identity, so output should equal input bit-for-bit.
-            // Real wav2vec2 model output will be V/A/D scalars; head/tail still
-            // shows them. This is sanity-check noise, not the gate.
-            int headN = Math.Min(6, output.Length);
-            int tailN = Math.Min(6, output.Length);
-            var head = string.Join(", ", output.Take(headN).Select(f => f.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)));
-            var tail = string.Join(", ", output.Skip(Math.Max(0, output.Length - tailN)).Select(f => f.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)));
-            Console.WriteLine($"[vam-smoke] output head[{headN}]: [{head}]");
-            if (output.Length > 2 * tailN)
-                Console.WriteLine($"[vam-smoke] output tail[{tailN}]: [{tail}]");
-
-            if (output.Length == pcm.Length)
-            {
-                int mismatches = 0;
-                for (int i = 0; i < output.Length; i++)
-                {
-                    if (output[i] != pcm[i]) mismatches++;
-                }
-                if (mismatches == 0)
-                    Console.WriteLine("[vam-smoke] Identity check: PASS (output bit-identical to input — skeleton wiring confirmed)");
-                else
-                    Console.WriteLine($"[vam-smoke] Identity check: {mismatches} sample(s) diverged — model is NOT the skeleton (real SER model probably loaded)");
-            }
-            else
-            {
-                Console.WriteLine($"[vam-smoke] output length ({output.Length}) differs from input length ({pcm.Length}) — non-Identity model loaded");
-            }
-            return 0;
-        }
-
-        /// <summary>S2.5 scan-lifetime VAM pipeline factory. Returns null when
-        /// ffmpeg.exe isn't available — VAM needs the s16le 16 kHz mono decode
-        /// pipe, so without ffmpeg there's nothing to feed the model. Workers
-        /// short-circuit on null and leave TrackEntry.Vocal null.
-        ///
-        /// Model paths default to <see cref="AppContext.BaseDirectory"/>/_models/
-        /// (the auto-bootstrap skeleton location); explicit override paths would
-        /// go through a future --vam-model / --vad-model on the production scan
-        /// (currently only the --vam-smoke entry points expose those flags).</summary>
-        static VamPipeline? TryCreateVamPipelineForScan()
-        {
-            // Opt-in gate: VAM only runs in a scan when --vam was passed.
-            if (!_vamEnabled) return null;
-            var ffmpeg = _ffmpegPath.Value;
-            if (string.IsNullOrEmpty(ffmpeg)) return null;
-            var vadModelPath = Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
-            var vamModelPath = Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
-            try
-            {
-                return new VamPipeline(vadModelPath, vamModelPath, ffmpeg!, Console.Out);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"WARNING: VAM pipeline construction failed ({ex.GetType().Name}: {ex.Message}). Tracks will land with vocal=null.");
-                return null;
-            }
-        }
-
-        /// <summary>Merge a freshly-computed <see cref="VocalBlock"/> into the
-        /// prior entry's block per the per-backend federation policy:
-        /// <list type="bullet">
-        ///   <item>Fresh wins for vocalCoverage + vad audit-trail (newest VAD
-        ///         run reflects the current audio state).</item>
-        ///   <item>Per-backend entries in <c>ByBackend</c> are merged key-by-key.
-        ///         Fresh entry for this backend overwrites the prior entry for
-        ///         that backend; entries for OTHER backends carry forward
-        ///         untouched (so a CPU re-scan doesn't wipe last week's NPU
-        ///         result, and vice versa).</item>
-        /// </list>
-        /// When <paramref name="fresh"/> is null (ffmpeg-absent / pipeline
-        /// failure), the prior block is preserved unchanged. When the prior
-        /// is null and fresh is set, fresh wins.</summary>
-        static VocalBlock? MergeVocalBlock(VocalBlock? prior, VocalBlock? fresh)
-        {
-            if (fresh == null) return prior;
-            if (prior == null || prior.ByBackend == null || prior.ByBackend.Count == 0)
-                return fresh;
-            // Carry forward prior per-backend entries that fresh didn't recompute.
-            if (fresh.ByBackend == null)
-                fresh.ByBackend = new Dictionary<string, VocalBackendResult>(prior.ByBackend, StringComparer.OrdinalIgnoreCase);
-            else
-            {
-                foreach (var kv in prior.ByBackend)
-                {
-                    if (!fresh.ByBackend.ContainsKey(kv.Key))
-                        fresh.ByBackend[kv.Key] = kv.Value;
-                }
-            }
-            return fresh;
-        }
-
-        /// <summary>VAM S2.4 multi-track sanity rig. Reads a UTF-8 file list
-        /// (one audio path per line, # comments, '-' for stdin), runs the
-        /// same decode + VAD + (gated) VAM pipeline as RunVamSmoke per track,
-        /// and appends one TSV row per track to <paramref name="csvOutPath"/>.
-        ///
-        /// Serial pass over the list — InferenceSession.Run is internally
-        /// thread-safe but parallel batch is out of scope until T-A3 wires
-        /// up the production worker pool. The rig is meant for periodic
-        /// quality eyeballing, not throughput.
-        ///
-        /// TSV (tab-separated; matches the existing mbxmoods-verify.csv
-        /// convention even though the extension is .csv):
-        ///   status, path, decodedSamples, vocalCoverage, vadMethod,
-        ///   vadInferenceMs, gatePassed, vamInferenceMs, vamOutputLen,
-        ///   vamMethod, notes
-        ///
-        /// Status set: OK / SKIPPED_INSTRUMENTAL / DECODE_FAILED / ERROR.
-        /// Returns 0 when at least one row landed successfully; 1 when no
-        /// rows produced (the rig itself failed). Per-track failures show
-        /// up as ERROR rows, not as exit code.</summary>
-        static int RunVamSmokeBatch(string fileListPath, string csvOutPath,
-            string? vamModelOverride, string? vadModelOverride, bool force)
-        {
-            // ── Resolve the file list (file path OR '-' for stdin), match
-            //    the existing --file-list parser pattern.
-            List<string> paths;
-            if (fileListPath == "-")
-            {
-                Console.Error.WriteLine("Reading file list from stdin (one path per line, # comments, EOF to start)...");
-                paths = new List<string>();
-                string? line;
-                while ((line = Console.In.ReadLine()) != null)
-                {
-                    var trimmed = line.Trim();
-                    if (!string.IsNullOrWhiteSpace(trimmed) && !trimmed.StartsWith("#"))
-                        paths.Add(trimmed);
-                }
-            }
-            else
-            {
-                if (!File.Exists(fileListPath))
-                {
-                    Console.Error.WriteLine($"Error: file list not found: {fileListPath}");
-                    return 1;
-                }
-                paths = File.ReadAllLines(fileListPath, Encoding.UTF8)
-                    .Where(l => !string.IsNullOrWhiteSpace(l) && !l.TrimStart().StartsWith("#"))
-                    .Select(l => l.Trim())
-                    .ToList();
-            }
-            if (paths.Count == 0)
-            {
-                Console.Error.WriteLine("Error: no audio paths to process.");
-                return 1;
-            }
-
-            var ffmpeg = _ffmpegPath.Value;
-            if (string.IsNullOrEmpty(ffmpeg))
-            {
-                Console.Error.WriteLine("Error: ffmpeg.exe required for --vam-smoke-list (audio decode path).");
-                return 1;
-            }
-
-            // ── Resolve model paths the same way as single-track --vam-smoke.
-            string vamModelPath = !string.IsNullOrEmpty(vamModelOverride)
-                ? vamModelOverride!
-                : Path.Combine(AppContext.BaseDirectory, "_models", "vam-skeleton.onnx");
-            string vadModelPath = !string.IsNullOrEmpty(vadModelOverride)
-                ? vadModelOverride!
-                : Path.Combine(AppContext.BaseDirectory, "_models", "silero-vad-skeleton.onnx");
-
-            Console.WriteLine($"[vam-batch] {paths.Count} track(s), TSV out: {csvOutPath}");
-            Console.WriteLine($"[vam-batch] vad model: {vadModelPath}");
-            Console.WriteLine($"[vam-batch] vam model: {vamModelPath}");
-
-            using var vad = new VadStage(vadModelPath, Console.Out);
-            using var vam = new VocalAffectStage(vamModelPath, Console.Out);
-            string vadMethodTag = vad.IsSkeleton ? "skeleton-stub" : "real";
-            string vamMethodTag = vam.IsSkeleton ? "skeleton-identity" : "real";
-
-            // Ensure parent dir exists before opening the writer (Path.GetDirectoryName
-            // returns "" for bare filenames, which Directory.CreateDirectory rejects).
-            var csvDir = Path.GetDirectoryName(csvOutPath);
-            if (!string.IsNullOrEmpty(csvDir) && !Directory.Exists(csvDir))
-                Directory.CreateDirectory(csvDir);
-
-            int rowsOk = 0, rowsSkipped = 0, rowsDecodeFail = 0, rowsError = 0;
-            var inv = System.Globalization.CultureInfo.InvariantCulture;
-
-            using (var w = new StreamWriter(csvOutPath, append: false, Encoding.UTF8))
-            {
-                w.WriteLine("status\tpath\tdecodedSamples\tvocalCoverage\tvadMethod\tvadInferenceMs\tgatePassed\tvamInferenceMs\tvamOutputLen\tvamMethod\tnotes");
-
-                foreach (var path in paths)
-                {
-                    string status, notes = "";
-                    int decodedSamples = 0;
-                    double vocalCoverage = 0;
-                    double vadMs = 0;
-                    bool gatePassed = false;
-                    string vamMs = "";
-                    string vamLen = "";
-                    string vamMethod = "";
-
-                    try
-                    {
-                        if (!File.Exists(path))
-                        {
-                            status = "ERROR";
-                            notes = "file not found";
-                            rowsError++;
-                        }
-                        else
-                        {
-                            var pcm = DecodeMidTrackPcm16kMono(path, ffmpeg!, durationSec: 30);
-                            if (pcm == null || pcm.Length == 0)
-                            {
-                                status = "DECODE_FAILED";
-                                notes = "ffmpeg returned no samples";
-                                rowsDecodeFail++;
-                            }
-                            else
-                            {
-                                decodedSamples = pcm.Length;
-                                var vr = vad.Run(pcm);
-                                vocalCoverage = vr.VocalCoverage;
-                                vadMs = vr.InferenceMs;
-                                gatePassed = vr.VocalCoverage >= VadStage.DefaultGateThreshold;
-
-                                if (!gatePassed && !force)
-                                {
-                                    status = "SKIPPED_INSTRUMENTAL";
-                                    rowsSkipped++;
-                                }
-                                else
-                                {
-                                    var sw = Stopwatch.StartNew();
-                                    var output = vam.Run(pcm);
-                                    sw.Stop();
-                                    vamMs = sw.Elapsed.TotalMilliseconds.ToString("F1", inv);
-                                    vamLen = output.Length.ToString(inv);
-                                    vamMethod = vamMethodTag;
-                                    status = "OK";
-                                    rowsOk++;
-                                    if (!gatePassed && force)
-                                        notes = "vam-force bypassed gate";
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        status = "ERROR";
-                        notes = $"{ex.GetType().Name}: {ex.Message}";
-                        rowsError++;
-                    }
-
-                    // Tab in any field would break the TSV — sanitise notes/path.
-                    string Sanitize(string s) => s.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
-
-                    w.WriteLine(string.Join("\t",
-                        status,
-                        Sanitize(path),
-                        decodedSamples.ToString(inv),
-                        vocalCoverage.ToString("F4", inv),
-                        vadMethodTag,
-                        vadMs.ToString("F1", inv),
-                        gatePassed.ToString().ToLowerInvariant(),
-                        vamMs,
-                        vamLen,
-                        vamMethod,
-                        Sanitize(notes)));
-
-                    Console.WriteLine($"[vam-batch] {status,-22} {Path.GetFileName(path)}");
-                }
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("=== VAM smoke summary ===");
-            Console.WriteLine($"  OK:                    {rowsOk}");
-            Console.WriteLine($"  SKIPPED_INSTRUMENTAL:  {rowsSkipped}");
-            Console.WriteLine($"  DECODE_FAILED:         {rowsDecodeFail}");
-            Console.WriteLine($"  ERROR:                 {rowsError}");
-            Console.WriteLine($"  TSV:                   {csvOutPath}");
-            // Honest about state: when both stages are skeleton, the rig
-            // exercises wiring but the V/A numbers will be meaningless
-            // (output is just echoed audio). Real assessment needs S2.2.5
-            // (real wav2vec2) + S2.3.5 (real Silero VAD).
-            if (vad.IsSkeleton || vam.IsSkeleton)
-            {
-                Console.WriteLine();
-                Console.WriteLine($"  NOTE: VAD={(vad.IsSkeleton ? "skeleton" : "real")}, VAM={(vam.IsSkeleton ? "skeleton" : "real")}. " +
-                    "Real quality assessment needs both real models (S2.2.5 + S2.3.5).");
-            }
-            return (rowsOk + rowsSkipped + rowsDecodeFail + rowsError) > 0 ? 0 : 1;
-        }
-
-        /// <summary>ffmpeg-pipe → s16le mono 16 kHz → float32 in [-1, +1].
-        /// Mid-track 30 s window when the track is long enough; otherwise
-        /// decode from the start. Mirrors the ComputeBitUsage / ComputeHfAnalysis
-        /// subprocess pattern (stderr drained async, 60 s WaitForExit watchdog).</summary>
-        internal static float[]? DecodeMidTrackPcm16kMono(string audioPath, string ffmpegExe, int durationSec)
-        {
-            // Use TagLib to peek total duration; pick a mid-track offset when
-            // there's enough headroom. Fall back to start when unknown / short.
-            double totalDur = 0;
-            try
-            {
-                using var f = TagLib.File.Create(audioPath);
-                totalDur = f.Properties?.Duration.TotalSeconds ?? 0;
-            }
-            catch { /* unreadable → start at 0 */ }
-            double startSec = totalDur > durationSec + 5 ? (totalDur - durationSec) / 2.0 : 0;
-            string ssArg = startSec > 0
-                ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} "
-                : "";
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = ffmpegExe,
-                Arguments = $"-v error {ssArg}-t {durationSec} -i {PathHelper.QuoteArg(audioPath)} -f s16le -ac 1 -ar 16000 pipe:1",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            try
-            {
-                using var proc = Process.Start(psi);
-                if (proc == null) return null;
-                var stderrTask = proc.StandardError.ReadToEndAsync();
-
-                using var ms = new MemoryStream();
-                proc.StandardOutput.BaseStream.CopyTo(ms);
-
-                if (!proc.WaitForExit(60_000))
-                {
-                    try { proc.Kill(); } catch { }
-                    return null;
-                }
-                if (proc.ExitCode != 0 && ms.Length == 0) return null;
-
-                var raw = ms.ToArray();
-                int sampleCount = raw.Length / 2;          // int16 = 2 bytes/sample
-                var pcm = new float[sampleCount];
-                const float scale = 1.0f / 32768.0f;
-                for (int i = 0; i < sampleCount; i++)
-                {
-                    short s = (short)(raw[i * 2] | (raw[i * 2 + 1] << 8));
-                    pcm[i] = s * scale;
-                }
-                return pcm;
-            }
-            catch
-            {
-                return null;
-            }
         }
 
         /// <summary>Trailing-zero count for a uint32 value; returns 32 for zero.
@@ -7627,11 +7048,6 @@ namespace Truedat
                     jw.WriteNumber("chromaprintDuration", entry.ChromaprintDuration.Value);
             }
 
-            // VAM S2.5 — vocal-affect block. Omitted when null (pipeline absent
-            // / pre-S2.5 entries). Per-backend nesting matches the federation
-            // policy decision (see VocalBlock.cs).
-            WriteVocalBlock(jw, entry.Vocal);
-
             // Phase 4 — TruedatVerdict, computed inline. Emit only when at least one
             // verdict produced a real yes/no decision. "unknown" without source signals
             // (legacy 24-bit FLAC entries lacking Phase 2.5/3 fields, applicability gate
@@ -7704,7 +7120,6 @@ namespace Truedat
                         FingerprintV1 = ParseFingerprintV1FromJson(track),
                         Chromaprint = GetStr(track, "chromaprint") is var cpStr && cpStr.Length > 0 ? cpStr : null,
                         ChromaprintDuration = GetNullableDbl(track, "chromaprintDuration"),
-                        Vocal = ParseVocalBlockFromJson(track)
                     };
                 }
                 return allTracks.Count;
@@ -7848,98 +7263,6 @@ namespace Truedat
                 SensmeChannelName = GetStr(track, "sensmeChannelName") is var scn && scn.Length > 0 ? scn : null,
                 SmfmBpm           = GetNullableDbl(track, "smfmBpm"),
             };
-        }
-
-        /// <summary>VAM S2.5 — emit the persisted <c>vocal</c> block. Shape
-        /// matches docs/plans/2026-05-16-vader-vam-roadmap.md §3 with per-backend
-        /// nesting under <c>byBackend</c>. Whole block omitted when null
-        /// (pre-S2.5 entries / pipeline-absent installs).</summary>
-        static void WriteVocalBlock(Utf8JsonWriter jw, VocalBlock? v)
-        {
-            if (v == null) return;
-            jw.WritePropertyName("vocal");
-            jw.WriteStartObject();
-            jw.WriteNumber("vocalCoverage", Math.Round(v.VocalCoverage, 4));
-            if (v.Vad != null)
-            {
-                jw.WritePropertyName("vad");
-                jw.WriteStartObject();
-                if (!string.IsNullOrEmpty(v.Vad.Method))
-                    jw.WriteString("method", v.Vad.Method);
-                if (!string.IsNullOrEmpty(v.Vad.ModelVersion))
-                    jw.WriteString("modelVersion", v.Vad.ModelVersion);
-                jw.WriteNumber("threshold", Math.Round(v.Vad.Threshold, 4));
-                jw.WriteNumber("inferenceMs", Math.Round(v.Vad.InferenceMs, 1));
-                jw.WriteEndObject();
-            }
-            if (v.ByBackend != null && v.ByBackend.Count > 0)
-            {
-                jw.WritePropertyName("byBackend");
-                jw.WriteStartObject();
-                foreach (var kv in v.ByBackend)
-                {
-                    jw.WritePropertyName(kv.Key);
-                    jw.WriteStartObject();
-                    jw.WriteNumber("valence", Math.Round(kv.Value.Valence, 4));
-                    jw.WriteNumber("arousal", Math.Round(kv.Value.Arousal, 4));
-                    jw.WriteNumber("dominance", Math.Round(kv.Value.Dominance, 4));
-                    if (!string.IsNullOrEmpty(kv.Value.ModelVersion))
-                        jw.WriteString("modelVersion", kv.Value.ModelVersion);
-                    jw.WriteNumber("inferenceMs", Math.Round(kv.Value.InferenceMs, 1));
-                    jw.WriteString("analyzedAt", kv.Value.AnalyzedAt.ToString("o"));
-                    jw.WriteEndObject();
-                }
-                jw.WriteEndObject();
-            }
-            jw.WriteEndObject();
-        }
-
-        /// <summary>VAM S2.5 — read the persisted <c>vocal</c> block back from
-        /// mbxmoods.json. Returns null when absent (pre-S2.5 entries) or
-        /// malformed. Tolerant of missing sub-fields — never throws.</summary>
-        static VocalBlock? ParseVocalBlockFromJson(JsonElement track)
-        {
-            if (!track.TryGetProperty("vocal", out var v) || v.ValueKind != JsonValueKind.Object) return null;
-            try
-            {
-                var block = new VocalBlock
-                {
-                    VocalCoverage = GetDbl(v, "vocalCoverage"),
-                };
-                if (v.TryGetProperty("vad", out var vad) && vad.ValueKind == JsonValueKind.Object)
-                {
-                    block.Vad = new VadInfo
-                    {
-                        Method = GetStr(vad, "method"),
-                        ModelVersion = GetStr(vad, "modelVersion") is var mv && mv.Length > 0 ? mv : null,
-                        Threshold = GetDbl(vad, "threshold"),
-                        InferenceMs = GetDbl(vad, "inferenceMs"),
-                    };
-                }
-                if (v.TryGetProperty("byBackend", out var bb) && bb.ValueKind == JsonValueKind.Object)
-                {
-                    block.ByBackend = new Dictionary<string, VocalBackendResult>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var be in bb.EnumerateObject())
-                    {
-                        if (be.Value.ValueKind != JsonValueKind.Object) continue;
-                        DateTime analyzedAt = DateTime.MinValue;
-                        var atStr = GetStr(be.Value, "analyzedAt");
-                        if (!string.IsNullOrEmpty(atStr))
-                            DateTime.TryParse(atStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out analyzedAt);
-                        block.ByBackend[be.Name] = new VocalBackendResult
-                        {
-                            Valence = GetDbl(be.Value, "valence"),
-                            Arousal = GetDbl(be.Value, "arousal"),
-                            Dominance = GetDbl(be.Value, "dominance"),
-                            ModelVersion = GetStr(be.Value, "modelVersion"),
-                            InferenceMs = GetDbl(be.Value, "inferenceMs"),
-                            AnalyzedAt = analyzedAt,
-                        };
-                    }
-                }
-                return block;
-            }
-            catch { return null; }
         }
 
         /// <summary>Phase 5 — read the nested hfSpectralStructure block back from
@@ -9340,10 +8663,6 @@ namespace Truedat
                 FingerprintV1 = refreshedFp ?? source.FingerprintV1,
                 Chromaprint = source.Chromaprint,
                 ChromaprintDuration = source.ChromaprintDuration,
-                // VAM S2.5 — preserve across cache reuse. The vocal block
-                // is tied to audio content, not metadata, so it survives
-                // tag-edit re-keys and cross-MD5 / cross-SHA path moves.
-                Vocal = source.Vocal,
             };
         }
 

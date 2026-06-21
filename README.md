@@ -24,7 +24,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 ## Download
 
-[**truedat.zip**](https://halrad.com/truedat/truedat.zip) — full self-contained bundle (`truedat.exe` + Essentia + ffmpeg + ONNX Runtime / DirectML). Runs offline, no install. Unzip anywhere and run `truedat.exe`.
+[**truedat.zip**](https://halrad.com/truedat/truedat.zip) — full self-contained bundle (`truedat.exe` + Essentia + ffmpeg). Runs offline, no install. Unzip anywhere and run `truedat.exe`.
 
 What's inside and what happens if you drop pieces: [dependency-surface notes](https://halrad.com/truedat/2026-05-23-dependency-surface.md).
 

@@ -42,10 +42,7 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
     </ItemGroup>
   </Target>
 
-  <!-- ILRepack: Merge System.Text.Json + TagLibSharp + Microsoft.ML.OnnxRuntime
-       (managed) + BCL polyfills into single exe. The native onnxruntime.dll
-       ships as a sibling (see ILRepack.targets for filter pattern). VAM uses
-       CPU EP only — no DirectML / NPU dependency. -->
+  <!-- ILRepack: Merge System.Text.Json + TagLibSharp into the single exe. -->
   <PropertyGroup>
     <ILRepackInternalize>true</ILRepackInternalize>
   </PropertyGroup>
@@ -53,7 +50,6 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.5" PrivateAssets="all" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" PrivateAssets="all" />
     <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" PrivateAssets="all" />
   </ItemGroup>
 
