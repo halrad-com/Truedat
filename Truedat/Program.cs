@@ -4981,7 +4981,7 @@ namespace Truedat
         /// <summary>
         /// Run the per-track concurrent worker fan-out: Essentia + ComputeFileMd5 +
         /// ComputeFingerprintV1 + ComputeAudioStreamSha256FromFile + ComputeBitUsage
-        /// + ComputeHfAnalysis + VAM + SMFM (+ optional ExtractFileTags). Wall-clock
+        /// + ComputeHfAnalysis + SMFM (+ optional ExtractFileTags). Wall-clock
         /// ≈ max(analysis, slowest-task). All workers read from <c>src.Path</c>
         /// (the staged copy if staging happened, the original otherwise).
         ///
