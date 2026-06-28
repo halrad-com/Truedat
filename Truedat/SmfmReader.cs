@@ -5,49 +5,37 @@ using System.Text;
 
 namespace Truedat
 {
-    /// <summary>Reads Sony 12 TONE / SensMe SMFM payloads embedded directly into audio files
+    /// <summary>Reads Sony SMFM (12-TONE analysis) payloads embedded directly into audio files
     /// by Music Center. Supports FLAC (APPLICATION block), MP3 (GEOB frame), and WMA (ASF ECD).
     /// All methods are static and thread-safe. Never throws — returns null on any failure.</summary>
     internal static class SmfmReader
     {
         internal struct SmfmResult
         {
-            public int[] Scores;   // STMO channel scores 0-255, length 10
-            public int   Channel;  // argmax of Scores
+            public int[] Scores;   // STMO slot scores 0-255, length 10
+            public int   Channel;  // argmax of Scores — dominant raw STMO slot index, NOT a mood channel
             public float Bpm;      // GBPM big-endian float32
         }
 
-        // STMO channel -> SensMe tile-name mapping.
-        // Audit trail: smfm/sensme_channels.json (schema_version 2, 2026-05-26 device-Q&A session).
-        // ch0 is ambiguous: both Night and Midnight elevate ch0 with similar floor patterns.
-        //   Left null; consumers must not rely on this index being named until a separator is
-        //   identified. (13 device tiles vs 10 STMO slots = 3 tiles must be derived combinations;
-        //   one of Night/Midnight is likely a derived tile rather than the direct ch0 slot.)
-        // ch6 is unmapped: no single device tile uses ch6 as a primary marker. It is anti-correlated
-        //   with Relax (floor 7) but spikes in some Extreme tracks (Pigs on the Wing 1: ch6=83).
-        //   Likely participates in Sony's multi-channel threshold rules for the 3 derived tiles
-        //   (Extreme / Mellow / Daytime), rather than being a direct tile marker itself.
-        // Prior schema-v1 stub had ch5="Extreme" and ch6="Upbeat"; device-Q&A evidence shows both
-        //   were wrong: ch5 is Morning, Upbeat is ch8. Stub-era ch2/ch3/ch4 names re-validated.
-        private static readonly string[] _names = new string[10];
-        static SmfmReader()
-        {
-            // _names[0] = null;          // Night|Midnight (ambiguous, see audit notes above)
-            _names[1] = "Energetic";
-            _names[2] = "Emotional";
-            _names[3] = "Lounge";
-            _names[4] = "Dance";
-            _names[5] = "Morning";        // schema-v1 stub had "Extreme" — wrong per device Q&A
-            // _names[6] = null;          // unmapped (stub had "Upbeat" — wrong; Upbeat is ch8)
-            _names[7] = "Relax";
-            _names[8] = "Upbeat";
-            _names[9] = "Evening";
-        }
+        // ── SMFM slot "channel" labels: REMOVED (device-refuted) ─────────────
+        // An earlier hardcoded slot->name table ("Energetic", "Lounge", …) is
+        // REFUTED and no longer emitted. A 2026-06-27 live Walkman device test
+        // (52 tracks) proved the device's mood channels are REGIONS on a 2-D
+        // arousal×valence canvas a track lands in SEVERAL of at once — they are
+        // NOT 1:1 with STMO slots, and STMO argmax does NOT predict the device
+        // channel. Specific refutations: ch2 ≠ "Emotional" (not a device channel
+        // at all), ch6 ≠ "Extreme" (those were junk 254-valued LIVE recordings).
+        // The labels were geometry/hand-audit guesses, never device-validated.
+        //   Evidence (smfm repo): docs/2026-06-27-device-test-rederivation.md,
+        //   docs/2026-06-27-canvas-rederivation-round2.md (+ the schema-v4 channel record).
+        // The meaningful derived signal is (arousal, valence), computed DOWNSTREAM
+        // (AutoQ / SmfmVaProjector), NOT here. truedat emits only the raw Scores +
+        // Bpm + the dominant raw STMO slot index (SmfmResult.Channel).
 
-        /// <summary>Returns the confirmed SensMe channel name for the given index,
-        /// or null for unconfirmed/ambiguous indices (currently ch0 and ch6).</summary>
-        internal static string? ChannelName(int index) =>
-            (uint)index < (uint)_names.Length ? _names[index] : null;
+        /// <summary>Slot "channel" names are device-refuted (slots ≠ mood channels) and no
+        /// longer emitted — always returns null. Kept for call-site/back-compat; the property
+        /// it feeds is omit-when-null. See the comment block above for the device-test finding.</summary>
+        internal static string? ChannelName(int index) => null;
 
         /// <summary>Returns null if the file has no SMFM payload or parse fails.
         /// Header-only read — never decodes audio.</summary>
