@@ -133,11 +133,11 @@ namespace Truedat
         // as HfEnergyRatio (sourceSampleRate > 44100 + ffmpeg present).
         public HfSpectralStructure? HfSpectralStructure { get; set; }
 
-        // Sony SensMe / 12 TONE — read fresh on every scan (MC analyses files progressively).
+        // Sony SMFM (12-TONE) — read fresh on every scan (MC analyses files progressively).
         // Not stored in the Essentia cache; never copied in RebuildCacheEntryCore.
-        public int[]?   SensmeScores;       // STMO channel scores 0-255, null when no MC analysis
-        public int?     SensmeChannel;      // dominant channel index (argmax of scores)
-        public string?  SensmeChannelName;  // confirmed name, null for unconfirmed indices
+        public int[]?   SmfmScores;         // raw STMO slot scores 0-255, null when no MC analysis
+        public int?     SmfmChannel;        // dominant raw STMO slot index (argmax) — NOT a mood channel
+        public string?  SmfmChannelName;    // device-refuted slot label; always null now (see SmfmReader)
         public double?  SmfmBpm;            // GBPM float32 BPM
     }
 
@@ -946,7 +946,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -1287,9 +1287,9 @@ namespace Truedat
                     if (afResults.HfSpectralStructure != null) features.HfSpectralStructure = afResults.HfSpectralStructure;
                     if (afSmfmResult.HasValue)
                     {
-                        features.SensmeScores      = afSmfmResult.Value.Scores;
-                        features.SensmeChannel     = afSmfmResult.Value.Channel;
-                        features.SensmeChannelName = SmfmReader.ChannelName(afSmfmResult.Value.Channel);
+                        features.SmfmScores      = afSmfmResult.Value.Scores;
+                        features.SmfmChannel     = afSmfmResult.Value.Channel;
+                        features.SmfmChannelName = SmfmReader.ChannelName(afSmfmResult.Value.Channel);
                         features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, 3);
                     }
 
@@ -1323,8 +1323,8 @@ namespace Truedat
                 }
 
                 // For cache-hit paths, SMFM wasn't in the concurrent task batch — apply now.
-                // For cache-miss, SensmeScores is already set from afSmfmTask.Result above.
-                if (trackEntry!.Features.SensmeScores == null)
+                // For cache-miss, SmfmScores is already set from afSmfmTask.Result above.
+                if (trackEntry!.Features.SmfmScores == null)
                     ApplySmfmInPlace(trackEntry.Features, analyzeFilePath!);
 
                 afSw.Stop();
@@ -1824,9 +1824,9 @@ namespace Truedat
                         if (flResults.HfSpectralStructure != null) features.HfSpectralStructure = flResults.HfSpectralStructure;
                         if (flSmfmResult.HasValue)
                         {
-                            features.SensmeScores      = flSmfmResult.Value.Scores;
-                            features.SensmeChannel     = flSmfmResult.Value.Channel;
-                            features.SensmeChannelName = SmfmReader.ChannelName(flSmfmResult.Value.Channel);
+                            features.SmfmScores      = flSmfmResult.Value.Scores;
+                            features.SmfmChannel     = flSmfmResult.Value.Channel;
+                            features.SmfmChannelName = SmfmReader.ChannelName(flSmfmResult.Value.Channel);
                             features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, 3);
                         }
 
@@ -1961,7 +1961,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -2589,9 +2589,9 @@ namespace Truedat
                         if (msResults.HfSpectralStructure != null) feat.HfSpectralStructure = msResults.HfSpectralStructure;
                         if (smfmResult.HasValue)
                         {
-                            feat.SensmeScores      = smfmResult.Value.Scores;
-                            feat.SensmeChannel     = smfmResult.Value.Channel;
-                            feat.SensmeChannelName = SmfmReader.ChannelName(smfmResult.Value.Channel);
+                            feat.SmfmScores      = smfmResult.Value.Scores;
+                            feat.SmfmChannel     = smfmResult.Value.Channel;
+                            feat.SmfmChannelName = SmfmReader.ChannelName(smfmResult.Value.Channel);
                             feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, 3);
                         }
 
@@ -3641,9 +3641,9 @@ namespace Truedat
         {
             var smfm = SmfmReader.TryRead(filePath);
             if (!smfm.HasValue) return;
-            f.SensmeScores      = smfm.Value.Scores;
-            f.SensmeChannel     = smfm.Value.Channel;
-            f.SensmeChannelName = SmfmReader.ChannelName(smfm.Value.Channel);
+            f.SmfmScores      = smfm.Value.Scores;
+            f.SmfmChannel     = smfm.Value.Channel;
+            f.SmfmChannelName = SmfmReader.ChannelName(smfm.Value.Channel);
             f.SmfmBpm           = Math.Round(smfm.Value.Bpm, 3);
         }
 
@@ -3858,10 +3858,23 @@ namespace Truedat
             return 0;
         }
 
+        /// <summary>Renames a JSON object key in place, preserving the value (clone-detach to avoid
+        /// parent-ownership errors). No-op if oldKey absent; if newKey already exists, just drops the
+        /// stale oldKey (idempotent re-migration).</summary>
+        static bool RenameJsonKey(System.Text.Json.Nodes.JsonObject o, string oldKey, string newKey)
+        {
+            if (o == null || !o.ContainsKey(oldKey)) return false;
+            var node = o[oldKey];
+            o.Remove(oldKey);
+            if (!o.ContainsKey(newKey))
+                o[newKey] = node == null ? null : System.Text.Json.Nodes.JsonNode.Parse(node.ToJsonString());
+            return true;
+        }
+
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields, removes podcast entries");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields, renames SMFM keys (sensme*->smfm*), removes podcast entries");
             Console.WriteLine();
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
@@ -3874,15 +3887,21 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
 
-            int stripped = 0, total = tracks.Count;
+            int stripped = 0, renamed = 0, total = tracks.Count;
             foreach (var kv in tracks)
             {
                 var trackData = kv.Value?.AsObject();
                 if (trackData == null) continue;
-                bool changed = false;
-                if (trackData.Remove("valence")) changed = true;
-                if (trackData.Remove("arousal")) changed = true;
-                if (changed) stripped++;
+                bool va = false;
+                if (trackData.Remove("valence")) va = true;
+                if (trackData.Remove("arousal")) va = true;
+                if (va) stripped++;
+                // SMFM key rename: sensme* -> smfm* (rename, not removal — the data is kept).
+                bool tr = false;
+                if (RenameJsonKey(trackData, "sensmeScores",      "smfmScores"))      tr = true;
+                if (RenameJsonKey(trackData, "sensmeChannel",     "smfmChannel"))     tr = true;
+                if (RenameJsonKey(trackData, "sensmeChannelName", "smfmChannelName")) tr = true;
+                if (tr) renamed++;
             }
 
             // Remove podcast entries (identified by genre)
@@ -3895,10 +3914,12 @@ namespace Truedat
             Console.WriteLine($"Tracks: {total}");
             if (stripped > 0)
                 Console.WriteLine($"Stripped valence/arousal from: {stripped}");
+            if (renamed > 0)
+                Console.WriteLine($"Renamed SMFM keys (sensme*->smfm*) on: {renamed}");
             if (podcastKeys.Count > 0)
                 Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
 
-            if (stripped == 0 && podcastKeys.Count == 0)
+            if (stripped == 0 && renamed == 0 && podcastKeys.Count == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
@@ -7003,16 +7024,16 @@ namespace Truedat
                     jw.WriteString("method", f.HfSpectralStructure.Method);
                 jw.WriteEndObject();
             }
-            // Sony SensMe / 12 TONE — omit-when-null (tracks MC has not yet analysed).
+            // Sony SMFM (12-TONE) — omit-when-null (tracks MC has not yet analysed).
             static void WriteOptStr(Utf8JsonWriter w, string name, string? v) { if (v != null) w.WriteString(name, v); }
-            if (f.SensmeScores != null)
+            if (f.SmfmScores != null)
             {
-                jw.WritePropertyName("sensmeScores");
+                jw.WritePropertyName("smfmScores");
                 jw.WriteStartArray();
-                foreach (var s in f.SensmeScores) jw.WriteNumberValue(s);
+                foreach (var s in f.SmfmScores) jw.WriteNumberValue(s);
                 jw.WriteEndArray();
-                WriteOpt(jw, "sensmeChannel", (double?)f.SensmeChannel);
-                WriteOptStr(jw, "sensmeChannelName", f.SensmeChannelName);
+                WriteOpt(jw, "smfmChannel", (double?)f.SmfmChannel);
+                WriteOptStr(jw, "smfmChannelName", f.SmfmChannelName);
                 if (f.SmfmBpm.HasValue) jw.WriteNumber("smfmBpm", Math.Round(f.SmfmBpm.Value, 3));
             }
             if (f.Mfcc != null)
@@ -7256,11 +7277,13 @@ namespace Truedat
                 HfEnergyRatio = GetNullableDbl(track, "hfEnergyRatio"),
                 HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
                 HfSpectralStructure = ParseHfSpectralStructureFromJson(track),
-                SensmeScores = track.TryGetProperty("sensmeScores", out var ssEl) && ssEl.ValueKind == JsonValueKind.Array
+                // Read new smfm* keys; fall back to legacy sensme* for not-yet-migrated libraries.
+                SmfmScores = (track.TryGetProperty("smfmScores", out var ssEl) || track.TryGetProperty("sensmeScores", out ssEl)) && ssEl.ValueKind == JsonValueKind.Array
                     ? ssEl.EnumerateArray().Select(e => e.GetInt32()).ToArray()
                     : null,
-                SensmeChannel     = GetNullableInt(track, "sensmeChannel"),
-                SensmeChannelName = GetStr(track, "sensmeChannelName") is var scn && scn.Length > 0 ? scn : null,
+                SmfmChannel     = GetNullableInt(track, "smfmChannel") ?? GetNullableInt(track, "sensmeChannel"),
+                SmfmChannelName = GetStr(track, "smfmChannelName") is var scn && scn.Length > 0 ? scn
+                                  : (GetStr(track, "sensmeChannelName") is var scnOld && scnOld.Length > 0 ? scnOld : null),
                 SmfmBpm           = GetNullableDbl(track, "smfmBpm"),
             };
         }
