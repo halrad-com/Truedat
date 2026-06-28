@@ -202,15 +202,17 @@ When your library grows or your taste shifts:
 
 `extract-sony-sensme.py` is an unrelated single-purpose tool: it walks a
 local Sony Music Center installation, decodes the binary `smfmf.bin`
-sidecar files (10-channel SensMe scores + BPM), and joins them to
+sidecar files (10 raw STMO slot scores + BPM), and joins them to
 `mbxmoods.json` by filename. Output is a separate JSON useful as
 auxiliary labeled training data.
 
-Note: truedat itself now ships a C# Sony SensMe / SMFM reader wired into
-the scan path (commit `6283ce6` and follow-ups), which populates SensMe
-fields directly into `mbxmoods.json` per-track during a normal scan. The
-Python script remains useful for one-shot bulk extraction outside the
-scan pipeline.
+Note: truedat itself now ships a C# Sony SMFM (12-TONE) reader wired into
+the scan path (commit `6283ce6` and follow-ups), which populates the
+`smfm*` fields (`smfmScores` / `smfmChannel` / `smfmBpm`) directly into
+`mbxmoods.json` per-track during a normal scan. (The per-slot channel
+*names* were device-refuted on 2026-06-27 and are no longer emitted —
+slots are raw STMO scores, not mood channels.) The Python script remains
+useful for one-shot bulk extraction outside the scan pipeline.
 
 ```
 python extract-sony-sensme.py \
