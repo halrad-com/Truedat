@@ -1,6 +1,13 @@
 # Truedat - Music Mood Extractor & Fingerprinter
 
-Truedat is a Windows .NET CLI that analyzes a music library and writes the data MBXHub's AutoQ engine consumes — mood-aware shuffle, fake-hi-res detection, and lossy-transcode detection. It bundles [Essentia](https://essentia.upf.edu/) for mood extraction (55 acoustic features per track + valence/arousal mapping) and adds its own pure-managed analyses on top:
+Truedat is a Windows .NET CLI that extracts **per-track mood** across a music library — the signal MBXHub's AutoQ engine uses for **mood-aware shuffle** — and writes it (alongside identity, authenticity, and metadata) into `mbxmoods.json` that MBXHub reads directly.
+
+**Mood is the core job, and truedat captures it two independent ways:**
+
+- **Essentia** — bundled [Essentia](https://essentia.upf.edu/) extracts 55 acoustic features per track plus a valence/arousal mapping. The primary mood read.
+- **SMFM (Sony 12 TONE / SensMe)** — truedat decodes Sony's own analysis already embedded in many files: the SMFM block, yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
+
+Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
 
 - **Composite track identity** — `fingerprint.v1` (file size + path tail + audio properties + 64 KB head MD5 + MP3 LAME tag block), `audioStreamSha256` (SHA-256 over TagLib's invariant audio region; cross-machine portable, tag-edit resilient), and traditional file/audio MD5.
 - **Authenticity signals** — `bitUsage` (ffmpeg-driven LSB walk that catches fake-hi-res 24-bit padding), `hfEnergyRatio` (bin-sharp energy above 22.05 kHz via managed FFT), `hfSpectralStructure` (flatness / peak-to-mean / mirror-imaging from the same FFT pass — catches ffmpeg-upsampled fakes the bit-level signals miss), MP3 LAME-tag parsing (pure-managed Xing/Info+LAME decoder for transcode detection).
