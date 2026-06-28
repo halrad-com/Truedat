@@ -117,7 +117,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
-  --migrate               Strip legacy valence/arousal fields from mbxmoods.json (creates backup)
+  --migrate               Clean up mbxmoods.json: strip legacy valence/arousal fields,
+                          rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)
   --fingerprint           Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json
   --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
   --md5-only              Fingerprint mode: only run audio md5 (skip chromaprint)
@@ -464,7 +465,10 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
         "hiresConfidence": 1.0,
         "lossyTranscodeLikely": "n/a",
         "method": "truedat-v1-fft-corpus1-2026-05-18"
-      }
+      },
+      "smfmScores": [22, 41, 8, 130, 95, 12, 4, 7, 88, 33],
+      "smfmChannel": 3,
+      "smfmBpm": 128.004
     }
   }
 }
@@ -491,6 +495,8 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
   }
 }
 ```
+
+When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Music Center — truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant raw slot index), and `smfmBpm` (Sony's tempo estimate). These are nullable and omitted when absent. The per-slot *channel names* are deliberately **not** emitted: a 2026-06-27 live device test refuted the old slot→name mapping (the device's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so any interpreted mood label is derived downstream by MBXHub, not by truedat. These keys were renamed from `sensme*` on 2026-06-28 — `--migrate` converts existing libraries (with backup), and the reader still accepts the old keys for un-migrated files.
 
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
