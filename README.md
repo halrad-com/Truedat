@@ -4,8 +4,8 @@ Truedat is a Windows .NET CLI that extracts **per-track mood** across a music li
 
 **Mood is the core job, and truedat captures it two independent ways:**
 
-- **Essentia** — bundled [Essentia](https://essentia.upf.edu/) extracts 55 acoustic features per track plus a valence/arousal mapping. The primary mood read.
-- **SMFM (Sony 12 TONE / SensMe)** — truedat decodes Sony's own analysis already embedded in many files: the SMFM block, yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
+- **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract 55 acoustic features per track plus a valence/arousal mapping. The primary mood read. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
+- **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
 
