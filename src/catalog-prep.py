@@ -59,8 +59,11 @@ AB_SAMPLE_URL = (
     "acousticbrainz-lowlevel-sample-json-20220623-0.tar.zst"
 )
 
-# MusicBrainz JSON dumps — date set via --mb-date CLI arg
-MB_DEFAULT_DATE = "20260225-001001"
+# MusicBrainz JSON dumps. The server rotates dumps and deletes old ones, so a
+# hardcoded date goes stale (404). The default resolves the live LATEST pointer;
+# MB_FALLBACK_DATE is only used if that fetch fails. Override with --mb-date.
+MB_JSON_DUMPS_BASE = "https://data.metabrainz.org/pub/musicbrainz/data/json-dumps"
+MB_FALLBACK_DATE = "20260627-001001"
 
 # Download infrastructure constants
 MANIFEST_PATH = DATA_DIR / ".download-manifest.json"
@@ -184,9 +187,33 @@ def _record_download(url, dest, manifest):
     log.info("Recorded in manifest: %s (%s)", dest.name, sha256[:12])
 
 
+def _resolve_mb_date(mb_date):
+    """Resolve the MusicBrainz dump date. 'latest' (the default) fetches the
+    server's LATEST pointer file, whose contents are the current dump folder
+    name (e.g. '20260627-001001') to append to the dumps URL. Old dumps get
+    rotated off the server so a hardcoded date goes stale; LATEST never does.
+    Falls back to MB_FALLBACK_DATE if the fetch fails. An explicit date string
+    is returned unchanged."""
+    if mb_date and mb_date.lower() != "latest":
+        return mb_date
+    url = f"{MB_JSON_DUMPS_BASE}/LATEST"
+    try:
+        resp = requests.get(url, timeout=(DOWNLOAD_TIMEOUT, DOWNLOAD_TIMEOUT))
+        resp.raise_for_status()
+        latest = resp.text.strip().splitlines()[0].strip().strip("/")
+        if not latest:
+            raise ValueError("LATEST pointer file was empty")
+        log.info("Resolved latest MusicBrainz dump via LATEST: %s", latest)
+        return latest
+    except Exception as e:
+        log.warning("Could not fetch %s (%s); falling back to %s",
+                    url, e, MB_FALLBACK_DATE)
+        return MB_FALLBACK_DATE
+
+
 def _mb_dump_urls(mb_date):
     """Build MusicBrainz dump URLs for the given date string."""
-    base = f"https://data.metabrainz.org/pub/musicbrainz/data/json-dumps/{mb_date}"
+    base = f"{MB_JSON_DUMPS_BASE}/{mb_date}"
     return {
         "release": f"{base}/release.tar.xz",
         "artist": f"{base}/artist.tar.xz",
@@ -306,7 +333,7 @@ def _download_file_once(url, dest, label):
     log.info("Completed: %s (%d bytes)", label, final_size)
 
 
-def download_all(mb_date=MB_DEFAULT_DATE):
+def download_all(mb_date=MB_FALLBACK_DATE):
     """Download all required data dumps with manifest-based integrity tracking.
 
     Loads the SHA-256 manifest, checks each file against it, skips verified
@@ -1262,8 +1289,10 @@ def main():
         help="Target catalog size (default: 430000)"
     )
     parser.add_argument(
-        "--mb-date", default=MB_DEFAULT_DATE,
-        help=f"MusicBrainz dump date (default: {MB_DEFAULT_DATE})"
+        "--mb-date", default="latest",
+        help="MusicBrainz dump date, e.g. 20260627-001001, or 'latest' to "
+             "auto-resolve the newest dump from the server's LATEST pointer "
+             "(default: latest)"
     )
     args = parser.parse_args()
 
@@ -1275,6 +1304,8 @@ def main():
         log.error("--target must be > 0, got %d", args.target)
         return 1
 
+    if args.download:
+        args.mb_date = _resolve_mb_date(args.mb_date)
     log.info("MusicBrainz dump date: %s", args.mb_date)
 
     if args.download:
