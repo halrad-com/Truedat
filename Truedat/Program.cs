@@ -652,6 +652,7 @@ namespace Truedat
             string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
+            int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
@@ -746,6 +747,7 @@ namespace Truedat
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
+                else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -938,6 +940,8 @@ namespace Truedat
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --stats [path]      Read-only catalog summary: Essentia-analyzed count, hash coverage");
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
+                Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
+                Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
@@ -1098,7 +1102,12 @@ namespace Truedat
                 }
                 var statsTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 LoadExistingMoods(statsPath!, statsTracks);
-                PrintCatalogStats(statsPath!, ComputeCatalogStats(statsTracks.Values));
+                // --audit: tee the summary to truedat.log next to the moods file.
+                TeeWriter? statsTee = null;
+                string statsLog = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log");
+                if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); }
+                ReportCatalog(statsPath!, statsTracks.Values, statsDetailThreshold);
+                if (statsTee != null) { Console.WriteLine($"Log:    {statsLog}"); statsTee.Dispose(); }
                 Environment.ExitCode = 0;
                 return;
             }
@@ -1387,7 +1396,7 @@ namespace Truedat
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
-                    PrintCatalogStats(analyzeFileMoods!, ComputeCatalogStats(afMoodsTracks.Values));
+                    ReportCatalog(analyzeFileMoods!, afMoodsTracks.Values, statsDetailThreshold);
                 }
 
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
@@ -1950,7 +1959,7 @@ namespace Truedat
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
-                    PrintCatalogStats(analyzeFileMoods!, ComputeCatalogStats(flMoodsTracks.Values));
+                    ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold);
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -1993,6 +2002,8 @@ namespace Truedat
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
                 Console.WriteLine("  --stats [path]      Read-only catalog summary: Essentia-analyzed count, hash coverage");
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
+                Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
+                Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
@@ -2755,8 +2766,7 @@ namespace Truedat
             }
             catch { }
             EmitStagingSummary();
-            Console.WriteLine();
-            PrintCatalogStats(moodsPath, ComputeCatalogStats(allTracks.Values));
+            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold);
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
@@ -5033,21 +5043,46 @@ namespace Truedat
             }
         }
 
-        /// <summary>Counts over an mbxmoods.json catalog: how many tracks are
-        /// Essentia-analyzed, how many carry each hash kind, how many carry SMFM.
-        /// Pure tally — produced by <see cref="ComputeCatalogStats"/>, rendered by
-        /// <see cref="PrintCatalogStats"/>. Shared by the standalone --stats mode and
-        /// the end-of-scan echo so the two surfaces can never disagree.</summary>
+        /// <summary>Per-entry presence flags for the catalog summary. Computed once
+        /// per entry by <see cref="Probe"/> and reused by both the aggregate tally
+        /// (<see cref="ComputeCatalogStats"/>) and the small-catalog per-file listing,
+        /// so the two views can never disagree.</summary>
+        sealed class EntryProbe
+        {
+            public bool Essentia;     // has core features (non-empty mfcc[]) — all-or-nothing
+            public bool Sha256;       // audioStreamSha256 — primary cross-system identity
+            public bool FileMd5;
+            public bool Head64k;      // fingerprint.v1.audioHead64kMd5
+            public bool AudioMd5;     // legacy (essentia_streaming_md5)
+            public bool Chromaprint;  // legacy (fpcalc)
+            public bool Smfm;         // Sony 12-TONE (smfmScores populated)
+        }
+
+        static EntryProbe Probe(TrackEntry e)
+        {
+            var f = e?.Features;
+            return new EntryProbe
+            {
+                Essentia    = f?.Mfcc != null && f.Mfcc.Length > 0,
+                Sha256      = e != null && !string.IsNullOrEmpty(e.AudioStreamSha256),
+                FileMd5     = e != null && !string.IsNullOrEmpty(e.FileMd5),
+                Head64k     = e?.FingerprintV1 != null && !string.IsNullOrEmpty(e.FingerprintV1.AudioHead64kMd5),
+                AudioMd5    = e != null && !string.IsNullOrEmpty(e.AudioMd5),
+                Chromaprint = e != null && !string.IsNullOrEmpty(e.Chromaprint),
+                Smfm        = f?.SmfmScores != null && f.SmfmScores.Length > 0,
+            };
+        }
+
         sealed class CatalogStats
         {
             public int Total;
-            public int EssentiaAnalyzed;   // has core features (non-empty mfcc[]) — all-or-nothing
-            public int AudioStreamSha256;  // primary cross-system identity
+            public int EssentiaAnalyzed;
+            public int AudioStreamSha256;
             public int FileMd5;
-            public int AudioHead64kMd5;    // inside fingerprint.v1
+            public int AudioHead64kMd5;
             public int AudioMd5Legacy;
             public int ChromaprintLegacy;
-            public int Smfm;               // Sony 12-TONE (smfmScores populated)
+            public int Smfm;
         }
 
         static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
@@ -5057,32 +5092,80 @@ namespace Truedat
             {
                 if (e == null) continue;
                 s.Total++;
-                var f = e.Features;
-                if (f?.Mfcc != null && f.Mfcc.Length > 0) s.EssentiaAnalyzed++;
-                if (!string.IsNullOrEmpty(e.AudioStreamSha256)) s.AudioStreamSha256++;
-                if (!string.IsNullOrEmpty(e.FileMd5)) s.FileMd5++;
-                if (e.FingerprintV1 != null && !string.IsNullOrEmpty(e.FingerprintV1.AudioHead64kMd5)) s.AudioHead64kMd5++;
-                if (!string.IsNullOrEmpty(e.AudioMd5)) s.AudioMd5Legacy++;
-                if (!string.IsNullOrEmpty(e.Chromaprint)) s.ChromaprintLegacy++;
-                if (f?.SmfmScores != null && f.SmfmScores.Length > 0) s.Smfm++;
+                var pr = Probe(e);
+                if (pr.Essentia)    s.EssentiaAnalyzed++;
+                if (pr.Sha256)      s.AudioStreamSha256++;
+                if (pr.FileMd5)     s.FileMd5++;
+                if (pr.Head64k)     s.AudioHead64kMd5++;
+                if (pr.AudioMd5)    s.AudioMd5Legacy++;
+                if (pr.Chromaprint) s.ChromaprintLegacy++;
+                if (pr.Smfm)        s.Smfm++;
             }
             return s;
         }
 
-        static void PrintCatalogStats(string path, CatalogStats s)
+        /// <summary>Render a human-readable catalog summary to stdout (so the MoodsMode
+        /// --audit tee captures it in truedat.log). When the catalog has fewer than
+        /// <paramref name="detailThreshold"/> tracks it lists each file with its per-field
+        /// status instead of aggregate counts — aggregates over 1-4 files aren't useful.</summary>
+        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold)
         {
-            int total = s.Total;
-            string Miss(int present) => $"({total - present} missing)";
-            Console.Error.WriteLine($"Catalog: {path}");
-            Console.Error.WriteLine($"  tracks:              {total}");
-            Console.Error.WriteLine($"  essentia-analyzed:   {s.EssentiaAnalyzed} / {total}");
-            Console.Error.WriteLine($"  hashes (present / total):");
-            Console.Error.WriteLine($"    audioStreamSha256    {s.AudioStreamSha256} / {total}   {Miss(s.AudioStreamSha256)}   <- primary identity");
-            Console.Error.WriteLine($"    fileMd5              {s.FileMd5} / {total}   {Miss(s.FileMd5)}");
-            Console.Error.WriteLine($"    audioHead64kMd5      {s.AudioHead64kMd5} / {total}   {Miss(s.AudioHead64kMd5)}");
-            Console.Error.WriteLine($"    audioMd5 (legacy)    {s.AudioMd5Legacy}");
-            Console.Error.WriteLine($"    chromaprint (legacy) {s.ChromaprintLegacy}");
-            Console.Error.WriteLine($"  smfm (12-TONE):      {s.Smfm}");
+            var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
+            int total = entries.Count;
+            Console.WriteLine();
+            if (total == 0)
+            {
+                Console.WriteLine($"Catalog summary: {path}");
+                Console.WriteLine("  (empty — no track entries)");
+                return;
+            }
+
+            string YN(bool b) => b ? "yes" : "NO ";
+
+            // Small catalog: list each file with its per-field status.
+            if (total < detailThreshold)
+            {
+                Console.WriteLine($"Catalog summary: {path}  ({total} track{(total == 1 ? "" : "s")})");
+                int n = 0;
+                foreach (var e in entries)
+                {
+                    var pr = Probe(e);
+                    Console.WriteLine($"  {++n}. {e?.Features?.FilePath ?? "(unknown path)"}");
+                    Console.WriteLine($"       essentia:{YN(pr.Essentia)}  audioStreamSha256:{YN(pr.Sha256)}  fileMd5:{YN(pr.FileMd5)}  audioHead64kMd5:{YN(pr.Head64k)}  smfm:{YN(pr.Smfm)}");
+                }
+                return;
+            }
+
+            // Aggregate view. Right-aligned counts, thousands separators, percent +
+            // a plain-English status note so the gaps read at a glance.
+            // Floor the percent so a near-complete count never rounds up to a
+            // misleading "100%" while tracks are still missing.
+            string Cov(string label, int present, bool showComplete = true, bool showGap = true)
+            {
+                int pct = total == 0 ? 0 : (int)Math.Floor(100.0 * present / total);
+                string note = present == total
+                    ? (showComplete ? "complete" : "")
+                    : (showGap ? $"{total - present:N0} missing" : "");
+                string line = $"  {label,-20} {present,9:N0} / {total,-9:N0} {pct,3}%";
+                return note.Length > 0 ? line + "   " + note : line;
+            }
+
+            var s = ComputeCatalogStats(entries);
+            Console.WriteLine($"Catalog summary: {path}");
+            Console.WriteLine($"  {total:N0} tracks total");
+            Console.WriteLine();
+            Console.WriteLine(Cov("Essentia analysis", s.EssentiaAnalyzed));
+            Console.WriteLine(Cov("audioStreamSha256", s.AudioStreamSha256) + "   (primary identity)");
+            Console.WriteLine(Cov("fileMd5", s.FileMd5));
+            Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5));
+            Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
+            if (s.AudioMd5Legacy > 0 || s.ChromaprintLegacy > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  legacy hashes (only from older fingerprint-mode scans):");
+                Console.WriteLine($"    audioMd5            {s.AudioMd5Legacy,9:N0}");
+                Console.WriteLine($"    chromaprint         {s.ChromaprintLegacy,9:N0}");
+            }
         }
 
         /// <summary>
