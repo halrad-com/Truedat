@@ -1622,6 +1622,7 @@ namespace Truedat
                 var flCachedByShaCross = 0;
                 var flFailed = 0;
                 var flDsdSkipped = 0;
+                var flSmfmAdded = 0;
                 var flErrors = new ConcurrentBag<string>();
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1707,11 +1708,12 @@ namespace Truedat
                                     var flMtimeEntry = RebuildCacheEntryFromTags(
                                         fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, null, null);
-                                    ApplySmfmInPlace(flMtimeEntry.Features, filePath);
+                                    var flMtimeSmfmTag = ApplySmfmInPlace(flMtimeEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                    if (flMtimeSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flMtimeEntry;
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMtime);
-                                    Console.Error.WriteLine($"[CACHED] {Path.GetFileName(filePath)}");
+                                    Console.Error.WriteLine($"[CACHED{flMtimeSmfmTag}] {Path.GetFileName(filePath)}");
                                     return;
                                 }
 
@@ -1730,11 +1732,12 @@ namespace Truedat
                                         var flShaPathEntry = RebuildCacheEntryFromTags(
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                        ApplySmfmInPlace(flShaPathEntry.Features, filePath);
+                                        var flShaPathSmfmTag = ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                        if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByShaPath);
-                                        Console.Error.WriteLine($"[CACHED·sha] {Path.GetFileName(filePath)}");
+                                        Console.Error.WriteLine($"[CACHED·sha{flShaPathSmfmTag}] {Path.GetFileName(filePath)}");
                                         return;
                                     }
                                 }
@@ -1754,12 +1757,13 @@ namespace Truedat
                                     var flCrossMd5Entry = RebuildCacheEntryFromTags(
                                         xp.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, localMd5, null);
-                                    ApplySmfmInPlace(flCrossMd5Entry.Features, filePath);
+                                    var flCrossMd5SmfmTag = ApplySmfmInPlace(flCrossMd5Entry.Features, filePath, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                    if (flCrossMd5SmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossMd5Entry;
                                     flMoodsTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMd5Cross);
-                                    Console.Error.WriteLine($"[CACHED·md5] {Path.GetFileName(filePath)}");
+                                    Console.Error.WriteLine($"[CACHED·md5{flCrossMd5SmfmTag}] {Path.GetFileName(filePath)}");
                                     return;
                                 }
                             }
@@ -1780,12 +1784,13 @@ namespace Truedat
                                     var flCrossShaEntry = RebuildCacheEntryFromTags(
                                         xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                    ApplySmfmInPlace(flCrossShaEntry.Features, filePath);
+                                    var flCrossShaSmfmTag = ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                    if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
                                     flMoodsTracks.TryRemove(xs.OldKey, out _);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByShaCross);
-                                    Console.Error.WriteLine($"[CACHED·sha] {Path.GetFileName(filePath)}");
+                                    Console.Error.WriteLine($"[CACHED·sha{flCrossShaSmfmTag}] {Path.GetFileName(filePath)}");
                                     return;
                                 }
                             }
@@ -1822,12 +1827,15 @@ namespace Truedat
                         if (bitUsage != null) features.BitUsage = bitUsage;
                         if (flResults.HfEnergyRatio.HasValue) { features.HfEnergyRatio = flResults.HfEnergyRatio; features.HfEnergyMethod = flResults.HfEnergyMethod; }
                         if (flResults.HfSpectralStructure != null) features.HfSpectralStructure = flResults.HfSpectralStructure;
+                        var flOkSmfmTag = "";
                         if (flSmfmResult.HasValue)
                         {
+                            var flSmfmWasAbsent = !(flMoodsTracks.TryGetValue(fullPath, out var flSmfmPrior) && flSmfmPrior.Features?.SmfmScores != null);
                             features.SmfmScores      = flSmfmResult.Value.Scores;
                             features.SmfmChannel     = flSmfmResult.Value.Channel;
                             features.SmfmChannelName = SmfmReader.ChannelName(flSmfmResult.Value.Channel);
                             features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, 3);
+                            if (flSmfmWasAbsent) { flOkSmfmTag = " +smfm"; Interlocked.Increment(ref flSmfmAdded); }
                         }
 
                         // FIX 5 — snapshot from SourceHandle. Falls back to the entry-time
@@ -1863,7 +1871,7 @@ namespace Truedat
 
                         Interlocked.Increment(ref flProcessed);
                         Interlocked.Increment(ref flAnalyzed);
-                        Console.Error.WriteLine($"[OK] {Path.GetFileName(filePath)}");
+                        Console.Error.WriteLine($"[OK{flOkSmfmTag}] {Path.GetFileName(filePath)}");
                     }
                     catch (Exception ex)
                     {
@@ -1899,6 +1907,7 @@ namespace Truedat
                         cachedByShaCross = flCachedByShaCross,
                         failed = flFailed,
                         skipped = flDsdSkipped,
+                        smfmAdded = flSmfmAdded,
                         elapsed = flSw.Elapsed.TotalSeconds,
                         errors = flErrors.ToArray()
                     };
@@ -1907,7 +1916,7 @@ namespace Truedat
                     Console.WriteLine(summaryJson);
                 }
 
-                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped in {flSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
@@ -2183,6 +2192,7 @@ namespace Truedat
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
+            int smfmAdded = 0;         // tracks that gained SMFM data this scan (file newly carries 12-TONE)
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
@@ -2326,10 +2336,11 @@ namespace Truedat
                                             }
                                         }
                                         var mtimeEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
-                                        ApplySmfmInPlace(mtimeEntry.Features, t.Location);
+                                        var mtimeSmfmTag = ApplySmfmInPlace(mtimeEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                        if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
                                         Interlocked.Increment(ref cachedCount);
-                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag})");
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag}{mtimeSmfmTag})");
                                         return;
                                     }
                                 }
@@ -2358,11 +2369,12 @@ namespace Truedat
                                                 var refreshedMd5 = ComputeFileMd5(msStagedPath);
                                                 var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
-                                                ApplySmfmInPlace(shaPathEntry.Features, t.Location);
+                                                var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByShaPath);
-                                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha)");
+                                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha{shaPathSmfmTag})");
                                                 return;
                                             }
                                         }
@@ -2467,11 +2479,12 @@ namespace Truedat
                                         Chromaprint = xp.Entry.Chromaprint,
                                         ChromaprintDuration = xp.Entry.ChromaprintDuration,
                                     };
-                                    ApplySmfmInPlace(allTracks[t.Location].Features, t.Location);
+                                    var crossMd5SmfmTag = ApplySmfmInPlace(allTracks[t.Location].Features, t.Location, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                    if (crossMd5SmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                     allTracks.TryRemove(xp.OldKey, out _);
                                     Interlocked.Increment(ref crossPathMoods);
                                     Interlocked.Increment(ref cachedCount);
-                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5)");
+                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5{crossMd5SmfmTag})");
                                     return;
                                 }
                             }
@@ -2506,13 +2519,14 @@ namespace Truedat
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                                         var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
-                                        ApplySmfmInPlace(crossShaEntry.Features, t.Location);
+                                        var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, t.Location, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                        if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
                                         allTracks.TryRemove(xs.OldKey, out _);
                                         Interlocked.Increment(ref crossPathMoods);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
-                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha)");
+                                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha{crossShaSmfmTag})");
                                         return;
                                     }
                                 }
@@ -2589,10 +2603,16 @@ namespace Truedat
                         if (msResults.HfSpectralStructure != null) feat.HfSpectralStructure = msResults.HfSpectralStructure;
                         if (smfmResult.HasValue)
                         {
+                            var smfmWasAbsent = !(allTracks.TryGetValue(t.Location, out var smfmPrior) && smfmPrior.Features?.SmfmScores != null);
                             feat.SmfmScores      = smfmResult.Value.Scores;
                             feat.SmfmChannel     = smfmResult.Value.Channel;
                             feat.SmfmChannelName = SmfmReader.ChannelName(smfmResult.Value.Channel);
                             feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, 3);
+                            if (smfmWasAbsent)
+                            {
+                                Interlocked.Increment(ref smfmAdded);
+                                Console.WriteLine($"  +smfm: {t.Artist} - {t.Name}");
+                            }
                         }
 
                         // FIX 5 — record the mtime captured inside OpenStagedSource right
@@ -2675,6 +2695,8 @@ namespace Truedat
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
             if (shaBackfilled > 0)
                 Console.WriteLine($"  SHA backfill: {shaBackfilled}  (legacy cache hits gained audioStreamSha256)");
+            if (smfmAdded > 0)
+                Console.WriteLine($"  SMFM added: {smfmAdded}  (tracks that gained Sony 12-TONE data this scan)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             if (dsdSkipped > 0)
@@ -3636,15 +3658,20 @@ namespace Truedat
         /// <summary>Per-entry backfill. Identity tier: TagLib + cheap file IO (Tier A
         /// fileMd5, Tier B whole fingerprint.v1, Tier C sub-fields, MP3 LAME tag).
         /// <summary>Apply a fresh SMFM read to the features of an already-resolved cache entry.
-        /// Called inline at every cache-hit return point. Fast (~5 ms header-only read).</summary>
-        static void ApplySmfmInPlace(TrackFeatures f, string filePath)
+        /// Called inline at every cache-hit return point. Fast (~5 ms header-only read).
+        /// Returns true when SMFM was read AND the prior cache entry had none — i.e. the
+        /// data is newly added this scan, so the caller can surface a "+smfm" marker.
+        /// Pass the prior entry's SmfmScores so the marker fires once (when the file first
+        /// gains SMFM) instead of on every rescan of an already-tagged track.</summary>
+        static bool ApplySmfmInPlace(TrackFeatures f, string filePath, int[]? priorScores = null)
         {
             var smfm = SmfmReader.TryRead(filePath);
-            if (!smfm.HasValue) return;
+            if (!smfm.HasValue) return false;
             f.SmfmScores      = smfm.Value.Scores;
             f.SmfmChannel     = smfm.Value.Channel;
             f.SmfmChannelName = SmfmReader.ChannelName(smfm.Value.Channel);
             f.SmfmBpm           = Math.Round(smfm.Value.Bpm, 3);
+            return priorScores == null;
         }
 
         /// Features tier: ffmpeg-driven bitUsage + hfEnergyRatio + hfSpectralStructure. Level selects which
