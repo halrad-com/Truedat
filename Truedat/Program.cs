@@ -651,6 +651,7 @@ namespace Truedat
             bool fixupMode = false;
             string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
             bool verifyMode = false;
+            bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
@@ -744,6 +745,7 @@ namespace Truedat
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
+                else if (canonical == "stats") statsMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -839,7 +841,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -904,7 +906,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -934,6 +936,8 @@ namespace Truedat
                 Console.WriteLine("                      truedat --fixup --remap \"D:\\Music\\=\\\\nas\\share\\Music\\\" mbxmoods.json");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
+                Console.WriteLine("  --stats [path]      Read-only catalog summary: Essentia-analyzed count, hash coverage");
+                Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
@@ -1070,6 +1074,32 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel);
+                return;
+            }
+
+            // --stats: read-only catalog summary. Counts Essentia-analyzed tracks,
+            // hash coverage per kind, and SMFM (12-TONE) tracks in an mbxmoods.json.
+            // Path resolution mirrors --verify: --moods <path>, else the positional
+            // arg, else ./mbxmoods.json (a bare directory resolves to mbxmoods.json
+            // inside it). Writes nothing.
+            if (statsMode)
+            {
+                string? statsPath = analyzeFileMoods ?? xmlPath;
+                if (string.IsNullOrEmpty(statsPath))
+                    statsPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
+                else if (Directory.Exists(statsPath))
+                    statsPath = Path.Combine(statsPath, "mbxmoods.json");
+                if (!File.Exists(statsPath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {statsPath}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var statsTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(statsPath!, statsTracks);
+                PrintCatalogStats(statsPath!, ComputeCatalogStats(statsTracks.Values));
+                Environment.ExitCode = 0;
                 return;
             }
 
@@ -1357,6 +1387,7 @@ namespace Truedat
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
+                    PrintCatalogStats(analyzeFileMoods!, ComputeCatalogStats(afMoodsTracks.Values));
                 }
 
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
@@ -1918,6 +1949,8 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
+                if (!string.IsNullOrEmpty(analyzeFileMoods))
+                    PrintCatalogStats(analyzeFileMoods!, ComputeCatalogStats(flMoodsTracks.Values));
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -1958,6 +1991,8 @@ namespace Truedat
                 Console.WriteLine("                      truedat --fixup --remap \"D:\\Music\\=\\\\nas\\share\\Music\\\" mbxmoods.json");
                 Console.WriteLine("  --verify            Recompute audioStreamSha256 for each entry, report drift / missing.");
                 Console.WriteLine("                      Read-only. Use --moods <path> to verify a specific file.");
+                Console.WriteLine("  --stats [path]      Read-only catalog summary: Essentia-analyzed count, hash coverage");
+                Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
@@ -2720,6 +2755,8 @@ namespace Truedat
             }
             catch { }
             EmitStagingSummary();
+            Console.WriteLine();
+            PrintCatalogStats(moodsPath, ComputeCatalogStats(allTracks.Values));
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
@@ -4994,6 +5031,58 @@ namespace Truedat
                 Console.Error.WriteLine(
                     $"WARNING: staging degraded ({fallback} of {total} tracks fell back to direct read) — check stage-dir disk space / permissions");
             }
+        }
+
+        /// <summary>Counts over an mbxmoods.json catalog: how many tracks are
+        /// Essentia-analyzed, how many carry each hash kind, how many carry SMFM.
+        /// Pure tally — produced by <see cref="ComputeCatalogStats"/>, rendered by
+        /// <see cref="PrintCatalogStats"/>. Shared by the standalone --stats mode and
+        /// the end-of-scan echo so the two surfaces can never disagree.</summary>
+        sealed class CatalogStats
+        {
+            public int Total;
+            public int EssentiaAnalyzed;   // has core features (non-empty mfcc[]) — all-or-nothing
+            public int AudioStreamSha256;  // primary cross-system identity
+            public int FileMd5;
+            public int AudioHead64kMd5;    // inside fingerprint.v1
+            public int AudioMd5Legacy;
+            public int ChromaprintLegacy;
+            public int Smfm;               // Sony 12-TONE (smfmScores populated)
+        }
+
+        static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
+        {
+            var s = new CatalogStats();
+            foreach (var e in entries)
+            {
+                if (e == null) continue;
+                s.Total++;
+                var f = e.Features;
+                if (f?.Mfcc != null && f.Mfcc.Length > 0) s.EssentiaAnalyzed++;
+                if (!string.IsNullOrEmpty(e.AudioStreamSha256)) s.AudioStreamSha256++;
+                if (!string.IsNullOrEmpty(e.FileMd5)) s.FileMd5++;
+                if (e.FingerprintV1 != null && !string.IsNullOrEmpty(e.FingerprintV1.AudioHead64kMd5)) s.AudioHead64kMd5++;
+                if (!string.IsNullOrEmpty(e.AudioMd5)) s.AudioMd5Legacy++;
+                if (!string.IsNullOrEmpty(e.Chromaprint)) s.ChromaprintLegacy++;
+                if (f?.SmfmScores != null && f.SmfmScores.Length > 0) s.Smfm++;
+            }
+            return s;
+        }
+
+        static void PrintCatalogStats(string path, CatalogStats s)
+        {
+            int total = s.Total;
+            string Miss(int present) => $"({total - present} missing)";
+            Console.Error.WriteLine($"Catalog: {path}");
+            Console.Error.WriteLine($"  tracks:              {total}");
+            Console.Error.WriteLine($"  essentia-analyzed:   {s.EssentiaAnalyzed} / {total}");
+            Console.Error.WriteLine($"  hashes (present / total):");
+            Console.Error.WriteLine($"    audioStreamSha256    {s.AudioStreamSha256} / {total}   {Miss(s.AudioStreamSha256)}   <- primary identity");
+            Console.Error.WriteLine($"    fileMd5              {s.FileMd5} / {total}   {Miss(s.FileMd5)}");
+            Console.Error.WriteLine($"    audioHead64kMd5      {s.AudioHead64kMd5} / {total}   {Miss(s.AudioHead64kMd5)}");
+            Console.Error.WriteLine($"    audioMd5 (legacy)    {s.AudioMd5Legacy}");
+            Console.Error.WriteLine($"    chromaprint (legacy) {s.ChromaprintLegacy}");
+            Console.Error.WriteLine($"  smfm (12-TONE):      {s.Smfm}");
         }
 
         /// <summary>
