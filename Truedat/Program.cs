@@ -3699,40 +3699,67 @@ namespace Truedat
             Console.WriteLine($"  Detail:            {csvPath}");
 
             // Surface the entries that need human action right in the console — otherwise
-            // they're a needle in a multi-thousand-row CSV. OK / BACKFILLED are not listed;
-            // only the statuses that mean "a file needs your attention".
+            // they're a needle in a multi-thousand-row CSV. OK / BACKFILLED aren't listed.
+            //
+            // The important nuance: a "changed" file that is ALSO on the error skip-list
+            // (mbxmoods-errors.csv) is SKIPPED by a normal scan — so telling the user to
+            // "rescan" it would be a lie; it needs --retry-errors. We cross-reference that
+            // list here and bucket accordingly, and show the prior Essentia failure reason
+            // (the actionable fact) instead of the sha pair for those entries.
+            var errIndex = LoadExistingErrors(
+                Path.Combine(Path.GetDirectoryName(moodsPath) ?? ".", "mbxmoods-errors.csv"));
+
             var attention = details
                 .Select(d => d.Split('\t'))
                 .Where(p => p.Length >= 2 && p[0] != "BACKFILLED")
-                .OrderBy(p => p[0], StringComparer.Ordinal)
-                .ThenBy(p => p.Length > 1 ? p[1] : "", StringComparer.OrdinalIgnoreCase)
+                .Select(p =>
+                {
+                    var st = p[0];
+                    var ap = p.Length > 1 ? p[1] : "";
+                    var ad = p.Length > 2 ? p[2] : "";
+                    string bucket;
+                    if (st == "MISSING") bucket = "missing";
+                    else if (st == "NO_HASH") bucket = "nohash";
+                    else if (st == "ERROR") bucket = "error";
+                    else if (st == "DRIFT" || st == "REANALYZE_NEEDED")
+                        bucket = errIndex.ContainsKey(ap) ? "drift_errored" : "drift_plain";
+                    else bucket = "other";
+                    return new { Path = ap, Detail = ad, Bucket = bucket };
+                })
                 .ToList();
+
             if (attention.Count > 0)
             {
                 const int perGroupCap = 25;
+                // Fixed, logical presentation order with the *real* remediation per bucket.
+                var order = new (string Key, string Header)[]
+                {
+                    ("drift_plain",   "CHANGED — audio differs from last analysis; a normal rescan re-analyzes these"),
+                    ("drift_errored", "CHANGED + PREVIOUSLY FAILED — on the error list, so a normal scan SKIPS them. Re-attempt with  --retry-errors  (if they still fail, the file itself is bad)"),
+                    ("missing",       "MISSING — file not found on disk; restore it or drop the entry from your library"),
+                    ("nohash",        "NO HASH — no audioStreamSha256 stored to verify against"),
+                    ("error",         "ERROR — could not read/hash the file during verify"),
+                    ("other",         "OTHER"),
+                };
+                var byBucket = attention
+                    .GroupBy(a => a.Bucket)
+                    .ToDictionary(g => g.Key, g => g.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList());
+
                 Console.WriteLine();
                 Console.WriteLine($"=== Needs attention ({attention.Count}) ===");
-                foreach (var grp in attention.GroupBy(p => p[0]))
+                foreach (var (key, header) in order)
                 {
-                    var items = grp.ToList();
-                    string label = grp.Key switch
-                    {
-                        "REANALYZE_NEEDED" => "REANALYZE_NEEDED — audio bytes changed since last scan; rescan these",
-                        "DRIFT"            => "DRIFT — audio bytes changed since last scan; rescan these",
-                        "MISSING"          => "MISSING — file not found on disk",
-                        "NO_HASH"          => "NO_HASH — no audioStreamSha256 to verify against",
-                        "ERROR"            => "ERROR — could not process",
-                        _                  => grp.Key,
-                    };
+                    if (!byBucket.TryGetValue(key, out var items) || items.Count == 0) continue;
                     Console.WriteLine();
-                    Console.WriteLine($"  {label} ({items.Count}):");
-                    foreach (var p in items.Take(perGroupCap))
+                    Console.WriteLine($"  {header} ({items.Count}):");
+                    foreach (var a in items.Take(perGroupCap))
                     {
-                        var itemPath = p.Length > 1 ? p[1] : "";
-                        var itemDetail = p.Length > 2 ? p[2] : "";
-                        Console.WriteLine(string.IsNullOrEmpty(itemDetail)
-                            ? $"    {itemPath}"
-                            : $"    {itemPath}  ({itemDetail})");
+                        // For errored entries the prior failure reason is the useful thing to
+                        // show, not the sha pair.
+                        string note = a.Detail;
+                        if (key == "drift_errored" && errIndex.TryGetValue(a.Path, out var reason) && !string.IsNullOrEmpty(reason))
+                            note = reason.Length > 100 ? reason.Substring(0, 97) + "..." : reason;
+                        Console.WriteLine(string.IsNullOrEmpty(note) ? $"    {a.Path}" : $"    {a.Path}  ({note})");
                     }
                     if (items.Count > perGroupCap)
                         Console.WriteLine($"    … +{items.Count - perGroupCap} more — full list in {Path.GetFileName(csvPath)}");
