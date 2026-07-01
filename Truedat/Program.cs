@@ -3697,6 +3697,48 @@ namespace Truedat
             Console.WriteLine($"  Errored:           {errored}");
             Console.WriteLine($"  Elapsed:           {FormatTimeSpan(sw.Elapsed)}");
             Console.WriteLine($"  Detail:            {csvPath}");
+
+            // Surface the entries that need human action right in the console — otherwise
+            // they're a needle in a multi-thousand-row CSV. OK / BACKFILLED are not listed;
+            // only the statuses that mean "a file needs your attention".
+            var attention = details
+                .Select(d => d.Split('\t'))
+                .Where(p => p.Length >= 2 && p[0] != "BACKFILLED")
+                .OrderBy(p => p[0], StringComparer.Ordinal)
+                .ThenBy(p => p.Length > 1 ? p[1] : "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (attention.Count > 0)
+            {
+                const int perGroupCap = 25;
+                Console.WriteLine();
+                Console.WriteLine($"=== Needs attention ({attention.Count}) ===");
+                foreach (var grp in attention.GroupBy(p => p[0]))
+                {
+                    var items = grp.ToList();
+                    string label = grp.Key switch
+                    {
+                        "REANALYZE_NEEDED" => "REANALYZE_NEEDED — audio bytes changed since last scan; rescan these",
+                        "DRIFT"            => "DRIFT — audio bytes changed since last scan; rescan these",
+                        "MISSING"          => "MISSING — file not found on disk",
+                        "NO_HASH"          => "NO_HASH — no audioStreamSha256 to verify against",
+                        "ERROR"            => "ERROR — could not process",
+                        _                  => grp.Key,
+                    };
+                    Console.WriteLine();
+                    Console.WriteLine($"  {label} ({items.Count}):");
+                    foreach (var p in items.Take(perGroupCap))
+                    {
+                        var itemPath = p.Length > 1 ? p[1] : "";
+                        var itemDetail = p.Length > 2 ? p[2] : "";
+                        Console.WriteLine(string.IsNullOrEmpty(itemDetail)
+                            ? $"    {itemPath}"
+                            : $"    {itemPath}  ({itemDetail})");
+                    }
+                    if (items.Count > perGroupCap)
+                        Console.WriteLine($"    … +{items.Count - perGroupCap} more — full list in {Path.GetFileName(csvPath)}");
+                }
+            }
+
             // Exit non-zero on any condition that needs human attention.
             // Backfill is a successful outcome -> doesn't fail the exit code.
             return (drift > 0 || missing > 0 || errored > 0) ? 1 : 0;
@@ -3773,7 +3815,17 @@ namespace Truedat
                     foreach (var spec in missingSpecs)
                     {
                         spec.Populate(tf, entry.FingerprintV1);
-                        filled.Add(spec.Name);
+                        // Only report BACKFILLED when Populate actually produced a value —
+                        // re-check via the spec's own IsPresent. A large fraction of a normal
+                        // library genuinely carries no encoder tag (Zune/older rippers never
+                        // wrote TSSE/ENCODER) and some files have no TagLib-readable bit depth;
+                        // for those Populate leaves the field at its default and IsPresent stays
+                        // false. Without this guard every pass re-counted them as backfilled
+                        // forever (the field can never converge), so --verify --backfill never
+                        // reached a clean "Backfilled: 0". (Same loop class the bitDepth
+                        // CodecLacksBitDepth guard prevents, generalised to any unfillable spec.)
+                        if (spec.IsPresent(entry.FingerprintV1))
+                            filled.Add(spec.Name);
                     }
                 }
                 catch
