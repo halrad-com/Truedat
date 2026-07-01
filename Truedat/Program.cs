@@ -843,7 +843,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -908,7 +908,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -954,6 +954,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
+                Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -969,7 +970,6 @@ namespace Truedat
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
-                Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
@@ -2016,6 +2016,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
+                Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2031,7 +2032,6 @@ namespace Truedat
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
-                Console.WriteLine("  --duplicates        Find duplicate files from fingerprint data -> mbxhub-duplicates.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
                 Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
@@ -3152,145 +3152,22 @@ namespace Truedat
 
         static void RunDuplicates(string outputDir)
         {
-            Console.WriteLine("=== Duplicate Detection ===");
-            Console.WriteLine();
-
-            var fpPath = Path.Combine(outputDir, "mbxhub-fingerprints.json");
-            if (!File.Exists(fpPath))
+            // --duplicates now reports over mbxmoods.json (audioStreamSha256 = content
+            // identity — catches same audio even when tags/path differ), not the legacy
+            // mbxhub-fingerprints.json (fileMd5, produced only by the retired --fingerprint
+            // mode). Thin wrapper: resolve the moods file next to the output dir and hand
+            // off to the shared reporter.
+            var moodsPath = Path.Combine(outputDir, "mbxmoods.json");
+            if (!File.Exists(moodsPath))
             {
-                Console.WriteLine($"Fingerprints file not found: {fpPath}");
-                Console.WriteLine("Run --fingerprint first to generate file hashes.");
+                Console.WriteLine("=== Duplicate Audio ===");
+                Console.WriteLine($"Moods file not found: {moodsPath}");
+                Console.WriteLine("Run a scan first to produce mbxmoods.json.");
                 return;
             }
-
-            Console.WriteLine($"Loading: {fpPath}");
-            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
-            using var fs = new FileStream(fpPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-            using var doc = JsonDocument.Parse(fs, docOptions);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
-            {
-                Console.WriteLine("No tracks found in fingerprints file.");
-                return;
-            }
-
-            // Group by fileMd5
-            var hashGroups = new Dictionary<string, List<(string Path, int TrackId, string Artist, string Title, string Album)>>(StringComparer.Ordinal);
-            int total = 0, withHash = 0, noHash = 0;
-
-            foreach (var prop in tracks.EnumerateObject())
-            {
-                total++;
-                var filePath = PathHelper.NormalizeSeparators(prop.Name);
-                var track = prop.Value;
-                var fileMd5 = GetStr(track, "fileMd5");
-                if (string.IsNullOrEmpty(fileMd5)) { noHash++; continue; }
-                withHash++;
-
-                var entry = (
-                    Path: filePath,
-                    TrackId: GetInt(track, "trackId"),
-                    Artist: GetStr(track, "artist"),
-                    Title: GetStr(track, "title"),
-                    Album: GetStr(track, "album")
-                );
-
-                if (!hashGroups.TryGetValue(fileMd5, out var list))
-                {
-                    list = new List<(string, int, string, string, string)>();
-                    hashGroups[fileMd5] = list;
-                }
-                list.Add(entry);
-            }
-
-            Console.WriteLine($"  Tracks: {total}  (with fileMd5: {withHash}, missing: {noHash})");
-            Console.WriteLine();
-
-            var duplicates = hashGroups
-                .Where(kv => kv.Value.Count > 1)
-                .OrderByDescending(kv => kv.Value.Count)
-                .ToList();
-            int dupFileCount = duplicates.Sum(kv => kv.Value.Count);
-
-            if (duplicates.Count > 0)
-            {
-                Console.WriteLine($"DUPLICATES: {duplicates.Count} set(s), {dupFileCount} files with identical content:");
-                Console.WriteLine();
-                foreach (var kv in duplicates)
-                {
-                    Console.WriteLine($"  MD5 {kv.Key}  ({kv.Value.Count} copies):");
-                    foreach (var f in kv.Value)
-                        Console.WriteLine($"    {f.Artist} - {f.Title}  |  {f.Path}");
-                    Console.WriteLine();
-                }
-            }
-            else
-            {
-                Console.WriteLine("No duplicates found.");
-                Console.WriteLine();
-            }
-
-            Console.WriteLine("=== Summary ===");
-            Console.WriteLine($"  Total tracks:     {total}");
-            Console.WriteLine($"  With fileMd5:     {withHash}");
-            Console.WriteLine($"  Missing fileMd5:  {noHash}");
-            Console.WriteLine($"  Duplicate sets:   {duplicates.Count}");
-            Console.WriteLine($"  Duplicate files:  {dupFileCount}");
-            Console.WriteLine($"  Unique:           {hashGroups.Count(kv => kv.Value.Count == 1)}");
-
-            // Write JSON report
-            var reportPath = Path.Combine(outputDir, "mbxhub-duplicates.json");
-            var tmpPath = reportPath + ".tmp";
-            try { File.Delete(tmpPath); } catch { }
-
-            using (var ofs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-            using (var jw = new Utf8JsonWriter(ofs, new JsonWriterOptions { Indented = true }))
-            {
-                jw.WriteStartObject();
-                jw.WriteString("version", "1.0");
-                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
-
-                jw.WriteStartObject("summary");
-                jw.WriteNumber("totalTracks", total);
-                jw.WriteNumber("withFileMd5", withHash);
-                jw.WriteNumber("missingFileMd5", noHash);
-                jw.WriteNumber("duplicateSets", duplicates.Count);
-                jw.WriteNumber("duplicateFiles", dupFileCount);
-                jw.WriteNumber("unique", hashGroups.Count(kv => kv.Value.Count == 1));
-                jw.WriteEndObject();
-
-                if (duplicates.Count > 0)
-                {
-                    jw.WriteStartArray("duplicates");
-                    foreach (var kv in duplicates)
-                    {
-                        jw.WriteStartObject();
-                        jw.WriteString("md5", kv.Key);
-                        jw.WriteNumber("count", kv.Value.Count);
-                        jw.WriteStartArray("files");
-                        foreach (var f in kv.Value)
-                        {
-                            jw.WriteStartObject();
-                            jw.WriteNumber("trackId", f.TrackId);
-                            jw.WriteString("artist", f.Artist);
-                            jw.WriteString("title", f.Title);
-                            jw.WriteString("album", f.Album);
-                            jw.WriteString("path", f.Path);
-                            jw.WriteEndObject();
-                        }
-                        jw.WriteEndArray();
-                        jw.WriteEndObject();
-                    }
-                    jw.WriteEndArray();
-                }
-
-                jw.WriteEndObject();
-            }
-
-            AtomicReplace(tmpPath, reportPath);
-            Console.WriteLine();
-            Console.WriteLine($"Output: {reportPath}");
+            var tracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+            LoadExistingMoods(moodsPath, tracks);
+            RunDuplicates(moodsPath, tracks);
         }
 
         static void RunFixup(string xmlPath, string moodsPath)
@@ -5162,11 +5039,14 @@ namespace Truedat
             public int AudioMd5Legacy;
             public int ChromaprintLegacy;
             public int Smfm;
+            public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
+            public int RedundantCopies;   // sum over groups of (members - 1)
         }
 
         static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
         {
             var s = new CatalogStats();
+            var shaCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var e in entries)
             {
                 if (e == null) continue;
@@ -5179,7 +5059,14 @@ namespace Truedat
                 if (pr.AudioMd5)    s.AudioMd5Legacy++;
                 if (pr.Chromaprint) s.ChromaprintLegacy++;
                 if (pr.Smfm)        s.Smfm++;
+                if (pr.Sha256)
+                {
+                    shaCount.TryGetValue(e.AudioStreamSha256!, out var c);
+                    shaCount[e.AudioStreamSha256!] = c + 1;
+                }
             }
+            foreach (var c in shaCount.Values)
+                if (c > 1) { s.DuplicateGroups++; s.RedundantCopies += c - 1; }
             return s;
         }
 
@@ -5245,6 +5132,108 @@ namespace Truedat
                 Console.WriteLine($"    audioMd5            {s.AudioMd5Legacy,9:N0}");
                 Console.WriteLine($"    chromaprint         {s.ChromaprintLegacy,9:N0}");
             }
+            if (s.DuplicateGroups > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
+            }
+        }
+
+        /// <summary>Read-only duplicate-audio report. Groups mbxmoods.json entries by
+        /// audioStreamSha256 (content identity — same audio regardless of tags or path)
+        /// and lists every group with 2+ members. Splits them into "same folder"
+        /// (usually accidental — e.g. tagging software renamed a file and orphaned the
+        /// old copy, "01 Track" vs "1-01 Track") and "different folders" (usually
+        /// intentional — one track legitimately on two albums). No judgement is applied
+        /// and nothing is modified; the console + CSV just give the info to decide.
+        /// Entries with no audioStreamSha256 can't be compared and are counted-but-skipped.</summary>
+        static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
+        {
+            Console.WriteLine("=== Duplicate Audio (by audioStreamSha256) ===");
+            Console.WriteLine($"Moods file: {moodsPath}");
+            Console.WriteLine();
+
+            var byHash = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            int noHash = 0;
+            foreach (var kv in tracks)
+            {
+                var sha = kv.Value?.AudioStreamSha256;
+                if (string.IsNullOrEmpty(sha)) { noHash++; continue; }
+                if (!byHash.TryGetValue(sha!, out var list)) { list = new List<string>(); byHash[sha!] = list; }
+                list.Add(kv.Key);
+            }
+
+            var groups = byHash
+                .Where(g => g.Value.Count > 1)
+                .Select(g => (Hash: g.Key, Paths: g.Value.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList()))
+                .ToList();
+
+            if (groups.Count == 0)
+            {
+                Console.WriteLine($"No duplicate audio across {tracks.Count:N0} entries"
+                    + (noHash > 0 ? $" ({noHash:N0} had no audioStreamSha256 and were skipped)." : "."));
+                return 0;
+            }
+
+            int redundant = groups.Sum(g => g.Paths.Count - 1);
+            int filesInvolved = groups.Sum(g => g.Paths.Count);
+
+            string DirOf(string p) { try { return Path.GetDirectoryName(p) ?? ""; } catch { return ""; } }
+            bool AllSameFolder((string Hash, List<string> Paths) g) =>
+                g.Paths.Select(DirOf).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1;
+
+            var sameFolder = groups.Where(AllSameFolder)
+                .OrderBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase).ToList();
+            var crossFolder = groups.Where(g => !AllSameFolder(g))
+                .OrderBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase).ToList();
+
+            Console.WriteLine($"  {groups.Count:N0} groups, {redundant:N0} redundant copies ({filesInvolved:N0} files share audio with at least one other)");
+            if (noHash > 0)
+                Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't be compared)");
+
+            const int cap = 40;
+            void Dump(string header, List<(string Hash, List<string> Paths)> gs)
+            {
+                if (gs.Count == 0) return;
+                Console.WriteLine();
+                Console.WriteLine($"  {header} ({gs.Count}):");
+                int shown = 0;
+                foreach (var g in gs)
+                {
+                    if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
+                    Console.WriteLine($"    [{g.Hash.Substring(0, 12)}]");
+                    foreach (var p in g.Paths) Console.WriteLine($"      {p}");
+                    shown++;
+                }
+            }
+            Dump("Same folder — usually accidental, cleanup candidates", sameFolder);
+            Dump("Different folders — usually intentional (same track on 2+ albums)", crossFolder);
+
+            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-duplicates.csv");
+            string Csv(string? v) => "\"" + (v ?? "").Replace("\"", "\"\"") + "\"";
+            try
+            {
+                var lines = new List<string> { "group,scope,hash,path,artist,title" };
+                int gi = 0;
+                foreach (var (scope, gs) in new[] { ("same-folder", sameFolder), ("cross-folder", crossFolder) })
+                    foreach (var g in gs)
+                    {
+                        gi++;
+                        foreach (var p in g.Paths)
+                        {
+                            tracks.TryGetValue(p, out var e);
+                            lines.Add($"{gi},{scope},{g.Hash.Substring(0, 16)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
+                        }
+                    }
+                File.WriteAllLines(csvPath, lines, Encoding.UTF8);
+                Console.WriteLine();
+                Console.WriteLine($"  Full list: {csvPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  WARNING: could not write {csvPath}: {ex.Message}");
+            }
+            return 0;
         }
 
         /// <summary>
