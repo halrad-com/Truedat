@@ -1260,7 +1260,7 @@ namespace Truedat
                             var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xp.Entry, freshTags.Artist, freshTags.Title,
                                 freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, localMd5, null);
-                            afMoodsTracks.TryRemove(xp.OldKey, out _);
+                            RemoveIfMoved(afMoodsTracks, xp.OldKey);
                             afHitTag = "cached·md5";
                             afFingerprintV1 = trackEntry.FingerprintV1;
                             afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -1283,7 +1283,7 @@ namespace Truedat
                             var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                 freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                            afMoodsTracks.TryRemove(xs.OldKey, out _);
+                            RemoveIfMoved(afMoodsTracks, xs.OldKey);
                             afHitTag = "cached·sha";
                             afFingerprintV1 = trackEntry.FingerprintV1;
                             afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -1800,7 +1800,7 @@ namespace Truedat
                                     var flCrossMd5SmfmTag = ApplySmfmInPlace(flCrossMd5Entry.Features, filePath, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossMd5SmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossMd5Entry;
-                                    flMoodsTracks.TryRemove(xp.OldKey, out _);
+                                    RemoveIfMoved(flMoodsTracks, xp.OldKey);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMd5Cross);
                                     Console.Error.WriteLine($"[CACHED·md5{flCrossMd5SmfmTag}] {Path.GetFileName(filePath)}");
@@ -1827,7 +1827,7 @@ namespace Truedat
                                     var flCrossShaSmfmTag = ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
-                                    flMoodsTracks.TryRemove(xs.OldKey, out _);
+                                    RemoveIfMoved(flMoodsTracks, xs.OldKey);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByShaCross);
                                     Console.Error.WriteLine($"[CACHED·sha{flCrossShaSmfmTag}] {Path.GetFileName(filePath)}");
@@ -2527,7 +2527,7 @@ namespace Truedat
                                     };
                                     var crossMd5SmfmTag = ApplySmfmInPlace(allTracks[t.Location].Features, t.Location, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (crossMd5SmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
-                                    allTracks.TryRemove(xp.OldKey, out _);
+                                    RemoveIfMoved(allTracks, xp.OldKey);
                                     Interlocked.Increment(ref crossPathMoods);
                                     Interlocked.Increment(ref cachedCount);
                                     Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5{crossMd5SmfmTag})");
@@ -2568,7 +2568,7 @@ namespace Truedat
                                         var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, t.Location, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
-                                        allTracks.TryRemove(xs.OldKey, out _);
+                                        RemoveIfMoved(allTracks, xs.OldKey);
                                         Interlocked.Increment(ref crossPathMoods);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
@@ -3148,6 +3148,23 @@ namespace Truedat
             AtomicReplace(tmpPath, reportPath);
             Console.WriteLine();
             Console.WriteLine($"Output: {reportPath}");
+        }
+
+        /// <summary>Drop a cross-path-matched cache entry ONLY when its path is genuinely
+        /// gone from disk (a real move/rename). If the old file still exists it's a
+        /// duplicate, not a move — removing it makes two live duplicate files ping-pong
+        /// between scans forever: each scan cross-matches one twin, deletes the other,
+        /// and the next scan recreates the deleted one and deletes the first. The library
+        /// never converges (visible as Cross-MD5/SHA counts and "SMFM added" oscillating
+        /// run-to-run on an otherwise-unchanged library). Guarding the removal on
+        /// File.Exists lets legitimate duplicates coexist as two stable entries. Surface
+        /// them with --duplicates.</summary>
+        static void RemoveIfMoved(ConcurrentDictionary<string, TrackEntry> dict, string oldKey)
+        {
+            bool stillThere;
+            try { stillThere = File.Exists(oldKey); }
+            catch { stillThere = false; }   // unreadable path → treat as gone (old behavior)
+            if (!stillThere) dict.TryRemove(oldKey, out _);
         }
 
         static void RunDuplicates(string outputDir)
