@@ -375,6 +375,9 @@ namespace Truedat
         internal static bool _noBitUsage   { get => _stageOpts.NoBitUsage;   set => _stageOpts.NoBitUsage   = value; }
         internal static bool _noHfAnalysis { get => _stageOpts.NoHfAnalysis; set => _stageOpts.NoHfAnalysis = value; }
 
+        static bool _losersM3u = false;
+        static string? _losersM3uPath = null;
+
         // Per-process cache: drive root -> isNetwork. DriveInfo.DriveType is a Win32
         // call (~µs per hit but it touches the mount table). One lookup per unique
         // root, then memoized. Concurrent-safe; readers don't lock.
@@ -771,6 +774,11 @@ namespace Truedat
                 else if (canonical == "audit") auditLog = true;
                 else if (canonical == "check-filenames") checkFilenames = true;
                 else if (canonical == "duplicates") duplicatesMode = true;
+                else if (canonical == "losers-m3u")
+                {
+                    _losersM3u = true;
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-")) { _losersM3uPath = args[i + 1]; i++; }
+                }
                 else if (canonical == "quick-fingerprint") quickFingerprintMode = true;
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
                 else if (canonical == "synthesize") synthesize = true;
@@ -955,6 +963,7 @@ namespace Truedat
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
+                Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2017,6 +2026,7 @@ namespace Truedat
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
+                Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -5369,6 +5379,25 @@ namespace Truedat
             catch (Exception ex)
             {
                 Console.WriteLine($"  WARNING: could not write {jsonPath}: {ex.Message}");
+            }
+
+            if (_losersM3u)
+            {
+                var m3uPath = _losersM3uPath ?? Path.Combine(outDir, "mbxmoods-duplicate-losers.m3u8");
+                try
+                {
+                    var m3u = new List<string> { "#EXTM3U" };
+                    foreach (var g in groups)
+                        foreach (var p in g.Paths)
+                            if (!string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase))
+                                m3u.Add(p);
+                    File.WriteAllLines(m3uPath, m3u, new UTF8Encoding(false));
+                    Console.WriteLine($"  Losers playlist: {m3uPath} ({m3u.Count - 1} files) — review/delete inside MusicBee so library entries aren't orphaned");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  WARNING: could not write {m3uPath}: {ex.Message}");
+                }
             }
             return 0;
         }
