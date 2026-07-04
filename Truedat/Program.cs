@@ -5175,7 +5175,14 @@ namespace Truedat
         // Cross-encode candidate-key buckets (spec §1). Sized so lossy re-encode
         // perturbation of the aggregate MFCC means stays inside one bucket. Coeff 0
         // carries overall energy (values ~-1200..0) and needs a wider bucket than 1-12.
-        // Initial values pending calibration against known FLAC<->MP3 pairs (Task 8).
+        // Calibrated 2026-07-04 against a 71k-track library mirror: 1,277 probable
+        // groups, 69.1% title-agreement, 78.2% artist-agreement, mean size 2.05 (max 9)
+        // — healthy. A 30%-tighter trial was tested and rejected: group count fell to
+        // 1,153 but title-agreement also fell (67.3%), and the one persistent junk
+        // cluster (era-matched hip-hop/dance tracks with near-identical bpm/key/
+        // duration from compilation mastering) survived unchanged — it's genuine
+        // feature-space proximity, not quantization slop, so tightening only cost
+        // recall on real cross-encode matches. Frozen at original widths.
         internal static readonly double[] DupQMfcc =
         {
             24.0,                   // mfcc[0]
