@@ -5260,6 +5260,18 @@ namespace Truedat
         /// is modified; the console + CSV just give the info to decide. Entries with no
         /// audioStreamSha256 can't join the exact tier; entries missing mfcc/bpm/key/
         /// duration can't join the probable tier — both are counted-but-skipped.</summary>
+        static string Linkify(string path)
+        {
+            if (Console.IsOutputRedirected) return path;
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"))) return path;
+            try
+            {
+                var uri = new Uri(Path.GetFullPath(path)).AbsoluteUri;
+                return "\x1b]8;;" + uri + "\x1b\\" + path + "\x1b]8;;\x1b\\";
+            }
+            catch { return path; }
+        }
+
         static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
         {
             Console.WriteLine("=== Duplicate Audio ===");
@@ -5341,7 +5353,7 @@ namespace Truedat
                     if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
                     Console.WriteLine($"    [{(g.Tier == "exact" ? g.Key.Substring(0, Math.Min(12, g.Key.Length)) : "probable")}]");
                     foreach (var p in g.Paths)
-                        Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{p}");
+                        Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{Linkify(p)}");
                     shown++;
                 }
             }
