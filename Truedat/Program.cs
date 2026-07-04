@@ -5272,12 +5272,16 @@ namespace Truedat
             catch { return path; }
         }
 
-        static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
+        /// <summary>Pure grouping core of the --duplicates report, extracted out of
+        /// <see cref="RunDuplicates"/> so the keeper-uniqueness contract invariant
+        /// (exactly one keeper:true per group, keeper is one of the group's own
+        /// members) can be exercised directly under --self-test. Tier 1 ("exact")
+        /// groups by audioStreamSha256; tier 2 ("probable") groups whatever is left
+        /// over by the quantized-feature candidate key. Returns groups in
+        /// deterministic order: exact before probable, same-folder before
+        /// cross-folder, then first path.</summary>
+        internal static (List<DupGroup> Groups, int NoHash, int NoFeatures) BuildDuplicateGroups(IDictionary<string, TrackEntry> tracks)
         {
-            Console.WriteLine("=== Duplicate Audio ===");
-            Console.WriteLine($"Moods file: {moodsPath}");
-            Console.WriteLine();
-
             // ---- Tier 1: exact (audioStreamSha256) ----
             var byHash = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             int noHash = 0;
@@ -5326,6 +5330,17 @@ namespace Truedat
                 .ThenBy(g => g.Scope == "same-folder" ? 0 : 1)
                 .ThenBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            return (groups, noHash, noFeatures);
+        }
+
+        static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
+        {
+            Console.WriteLine("=== Duplicate Audio ===");
+            Console.WriteLine($"Moods file: {moodsPath}");
+            Console.WriteLine();
+
+            var (groups, noHash, noFeatures) = BuildDuplicateGroups(tracks);
 
             if (groups.Count == 0)
             {
@@ -5485,7 +5500,7 @@ namespace Truedat
 
         /// <summary>One duplicate group in the --duplicates report. Tier: "exact"
         /// (audioStreamSha256) or "probable" (quantized-feature candidate key).</summary>
-        sealed class DupGroup
+        internal sealed class DupGroup
         {
             public string Tier = "exact";
             public string Scope = "";
@@ -6420,6 +6435,73 @@ namespace Truedat
             Assert(PickKeeper(new[] { "C:\\m\\a.mp3", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: lossless beats lossy");
             Assert(PickKeeper(new[] { "C:\\m\\a.flac", "C:\\m\\hi.flac" }, kpLookup) == "C:\\m\\hi.flac", "keeper: higher bitDepth wins among lossless");
             Assert(PickKeeper(new[] { "C:\\m\\deep\\sub\\a.flac", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: equal quality -> shortest path wins");
+
+            Console.WriteLine();
+            Console.WriteLine("Duplicate grouping self-test");
+            {
+                // Cross-repo contract: mbxmoods-duplicates.json consumers can't express
+                // "exactly one keeper:true per group" on their side — this invariant is
+                // guarded here, against BuildDuplicateGroups (the pure core extracted
+                // out of RunDuplicates).
+                TrackEntry MakeGrp(string? sha, double[]? mfcc, double bpm, string key, string mode, int durMs) => new TrackEntry
+                {
+                    Features = new TrackFeatures { Bpm = bpm, Key = key, Mode = mode, Mfcc = mfcc },
+                    FingerprintV1 = durMs > 0 ? new FingerprintV1 { DurationMs = durMs } : (FingerprintV1?)null,
+                    AudioStreamSha256 = sha,
+                };
+                var gBase = new double[] { -700, 100, 20, 8, 4, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01 };
+                const string shaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+                var grpTracks = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase)
+                {
+                    // Exact group: two same-sha entries in the same folder.
+                    ["C:\\m\\exact\\a1.flac"] = MakeGrp(shaA, gBase, 120, "C", "major", 215000),
+                    ["C:\\m\\exact\\a2.mp3"] = MakeGrp(shaA, gBase, 120, "C", "major", 215000),
+                    // Same features as the exact pair but no sha -> must NOT join the exact group.
+                    ["C:\\m\\exact\\a3-nosha.mp3"] = MakeGrp(null, gBase, 120, "C", "major", 215000),
+                    // Probable group: same candidate key, no sha, different folders.
+                    ["C:\\m\\probA\\p1.flac"] = MakeGrp(null, gBase, 130, "D", "minor", 200000),
+                    ["C:\\m\\probB\\p2.mp3"] = MakeGrp(null, gBase, 130, "D", "minor", 200000),
+                    // Unrelated singleton -> no group.
+                    ["C:\\m\\lonely\\only.mp3"] = MakeGrp("shaunique000000000000000000000000000000000000000000000000000", gBase, 140, "E", "major", 190000),
+                };
+                var (grpGroups, grpNoHash, grpNoFeatures) = BuildDuplicateGroups(grpTracks);
+
+                Assert(grpGroups.Count == 2, $"grouping: exact 2-member group + probable 2-member group only (got {grpGroups.Count})");
+
+                var exactG = grpGroups.FirstOrDefault(g => g.Tier == "exact");
+                Assert(exactG != null && exactG.Paths.Count == 2, "grouping: exact group has exactly the 2 same-sha members");
+                Assert(exactG != null && !exactG.Paths.Contains("C:\\m\\exact\\a3-nosha.mp3", StringComparer.OrdinalIgnoreCase),
+                    "grouping: same-features-no-sha entry is NOT pulled into the exact group");
+
+                var probG = grpGroups.FirstOrDefault(g => g.Tier == "probable");
+                Assert(probG != null && probG.Paths.Count == 2, "grouping: probable group has exactly the 2 matching-key members");
+                Assert(probG != null && !probG.Paths.Contains("C:\\m\\exact\\a3-nosha.mp3", StringComparer.OrdinalIgnoreCase),
+                    "grouping: entry already claimed by an exact group is NOT also in a probable group (path-disjointness)");
+
+                // THE contract invariant: every group has exactly one keeper, contained in its Paths.
+                foreach (var g in grpGroups)
+                {
+                    int keeperCount = g.Paths.Count(p => string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase));
+                    Assert(keeperCount == 1, $"grouping: group '{g.Key}' has exactly one keeper (got {keeperCount})");
+                    Assert(g.Paths.Contains(g.Keeper, StringComparer.OrdinalIgnoreCase), $"grouping: group '{g.Key}' keeper is one of its own Paths");
+                }
+
+                // Every group has >= 2 members.
+                Assert(grpGroups.All(g => g.Paths.Count >= 2), "grouping: every returned group has at least 2 members");
+
+                // Ordering: exact groups precede probable groups.
+                int firstProbableIdx = grpGroups.FindIndex(g => g.Tier == "probable");
+                int lastExactIdx = grpGroups.FindLastIndex(g => g.Tier == "exact");
+                Assert(firstProbableIdx == -1 || lastExactIdx < firstProbableIdx, "grouping: exact groups ordered before probable groups");
+
+                // Scope classification.
+                Assert(exactG != null && exactG.Scope == "same-folder", $"grouping: exact group in same dir -> scope 'same-folder' (got {exactG?.Scope})");
+                Assert(probG != null && probG.Scope == "cross-folder", $"grouping: probable group across dirs -> scope 'cross-folder' (got {probG?.Scope})");
+
+                Assert(grpNoHash == 3, $"grouping: noHash counts entries without audioStreamSha256 (got {grpNoHash})");
+                Assert(grpNoFeatures == 0, $"grouping: all synthetic entries have valid candidate-key features (got {grpNoFeatures})");
+            }
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
