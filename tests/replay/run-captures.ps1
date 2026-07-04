@@ -55,13 +55,17 @@ try {
     # determinism: audioStreamSha256 per path identical across runs, all non-empty
     $sha = @{}; $detPass = $true; $detWhy = ""
     foreach ($line in Get-Content $m1) { $o = $line | ConvertFrom-Json; $sha[$o.path] = $o.identity.audioStreamSha256 }
+    $run2Count = 0
     foreach ($line in Get-Content $m2) {
-        $o = $line | ConvertFrom-Json
+        $o = $line | ConvertFrom-Json; $run2Count++
         if (-not $sha.ContainsKey($o.path)) { $detPass = $false; $detWhy = "path set differs: $($o.path)"; break }
         if ([string]::IsNullOrEmpty($o.identity.audioStreamSha256) -or $sha[$o.path] -ne $o.identity.audioStreamSha256) {
             $detPass = $false; $detWhy = "sha mismatch for $($o.path)"; break
         }
     }
+    # run2 subset-of run1 is checked above; count equality closes the reverse gap
+    # (a path in run1 that run2 dropped).
+    if ($detPass -and $run2Count -ne $sha.Count) { $detPass = $false; $detWhy = "manifest counts differ: run1=$($sha.Count) run2=$run2Count" }
     if (-not $detPass) { Write-Host "replay: DETERMINISM FAILED - $detWhy" } else { Write-Host "replay: determinism OK ($($sha.Count) files)" }
 
     Write-Host "replay: contract checks..."
