@@ -67,6 +67,57 @@ Assert ($mv[0].to -eq (Join-Path ($root + '-quarantine') 'dupe\t.flac')) 'dryrun
 Assert (@($plan | Where-Object { $_.action -eq 'skip-keeper-missing' }).Count -ge 1) 'dryrun: keeper missing on disk -> group skipped'
 Assert ((Test-Path (Join-Path $root 'dupe\t.flac'))) 'dryrun: no file moved without -Apply'
 
+# ── Task 3: apply + idempotency + expected-under-Apply + skip-single-copy ──
+# Extend manifest with h-exp (expected, untouched) and h-solo (skip-single-copy)
+$manifest3 = @{ groups = @(
+    @{ hash='h-exact'; tier='exact'; keeper='R:\lib\a\t.flac'; paths=@('R:\lib\a\t.flac','R:\lib\dupe\t.flac') },
+    @{ hash='h-new';   tier='exact'; keeper='R:\lib\c\n.flac'; paths=@('R:\lib\c\n.flac','R:\lib\d\n.flac') },
+    @{ hash='h-exp';   tier='exact'; keeper='R:\lib\e\x.flac'; paths=@('R:\lib\e\x.flac','R:\lib\f\x.flac') },
+    @{ hash='h-solo';  tier='exact'; keeper='R:\lib\g\solo.flac'; paths=@('R:\lib\g\solo.flac','R:\lib\h\solo.flac') }
+) } | ConvertTo-Json -Depth 5
+Set-Content -Path $mPath -Value $manifest3 -Encoding UTF8
+
+# Extend sidecar with h-exp (expected, should NOT touch) and h-solo (resolve, skip-single-copy)
+$v4 = Get-Content $vPath -Raw | ConvertFrom-Json
+foreach ($e in $v4.verdicts) {
+    if ($e.hash -eq 'h-exact') { $e.verdict = 'resolve'; $e.keepPath = 'R:\lib\a\t.flac' }
+    if ($e.hash -eq 'h-new')   { $e.verdict = 'resolve'; $e.keepPath = 'R:\lib\c\MISSING.flac' }
+}
+$v4.verdicts += @{ hash='h-exp'; tier='exact'; verdict='expected'; keepPath='R:\lib\e\x.flac' }
+$v4.verdicts += @{ hash='h-solo'; tier='exact'; verdict='resolve'; keepPath='R:\lib\g\solo.flac' }
+$v4 | ConvertTo-Json -Depth 5 | Set-Content -Path $vPath -Encoding UTF8
+
+# Create files for h-exp (both copies)
+foreach ($rel in 'e\x.flac','f\x.flac') {
+    $p = Join-Path $root $rel
+    New-Item -ItemType Directory -Path (Split-Path $p) -Force | Out-Null
+    Set-Content -Path $p -Value 'x' -Encoding ASCII
+}
+
+# Create file for h-solo (only one copy to trigger skip-single-copy)
+$p = Join-Path $root 'g\solo.flac'
+New-Item -ItemType Directory -Path (Split-Path $p) -Force | Out-Null
+Set-Content -Path $p -Value 'x' -Encoding ASCII
+
+# First apply with -Apply
+$log = Join-Path $work 'moves.csv'
+& (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root -Apply -LogCsv $log | Out-Null
+Assert (-not (Test-Path (Join-Path $root 'dupe\t.flac'))) 'apply: loser moved out of tree'
+Assert (Test-Path (Join-Path ($root + '-quarantine') 'dupe\t.flac')) 'apply: loser in mirrored quarantine path'
+Assert (Test-Path (Join-Path $root 'a\t.flac')) 'apply: keeper untouched'
+Assert (Test-Path (Join-Path $root 'b\t.mp3')) 'apply: uncurated (probable) group untouched'
+Assert (Test-Path $log) 'apply: move log written'
+Assert (Test-Path (Join-Path $root 'e\x.flac')) 'apply: expected-verdict group file 1 untouched'
+Assert (Test-Path (Join-Path $root 'f\x.flac')) 'apply: expected-verdict group file 2 untouched'
+Assert (Test-Path (Join-Path $root 'g\solo.flac')) 'apply: skip-single-copy file untouched'
+
+# Second apply (idempotency)
+$re = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root -Apply -LogCsv $log
+Assert (@($re | Where-Object { $_.action -eq 'move' }).Count -eq 0) 'idempotent: second apply plans zero moves'
+Assert (@($re | Where-Object { $_.action -eq 'skip-already-moved' }).Count -ge 1) 'idempotent: quarantined loser reported as already-moved'
+
 Write-Host ''
 if ($script:failures -gt 0) { Write-Host "$($script:failures) FAILURES" -ForegroundColor Red; exit 1 }
 Write-Host 'ALL PASS'; exit 0

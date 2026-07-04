@@ -38,6 +38,22 @@ foreach ($g in $m.groups) {
         [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$e.keepPath; to=$null; action='skip-keeper-missing' })
         $stats.skipped++; continue
     }
+    # Check for already-moved files first (even if < 2 in root, losers may be in quarantine)
+    $movedCount = 0
+    foreach ($p in $g.paths) {
+        $tp = Re-Root $p
+        if (-not $tp -or $tp -eq $keep) { continue }
+        if (Test-Path $tp) { continue }  # still in root, will handle below
+        $rel = $tp.Substring(($Root.TrimEnd('\') + '\').Length)
+        $qp = Join-Path $QuarantineRoot $rel
+        if (Test-Path $qp) {
+            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$tp; to=$qp; action='skip-already-moved' })
+            $movedCount++
+            $stats.skipped++
+        }
+    }
+    if ($movedCount -gt 0) { continue }  # All losers already moved, group done
+
     if ($present.Count -lt 2) {
         [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$keep; to=$null; action='skip-single-copy' })
         $stats.skipped++; continue
