@@ -6642,6 +6642,38 @@ namespace Truedat
                 finally { try { File.Delete(tmp); } catch { } }
             }
 
+            // --- IsTagsOnlyChange acceptance envelope --------------------------------
+            {
+                FingerprintV1 Mk() => new FingerprintV1
+                {
+                    FileSize = 1000, PathTail = "a/b/c.flac", DurationMs = 200000,
+                    SampleRate = 44100, Channels = 2, BitDepth = 16, Codec = "flac",
+                    Bitrate = 900, AudioHead64kMd5 = "aabbcc", AudioHead64kMd5Source = "invariant",
+                };
+                var s0 = Mk(); var f0 = Mk(); f0.FileSize = 1042; f0.Bitrate = 897; f0.Encoder = "retagger";
+                Assert(IsTagsOnlyChange(f0, s0), "tags-only: size/bitrate/encoder drift alone is accepted");
+
+                var f1 = Mk(); f1.AudioHead64kMd5 = "ddeeff";
+                Assert(!IsTagsOnlyChange(f1, s0), "tags-only: head md5 mismatch rejected");
+
+                var f2 = Mk(); f2.DurationMs = 205000;
+                Assert(!IsTagsOnlyChange(f2, s0), "tags-only: duration drift > 500ms rejected");
+
+                var f3 = Mk(); f3.DurationMs = 200400;
+                Assert(IsTagsOnlyChange(f3, s0), "tags-only: duration drift <= 500ms accepted");
+
+                var f4 = Mk(); f4.AudioHead64kMd5Source = "whole-file-start";
+                Assert(!IsTagsOnlyChange(f4, s0), "tags-only: whole-file-start head rejected (fresh)");
+                var s4 = Mk(); s4.AudioHead64kMd5Source = "whole-file-start";
+                Assert(!IsTagsOnlyChange(f0, s4), "tags-only: whole-file-start head rejected (stored)");
+
+                var f5 = Mk(); f5.SampleRate = 48000;
+                Assert(!IsTagsOnlyChange(f5, s0), "tags-only: sampleRate change rejected");
+
+                var s6 = Mk(); s6.AudioHead64kMd5 = "";
+                Assert(!IsTagsOnlyChange(f0, s6), "tags-only: empty stored head rejected");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -8976,6 +9008,35 @@ namespace Truedat
         }
 
         /// <summary>Compute fingerprint.v1 composite. Returns null + error string on failure.</summary>
+        /// <summary>
+        /// Tier-1.5 evidence check: proves an mtime-drifted same-path file is a
+        /// tags-only change WITHOUT reading the audio body. True when the stored and
+        /// freshly computed fingerprints agree on the 64 KB audio-region head hash
+        /// (measured from InvariantStartPosition, so tag writes don't move it) and on
+        /// the audio properties a re-encode/trim cannot preserve. FileSize, Bitrate
+        /// and Encoder are deliberately NOT compared — all three legitimately drift
+        /// with tag size. False on any doubt: the caller falls through to the full
+        /// audioStreamSha256 tier, so a false negative only costs speed, never
+        /// correctness. The accepted residual risk is an in-place audio edit beyond
+        /// the first 64 KB that preserves duration and codec properties — deliberate
+        /// tampering, which --verify (full SHA) still catches.
+        /// </summary>
+        static bool IsTagsOnlyChange(FingerprintV1 fresh, FingerprintV1 stored)
+        {
+            if (string.IsNullOrEmpty(fresh.AudioHead64kMd5) || string.IsNullOrEmpty(stored.AudioHead64kMd5))
+                return false;
+            if ((fresh.AudioHead64kMd5Source ?? "invariant") != "invariant") return false;
+            if ((stored.AudioHead64kMd5Source ?? "invariant") != "invariant") return false;
+            if (!string.Equals(fresh.AudioHead64kMd5, stored.AudioHead64kMd5, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (fresh.Codec != stored.Codec) return false;
+            if (fresh.SampleRate != stored.SampleRate) return false;
+            if (fresh.Channels != stored.Channels) return false;
+            if (fresh.BitDepth != stored.BitDepth) return false;
+            if (Math.Abs(fresh.DurationMs - stored.DurationMs) > 500) return false;
+            return true;
+        }
+
         static FingerprintV1? ComputeFingerprintV1(string filePath, long fileSize, out string? error)
         {
             error = null;
