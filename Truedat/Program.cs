@@ -5346,7 +5346,7 @@ namespace Truedat
                     foreach (var p in g.Paths)
                     {
                         tracks.TryGetValue(p, out var e);
-                        lines.Add($"{gi},{g.Scope},{g.Key},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
+                        lines.Add($"{gi},{g.Scope},{Csv(g.Key)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
                     }
                 }
                 File.WriteAllLines(csvPath, lines, Encoding.UTF8);
