@@ -154,9 +154,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
   --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --no-quick-cache        Disable the tags-only quick cache tier (head-64k check);
+                          mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
 ```
+
+**After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
 
 **Network libraries:** when the source is on a UNC share (`\\server\share\…`), a mapped network drive (e.g. `Z:\` mapped to `\\server\share`), or a local path with non-ASCII characters, truedat stages each file once to a local temp copy and runs the 8-9 concurrent per-track workers (and the cache hierarchy's tier-2/3/4 body reads) against the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. Cache tier-1 (path + mtime equality) doesn't stage — already-cached tracks stay free. Local-ASCII paths read directly. Use `--no-stage` to opt out, or `--stage-dir` to relocate the staging directory (e.g. to a fast scratch volume when `%TEMP%` is on a small SSD). Per-track stage failures fall back to direct read with a one-line warning — scans never abort over a staging hiccup. End-of-scan summary reports `staging: N staged` (or `N staged, M direct-fallback`), with a stderr warning when >5% of attempted stages fell back so a wedged stage-dir is visible.
 
