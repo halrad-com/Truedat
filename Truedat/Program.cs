@@ -5194,6 +5194,41 @@ namespace Truedat
             return sb.ToString();
         }
 
+        /// <summary>Pick the recommended keeper in a duplicate group (spec §2):
+        /// lossless codec > bitDepth > sampleRate > bitrate > fileSize > shortest path,
+        /// ordinal compare as the deterministic final tie-break. Members missing a
+        /// field rank below members that have it (missing == 0). Pure annotation —
+        /// truedat never acts on it.</summary>
+        internal static string PickKeeper(IReadOnlyList<string> paths, Func<string, TrackEntry?> lookup)
+        {
+            string best = paths[0];
+            for (int i = 1; i < paths.Count; i++)
+                if (CompareKeeper(paths[i], best, lookup) > 0) best = paths[i];
+            return best;
+        }
+
+        /// <summary>Positive when pa outranks pb as keeper.</summary>
+        static int CompareKeeper(string pa, string pb, Func<string, TrackEntry?> lookup)
+        {
+            var a = lookup(pa)?.FingerprintV1;
+            var b = lookup(pb)?.FingerprintV1;
+            int LosslessRank(FingerprintV1? fp) =>
+                fp != null && IsLosslessCodecForHiresCheck(fp.Codec) ? 1 : 0;
+            int c = LosslessRank(a).CompareTo(LosslessRank(b));
+            if (c != 0) return c;
+            c = (a?.BitDepth ?? 0).CompareTo(b?.BitDepth ?? 0);
+            if (c != 0) return c;
+            c = (a?.SampleRate ?? 0).CompareTo(b?.SampleRate ?? 0);
+            if (c != 0) return c;
+            c = (a?.Bitrate ?? 0).CompareTo(b?.Bitrate ?? 0);
+            if (c != 0) return c;
+            c = (a?.FileSize ?? 0L).CompareTo(b?.FileSize ?? 0L);
+            if (c != 0) return c;
+            c = pb.Length.CompareTo(pa.Length);            // shorter path wins
+            if (c != 0) return c;
+            return string.CompareOrdinal(pb, pa);          // deterministic
+        }
+
         /// <summary>Read-only duplicate-audio report. Groups mbxmoods.json entries by
         /// audioStreamSha256 (content identity — same audio regardless of tags or path)
         /// and lists every group with 2+ members. Splits them into "same folder"
@@ -6198,6 +6233,25 @@ namespace Truedat
             Assert(BuildDupCandidateKey(dkA) != BuildDupCandidateKey(MakeDup(dkBase, 120, "D", "major", 215000)), "candidate key: different musical key -> different group");
             Assert(BuildDupCandidateKey(MakeDup(null, 120, "C", "major", 215000)) == null, "candidate key: missing mfcc -> ineligible (null)");
             Assert(BuildDupCandidateKey(MakeDup(dkBase, 120, "C", "major", 0)) == null, "candidate key: missing durationMs -> ineligible (null)");
+
+            Console.WriteLine();
+            Console.WriteLine("Duplicate keeper self-test");
+            TrackEntry MakeKp(string codec, int bitDepth, int sampleRate, int bitrate, long fileSize) => new TrackEntry
+            {
+                Features = new TrackFeatures(),
+                FingerprintV1 = new FingerprintV1 { Codec = codec, BitDepth = bitDepth, SampleRate = sampleRate, Bitrate = bitrate, FileSize = fileSize }
+            };
+            var kpMap = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["C:\\m\\a.flac"] = MakeKp("flac", 16, 44100, 900, 30_000_000),
+                ["C:\\m\\a.mp3"]  = MakeKp("mp3", 0, 44100, 320, 9_000_000),
+                ["C:\\m\\hi.flac"] = MakeKp("flac", 24, 96000, 2800, 90_000_000),
+                ["C:\\m\\deep\\sub\\a.flac"] = MakeKp("flac", 16, 44100, 900, 30_000_000),
+            };
+            Func<string, TrackEntry?> kpLookup = p => kpMap.TryGetValue(p, out var v) ? v : null;
+            Assert(PickKeeper(new[] { "C:\\m\\a.mp3", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: lossless beats lossy");
+            Assert(PickKeeper(new[] { "C:\\m\\a.flac", "C:\\m\\hi.flac" }, kpLookup) == "C:\\m\\hi.flac", "keeper: higher bitDepth wins among lossless");
+            Assert(PickKeeper(new[] { "C:\\m\\deep\\sub\\a.flac", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: equal quality -> shortest path wins");
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
