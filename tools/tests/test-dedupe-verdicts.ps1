@@ -159,8 +159,14 @@ Assert (Test-Path $restoredPath) 'multi-loser: loser2 restored to root before re
 $re2 = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
     -ManifestRoot 'R:\lib' -Root $root -Apply -LogCsv $log
 $multiEntries = @($re2 | Where-Object { $_.hash -eq 'h-multi' })
-Assert ((@($multiEntries | Where-Object { $_.action -eq 'move' -and $_.from -eq $restoredPath }).Count) -eq 1) 'multi-loser: loser2 planned as move (partial quarantine does not mask it)'
-Assert (-not (Test-Path $restoredPath)) 'multi-loser: loser2 gone from root after regression apply'
+# Loser2 reappeared at a root path whose quarantine mirror is already occupied
+# (from the first apply). Per-path classification still surfaces it (the
+# original masking bug this test guards against - the group-level short
+# circuit that silently skipped the whole group) but the N1 clobber guard
+# means it is now a conflict, not a blind overwrite-move: the existing
+# quarantine copy is never known to be identical, so it must not be clobbered.
+Assert ((@($multiEntries | Where-Object { $_.action -eq 'conflict-dest-exists' -and $_.from -eq $restoredPath }).Count) -eq 1) 'multi-loser: loser2 surfaced as conflict-dest-exists (partial quarantine does not mask it, and the existing quarantine copy is not clobbered)'
+Assert (Test-Path $restoredPath) 'multi-loser: loser2 left in root untouched (move refused rather than overwriting the existing quarantine copy)'
 Assert ((@($multiEntries | Where-Object { $_.action -eq 'skip-already-moved' -and $_.from -eq (Join-Path $root 'j\loser1.flac') }).Count) -eq 1) 'multi-loser: loser1 still reported skip-already-moved'
 Assert (Test-Path (Join-Path $root 'i\keep.flac')) 'multi-loser: keeper untouched'
 
@@ -176,6 +182,90 @@ foreach ($rel in 'a\t.flac','dupe\t.flac') {
 Assert (-not (Test-Path (Join-Path $prod 'dupe\t.flac'))) 'replay: same sidecar resolves the loser under the prod root'
 Assert (Test-Path (Join-Path $prod 'a\t.flac')) 'replay: prod keeper untouched'
 Assert (Test-Path (Join-Path ($prod + '-quarantine') 'dupe\t.flac')) 'replay: prod quarantine mirrored'
+
+# ── Task 5 (final review): N1 quarantine-clobber guard, N2 dry-run LogCsv dir, E unknown verdict ──
+
+# N1: conflict-dest-exists must never let -Force overwrite a quarantined file.
+$manifest5 = @{ groups = @(
+    @{ hash='h-exact'; tier='exact'; keeper='R:\lib\a\t.flac'; paths=@('R:\lib\a\t.flac','R:\lib\dupe\t.flac') },
+    @{ hash='h-new';   tier='exact'; keeper='R:\lib\c\n.flac'; paths=@('R:\lib\c\n.flac','R:\lib\d\n.flac') },
+    @{ hash='h-exp';   tier='exact'; keeper='R:\lib\e\x.flac'; paths=@('R:\lib\e\x.flac','R:\lib\f\x.flac') },
+    @{ hash='h-solo';  tier='exact'; keeper='R:\lib\g\solo.flac'; paths=@('R:\lib\g\solo.flac','R:\lib\h\solo.flac') },
+    @{ hash='h-multi'; tier='exact'; keeper='R:\lib\i\keep.flac'; paths=@('R:\lib\i\keep.flac','R:\lib\j\loser1.flac','R:\lib\k\loser2.flac') },
+    @{ hash='h-conflict'; tier='exact'; keeper='R:\lib\m\keep.flac'; paths=@('R:\lib\m\keep.flac','R:\lib\n\loser.flac') }
+) } | ConvertTo-Json -Depth 5
+Set-Content -Path $mPath -Value $manifest5 -Encoding UTF8
+
+$v6 = Get-Content $vPath -Raw | ConvertFrom-Json
+$v6.verdicts += @{ hash='h-conflict'; tier='exact'; verdict='resolve'; keepPath='R:\lib\m\keep.flac' }
+$v6 | ConvertTo-Json -Depth 5 | Set-Content -Path $vPath -Encoding UTF8
+
+$keepConflictPath = Join-Path $root 'm\keep.flac'
+New-Item -ItemType Directory -Path (Split-Path $keepConflictPath) -Force | Out-Null
+Set-Content -Path $keepConflictPath -Value 'x' -Encoding ASCII
+
+$loserPath = Join-Path $root 'n\loser.flac'
+New-Item -ItemType Directory -Path (Split-Path $loserPath) -Force | Out-Null
+$originalContent = 'original-content-h-conflict-12345'
+Set-Content -Path $loserPath -Value $originalContent -Encoding ASCII -NoNewline
+
+# First apply quarantines the loser normally (no conflict yet).
+& (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root -Apply -LogCsv $log | Out-Null
+$quarantinedPath = Join-Path ($root + '-quarantine') 'n\loser.flac'
+Assert (Test-Path $quarantinedPath) 'conflict: loser quarantined on first apply'
+Assert (-not (Test-Path $loserPath)) 'conflict: loser gone from root after first apply'
+
+# Simulate the file reappearing at the same root path with DIFFERENT content
+# (e.g. a re-scan turning up a new/different file at the same path) while the
+# original loser is still sitting in quarantine from the first apply.
+$differentContent = 'different-content-reappeared-67890'
+Set-Content -Path $loserPath -Value $differentContent -Encoding ASCII -NoNewline
+
+$re3 = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root -Apply -LogCsv $log
+$conflictEntries = @($re3 | Where-Object { $_.hash -eq 'h-conflict' -and $_.action -eq 'conflict-dest-exists' })
+Assert ($conflictEntries.Count -eq 1) 'conflict: conflict-dest-exists plan entry emitted'
+Assert (($conflictEntries[0].from -eq $loserPath) -and ($conflictEntries[0].to -eq $quarantinedPath)) 'conflict: plan entry from/to point at root path and quarantine path'
+Assert (Test-Path $loserPath) 'conflict: root file NOT moved - still present'
+Assert ((Get-Content -Path $loserPath -Raw) -eq $differentContent) 'conflict: root file content is the reappeared (different) content, untouched'
+Assert ((Get-Content -Path $quarantinedPath -Raw) -eq $originalContent) 'conflict: quarantined file content UNCHANGED (not clobbered by -Force)'
+
+# ── N2: dry-run with -LogCsv pointing into a not-yet-created directory must not throw ──
+$newLogDir = Join-Path $work 'newlogs\nested'
+$newLog = Join-Path $newLogDir 'plan.csv'
+Assert (-not (Test-Path $newLogDir)) 'logcsv-dir: target directory does not exist before dry-run'
+$dryPlan = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root -LogCsv $newLog
+Assert ($null -ne $dryPlan -and @($dryPlan).Count -gt 0) 'logcsv-dir: dry-run with missing LogCsv parent returns plan objects (does not throw)'
+Assert (Test-Path $newLog) 'logcsv-dir: CSV file created despite missing parent directory'
+
+# ── E: unknown/typo verdict must be surfaced, never silently dropped ──
+$manifest6 = @{ groups = @(
+    @{ hash='h-exact'; tier='exact'; keeper='R:\lib\a\t.flac'; paths=@('R:\lib\a\t.flac','R:\lib\dupe\t.flac') },
+    @{ hash='h-new';   tier='exact'; keeper='R:\lib\c\n.flac'; paths=@('R:\lib\c\n.flac','R:\lib\d\n.flac') },
+    @{ hash='h-exp';   tier='exact'; keeper='R:\lib\e\x.flac'; paths=@('R:\lib\e\x.flac','R:\lib\f\x.flac') },
+    @{ hash='h-solo';  tier='exact'; keeper='R:\lib\g\solo.flac'; paths=@('R:\lib\g\solo.flac','R:\lib\h\solo.flac') },
+    @{ hash='h-multi'; tier='exact'; keeper='R:\lib\i\keep.flac'; paths=@('R:\lib\i\keep.flac','R:\lib\j\loser1.flac','R:\lib\k\loser2.flac') },
+    @{ hash='h-conflict'; tier='exact'; keeper='R:\lib\m\keep.flac'; paths=@('R:\lib\m\keep.flac','R:\lib\n\loser.flac') },
+    @{ hash='h-badverdict'; tier='exact'; keeper='R:\lib\p\keep.flac'; paths=@('R:\lib\p\keep.flac','R:\lib\q\loser.flac') }
+) } | ConvertTo-Json -Depth 5
+Set-Content -Path $mPath -Value $manifest6 -Encoding UTF8
+
+$v7 = Get-Content $vPath -Raw | ConvertFrom-Json
+$v7.verdicts += @{ hash='h-badverdict'; tier='exact'; verdict='reslove'; keepPath='R:\lib\p\keep.flac' }
+$v7 | ConvertTo-Json -Depth 5 | Set-Content -Path $vPath -Encoding UTF8
+
+# Redirect the warning stream (3) into the success stream so it can be
+# inspected alongside the returned plan objects.
+$mixed = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $root 3>&1
+$warnRecords = @($mixed | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+$planObjects = @($mixed | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+$unknownEntry = @($planObjects | Where-Object { $_.hash -eq 'h-badverdict' -and $_.action -eq 'skip-unknown-verdict' })
+Assert ($unknownEntry.Count -eq 1) 'unknown-verdict: skip-unknown-verdict plan entry emitted for bad verdict value'
+Assert ($null -eq $unknownEntry[0].from -and $null -eq $unknownEntry[0].to) 'unknown-verdict: plan entry carries null from/to (no path to act on)'
+Assert (($warnRecords.Count -ge 1) -and ($warnRecords[0].Message -like '*h-badverdict*') -and ($warnRecords[0].Message -like '*reslove*')) 'unknown-verdict: warning names the offending hash and the bad verdict value'
 
 Write-Host ''
 if ($script:failures -gt 0) { Write-Host "$($script:failures) FAILURES" -ForegroundColor Red; exit 1 }
