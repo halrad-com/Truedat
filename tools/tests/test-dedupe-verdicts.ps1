@@ -42,6 +42,31 @@ Assert (($v2.verdicts | Where-Object { $_.hash -eq 'h-exact' }).verdict -eq 'exp
 Assert ((@($v2.verdicts | Where-Object { $_.hash -eq 'h-new' }).Count) -eq 1) 'merge: new group appended'
 Assert ((@($v2.verdicts | Where-Object { $_.hash -eq 'h-prob' }).Count) -eq 1) 'merge: vanished hash kept as history'
 
+# ── Task 2: apply dry-run ──
+$root = Join-Path $work 'lib'
+foreach ($rel in 'a\t.flac','dupe\t.flac','b\t.mp3','b\t.flac','c\n.flac') {
+    $p = Join-Path $root $rel
+    New-Item -ItemType Directory -Path (Split-Path $p) -Force | Out-Null
+    Set-Content -Path $p -Value 'x' -Encoding ASCII
+}
+# curate: h-exact resolve (keep a\t.flac); h-prob stays uncurated; h-new resolve but keeper missing on disk
+$v3 = Get-Content $vPath -Raw | ConvertFrom-Json
+foreach ($e in $v3.verdicts) {
+    if ($e.hash -eq 'h-exact') { $e.verdict = 'resolve'; $e.keepPath = 'R:\lib\a\t.flac' }
+    if ($e.hash -eq 'h-new')   { $e.verdict = 'resolve'; $e.keepPath = 'R:\lib\c\MISSING.flac' }
+}
+$v3 | ConvertTo-Json -Depth 5 | Set-Content -Path $vPath -Encoding UTF8
+Set-Content -Path $mPath -Value $manifest2 -Encoding UTF8
+
+$plan = & (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+            -ManifestRoot 'R:\lib' -Root $root
+$mv = @($plan | Where-Object { $_.action -eq 'move' })
+Assert ($mv.Count -eq 1) 'dryrun: exactly one planned move (h-exact loser)'
+Assert ($mv[0].from -eq (Join-Path $root 'dupe\t.flac')) 'dryrun: loser path re-rooted to target'
+Assert ($mv[0].to -eq (Join-Path ($root + '-quarantine') 'dupe\t.flac')) 'dryrun: quarantine mirrors relpath'
+Assert (@($plan | Where-Object { $_.action -eq 'skip-keeper-missing' }).Count -ge 1) 'dryrun: keeper missing on disk -> group skipped'
+Assert ((Test-Path (Join-Path $root 'dupe\t.flac'))) 'dryrun: no file moved without -Apply'
+
 Write-Host ''
 if ($script:failures -gt 0) { Write-Host "$($script:failures) FAILURES" -ForegroundColor Red; exit 1 }
 Write-Host 'ALL PASS'; exit 0
