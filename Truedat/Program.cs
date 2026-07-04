@@ -968,7 +968,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
+                Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -2031,7 +2031,7 @@ namespace Truedat
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-                Console.WriteLine("  --duplicates [path] Read-only: list files that share audio (by audioStreamSha256), same-folder vs cross-folder -> mbxmoods-duplicates.csv");
+                Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
@@ -5310,6 +5310,10 @@ namespace Truedat
                 .ThenBy(g => g.Scope == "same-folder" ? 0 : 1)
                 .ThenBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase)
                 .ToList();
+            // Sequential 1-based id, assigned once here so the CSV writer and the JSON
+            // writer (WriteDuplicatesJson) reference the same group numbering instead of
+            // keeping two independent counters over the same ordered list.
+            for (int gi = 0; gi < groups.Count; gi++) groups[gi].Id = gi + 1;
 
             return (groups, noHash, noFeatures);
         }
@@ -5339,54 +5343,58 @@ namespace Truedat
 
             if (groups.Count == 0)
             {
-                Console.WriteLine($"No duplicate audio across {tracks.Count:N0} entries"
-                    + (noHash > 0 ? $" ({noHash:N0} had no audioStreamSha256; {noFeatures:N0} lacked features for the probable tier)." : "."));
-                return 0;
+                Console.WriteLine($"No duplicate audio across {tracks.Count:N0} entries.");
+                if (noHash > 0) Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't join the exact tier)");
+                if (noFeatures > 0) Console.WriteLine($"  ({noFeatures:N0} entries lacked mfcc/bpm/key/duration and couldn't join the probable tier)");
             }
-
-            int exactCount = groups.Count(g => g.Tier == "exact");
-            int probableCount = groups.Count - exactCount;
-            int redundant = groups.Sum(g => g.Paths.Count - 1);
-            Console.WriteLine($"  {exactCount:N0} exact groups + {probableCount:N0} probable groups, {redundant:N0} redundant copies");
-            if (noHash > 0) Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't join the exact tier)");
-            if (noFeatures > 0) Console.WriteLine($"  ({noFeatures:N0} entries lacked mfcc/bpm/key/duration and couldn't join the probable tier)");
-
-            const int cap = 40;
-            void Dump(string header, List<DupGroup> gs)
+            else
             {
-                if (gs.Count == 0) return;
-                Console.WriteLine();
-                Console.WriteLine($"  {header} ({gs.Count}):");
-                int shown = 0;
-                foreach (var g in gs)
-                {
-                    if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
-                    Console.WriteLine($"    [{(g.Tier == "exact" ? g.Key.Substring(0, Math.Min(12, g.Key.Length)) : "probable")}]");
-                    foreach (var p in g.Paths)
-                        Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{Linkify(p)}");
-                    shown++;
-                }
-            }
-            Dump("EXACT, same folder — byte-identical audio, usually accidental", groups.Where(g => g.Tier == "exact" && g.Scope == "same-folder").ToList());
-            Dump("EXACT, different folders — byte-identical audio, usually intentional", groups.Where(g => g.Tier == "exact" && g.Scope == "cross-folder").ToList());
-            Dump("PROBABLE, same folder — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "same-folder").ToList());
-            Dump("PROBABLE, different folders — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "cross-folder").ToList());
+                int exactCount = groups.Count(g => g.Tier == "exact");
+                int probableCount = groups.Count - exactCount;
+                int redundant = groups.Sum(g => g.Paths.Count - 1);
+                Console.WriteLine($"  {exactCount:N0} exact groups + {probableCount:N0} probable groups, {redundant:N0} redundant copies");
+                if (noHash > 0) Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't join the exact tier)");
+                if (noFeatures > 0) Console.WriteLine($"  ({noFeatures:N0} entries lacked mfcc/bpm/key/duration and couldn't join the probable tier)");
 
+                const int cap = 40;
+                void Dump(string header, List<DupGroup> gs)
+                {
+                    if (gs.Count == 0) return;
+                    Console.WriteLine();
+                    Console.WriteLine($"  {header} ({gs.Count}):");
+                    int shown = 0;
+                    foreach (var g in gs)
+                    {
+                        if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
+                        Console.WriteLine($"    [{(g.Tier == "exact" ? g.Key.Substring(0, Math.Min(12, g.Key.Length)) : "probable")}]");
+                        foreach (var p in g.Paths)
+                            Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{Linkify(p)}");
+                        shown++;
+                    }
+                }
+                Dump("EXACT, same folder — byte-identical audio, usually accidental", groups.Where(g => g.Tier == "exact" && g.Scope == "same-folder").ToList());
+                Dump("EXACT, different folders — byte-identical audio, usually intentional", groups.Where(g => g.Tier == "exact" && g.Scope == "cross-folder").ToList());
+                Dump("PROBABLE, same folder — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "same-folder").ToList());
+                Dump("PROBABLE, different folders — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "cross-folder").ToList());
+            }
+
+            // Writer tail: always runs, even with zero groups. A prior run's stale
+            // mbxmoods-duplicates.{csv,json} must not linger — a consumer needs to be
+            // able to tell "clean library" (freshly-written, empty groups) from
+            // "report never ran" (file missing / from an old scan).
             var outDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
             var csvPath = Path.Combine(outDir, "mbxmoods-duplicates.csv");
             string Csv(string? v) => "\"" + (v ?? "").Replace("\"", "\"\"") + "\"";
             try
             {
                 var lines = new List<string> { "group,tier,scope,hash,path,artist,title,keeper" };
-                int gi = 0;
                 foreach (var g in groups)
                 {
-                    gi++;
                     foreach (var p in g.Paths)
                     {
                         tracks.TryGetValue(p, out var e);
                         bool keep = string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase);
-                        lines.Add($"{gi},{g.Tier},{g.Scope},{Csv(g.Key)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)},{(keep ? "true" : "")}");
+                        lines.Add($"{g.Id},{g.Tier},{g.Scope},{Csv(g.Key)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)},{(keep ? "true" : "")}");
                     }
                 }
                 File.WriteAllLines(csvPath, lines, Encoding.UTF8);
@@ -5476,12 +5484,10 @@ namespace Truedat
             jw.WriteNumber("noFeatures", noFeatures);
             jw.WriteEndObject();
             jw.WriteStartArray("groups");
-            int id = 0;
             foreach (var g in groups)
             {
-                id++;
                 jw.WriteStartObject();
-                jw.WriteNumber("id", id);
+                jw.WriteNumber("id", g.Id);
                 jw.WriteString("tier", g.Tier);
                 jw.WriteString("scope", g.Scope);
                 jw.WriteString("key", g.Key);
@@ -5514,6 +5520,7 @@ namespace Truedat
         /// (audioStreamSha256) or "probable" (quantized-feature candidate key).</summary>
         internal sealed class DupGroup
         {
+            public int Id;
             public string Tier = "exact";
             public string Scope = "";
             public string Key = "";
@@ -6513,6 +6520,20 @@ namespace Truedat
 
                 Assert(grpNoHash == 3, $"grouping: noHash counts entries without audioStreamSha256 (got {grpNoHash})");
                 Assert(grpNoFeatures == 0, $"grouping: all synthetic entries have valid candidate-key features (got {grpNoFeatures})");
+
+                // Sequential id: assigned once in BuildDuplicateGroups, shared by the CSV
+                // and JSON writers instead of two independent counters over the same list.
+                Assert(grpGroups.Select(g => g.Id).SequenceEqual(Enumerable.Range(1, grpGroups.Count)),
+                    $"grouping: ids are sequential 1-based in output order (got [{string.Join(",", grpGroups.Select(g => g.Id))}])");
+
+                // Zero-group / empty-input contract: an empty catalog must still produce a
+                // well-formed (empty) grouping result, not throw — this is what lets
+                // RunDuplicates write an empty-but-valid mbxmoods-duplicates.json/.csv
+                // instead of leaving a stale prior report on disk.
+                var emptyTracks = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                var (emptyGroups, emptyNoHash, emptyNoFeatures) = BuildDuplicateGroups(emptyTracks);
+                Assert(emptyGroups.Count == 0, $"grouping: empty input -> zero groups (got {emptyGroups.Count})");
+                Assert(emptyNoHash == 0 && emptyNoFeatures == 0, "grouping: empty input -> zero skip counts");
             }
 
             Console.WriteLine(failures == 0
