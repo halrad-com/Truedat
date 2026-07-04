@@ -5229,20 +5229,28 @@ namespace Truedat
             return string.CompareOrdinal(pb, pa);          // deterministic
         }
 
-        /// <summary>Read-only duplicate-audio report. Groups mbxmoods.json entries by
-        /// audioStreamSha256 (content identity — same audio regardless of tags or path)
-        /// and lists every group with 2+ members. Splits them into "same folder"
-        /// (usually accidental — e.g. tagging software renamed a file and orphaned the
-        /// old copy, "01 Track" vs "1-01 Track") and "different folders" (usually
-        /// intentional — one track legitimately on two albums). No judgement is applied
-        /// and nothing is modified; the console + CSV just give the info to decide.
-        /// Entries with no audioStreamSha256 can't be compared and are counted-but-skipped.</summary>
+        /// <summary>Read-only duplicate-audio report, two tiers. Tier 1 ("exact") groups
+        /// mbxmoods.json entries by audioStreamSha256 — content identity, same audio
+        /// regardless of tags or path. Tier 2 ("probable") takes whatever's left over
+        /// (not already in an exact group) and groups by the quantized-feature candidate
+        /// key from <see cref="BuildDupCandidateKey"/> — catches cross-encode duplicates
+        /// (e.g. FLAC vs MP3 of the same track) that don't share a byte-identical hash;
+        /// these are recall-best-effort candidates for a human to confirm, not certainty.
+        /// Both tiers split into "same folder" (usually accidental — e.g. tagging
+        /// software renamed a file and orphaned the old copy, "01 Track" vs "1-01 Track")
+        /// and "different folders" (usually intentional — one track legitimately on two
+        /// albums). Each group carries a recommended keeper (<see cref="PickKeeper"/>),
+        /// marked with "keep " in the console dump. No judgement is applied and nothing
+        /// is modified; the console + CSV just give the info to decide. Entries with no
+        /// audioStreamSha256 can't join the exact tier; entries missing mfcc/bpm/key/
+        /// duration can't join the probable tier — both are counted-but-skipped.</summary>
         static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
         {
-            Console.WriteLine("=== Duplicate Audio (by audioStreamSha256) ===");
+            Console.WriteLine("=== Duplicate Audio ===");
             Console.WriteLine($"Moods file: {moodsPath}");
             Console.WriteLine();
 
+            // ---- Tier 1: exact (audioStreamSha256) ----
             var byHash = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             int noHash = 0;
             foreach (var kv in tracks)
@@ -5252,37 +5260,61 @@ namespace Truedat
                 if (!byHash.TryGetValue(sha!, out var list)) { list = new List<string>(); byHash[sha!] = list; }
                 list.Add(kv.Key);
             }
+            var exactGroups = byHash.Where(g => g.Value.Count > 1).ToList();
+            var inExact = new HashSet<string>(exactGroups.SelectMany(g => g.Value), StringComparer.OrdinalIgnoreCase);
 
-            var groups = byHash
-                .Where(g => g.Value.Count > 1)
-                .Select(g => (Hash: g.Key, Paths: g.Value.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList()))
+            // ---- Tier 2: probable (quantized-feature candidate key), over entries not
+            // already claimed by an exact group. No-sha entries are still eligible here. ----
+            var byKey = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            int noFeatures = 0;
+            foreach (var kv in tracks)
+            {
+                if (inExact.Contains(kv.Key)) continue;
+                var key = BuildDupCandidateKey(kv.Value);
+                if (key == null) { noFeatures++; continue; }
+                if (!byKey.TryGetValue(key, out var list)) { list = new List<string>(); byKey[key] = list; }
+                list.Add(kv.Key);
+            }
+            var probableGroups = byKey.Where(g => g.Value.Count > 1).ToList();
+
+            // ---- Unified group records: keeper + scope, deterministic order ----
+            string DirOf(string p) { try { return Path.GetDirectoryName(p) ?? ""; } catch { return ""; } }
+            DupGroup Build(string tier, string key, List<string> paths)
+            {
+                var ordered = paths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+                bool same = ordered.Select(DirOf).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1;
+                return new DupGroup
+                {
+                    Tier = tier,
+                    Scope = same ? "same-folder" : "cross-folder",
+                    Key = tier == "exact" ? key.Substring(0, Math.Min(16, key.Length)) : key,
+                    Paths = ordered,
+                    Keeper = PickKeeper(ordered, p => tracks.TryGetValue(p, out var e) ? e : null),
+                };
+            }
+            var groups = exactGroups.Select(g => Build("exact", g.Key, g.Value))
+                .Concat(probableGroups.Select(g => Build("probable", g.Key, g.Value)))
+                .OrderBy(g => g.Tier == "exact" ? 0 : 1)
+                .ThenBy(g => g.Scope == "same-folder" ? 0 : 1)
+                .ThenBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             if (groups.Count == 0)
             {
                 Console.WriteLine($"No duplicate audio across {tracks.Count:N0} entries"
-                    + (noHash > 0 ? $" ({noHash:N0} had no audioStreamSha256 and were skipped)." : "."));
+                    + (noHash > 0 ? $" ({noHash:N0} had no audioStreamSha256; {noFeatures:N0} lacked features for the probable tier)." : "."));
                 return 0;
             }
 
+            int exactCount = groups.Count(g => g.Tier == "exact");
+            int probableCount = groups.Count - exactCount;
             int redundant = groups.Sum(g => g.Paths.Count - 1);
-            int filesInvolved = groups.Sum(g => g.Paths.Count);
-
-            string DirOf(string p) { try { return Path.GetDirectoryName(p) ?? ""; } catch { return ""; } }
-            bool AllSameFolder((string Hash, List<string> Paths) g) =>
-                g.Paths.Select(DirOf).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1;
-
-            var sameFolder = groups.Where(AllSameFolder)
-                .OrderBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase).ToList();
-            var crossFolder = groups.Where(g => !AllSameFolder(g))
-                .OrderBy(g => g.Paths[0], StringComparer.OrdinalIgnoreCase).ToList();
-
-            Console.WriteLine($"  {groups.Count:N0} groups, {redundant:N0} redundant copies ({filesInvolved:N0} files share audio with at least one other)");
-            if (noHash > 0)
-                Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't be compared)");
+            Console.WriteLine($"  {exactCount:N0} exact groups + {probableCount:N0} probable groups, {redundant:N0} redundant copies");
+            if (noHash > 0) Console.WriteLine($"  ({noHash:N0} entries had no audioStreamSha256 and couldn't join the exact tier)");
+            if (noFeatures > 0) Console.WriteLine($"  ({noFeatures:N0} entries lacked mfcc/bpm/key/duration and couldn't join the probable tier)");
 
             const int cap = 40;
-            void Dump(string header, List<(string Hash, List<string> Paths)> gs)
+            void Dump(string header, List<DupGroup> gs)
             {
                 if (gs.Count == 0) return;
                 Console.WriteLine();
@@ -5291,13 +5323,16 @@ namespace Truedat
                 foreach (var g in gs)
                 {
                     if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
-                    Console.WriteLine($"    [{g.Hash.Substring(0, 12)}]");
-                    foreach (var p in g.Paths) Console.WriteLine($"      {p}");
+                    Console.WriteLine($"    [{(g.Tier == "exact" ? g.Key.Substring(0, Math.Min(12, g.Key.Length)) : "probable")}]");
+                    foreach (var p in g.Paths)
+                        Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{p}");
                     shown++;
                 }
             }
-            Dump("Same folder — usually accidental, cleanup candidates", sameFolder);
-            Dump("Different folders — usually intentional (same track on 2+ albums)", crossFolder);
+            Dump("EXACT, same folder — byte-identical audio, usually accidental", groups.Where(g => g.Tier == "exact" && g.Scope == "same-folder").ToList());
+            Dump("EXACT, different folders — byte-identical audio, usually intentional", groups.Where(g => g.Tier == "exact" && g.Scope == "cross-folder").ToList());
+            Dump("PROBABLE, same folder — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "same-folder").ToList());
+            Dump("PROBABLE, different folders — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "cross-folder").ToList());
 
             var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-duplicates.csv");
             string Csv(string? v) => "\"" + (v ?? "").Replace("\"", "\"\"") + "\"";
@@ -5305,16 +5340,15 @@ namespace Truedat
             {
                 var lines = new List<string> { "group,scope,hash,path,artist,title" };
                 int gi = 0;
-                foreach (var (scope, gs) in new[] { ("same-folder", sameFolder), ("cross-folder", crossFolder) })
-                    foreach (var g in gs)
+                foreach (var g in groups)
+                {
+                    gi++;
+                    foreach (var p in g.Paths)
                     {
-                        gi++;
-                        foreach (var p in g.Paths)
-                        {
-                            tracks.TryGetValue(p, out var e);
-                            lines.Add($"{gi},{scope},{g.Hash.Substring(0, 16)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
-                        }
+                        tracks.TryGetValue(p, out var e);
+                        lines.Add($"{gi},{g.Scope},{g.Key},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
                     }
+                }
                 File.WriteAllLines(csvPath, lines, Encoding.UTF8);
                 Console.WriteLine();
                 Console.WriteLine($"  Full list: {csvPath}");
@@ -5324,6 +5358,17 @@ namespace Truedat
                 Console.WriteLine($"  WARNING: could not write {csvPath}: {ex.Message}");
             }
             return 0;
+        }
+
+        /// <summary>One duplicate group in the --duplicates report. Tier: "exact"
+        /// (audioStreamSha256) or "probable" (quantized-feature candidate key).</summary>
+        sealed class DupGroup
+        {
+            public string Tier = "exact";
+            public string Scope = "";
+            public string Key = "";
+            public List<string> Paths = new List<string>();
+            public string Keeper = "";
         }
 
         /// <summary>
