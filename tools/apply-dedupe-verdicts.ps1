@@ -33,47 +33,53 @@ foreach ($g in $m.groups) {
     if ($e.verdict -ne 'resolve') { continue }
     $stats.resolve++
     $keep = Re-Root $e.keepPath
-    $present = @($g.paths | ForEach-Object { Re-Root $_ } | Where-Object { $_ -and (Test-Path $_) })
     if (-not $keep -or -not (Test-Path $keep)) {
         [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$e.keepPath; to=$null; action='skip-keeper-missing' })
         $stats.skipped++; continue
     }
-    # Check for already-moved files first (even if < 2 in root, losers may be in quarantine)
-    $movedCount = 0
+
+    # Classify every path in the group (including keeper) independently -
+    # presentInRoot / inQuarantine / absentBoth - so partial quarantine state
+    # (some losers already moved, others still sitting in root) never masks
+    # a loser that still needs to move.
+    $presentInRootCount = 0
+    $anyLoserInQuarantine = $false
+    $classified = New-Object System.Collections.ArrayList
     foreach ($p in $g.paths) {
         $tp = Re-Root $p
-        if (-not $tp -or $tp -eq $keep) { continue }
-        if (Test-Path $tp) { continue }  # still in root, will handle below
-        $rel = $tp.Substring(($Root.TrimEnd('\') + '\').Length)
-        $qp = Join-Path $QuarantineRoot $rel
-        if (Test-Path $qp) {
-            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$tp; to=$qp; action='skip-already-moved' })
-            $movedCount++
-            $stats.skipped++
+        if (-not $tp) { continue }
+        $isKeep = ($tp -eq $keep)
+        $inRoot = Test-Path $tp
+        if ($inRoot) { $presentInRootCount++ }
+        $qp = $null; $inQuarantine = $false
+        if (-not $isKeep) {
+            $rel = $tp.Substring(($Root.TrimEnd('\') + '\').Length)
+            $qp = Join-Path $QuarantineRoot $rel
+            $inQuarantine = Test-Path $qp
+            if ($inQuarantine) { $anyLoserInQuarantine = $true }
         }
+        [void]$classified.Add([pscustomobject]@{ tp=$tp; isKeep=$isKeep; inRoot=$inRoot; qp=$qp; inQuarantine=$inQuarantine })
     }
-    if ($movedCount -gt 0) { continue }  # All losers already moved, group done
 
-    if ($present.Count -lt 2) {
+    if ($presentInRootCount -lt 2 -and -not $anyLoserInQuarantine) {
         [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$keep; to=$null; action='skip-single-copy' })
         $stats.skipped++; continue
     }
-    foreach ($p in $g.paths) {
-        $tp = Re-Root $p
-        if (-not $tp -or $tp -eq $keep) { continue }
-        $rel = $tp.Substring(($Root.TrimEnd('\') + '\').Length)
-        $qp = Join-Path $QuarantineRoot $rel
-        if (-not (Test-Path $tp)) {
-            $action = 'skip-already-moved'
-            if (-not (Test-Path $qp)) { $stats.skipped++ }   # neither side: nothing to do, still log
-            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$tp; to=$qp; action=$action })
-            continue
-        }
-        [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$tp; to=$qp; action='move' })
-        $stats.moves++
-        if ($Apply) {
-            New-Item -ItemType Directory -Path (Split-Path $qp) -Force | Out-Null
-            Move-Item -LiteralPath $tp -Destination $qp
+
+    foreach ($c in $classified) {
+        if ($c.isKeep) { continue }
+        if ($c.inRoot) {
+            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$c.tp; to=$c.qp; action='move' })
+            $stats.moves++
+            if ($Apply) {
+                New-Item -ItemType Directory -Path (Split-Path $c.qp) -Force | Out-Null
+                Move-Item -LiteralPath $c.tp -Destination $c.qp -Force
+            }
+        } else {
+            # inQuarantine or absentBoth - either way there's nothing left in
+            # root to move; log it as already-moved to keep the audit trail.
+            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$c.tp; to=$c.qp; action='skip-already-moved' })
+            $stats.skipped++
         }
     }
 }
