@@ -6626,6 +6626,22 @@ namespace Truedat
                 finally { try { File.Delete(tmp); } catch { } }
             }
 
+            // --- single-pass wrapper: TagLib-unparseable file degrades to md5-only ---
+            {
+                var tmp = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.xyz");
+                try
+                {
+                    var junk = new byte[4096];
+                    for (int i = 0; i < junk.Length; i++) junk[i] = (byte)(i * 31 + 7);
+                    File.WriteAllBytes(tmp, junk);
+                    var expectMd5 = ComputeFileMd5(tmp);
+                    var (wMd5, wSha, wSrc) = ComputeFileMd5AndAudioSha(tmp, junk.Length, out _);
+                    Assert(wMd5 == expectMd5 && wMd5 != null, "wrapper on TagLib-unparseable file still yields fileMd5");
+                    Assert(wSha == null && wSrc == "", "wrapper on TagLib-unparseable file yields null sha, empty source");
+                }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9116,33 +9132,40 @@ namespace Truedat
         /// walks — same results, one read instead of two. Same fallback semantics as
         /// ComputeAudioStreamSha256FromFile: invalid invariant bounds → sha covers
         /// the whole file, source "whole-file".
+        /// TagLib parse failure degrades to md5-only (sha null) — never loses the MD5.
         /// </summary>
         static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error)
         {
             error = null;
+            long invStart = 0, invEnd = 0;   // stays invalid on TagLib failure → Core computes md5-only
+            string source = "invariant";
             try
             {
-                long invStart, invEnd;
                 using (var tfile = TagLib.File.Create(filePath))
                 {
                     invStart = tfile.InvariantStartPosition;
                     invEnd = tfile.InvariantEndPosition;
                 }
-                string source = "invariant";
                 if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
                 {
                     invStart = 0;
                     invEnd = fileSize;
                     source = "whole-file";
                 }
-                var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, invStart, invEnd, out error);
-                return (md5Hex, shaHex, shaHex != null ? source : "");
             }
             catch (Exception ex)
             {
+                // TagLib parse failure. Parity with the split helpers this replaced:
+                // ComputeAudioStreamSha256FromFile returned a null sha here, while
+                // ComputeFileMd5 (pure FileStream, no TagLib) still produced the MD5.
+                // Leave the bounds invalid so Core hashes md5-only.
                 error = ex.Message;
-                return (null, null, "");
+                invStart = 0;
+                invEnd = 0;
             }
+            var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, invStart, invEnd, out var coreErr);
+            if (coreErr != null) error = coreErr;
+            return (md5Hex, shaHex, shaHex != null ? source : "");
         }
 
         /// <summary>Core of the single-pass dual hash; separated from the TagLib
