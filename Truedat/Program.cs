@@ -6536,6 +6536,25 @@ namespace Truedat
                 Assert(emptyNoHash == 0 && emptyNoFeatures == 0, "grouping: empty input -> zero skip counts");
             }
 
+            // --- audioStreamSha256 known vector -------------------------------------
+            // FIPS-180 test vector: SHA-256("abc"). Guards the hash implementation —
+            // any swap of the underlying provider must keep producing standard SHA-256.
+            {
+                var tmp = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.bin");
+                try
+                {
+                    File.WriteAllBytes(tmp, new byte[] { (byte)'a', (byte)'b', (byte)'c' });
+                    var vec = ComputeAudioStreamSha256(tmp, 0, 3, out var shaErr);
+                    Assert(shaErr == null && vec == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                        $"SHA-256 known vector (got {vec ?? "null"})");
+                    // Region subsetting: hash of [1,3) == SHA-256("bc") (verified vector).
+                    var sub = ComputeAudioStreamSha256(tmp, 1, 3, out _);
+                    Assert(sub == "1e0bbd6c686ba050b8eb03ffeedc64fdc9d80947fce821abbe5d6dc8d252c5ac",
+                        $"SHA-256 region subset [1,3) == SHA-256(\"bc\") (got {sub ?? "null"})");
+                }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9020,7 +9039,7 @@ namespace Truedat
 
         /// <summary>
         /// Streaming SHA-256 of the audio region [invariantStart, invariantEnd).
-        /// Disk-bound; SHA-NI makes CPU cost negligible on modern hardware.
+        /// Disk-bound; SHA-NI makes CPU cost negligible on modern hardware (SHA256Cng — the default SHA256.Create() on net48 is managed-only).
         /// </summary>
         static string? ComputeAudioStreamSha256(string filePath, long invariantStart, long invariantEnd, out string? error)
         {
@@ -9033,7 +9052,11 @@ namespace Truedat
                     error = "empty audio region";
                     return null;
                 }
-                using var sha = SHA256.Create();
+                // SHA256Cng (CNG / bcrypt) uses SHA-NI on modern CPUs. SHA256.Create() on
+                // .NET Framework resolves to SHA256Managed — no hardware accel, ~5-10x
+                // slower, which made mass tag-edit rescans CPU-bound (observed 2026-07-04:
+                // drive at 10%, CPU pegged). Same algorithm, same output.
+                using var sha = new SHA256Cng();
                 using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
                 fs.Seek(invariantStart, SeekOrigin.Begin);
                 var buf = new byte[81920];
