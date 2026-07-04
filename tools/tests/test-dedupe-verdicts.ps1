@@ -164,6 +164,19 @@ Assert (-not (Test-Path $restoredPath)) 'multi-loser: loser2 gone from root afte
 Assert ((@($multiEntries | Where-Object { $_.action -eq 'skip-already-moved' -and $_.from -eq (Join-Path $root 'j\loser1.flac') }).Count) -eq 1) 'multi-loser: loser1 still reported skip-already-moved'
 Assert (Test-Path (Join-Path $root 'i\keep.flac')) 'multi-loser: keeper untouched'
 
+# ── Task 4: replay against a second root (prod simulation) ──
+$prod = Join-Path $work 'prodlib'
+foreach ($rel in 'a\t.flac','dupe\t.flac') {
+    $p = Join-Path $prod $rel
+    New-Item -ItemType Directory -Path (Split-Path $p) -Force | Out-Null
+    Set-Content -Path $p -Value 'x' -Encoding ASCII
+}
+& (Join-Path $tools 'apply-dedupe-verdicts.ps1') -Manifest $mPath -Verdicts $vPath `
+    -ManifestRoot 'R:\lib' -Root $prod -Apply | Out-Null
+Assert (-not (Test-Path (Join-Path $prod 'dupe\t.flac'))) 'replay: same sidecar resolves the loser under the prod root'
+Assert (Test-Path (Join-Path $prod 'a\t.flac')) 'replay: prod keeper untouched'
+Assert (Test-Path (Join-Path ($prod + '-quarantine') 'dupe\t.flac')) 'replay: prod quarantine mirrored'
+
 Write-Host ''
 if ($script:failures -gt 0) { Write-Host "$($script:failures) FAILURES" -ForegroundColor Red; exit 1 }
 Write-Host 'ALL PASS'; exit 0
