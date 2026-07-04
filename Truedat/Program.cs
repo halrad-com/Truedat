@@ -375,6 +375,10 @@ namespace Truedat
         internal static bool _noBitUsage   { get => _stageOpts.NoBitUsage;   set => _stageOpts.NoBitUsage   = value; }
         internal static bool _noHfAnalysis { get => _stageOpts.NoHfAnalysis; set => _stageOpts.NoHfAnalysis = value; }
 
+        // Tier-1.5 tags-only quick cache (head-64k evidence check on mtime drift).
+        // Default ON; --no-quick-cache forces the full audio-hash tier instead.
+        internal static bool _quickCache = true;
+
         static bool _losersM3u = false;
         static string? _losersM3uPath = null;
 
@@ -821,6 +825,7 @@ namespace Truedat
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
+                else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "no-bitusage") _noBitUsage = true;
                 else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
@@ -981,6 +986,8 @@ namespace Truedat
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
                 Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --no-quick-cache    Disable the tags-only quick cache tier (head-64k check);");
+                Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
@@ -1253,24 +1260,51 @@ namespace Truedat
                             afAudioStreamSha256 = trackEntry.AudioStreamSha256;
                             afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
                         }
-                        // Tier 2: path-sha (mtime drifted, audio bytes unchanged).
-                        // Body reads go through the staged copy.
-                        else if (!string.IsNullOrEmpty(afEx.AudioStreamSha256))
+                        else
                         {
-                            var afStagedPath = EnsureStagedSrc();
-                            var recompSha = EnsureBodyHashes().sha;
-                            if (!string.IsNullOrEmpty(recompSha)
-                                && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                            // Tier 1.5: quick tags-only check — ~64 KB read on the ORIGINAL
+                            // path (no staging: copying the whole file would defeat the point).
+                            // Evidence-based: head-64k + audio props must match the stored
+                            // fingerprint; any doubt falls through to the full-SHA tier below.
+                            // fileMd5 is cleared, not recomputed — the tag write invalidated
+                            // it and recomputing costs the full read this tier avoids
+                            // (--verify --backfill refills it).
+                            FingerprintV1? afQuickFp = null;
+                            if (_quickCache && afEx.FingerprintV1 != null)
                             {
-                                var refreshedMd5 = EnsureBodyHashes().md5;
-                                var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
-                                var freshTags = ExtractFileTags(afStagedPath);
-                                trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
-                                    freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                                afHitTag = "cached·sha";
-                                afFingerprintV1 = trackEntry.FingerprintV1;
-                                afAudioStreamSha256 = trackEntry.AudioStreamSha256;
-                                afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                                afQuickFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                                if (afQuickFp != null && IsTagsOnlyChange(afQuickFp, afEx.FingerprintV1))
+                                {
+                                    var freshTags = ExtractFileTags(analyzeFilePath!);
+                                    trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                        freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, null, afQuickFp);
+                                    trackEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                    afHitTag = "cached·head";
+                                    afFingerprintV1 = trackEntry.FingerprintV1;
+                                    afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                                    afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                                }
+                            }
+
+                            // Tier 2: path-sha (mtime drifted, audio bytes unchanged).
+                            // Body reads go through the staged copy.
+                            if (trackEntry == null && !string.IsNullOrEmpty(afEx.AudioStreamSha256))
+                            {
+                                var afStagedPath = EnsureStagedSrc();
+                                var recompSha = EnsureBodyHashes().sha;
+                                if (!string.IsNullOrEmpty(recompSha)
+                                    && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var refreshedMd5 = EnsureBodyHashes().md5;
+                                    var refreshedFp = afQuickFp ?? ComputeFingerprintV1(afStagedPath, afFileSize, out _);
+                                    var freshTags = ExtractFileTags(afStagedPath);
+                                    trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                        freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                                    afHitTag = "cached·sha";
+                                    afFingerprintV1 = trackEntry.FingerprintV1;
+                                    afAudioStreamSha256 = trackEntry.AudioStreamSha256;
+                                    afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
+                                }
                             }
                         }
                     }
@@ -1685,6 +1719,7 @@ namespace Truedat
                 var flProcessed = 0;
                 var flAnalyzed = 0;
                 var flCachedByMtime = 0;
+                var flCachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k says tags-only
                 var flCachedByShaPath = 0;
                 var flCachedByMd5Cross = 0;
                 var flCachedByShaCross = 0;
@@ -1798,6 +1833,34 @@ namespace Truedat
                                     return;
                                 }
 
+                                // Tier 1.5: quick tags-only check — ~64 KB read on the ORIGINAL
+                                // path (no staging: copying the whole file would defeat the point).
+                                // Evidence-based: head-64k + audio props must match the stored
+                                // fingerprint; any doubt falls through to the full-SHA tier below.
+                                // fileMd5 is cleared, not recomputed — the tag write invalidated
+                                // it and recomputing costs the full read this tier avoids
+                                // (--verify --backfill refills it).
+                                FingerprintV1? flQuickFp = null;
+                                if (_quickCache && fEx.FingerprintV1 != null)
+                                {
+                                    flQuickFp = ComputeFingerprintV1(filePath, flFileSize, out _);
+                                    if (flQuickFp != null && IsTagsOnlyChange(flQuickFp, fEx.FingerprintV1))
+                                    {
+                                        var freshTags = ExtractFileTags(filePath);
+                                        var flHeadEntry = RebuildCacheEntryFromTags(
+                                            fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                            freshTags.Genre, fullPath, currentLastMod, null, flQuickFp);
+                                        flHeadEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                        var flHeadSmfmTag = ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                        if (flHeadSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
+                                        flMoodsTracks[fullPath] = flHeadEntry;
+                                        Interlocked.Increment(ref flProcessed);
+                                        Interlocked.Increment(ref flCachedByHeadPath);
+                                        Console.Error.WriteLine($"[CACHED·head{flHeadSmfmTag}] {Path.GetFileName(filePath)}");
+                                        return;
+                                    }
+                                }
+
                                 // Tier 2: path-sha hit (mtime drifted but audio bytes unchanged).
                                 // Body reads go through the staged copy.
                                 if (!string.IsNullOrEmpty(fEx.AudioStreamSha256))
@@ -1808,7 +1871,7 @@ namespace Truedat
                                         && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                                     {
                                         var refreshedMd5 = EnsureBodyHashes().md5;
-                                        var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
+                                        var refreshedFp = flQuickFp ?? ComputeFingerprintV1(flStagedPath, flFileSize, out _);
                                         var freshTags = ExtractFileTags(flStagedPath);
                                         var flShaPathEntry = RebuildCacheEntryFromTags(
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
@@ -1972,7 +2035,7 @@ namespace Truedat
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                 }
 
-                int flCachedTotal = flCachedByMtime + flCachedByShaPath + flCachedByMd5Cross + flCachedByShaCross;
+                int flCachedTotal = flCachedByMtime + flCachedByHeadPath + flCachedByShaPath + flCachedByMd5Cross + flCachedByShaCross;
 
                 // Summary JSON on stdout
                 if (jsonOutput || flFailed > 0)
@@ -1983,6 +2046,7 @@ namespace Truedat
                         analyzed = flAnalyzed,
                         cached = flCachedTotal,
                         cachedByMtime = flCachedByMtime,
+                        cachedByHeadPath = flCachedByHeadPath,
                         cachedByShaPath = flCachedByShaPath,
                         cachedByMd5Cross = flCachedByMd5Cross,
                         cachedByShaCross = flCachedByShaCross,
@@ -2070,6 +2134,8 @@ namespace Truedat
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
                 Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --no-quick-cache    Disable the tags-only quick cache tier (head-64k check);");
+                Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
@@ -2277,6 +2343,7 @@ namespace Truedat
             if (moodShaIndex != null)
                 Console.WriteLine($"  SHA index:  {moodShaIndex.Count} entries available for tag-edit / cross-machine matching");
             int crossPathMoods = 0;
+            int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
@@ -2451,7 +2518,42 @@ namespace Truedat
                                 }
                                 else
                                 {
-                                    // Mtime mismatched. Try the audioStreamSha256 path-tier:
+                                    // Mtime mismatched.
+                                    // Tier 1.5: quick tags-only check — ~64 KB read on the
+                                    // ORIGINAL path (no staging: copying the whole file would
+                                    // defeat the point). Evidence-based: head-64k + audio props
+                                    // must match the stored fingerprint; any doubt falls through
+                                    // to the full-SHA tier below. fileMd5 is cleared, not
+                                    // recomputed — the tag write invalidated it and recomputing
+                                    // costs the full read this tier avoids (--verify --backfill
+                                    // refills it).
+                                    FingerprintV1? msQuickFp = null;
+                                    if (_quickCache
+                                        && existing.FingerprintV1 != null
+                                        && existing.Features.DynamicRange.HasValue
+                                        && existing.Features.LoudnessMomentary.HasValue)
+                                    {
+                                        if (msSourceSize == 0)
+                                            try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                        if (msSourceSize > 0)
+                                        {
+                                            msQuickFp = ComputeFingerprintV1(t.Location, msSourceSize, out _);
+                                            if (msQuickFp != null && IsTagsOnlyChange(msQuickFp, existing.FingerprintV1))
+                                            {
+                                                var headEntry = RebuildCacheEntry(existing, t, currentLastMod, null, msQuickFp);
+                                                headEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                                var headSmfmTag = ApplySmfmInPlace(headEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
+                                                allTracks[t.Location] = headEntry;
+                                                Interlocked.Increment(ref cachedCount);
+                                                Interlocked.Increment(ref cachedByHeadPath);
+                                                Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·head{headSmfmTag})");
+                                                return;
+                                            }
+                                        }
+                                    }
+
+                                    // Try the audioStreamSha256 path-tier:
                                     // if the audio bytes are unchanged (only tags / container
                                     // metadata drifted), reuse Essentia features and refresh
                                     // identity fields the tag edit invalidated. Body reads
@@ -2472,7 +2574,7 @@ namespace Truedat
                                                 // fileMd5 + fingerprint.v1 (both tag-affected),
                                                 // reuse everything else.
                                                 var refreshedMd5 = EnsureBodyHashes().md5;
-                                                var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
+                                                var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
@@ -2794,6 +2896,8 @@ namespace Truedat
             Console.WriteLine($"  Cached:     {cachedCount}");
             if (crossPathMoods > 0)
                 Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
+            if (cachedByHeadPath > 0)
+                Console.WriteLine($"  Head-quick: {cachedByHeadPath}  (of {cachedCount} cached: tags-only via audioHead64kMd5)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
             if (shaBackfilled > 0)
