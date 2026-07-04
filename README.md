@@ -121,6 +121,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                             all       (default) identity + features
                             identity  fast tier only (TagLib + cheap file IO)
                             features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)
+  --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
+                          (byte-identical audioStreamSha256) plus probable cross-encode
+                          candidates (quantized feature match), each with a recommended
+                          keeper. Writes mbxmoods-duplicates.csv + mbxmoods-duplicates.json.
+  --losers-m3u [path]     With --duplicates: write non-keeper members to an .m3u8 playlist
+                          for review/removal inside MusicBee. Path must end in .m3u or .m3u8;
+                          default is mbxmoods-duplicate-losers.m3u8 next to the moods file.
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
@@ -229,6 +236,12 @@ truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.fl
 
 REM Same, but force a specific output rate and bit depth
 truedat.exe --transcode "C:\Music\track.opus" --transcode-out "C:\Music\track.flac" --sample-rate 44100 --bit-depth 16
+
+REM Find and clean duplicate audio
+truedat.exe --duplicates "D:\MusicBee\Library" --losers-m3u
+REM Review the report (exact = byte-identical, safe calls; probable = feature-match
+REM candidates, confirm before acting), then load mbxmoods-duplicate-losers.m3u8 in
+REM MusicBee to review and delete the redundant copies from inside the player.
 
 REM Two-machine same-library scan: each box does its own deterministic shard
 truedat.exe "iTunes Music Library.xml" --chunk 1/2     REM machine A

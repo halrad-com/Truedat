@@ -103,6 +103,10 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 
 Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR.
 
+## Duplicates report
+
+`--duplicates [path]` (read-only, JSON-only — works on metadata mirrors) groups mbxmoods.json entries in two tiers: `exact` (byte-identical `audioStreamSha256`) and `probable` (quantized-feature candidate key over mfcc/bpm/key/mode/duration — cross-encode candidates, human confirms). Each group marks one recommended `keeper` (lossless > bitDepth > sampleRate > bitrate > size > shortest path). Outputs: console (same/cross-folder split per tier), `mbxmoods-duplicates.csv`, and `mbxmoods-duplicates.json` — the machine contract an interactive surface (MBXHub /duplicates page) consumes, tolerant-reader pattern like mbxmoods.json itself. `--losers-m3u [path]` additionally writes non-keepers to an .m3u8 (path must end in .m3u or .m3u8; default mbxmoods-duplicate-losers.m3u8 next to the moods file) for review/removal inside MusicBee. Truedat never deletes or modifies files.
+
 ## Conventions
 
 - **Offline-first.** No runtime network calls. No CDN-fetched assets, no cloud dependencies. Truedat reads files, runs subprocess tools, writes files.
