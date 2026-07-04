@@ -6555,6 +6555,36 @@ namespace Truedat
                 finally { try { File.Delete(tmp); } catch { } }
             }
 
+            // --- single-pass MD5+SHA equals the two-pass helpers ---------------------
+            {
+                var tmp = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.bin");
+                try
+                {
+                    // Deterministic pseudo-random 200 000 bytes; invariant region [1000, 150000).
+                    var data = new byte[200000];
+                    uint seed = 0x2fa1d05u;
+                    for (int i = 0; i < data.Length; i++) { seed = seed * 1664525u + 1013904223u; data[i] = (byte)(seed >> 24); }
+                    File.WriteAllBytes(tmp, data);
+                    long invS = 1000, invE = 150000;
+
+                    var expectMd5 = ComputeFileMd5(tmp);
+                    var expectSha = ComputeAudioStreamSha256(tmp, invS, invE, out _);
+                    var (gotMd5, gotSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, invS, invE, out var cErr);
+                    Assert(cErr == null && gotMd5 == expectMd5, "single-pass fileMd5 matches ComputeFileMd5");
+                    Assert(gotSha == expectSha, "single-pass audioSha matches ComputeAudioStreamSha256");
+
+                    // Degenerate region (invEnd <= invStart) → sha null, md5 still produced.
+                    var (dMd5, dSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, 5000, 5000, out _);
+                    Assert(dMd5 == expectMd5 && dSha == null, "single-pass degenerate region: md5 ok, sha null");
+
+                    // Region at file tail (invEnd == fileSize).
+                    var expTail = ComputeAudioStreamSha256(tmp, 0, data.Length, out _);
+                    var (_, tailSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, 0, data.Length, out _);
+                    Assert(tailSha == expTail, "single-pass full-range sha matches");
+                }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9034,6 +9064,88 @@ namespace Truedat
             {
                 error = ex.Message;
                 return (null, "");
+            }
+        }
+
+        /// <summary>
+        /// One read pass over the whole file feeding two digests at once: whole-file
+        /// MD5 and SHA-256 of the audio region [InvariantStartPosition,
+        /// InvariantEndPosition). Replaces the back-to-back full reads
+        /// (ComputeAudioStreamSha256FromFile + ComputeFileMd5) in the cache tier
+        /// walks — same results, one read instead of two. Same fallback semantics as
+        /// ComputeAudioStreamSha256FromFile: invalid invariant bounds → sha covers
+        /// the whole file, source "whole-file".
+        /// </summary>
+        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error)
+        {
+            error = null;
+            try
+            {
+                long invStart, invEnd;
+                using (var tfile = TagLib.File.Create(filePath))
+                {
+                    invStart = tfile.InvariantStartPosition;
+                    invEnd = tfile.InvariantEndPosition;
+                }
+                string source = "invariant";
+                if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
+                {
+                    invStart = 0;
+                    invEnd = fileSize;
+                    source = "whole-file";
+                }
+                var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, invStart, invEnd, out error);
+                return (md5Hex, shaHex, shaHex != null ? source : "");
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return (null, null, "");
+            }
+        }
+
+        /// <summary>Core of the single-pass dual hash; separated from the TagLib
+        /// bounds lookup so the self-test can drive arbitrary regions.</summary>
+        static (string? fileMd5, string? audioSha) ComputeFileMd5AndAudioShaCore(string filePath, long fileSize, long invariantStart, long invariantEnd, out string? error)
+        {
+            error = null;
+            try
+            {
+                bool shaValid = invariantEnd > invariantStart && invariantStart >= 0 && invariantEnd <= fileSize;
+                using var md5 = MD5.Create();
+                // SHA256Cng: SHA-NI hardware accel; SHA256.Create() is managed-only on net48.
+                using var sha = new SHA256Cng();
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
+                var buf = new byte[81920];
+                long pos = 0;
+                int r;
+                while ((r = fs.Read(buf, 0, buf.Length)) > 0)
+                {
+                    md5.TransformBlock(buf, 0, r, null, 0);
+                    if (shaValid)
+                    {
+                        // Overlap of [pos, pos+r) with [invariantStart, invariantEnd).
+                        long s = Math.Max(pos, invariantStart);
+                        long e = Math.Min(pos + r, invariantEnd);
+                        if (e > s)
+                            sha.TransformBlock(buf, (int)(s - pos), (int)(e - s), null, 0);
+                    }
+                    pos += r;
+                }
+                md5.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                string md5Hex = HexLower(md5.Hash!);
+                string? shaHex = null;
+                if (shaValid)
+                {
+                    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    shaHex = HexLower(sha.Hash!);
+                }
+                return (md5Hex, shaHex);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return (null, null);
             }
         }
 
