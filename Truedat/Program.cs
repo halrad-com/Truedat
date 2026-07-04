@@ -5245,33 +5245,6 @@ namespace Truedat
             return string.CompareOrdinal(pb, pa);          // deterministic
         }
 
-        /// <summary>Read-only duplicate-audio report, two tiers. Tier 1 ("exact") groups
-        /// mbxmoods.json entries by audioStreamSha256 — content identity, same audio
-        /// regardless of tags or path. Tier 2 ("probable") takes whatever's left over
-        /// (not already in an exact group) and groups by the quantized-feature candidate
-        /// key from <see cref="BuildDupCandidateKey"/> — catches cross-encode duplicates
-        /// (e.g. FLAC vs MP3 of the same track) that don't share a byte-identical hash;
-        /// these are recall-best-effort candidates for a human to confirm, not certainty.
-        /// Both tiers split into "same folder" (usually accidental — e.g. tagging
-        /// software renamed a file and orphaned the old copy, "01 Track" vs "1-01 Track")
-        /// and "different folders" (usually intentional — one track legitimately on two
-        /// albums). Each group carries a recommended keeper (<see cref="PickKeeper"/>),
-        /// marked with "keep " in the console dump. No judgement is applied and nothing
-        /// is modified; the console + CSV just give the info to decide. Entries with no
-        /// audioStreamSha256 can't join the exact tier; entries missing mfcc/bpm/key/
-        /// duration can't join the probable tier — both are counted-but-skipped.</summary>
-        static string Linkify(string path)
-        {
-            if (Console.IsOutputRedirected) return path;
-            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"))) return path;
-            try
-            {
-                var uri = new Uri(Path.GetFullPath(path)).AbsoluteUri;
-                return "\x1b]8;;" + uri + "\x1b\\" + path + "\x1b]8;;\x1b\\";
-            }
-            catch { return path; }
-        }
-
         /// <summary>Pure grouping core of the --duplicates report, extracted out of
         /// <see cref="RunDuplicates"/> so the keeper-uniqueness contract invariant
         /// (exactly one keeper:true per group, keeper is one of the group's own
@@ -5334,6 +5307,21 @@ namespace Truedat
             return (groups, noHash, noFeatures);
         }
 
+        /// <summary>Read-only duplicate-audio report, two tiers. Tier 1 ("exact") groups
+        /// mbxmoods.json entries by audioStreamSha256 — content identity, same audio
+        /// regardless of tags or path. Tier 2 ("probable") takes whatever's left over
+        /// (not already in an exact group) and groups by the quantized-feature candidate
+        /// key from <see cref="BuildDupCandidateKey"/> — catches cross-encode duplicates
+        /// (e.g. FLAC vs MP3 of the same track) that don't share a byte-identical hash;
+        /// these are recall-best-effort candidates for a human to confirm, not certainty.
+        /// Both tiers split into "same folder" (usually accidental — e.g. tagging
+        /// software renamed a file and orphaned the old copy, "01 Track" vs "1-01 Track")
+        /// and "different folders" (usually intentional — one track legitimately on two
+        /// albums). Each group carries a recommended keeper (<see cref="PickKeeper"/>),
+        /// marked with "keep " in the console dump. No judgement is applied and nothing
+        /// is modified; the console + CSV just give the info to decide. Entries with no
+        /// audioStreamSha256 can't join the exact tier; entries missing mfcc/bpm/key/
+        /// duration can't join the probable tier — both are counted-but-skipped.</summary>
         static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
         {
             Console.WriteLine("=== Duplicate Audio ===");
@@ -5444,6 +5432,23 @@ namespace Truedat
                 }
             }
             return 0;
+        }
+
+        /// <summary>Wrap a path in an OSC 8 file:// hyperlink so Windows Terminal makes
+        /// it clickable. Plain path when stdout is redirected or we're not in Windows
+        /// Terminal (legacy conhost would print the escape bytes literally). When
+        /// --audit tees console to truedat.log the ESC bytes land in the log too —
+        /// accepted, the path text stays readable.</summary>
+        static string Linkify(string path)
+        {
+            if (Console.IsOutputRedirected) return path;
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"))) return path;
+            try
+            {
+                var uri = new Uri(Path.GetFullPath(path)).AbsoluteUri;
+                return "\x1b]8;;" + uri + "\x1b\\" + path + "\x1b]8;;\x1b\\";
+            }
+            catch { return path; }
         }
 
         /// <summary>mbxmoods-duplicates.json — the machine contract consumed by the
