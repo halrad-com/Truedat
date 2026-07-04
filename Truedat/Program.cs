@@ -1216,6 +1216,19 @@ namespace Truedat
                     afStagedSrc ??= OpenStagedSource(analyzeFilePath!, _stageOpts, afFileSize);
                     return afStagedSrc.Path;
                 }
+
+                // One body read serves tiers 2/3/4: both digests come from a single pass
+                // over the staged copy. Lazy — tier-1 hits never read the body.
+                (string? md5, string? sha)? afBodyHashes = null;
+                (string? md5, string? sha) EnsureBodyHashes()
+                {
+                    if (afBodyHashes == null)
+                    {
+                        var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, out _);
+                        afBodyHashes = (m, s);
+                    }
+                    return afBodyHashes.Value;
+                }
                 try
                 {
 
@@ -1245,11 +1258,11 @@ namespace Truedat
                         else if (!string.IsNullOrEmpty(afEx.AudioStreamSha256))
                         {
                             var afStagedPath = EnsureStagedSrc();
-                            var (recompSha, _) = ComputeAudioStreamSha256FromFile(afStagedPath, afFileSize, out _);
+                            var recompSha = EnsureBodyHashes().sha;
                             if (!string.IsNullOrEmpty(recompSha)
                                 && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                             {
-                                var refreshedMd5 = ComputeFileMd5(afStagedPath);
+                                var refreshedMd5 = EnsureBodyHashes().md5;
                                 var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
                                 var freshTags = ExtractFileTags(afStagedPath);
                                 trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
@@ -1266,7 +1279,7 @@ namespace Truedat
                     if (trackEntry == null && afMoodMd5Index != null)
                     {
                         var afStagedPath = EnsureStagedSrc();
-                        var localMd5 = ComputeFileMd5(afStagedPath);
+                        var localMd5 = EnsureBodyHashes().md5;
                         if (!string.IsNullOrEmpty(localMd5)
                             && afMoodMd5Index.TryGetValue(localMd5!, out var xp)
                             && xp.Entry.Features.DynamicRange.HasValue
@@ -1287,13 +1300,13 @@ namespace Truedat
                     if (trackEntry == null && afMoodShaIndex != null)
                     {
                         var afStagedPath = EnsureStagedSrc();
-                        var (localSha, _) = ComputeAudioStreamSha256FromFile(afStagedPath, afFileSize, out _);
+                        var localSha = EnsureBodyHashes().sha;
                         if (!string.IsNullOrEmpty(localSha)
                             && afMoodShaIndex.TryGetValue(localSha!, out var xs)
                             && xs.Entry.Features.DynamicRange.HasValue
                             && xs.Entry.Features.LoudnessMomentary.HasValue)
                         {
-                            var refreshedMd5 = ComputeFileMd5(afStagedPath);
+                            var refreshedMd5 = EnsureBodyHashes().md5;
                             var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
                             var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
@@ -1747,6 +1760,19 @@ namespace Truedat
                             return flStagedSrc.Path;
                         }
 
+                        // One body read serves tiers 2/3/4: both digests come from a single pass
+                        // over the staged copy. Lazy — tier-1 hits never read the body.
+                        (string? md5, string? sha)? flBodyHashes = null;
+                        (string? md5, string? sha) EnsureBodyHashes()
+                        {
+                            if (flBodyHashes == null)
+                            {
+                                var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, out _);
+                                flBodyHashes = (m, s);
+                            }
+                            return flBodyHashes.Value;
+                        }
+
                         // Cache hierarchy — same tiers as MoodsMode. Plugin-driven
                         // workflows (re-invoke after MusicBee scan finds new files) get
                         // path-mtime hits ~free; only new / changed audio runs Essentia.
@@ -1777,11 +1803,11 @@ namespace Truedat
                                 if (!string.IsNullOrEmpty(fEx.AudioStreamSha256))
                                 {
                                     var flStagedPath = EnsureStagedSrc();
-                                    var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(flStagedPath, flFileSize, out _);
+                                    var recomputedSha = EnsureBodyHashes().sha;
                                     if (!string.IsNullOrEmpty(recomputedSha)
                                         && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                                     {
-                                        var refreshedMd5 = ComputeFileMd5(flStagedPath);
+                                        var refreshedMd5 = EnsureBodyHashes().md5;
                                         var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
                                         var freshTags = ExtractFileTags(flStagedPath);
                                         var flShaPathEntry = RebuildCacheEntryFromTags(
@@ -1802,7 +1828,7 @@ namespace Truedat
                             if (flMoodMd5Index != null)
                             {
                                 var flStagedPath = EnsureStagedSrc();
-                                var localMd5 = ComputeFileMd5(flStagedPath);
+                                var localMd5 = EnsureBodyHashes().md5;
                                 if (!string.IsNullOrEmpty(localMd5)
                                     && flMoodMd5Index.TryGetValue(localMd5!, out var xp)
                                     && xp.Entry.Features.DynamicRange.HasValue
@@ -1827,13 +1853,13 @@ namespace Truedat
                             if (flMoodShaIndex != null)
                             {
                                 var flStagedPath = EnsureStagedSrc();
-                                var (localSha, _) = ComputeAudioStreamSha256FromFile(flStagedPath, flFileSize, out _);
+                                var localSha = EnsureBodyHashes().sha;
                                 if (!string.IsNullOrEmpty(localSha)
                                     && flMoodShaIndex.TryGetValue(localSha!, out var xs)
                                     && xs.Entry.Features.DynamicRange.HasValue
                                     && xs.Entry.Features.LoudnessMomentary.HasValue)
                                 {
-                                    var refreshedMd5 = ComputeFileMd5(flStagedPath);
+                                    var refreshedMd5 = EnsureBodyHashes().md5;
                                     var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
                                     var freshTags = ExtractFileTags(flStagedPath);
                                     var flCrossShaEntry = RebuildCacheEntryFromTags(
@@ -2330,6 +2356,23 @@ namespace Truedat
                         msStagedSrc ??= OpenStagedSource(t.Location, _stageOpts, msSourceSize);
                         return msStagedSrc.Path;
                     }
+
+                    // One body read serves tiers 2/3/4: both digests come from a single pass
+                    // over the staged copy. Lazy — tier-1 hits never read the body.
+                    // msSourceSize is assigned lazily in multiple branches below, so resolve
+                    // it at call time rather than capturing a stale 0.
+                    (string? md5, string? sha)? msBodyHashes = null;
+                    (string? md5, string? sha) EnsureBodyHashes()
+                    {
+                        if (msBodyHashes == null)
+                        {
+                            if (msSourceSize == 0)
+                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                            var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, out _);
+                            msBodyHashes = (m, s);
+                        }
+                        return msBodyHashes.Value;
+                    }
                     try
                     {
                         var pct = (current * 100) / total;
@@ -2421,14 +2464,14 @@ namespace Truedat
                                         if (msSourceSize > 0)
                                         {
                                             var msStagedPath = EnsureStagedSrc();
-                                            var (recomputedSha, _) = ComputeAudioStreamSha256FromFile(msStagedPath, msSourceSize, out _);
+                                            var recomputedSha = EnsureBodyHashes().sha;
                                             if (!string.IsNullOrEmpty(recomputedSha)
                                                 && string.Equals(recomputedSha, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
                                             {
                                                 // Audio bytes unchanged — tag edit only. Refresh
                                                 // fileMd5 + fingerprint.v1 (both tag-affected),
                                                 // reuse everything else.
-                                                var refreshedMd5 = ComputeFileMd5(msStagedPath);
+                                                var refreshedMd5 = EnsureBodyHashes().md5;
                                                 var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
@@ -2452,9 +2495,7 @@ namespace Truedat
                         // Body read goes through the staged copy (FIX 4).
                         if (moodMd5Index != null)
                         {
-                            if (msSourceSize == 0)
-                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
-                            var localMd5 = ComputeFileMd5(EnsureStagedSrc());
+                            var localMd5 = EnsureBodyHashes().md5;
                             if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
                             {
                                 var xf = xp.Entry.Features;
@@ -2563,7 +2604,7 @@ namespace Truedat
                             if (msSourceSize > 0)
                             {
                                 var msStagedPath = EnsureStagedSrc();
-                                var (localSha, _) = ComputeAudioStreamSha256FromFile(msStagedPath, msSourceSize, out _);
+                                var localSha = EnsureBodyHashes().sha;
                                 if (!string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out var xs))
                                 {
                                     var xsf = xs.Entry.Features;
@@ -2576,7 +2617,7 @@ namespace Truedat
                                         // Audio bytes match. fileMd5 likely differs (else cross-MD5
                                         // would have caught it); fingerprint.v1 is also tag-affected.
                                         // Recompute both, reuse Essentia features.
-                                        var refreshedMd5 = ComputeFileMd5(msStagedPath);
+                                        var refreshedMd5 = EnsureBodyHashes().md5;
                                         var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
