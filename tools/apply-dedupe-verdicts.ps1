@@ -1,11 +1,16 @@
 <# Quarantine-apply for curated dedupe verdicts. DRY-RUN by default: prints and
    returns the move plan; -Apply performs Move-Item into the quarantine mirror.
    NEVER deletes. Idempotent: already-quarantined losers report
-   skip-already-moved. Verdicts are hash-keyed, paths re-rooted from
+   skip-already-moved. Verdicts are key-keyed, paths re-rooted from
    -ManifestRoot to -Root, so one curated sidecar replays against any tree that
    holds the same content (ax1p first, prod later).
 
-   Plan-entry action vocabulary (each plan object is {hash;from;to;action}):
+   Manifest shape (pinned contract): groups[{key, tier, members[{path, keeper?}]}].
+   key is opaque group identity (exact: 16-hex sha256 prefix; probable: opaque
+   composite string) — never re-derive it. Exactly one member per group carries
+   keeper:true; unknown fields are ignored (tolerant reader).
+
+   Plan-entry action vocabulary (each plan object is {key;from;to;action}):
      move                  - loser present in root, planned/executed move to quarantine
      skip-already-moved    - loser already in quarantine (or absent both places); nothing to do
      skip-keeper-missing   - resolve verdict but the keeper path isn't on disk; group skipped
@@ -33,35 +38,35 @@ function Re-Root([string]$path) {
 }
 $m = Get-Content -Path $Manifest -Raw | ConvertFrom-Json
 $v = Get-Content -Path $Verdicts -Raw | ConvertFrom-Json
-$byHash = @{}; foreach ($e in $v.verdicts) { $byHash[$e.hash] = $e }
+$byKey = @{}; foreach ($e in $v.verdicts) { $byKey[$e.key] = $e }
 $plan = New-Object System.Collections.ArrayList
 $stats = @{ resolve=0; expected=0; uncurated=0; moves=0; skipped=0; conflicts=0; unknownVerdicts=0 }
 foreach ($g in $m.groups) {
-    $e = $byHash[$g.hash]
+    $e = $byKey[$g.key]
     if ($null -eq $e -or $null -eq $e.verdict) { $stats.uncurated++; continue }
     if ($e.verdict -eq 'expected') { $stats.expected++; continue }
     if ($e.verdict -ne 'resolve') {
-        Write-Warning ("apply-dedupe-verdicts: unknown verdict '{0}' for hash {1} - operator edit ignored" -f $e.verdict, $g.hash)
+        Write-Warning ("apply-dedupe-verdicts: unknown verdict '{0}' for key {1} - operator edit ignored" -f $e.verdict, $g.key)
         $stats.unknownVerdicts++
-        [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$null; to=$null; action='skip-unknown-verdict' })
+        [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$null; to=$null; action='skip-unknown-verdict' })
         continue
     }
     $stats.resolve++
     $keep = Re-Root $e.keepPath
     if (-not $keep -or -not (Test-Path $keep)) {
-        [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$e.keepPath; to=$null; action='skip-keeper-missing' })
+        [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$e.keepPath; to=$null; action='skip-keeper-missing' })
         $stats.skipped++; continue
     }
 
-    # Classify every path in the group (including keeper) independently -
+    # Classify every member in the group (including keeper) independently -
     # presentInRoot / inQuarantine / absentBoth - so partial quarantine state
     # (some losers already moved, others still sitting in root) never masks
     # a loser that still needs to move.
     $presentInRootCount = 0
     $anyLoserInQuarantine = $false
     $classified = New-Object System.Collections.ArrayList
-    foreach ($p in $g.paths) {
-        $tp = Re-Root $p
+    foreach ($mem in $g.members) {
+        $tp = Re-Root $mem.path
         if (-not $tp) { continue }
         $isKeep = ($tp -eq $keep)
         $inRoot = Test-Path $tp
@@ -77,7 +82,7 @@ foreach ($g in $m.groups) {
     }
 
     if ($presentInRootCount -lt 2 -and -not $anyLoserInQuarantine) {
-        [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$keep; to=$null; action='skip-single-copy' })
+        [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$keep; to=$null; action='skip-single-copy' })
         $stats.skipped++; continue
     }
 
@@ -89,11 +94,11 @@ foreach ($g in $m.groups) {
                 # quarantined on a prior run and a different file has since
                 # reappeared at the same root path). Never overwrite it -
                 # refuse the move and surface the conflict for the operator.
-                [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$c.tp; to=$c.qp; action='conflict-dest-exists' })
+                [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$c.tp; to=$c.qp; action='conflict-dest-exists' })
                 $stats.conflicts++
                 continue
             }
-            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$c.tp; to=$c.qp; action='move' })
+            [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$c.tp; to=$c.qp; action='move' })
             $stats.moves++
             if ($Apply) {
                 New-Item -ItemType Directory -Path (Split-Path $c.qp) -Force | Out-Null
@@ -102,7 +107,7 @@ foreach ($g in $m.groups) {
         } else {
             # inQuarantine or absentBoth - either way there's nothing left in
             # root to move; log it as already-moved to keep the audit trail.
-            [void]$plan.Add([pscustomobject]@{ hash=$g.hash; from=$c.tp; to=$c.qp; action='skip-already-moved' })
+            [void]$plan.Add([pscustomobject]@{ key=$g.key; from=$c.tp; to=$c.qp; action='skip-already-moved' })
             $stats.skipped++
         }
     }
@@ -116,7 +121,7 @@ if ($LogCsv) {
     $logDir = Split-Path -Parent $LogCsv
     if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     $stamp = (Get-Date).ToUniversalTime().ToString('o')
-    $plan | Select-Object @{n='timestampUtc';e={$stamp}}, @{n='mode';e={$mode}}, hash, from, to, action |
+    $plan | Select-Object @{n='timestampUtc';e={$stamp}}, @{n='mode';e={$mode}}, key, from, to, action |
         Export-Csv -Path $LogCsv -NoTypeInformation -Append
 }
 $plan
