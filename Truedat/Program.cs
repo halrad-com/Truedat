@@ -5156,6 +5156,44 @@ namespace Truedat
             }
         }
 
+        // Cross-encode candidate-key buckets (spec §1). Sized so lossy re-encode
+        // perturbation of the aggregate MFCC means stays inside one bucket. Coeff 0
+        // carries overall energy (values ~-1200..0) and needs a wider bucket than 1-12.
+        // Initial values pending calibration against known FLAC<->MP3 pairs (Task 8).
+        internal static readonly double[] DupQMfcc =
+        {
+            24.0,                   // mfcc[0]
+            8.0, 8.0, 8.0, 8.0,     // mfcc[1..4]
+            6.0, 6.0, 6.0, 6.0,     // mfcc[5..8]
+            5.0, 5.0, 5.0, 5.0      // mfcc[9..12]
+        };
+
+        /// <summary>Composite quantized-feature key for the probable (cross-encode)
+        /// duplicate tier: 13 bucketed mfcc means + rounded bpm + key/mode + 2s duration
+        /// bucket. Returns null when any required component is missing — the caller
+        /// counts those as skipped. Authenticity/HF/loudness signals are deliberately
+        /// excluded (they differ across encodes by design). Boundary misses are
+        /// accepted: this tier is candidates-only, a human confirms.</summary>
+        internal static string? BuildDupCandidateKey(TrackEntry e)
+        {
+            var f = e?.Features;
+            if (f == null) return null;
+            var mfcc = f.Mfcc;
+            if (mfcc == null || mfcc.Length < 13) return null;
+            if (f.Bpm <= 0 || string.IsNullOrEmpty(f.Key) || string.IsNullOrEmpty(f.Mode)) return null;
+            int durationMs = e!.FingerprintV1?.DurationMs ?? 0;
+            if (durationMs <= 0) return null;
+
+            var sb = new StringBuilder(64);
+            for (int i = 0; i < 13; i++)
+                sb.Append((long)Math.Round(mfcc[i] / DupQMfcc[i])).Append(',');
+            sb.Append((int)Math.Round(f.Bpm)).Append('|');
+            sb.Append(f.Key.ToLowerInvariant()).Append('|');
+            sb.Append(f.Mode.ToLowerInvariant()).Append('|');
+            sb.Append(durationMs / 2000);
+            return sb.ToString();
+        }
+
         /// <summary>Read-only duplicate-audio report. Groups mbxmoods.json entries by
         /// audioStreamSha256 (content identity — same audio regardless of tags or path)
         /// and lists every group with 2+ members. Splits them into "same folder"
@@ -6142,6 +6180,24 @@ namespace Truedat
                 Assert(h.Method == "direct", $"stage failure falls back to direct (got {h.Method})");
                 Assert(h.Path == @"\\server\share\test.mp3", "stage failure preserves source path");
             }
+
+            Console.WriteLine();
+            Console.WriteLine("Duplicate candidate-key self-test");
+            TrackEntry MakeDup(double[]? mfcc, double bpm, string key, string mode, int durMs) => new TrackEntry
+            {
+                Features = new TrackFeatures { Bpm = bpm, Key = key, Mode = mode, Mfcc = mfcc },
+                FingerprintV1 = durMs > 0 ? new FingerprintV1 { DurationMs = durMs } : (FingerprintV1?)null
+            };
+            var dkBase = new double[] { -700, 100, 20, 8, 4, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01 };
+            var dkJit = (double[])dkBase.Clone();
+            dkJit[0] += 5; dkJit[3] += 1.5;   // well inside the 24 / 8 buckets
+            var dkA = MakeDup(dkBase, 120.2, "C", "major", 215000);
+            var dkB = MakeDup(dkJit, 119.8, "C", "major", 214500);
+            Assert(BuildDupCandidateKey(dkA) != null, "candidate key: eligible entry produces a key");
+            Assert(BuildDupCandidateKey(dkA) == BuildDupCandidateKey(dkB), "candidate key: in-bucket mfcc jitter + bpm/duration rounding -> same key");
+            Assert(BuildDupCandidateKey(dkA) != BuildDupCandidateKey(MakeDup(dkBase, 120, "D", "major", 215000)), "candidate key: different musical key -> different group");
+            Assert(BuildDupCandidateKey(MakeDup(null, 120, "C", "major", 215000)) == null, "candidate key: missing mfcc -> ineligible (null)");
+            Assert(BuildDupCandidateKey(MakeDup(dkBase, 120, "C", "major", 0)) == null, "candidate key: missing durationMs -> ineligible (null)");
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
