@@ -5334,11 +5334,12 @@ namespace Truedat
             Dump("PROBABLE, same folder — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "same-folder").ToList());
             Dump("PROBABLE, different folders — feature match, confirm by ear/eye", groups.Where(g => g.Tier == "probable" && g.Scope == "cross-folder").ToList());
 
-            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-duplicates.csv");
+            var outDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var csvPath = Path.Combine(outDir, "mbxmoods-duplicates.csv");
             string Csv(string? v) => "\"" + (v ?? "").Replace("\"", "\"\"") + "\"";
             try
             {
-                var lines = new List<string> { "group,scope,hash,path,artist,title" };
+                var lines = new List<string> { "group,tier,scope,hash,path,artist,title,keeper" };
                 int gi = 0;
                 foreach (var g in groups)
                 {
@@ -5346,7 +5347,8 @@ namespace Truedat
                     foreach (var p in g.Paths)
                     {
                         tracks.TryGetValue(p, out var e);
-                        lines.Add($"{gi},{g.Scope},{Csv(g.Key)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)}");
+                        bool keep = string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase);
+                        lines.Add($"{gi},{g.Tier},{g.Scope},{Csv(g.Key)},{Csv(p)},{Csv(e?.Features?.Artist)},{Csv(e?.Features?.Title)},{(keep ? "true" : "")}");
                     }
                 }
                 File.WriteAllLines(csvPath, lines, Encoding.UTF8);
@@ -5357,7 +5359,70 @@ namespace Truedat
             {
                 Console.WriteLine($"  WARNING: could not write {csvPath}: {ex.Message}");
             }
+
+            var jsonPath = Path.Combine(outDir, "mbxmoods-duplicates.json");
+            try
+            {
+                WriteDuplicatesJson(jsonPath, moodsPath, groups, noHash, noFeatures, tracks);
+                Console.WriteLine($"  Machine report: {jsonPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  WARNING: could not write {jsonPath}: {ex.Message}");
+            }
             return 0;
+        }
+
+        /// <summary>mbxmoods-duplicates.json — the machine contract consumed by the
+        /// MBXHub /duplicates page (tolerant-reader pattern: consumers must skip
+        /// unknown fields; member fields are omit-when-missing). Version bumps on
+        /// breaking shape changes only.</summary>
+        static void WriteDuplicatesJson(string jsonPath, string moodsPath, List<DupGroup> groups,
+            int noHash, int noFeatures, IDictionary<string, TrackEntry> tracks)
+        {
+            using var fs = File.Create(jsonPath);
+            using var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+            jw.WriteStartObject();
+            jw.WriteNumber("version", 1);
+            jw.WriteString("generated", DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+            jw.WriteString("moodsFile", Path.GetFullPath(moodsPath));
+            jw.WriteStartObject("skipped");
+            jw.WriteNumber("noHash", noHash);
+            jw.WriteNumber("noFeatures", noFeatures);
+            jw.WriteEndObject();
+            jw.WriteStartArray("groups");
+            int id = 0;
+            foreach (var g in groups)
+            {
+                id++;
+                jw.WriteStartObject();
+                jw.WriteNumber("id", id);
+                jw.WriteString("tier", g.Tier);
+                jw.WriteString("scope", g.Scope);
+                jw.WriteString("key", g.Key);
+                jw.WriteStartArray("members");
+                foreach (var p in g.Paths)
+                {
+                    tracks.TryGetValue(p, out var e);
+                    var fp = e?.FingerprintV1;
+                    jw.WriteStartObject();
+                    jw.WriteString("path", p);
+                    if (!string.IsNullOrEmpty(e?.Features?.Artist)) jw.WriteString("artist", e!.Features.Artist);
+                    if (!string.IsNullOrEmpty(e?.Features?.Title)) jw.WriteString("title", e!.Features.Title);
+                    if (!string.IsNullOrEmpty(fp?.Codec)) jw.WriteString("codec", fp!.Codec);
+                    if (fp?.Bitrate > 0) jw.WriteNumber("bitrate", fp!.Bitrate);
+                    if (fp?.SampleRate > 0) jw.WriteNumber("sampleRate", fp!.SampleRate);
+                    if (fp?.BitDepth > 0) jw.WriteNumber("bitDepth", fp!.BitDepth);
+                    if (fp?.FileSize > 0) jw.WriteNumber("fileSize", fp!.FileSize);
+                    if (fp?.DurationMs > 0) jw.WriteNumber("durationMs", fp!.DurationMs);
+                    if (string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase)) jw.WriteBoolean("keeper", true);
+                    jw.WriteEndObject();
+                }
+                jw.WriteEndArray();
+                jw.WriteEndObject();
+            }
+            jw.WriteEndArray();
+            jw.WriteEndObject();
         }
 
         /// <summary>One duplicate group in the --duplicates report. Tier: "exact"
