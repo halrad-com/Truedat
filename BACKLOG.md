@@ -1,5 +1,28 @@
 # Truedat Backlog
 
+## Duplicate review workflow
+
+**Shipped (see CHANGELOG 5.3.9):** exact + probable detection, keeper recommendation
+(quality > SMFM-tagged > genuine-over-fake-hi-res), the offline interactive review page
+(default output + clickable link), chunk-based include model, folder-pair rollup with
+side-by-side A/B compare, per-file audition, click-to-open folders, track length,
+fake-hi-res badge, `album`/`smfm`/`fakeHires` in `mbxmoods-duplicates.json`, `--manifest`
+for the companion web UI, and the `--fixup` disk-verify + hash-resolve fixes.
+
+**Remaining — make review great** (fuller list in the local dedupe design notes):
+
+- **Triage speed:** keyboard nav; reviewed-state + "unreviewed only" filter with progress;
+  search box; sort by reclaimable space; per-group + running wasted-space totals.
+- **Keeper signals:** prefer the in-library copy (has a trackId) and higher playcount /
+  rating; prefer canonical folder structure over `download/` / `tmp/`; configurable
+  keeper order; flag ambiguous keepers.
+- **Detection quality:** similarity/confidence score on probable groups; split
+  strong-vs-loose probable; guard against live-vs-studio false pairs (duration/dynamics
+  delta); whole-album duplicate rollup.
+- **Safety:** pre-build dry-run summary (what the `.m3u8` will contain + size); keeper
+  exists-on-disk check; cross-group safety (a keeper is never a loser elsewhere).
+- **SMFM:** show channel/GBPM; flag groups where no copy carries SMFM.
+
 ## Authenticity-data plumbing — Phase 2.5 (bitUsage) + Phase 3 (spectralCeiling)
 
 Builds on the shipped Phase 1 (`bitDepth` + `encoder` in `fingerprint.v1` +
