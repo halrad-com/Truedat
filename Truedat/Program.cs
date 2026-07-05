@@ -6058,6 +6058,10 @@ namespace Truedat
   .fpair{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flink{color:#9cf;text-decoration:none;word-break:break-all}
   .flink:hover{text-decoration:underline}
+  .player{height:32px;max-width:280px;vertical-align:middle}
+  .play{background:#333;color:#7d7;border:0;border-radius:4px;padding:1px 7px;font-size:12px;cursor:pointer;line-height:1.4}
+  .play:hover{background:#3a5}
+  .play.on{background:#2e7d46;color:#fff}
   .pairwrap{overflow-x:auto}
   table.pair td.sep,table.pair th:empty{width:12px;background:#111;border-top:0}
   table.pair .fhdr{color:#9cf;text-align:center}
@@ -6074,6 +6078,7 @@ namespace Truedat
   <h1>Duplicate review</h1>
   <span class='counts' id='counts'></span>
   <button id='build'>Build losers playlist</button>
+  <audio id='player' class='player' controls preload='none'></audio>
   <div class='tools'>
     <button class='sec' id='incall'>include all shown</button>
     <button class='sec' id='clearall'>clear</button>
@@ -6106,7 +6111,7 @@ function memberRow(g,m){
   const k=m.path===keeperOf(g);
   return `<tr class='${k?'keep':''}'>`
     +`<td><label><input type='radio' name='k${g.id}' ${k?'checked':''} data-g='${g.id}' data-p='${esc(m.path)}'> keep</label></td>`
-    +`<td class='path'><a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='open containing folder'>${esc(m.path)}</a></td>`
+    +`<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='open containing folder'>${esc(m.path)}</a></td>`
     +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
     +`<td>${esc(m.codec)}</td>`
     +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
@@ -6123,7 +6128,7 @@ function tableFor(groups){
 // folder-level choice per track.
 function pairSide(m){
   if(!m) return `<td class='muted' colspan='6'>&mdash;</td>`;
-  return `<td class='path'><a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
+  return `<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
     +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num'>${m.bitDepth||''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
 }
 function pairTable(groups,fA,fB){
@@ -6195,6 +6200,7 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('click',e=>{
   if(e.target.matches('[data-exp]')){const el=document.getElementById(e.target.dataset.exp);if(el){const show=el.style.display==='none';el.style.display=show?'':'none';e.target.textContent=show?'hide tracks':'show tracks';}}
+  else if(e.target.matches('.play')){const p=document.getElementById('player');p.src=e.target.dataset.u;p.play().catch(()=>{});document.querySelectorAll('.play.on').forEach(b=>b.classList.remove('on'));e.target.classList.add('on');}
 });
 document.getElementById('incall').addEventListener('click',()=>{visible().forEach(g=>st.inc[g.id]=true);save();render();});
 document.getElementById('clearall').addEventListener('click',()=>{st.inc={};save();render();});
