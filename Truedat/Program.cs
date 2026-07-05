@@ -6017,6 +6017,13 @@ namespace Truedat
   .smfm{color:#7d7;font-weight:600}
   .path{word-break:break-all;color:#dcdcdc}
   .grp:not(.inc) tbody{opacity:.5}
+  .grp.cluster>.ghead{background:#1e2230}
+  .folders{padding:8px 12px;display:flex;gap:22px;flex-wrap:wrap;border-bottom:1px solid #262626;align-items:center}
+  .fchoice{display:flex;gap:6px;align-items:center;font-size:13px;color:#ddd;cursor:pointer}
+  .fchoice b{color:#9cf;font-weight:600;word-break:break-all}
+  .savings{color:#7c9;font-size:12px}
+  .expbtn{margin-left:auto;font-size:12px;padding:4px 8px}
+  .exp{border-top:1px solid #262626}
   .hint{color:#888;font-size:12px;margin:0 0 14px;line-height:1.5}
 </style>
 </head>
@@ -6039,53 +6046,96 @@ namespace Truedat
 <script>
 const D=JSON.parse(document.getElementById('data').textContent);
 const KEY='truedat-dupes:'+(D.moodsFile||'');
-let st={inc:{},keep:{}};
-try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if(s.keep)st.keep=s.keep;}catch(e){}
+let st={inc:{},keep:{},folderKeep:{}};
+try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if(s.keep)st.keep=s.keep;if(s.folderKeep)st.folderKeep=s.folderKeep;}catch(e){}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
 function esc(s){return(s==null?'':''+s).replace(/[&<>""]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','""':'&quot;'}[c]));}
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
+function folderOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(0,i);}
 function keeperOf(g){return st.keep[g.id]||g.keeper||g.members[0].path;}
 function visible(){const only=document.getElementById('onlysmfm').checked;return D.groups.filter(g=>!only||g.members.some(m=>m.smfm));}
+// A group is a folder-pair candidate when its members span exactly two folders.
+function pairKey(g){const fs=[...new Set(g.members.map(m=>folderOf(m.path)))].sort();return fs.length===2?fs.join('|'):null;}
+function defWinner(groups,fA,fB){let a=0,b=0;groups.forEach(g=>{const f=folderOf(g.keeper||g.members[0].path);if(f===fA)a++;else if(f===fB)b++;});return a>=b?fA:fB;}
+let CLUSTERS={};
+function memberRow(g,m){
+  const k=m.path===keeperOf(g);
+  return `<tr class='${k?'keep':''}'>`
+    +`<td><label><input type='radio' name='k${g.id}' ${k?'checked':''} data-g='${g.id}' data-p='${esc(m.path)}'> keep</label></td>`
+    +`<td class='path'>${esc(m.path)}</td>`
+    +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
+    +`<td>${esc(m.codec)}</td>`
+    +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
+    +`<td class='num'>${bytes(m.fileSize)}</td>`
+    +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
+}
+function tableFor(groups){
+  const rows=groups.map(g=>g.members.map(m=>memberRow(g,m)).join('')).join('');
+  return `<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function groupCard(g){
+  const included=!!st.inc[g.id];const hasSmfm=g.members.some(m=>m.smfm);
+  const div=document.createElement('div');div.className='grp'+(included?' inc':'');
+  div.innerHTML=`<div class='ghead'>`
+    +`<label><input type='checkbox' class='inc' data-g='${g.id}' ${included?'checked':''}> include</label>`
+    +`<span class='badge ${g.tier==='exact'?'exact':'prob'}'>${esc(g.tier)}</span>`
+    +`<span class='badge'>${esc(g.scope)}</span><span>group ${g.id}</span>`
+    +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')+`</div>`+tableFor([g]);
+  return div;
+}
+function clusterCard(key,groups){
+  const fs=key.split('|');const fA=fs[0],fB=fs[1];
+  const chosen=st.folderKeep[key]||defWinner(groups,fA,fB);
+  const included=groups.every(g=>st.inc[g.id]);
+  let lose=0;groups.forEach(g=>{const kp=keeperOf(g);g.members.forEach(m=>{if(m.path!==kp)lose+=m.fileSize||0;});});
+  const hasSmfm=groups.some(g=>g.members.some(m=>m.smfm));
+  const eid='exp'+key.replace(/[^a-z0-9]/gi,'');
+  const div=document.createElement('div');div.className='grp cluster'+(included?' inc':'');
+  div.innerHTML=`<div class='ghead'>`
+    +`<label><input type='checkbox' class='cinc' data-key='${esc(key)}' ${included?'checked':''}> include set</label>`
+    +`<span class='badge exact'>folder duplicate</span><span>${groups.length} tracks</span>`
+    +`<span class='savings'>frees ${bytes(lose)}</span>`
+    +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')
+    +`<button class='sec expbtn' data-exp='${eid}'>show tracks</button></div>`
+    +`<div class='folders'>keep:`
+      +`<label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> <b>${esc(fA)}</b></label>`
+      +`<label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> <b>${esc(fB)}</b></label>`
+    +`</div>`
+    +`<div class='exp' id='${eid}' style='display:none'>${tableFor(groups)}</div>`;
+  return div;
+}
 function render(){
   const list=document.getElementById('list');list.innerHTML='';
-  let inc=0,losers=0;const vis=visible();
-  vis.forEach(g=>{
-    const included=!!st.inc[g.id];const chosen=keeperOf(g);
-    if(included){inc++;losers+=g.members.filter(m=>m.path!==chosen).length;}
-    const hasSmfm=g.members.some(m=>m.smfm);
-    const div=document.createElement('div');div.className='grp'+(included?' inc':'');
-    const rows=g.members.map(m=>{
-      const k=m.path===chosen;
-      return `<tr class='${k?'keep':''}'>`
-        +`<td><label><input type='radio' name='k${g.id}' ${k?'checked':''} data-g='${g.id}' data-p='${esc(m.path)}'> keep</label></td>`
-        +`<td class='path'>${esc(m.path)}</td>`
-        +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
-        +`<td>${esc(m.codec)}</td>`
-        +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
-        +`<td class='num'>${bytes(m.fileSize)}</td>`
-        +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
-    }).join('');
-    div.innerHTML=`<div class='ghead'>`
-      +`<label><input type='checkbox' class='inc' data-g='${g.id}' ${included?'checked':''}> include</label>`
-      +`<span class='badge ${g.tier==='exact'?'exact':'prob'}'>${esc(g.tier)}</span>`
-      +`<span class='badge'>${esc(g.scope)}</span><span>group ${g.id}</span>`
-      +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')+`</div>`
-      +`<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
-    list.appendChild(div);
+  const vis=visible();
+  const map=new Map();
+  vis.forEach(g=>{const k=pairKey(g);if(k){if(!map.has(k))map.set(k,[]);map.get(k).push(g);}});
+  CLUSTERS={};const inClu=new Set();const clist=[];
+  map.forEach((groups,k)=>{if(groups.length>=2){CLUSTERS[k]=groups;clist.push([k,groups]);groups.forEach(g=>inClu.add(g.id));}});
+  clist.sort((a,b)=>b[1].length-a[1].length);
+  let inc=0,losers=0;
+  clist.forEach(([k,groups])=>{
+    list.appendChild(clusterCard(k,groups));
+    if(groups.every(g=>st.inc[g.id])){inc+=groups.length;groups.forEach(g=>{const kp=keeperOf(g);losers+=g.members.filter(m=>m.path!==kp).length;});}
   });
-  document.getElementById('counts').textContent=vis.length+' groups shown · '+inc+' included · '+losers+' losers queued';
+  vis.forEach(g=>{if(inClu.has(g.id))return;list.appendChild(groupCard(g));if(st.inc[g.id]){inc++;const kp=keeperOf(g);losers+=g.members.filter(m=>m.path!==kp).length;}});
+  document.getElementById('counts').textContent=vis.length+' groups · '+clist.length+' folder sets · '+inc+' included · '+losers+' losers queued';
 }
 document.addEventListener('change',e=>{
-  if(e.target.matches('input.inc')){st.inc[e.target.dataset.g]=e.target.checked;save();render();}
+  if(e.target.matches('input.inc')){if(e.target.checked)st.inc[e.target.dataset.g]=true;else delete st.inc[e.target.dataset.g];save();render();}
+  else if(e.target.matches('input.cinc')){(CLUSTERS[e.target.dataset.key]||[]).forEach(g=>{if(e.target.checked)st.inc[g.id]=true;else delete st.inc[g.id];});save();render();}
+  else if(e.target.matches('input.ckeep')){const key=e.target.dataset.key,f=e.target.dataset.f;st.folderKeep[key]=f;(CLUSTERS[key]||[]).forEach(g=>{const m=g.members.find(x=>folderOf(x.path)===f);if(m)st.keep[g.id]=m.path;});save();render();}
   else if(e.target.matches('input[type=radio][data-g]')){st.keep[e.target.dataset.g]=e.target.dataset.p;save();render();}
   else if(e.target.id==='onlysmfm'){render();}
+});
+document.addEventListener('click',e=>{
+  if(e.target.matches('[data-exp]')){const el=document.getElementById(e.target.dataset.exp);if(el){const show=el.style.display==='none';el.style.display=show?'':'none';e.target.textContent=show?'hide tracks':'show tracks';}}
 });
 document.getElementById('incall').addEventListener('click',()=>{visible().forEach(g=>st.inc[g.id]=true);save();render();});
 document.getElementById('clearall').addEventListener('click',()=>{st.inc={};save();render();});
 document.getElementById('build').addEventListener('click',()=>{
   const lines=['#EXTM3U'];
   D.groups.forEach(g=>{if(!st.inc[g.id])return;const c=keeperOf(g);g.members.forEach(m=>{if(m.path!==c)lines.push(m.path);});});
-  if(lines.length===1){alert('No groups included yet — tick include on the groups you want to remove.');return;}
+  if(lines.length===1){alert('No groups included yet — tick include on the folder sets / groups you want to remove.');return;}
   const blob=new Blob([lines.join('\r\n')+'\r\n'],{type:'audio/x-mpegurl'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mbxmoods-duplicate-losers.m3u8';
   document.body.appendChild(a);a.click();a.remove();
