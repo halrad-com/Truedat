@@ -6121,6 +6121,7 @@ try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if
 function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
 function esc(s){return(s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;');}
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
+function dur(ms){if(!ms)return '';const s=Math.round(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
 function folderOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(0,i);}
 function folderUrl(p){return 'file:///'+encodeURI(p.replace(/\\/g,'/'));}
 function fileOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(i+1);}
@@ -6138,24 +6139,24 @@ function memberRow(g,m){
     +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
     +`<td>${esc(m.codec)}</td>`
     +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td>`
-    +`<td class='num'>${bytes(m.fileSize)}</td>`
+    +`<td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td>`
     +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
 }
 function tableFor(groups){
   const rows=groups.map(g=>g.members.map(m=>memberRow(g,m)).join('')).join('');
-  return `<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th class='num'>len</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 // Side-by-side A vs B for a folder-pair cluster: one row per duplicate track, the
 // folder-A copy on the left and the folder-B copy on the right, so you compare
 // them row for row. The keep radios (left=keep A, right=keep B) override the
 // folder-level choice per track.
 function pairSide(m){
-  if(!m) return `<td class='muted' colspan='6'>&mdash;</td>`;
+  if(!m) return `<td class='muted' colspan='7'>&mdash;</td>`;
   return `<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
-    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
+    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
 }
 function pairTable(groups,fA,fB){
-  const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th>`;
+  const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th class='num'>len</th><th>smfm</th>`;
   const rows=groups.map(g=>{
     const A=g.members.find(m=>folderOf(m.path)===fA),B=g.members.find(m=>folderOf(m.path)===fB);
     const kp=keeperOf(g);
@@ -6164,7 +6165,7 @@ function pairTable(groups,fA,fB){
     return `<tr><td class='kc'>${rA}</td>${pairSide(A)}<td class='sep'></td>${pairSide(B)}<td class='kc'>${rB}</td></tr>`;
   }).join('');
   return `<div class='pairwrap'><table class='pair'><thead>`
-    +`<tr><th></th><th colspan='6' class='fhdr'>${esc(fileOf(fA))}</th><th></th><th colspan='6' class='fhdr'>${esc(fileOf(fB))}</th><th></th></tr>`
+    +`<tr><th></th><th colspan='7' class='fhdr'>${esc(fileOf(fA))}</th><th></th><th colspan='7' class='fhdr'>${esc(fileOf(fB))}</th><th></th></tr>`
     +`<tr><th>keep</th>${sub}<th></th>${sub}<th>keep</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function groupCard(g){
