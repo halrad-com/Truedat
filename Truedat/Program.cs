@@ -5452,6 +5452,20 @@ namespace Truedat
             return best;
         }
 
+        /// <summary>A copy that CLAIMS hi-res (>44.1 kHz or >=24-bit) but has zero
+        /// ultrasonic energy is an upsample. Standalone this can false-positive on a
+        /// genuine narrow-band 24/48, but inside a duplicate group — where a lower-rate
+        /// twin of the same audio exists — it is provably fake, so the keeper uses it to
+        /// avoid preferring an upsampled YouTube/re-encode copy over a real original.</summary>
+        internal static bool IsFakeHires(TrackEntry? e)
+        {
+            var fp = e?.FingerprintV1;
+            var f = e?.Features;
+            if (fp == null || f == null) return false;
+            bool claimsHires = fp.SampleRate > 44100 || fp.BitDepth >= 24;
+            return claimsHires && f.HfEnergyRatio.HasValue && f.HfEnergyRatio.Value < 1e-6;
+        }
+
         /// <summary>Positive when pa outranks pb as keeper.</summary>
         static int CompareKeeper(string pa, string pb, Func<string, TrackEntry?> lookup)
         {
@@ -5462,6 +5476,10 @@ namespace Truedat
             int LosslessRank(FingerprintV1? fp) =>
                 fp != null && IsLosslessCodecForHiresCheck(fp.Codec) ? 1 : 0;
             int c = LosslessRank(a).CompareTo(LosslessRank(b));
+            if (c != 0) return c;
+            // Genuine beats fake hi-res: an upsampled copy (claims hi-res, no ultrasonic)
+            // must not win on its inflated bitDepth/sampleRate over the real original.
+            c = (IsFakeHires(ea) ? 0 : 1).CompareTo(IsFakeHires(eb) ? 0 : 1);
             if (c != 0) return c;
             c = (a?.BitDepth ?? 0).CompareTo(b?.BitDepth ?? 0);
             if (c != 0) return c;
@@ -5820,6 +5838,7 @@ namespace Truedat
                 Col("durationMs", "ms", "num");
                 Col("fileSize", "bytes", "num");
                 Col("smfm", "smfm", "text");
+                Col("fakeHires", "hi-res", "text");
                 w.WriteEndArray();
             }
 
@@ -5878,6 +5897,7 @@ namespace Truedat
                         jw.WriteNumber("durationMs", fp?.DurationMs ?? 0);
                         jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
                         jw.WriteString("smfm", e?.Features?.HasSmfm == true ? "smfm" : "");
+                        jw.WriteString("fakeHires", IsFakeHires(e) ? "upsampled" : "");
                         jw.WriteEndObject();
                     }
                 }
@@ -5947,6 +5967,7 @@ namespace Truedat
                     if (fp?.FileSize > 0) jw.WriteNumber("fileSize", fp!.FileSize);
                     if (fp?.DurationMs > 0) jw.WriteNumber("durationMs", fp!.DurationMs);
                     jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
+                    jw.WriteBoolean("fakeHires", IsFakeHires(e));
                     if (string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase)) jw.WriteBoolean("keeper", true);
                     jw.WriteEndObject();
                 }
@@ -5999,6 +6020,7 @@ namespace Truedat
                             jw.WriteNumber("durationMs", fp?.DurationMs ?? 0);
                             jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
                             jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
+                            jw.WriteBoolean("fakeHires", IsFakeHires(e));
                             jw.WriteEndObject();
                         }
                         jw.WriteEndArray();
@@ -6062,6 +6084,7 @@ namespace Truedat
   .play{background:#333;color:#7d7;border:0;border-radius:4px;padding:1px 7px;font-size:12px;cursor:pointer;line-height:1.4}
   .play:hover{background:#3a5}
   .play.on{background:#2e7d46;color:#fff}
+  td.fake{color:#f77;font-weight:600}
   .pairwrap{overflow-x:auto}
   table.pair td.sep,table.pair th:empty{width:12px;background:#111;border-top:0}
   table.pair .fhdr{color:#9cf;text-align:center}
@@ -6114,7 +6137,7 @@ function memberRow(g,m){
     +`<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='open containing folder'>${esc(m.path)}</a></td>`
     +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
     +`<td>${esc(m.codec)}</td>`
-    +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
+    +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td>`
     +`<td class='num'>${bytes(m.fileSize)}</td>`
     +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
 }
@@ -6129,7 +6152,7 @@ function tableFor(groups){
 function pairSide(m){
   if(!m) return `<td class='muted' colspan='6'>&mdash;</td>`;
   return `<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
-    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num'>${m.bitDepth||''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
+    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
 }
 function pairTable(groups,fA,fB){
   const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th>`;
