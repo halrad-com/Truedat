@@ -5650,6 +5650,7 @@ namespace Truedat
                     jw.WriteString("path", p);
                     if (!string.IsNullOrEmpty(e?.Features?.Artist)) jw.WriteString("artist", e!.Features.Artist);
                     if (!string.IsNullOrEmpty(e?.Features?.Title)) jw.WriteString("title", e!.Features.Title);
+                    if (!string.IsNullOrEmpty(e?.Features?.Album)) jw.WriteString("album", e!.Features.Album);
                     if (!string.IsNullOrEmpty(fp?.Codec)) jw.WriteString("codec", fp!.Codec);
                     if (fp?.Bitrate > 0) jw.WriteNumber("bitrate", fp!.Bitrate);
                     if (fp?.SampleRate > 0) jw.WriteNumber("sampleRate", fp!.SampleRate);
