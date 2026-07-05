@@ -3421,7 +3421,20 @@ namespace Truedat
                 list.Add(t);
             }
 
-            int unchanged = 0, remapped = 0, orphaned = 0;
+            // Content-hash index of entries whose file STILL EXISTS on disk. Lets us drop
+            // an entry whose own file is gone but whose audio survives at another path (the
+            // kept copy of a deleted duplicate) instead of keeping a dead entry via a stale
+            // XML filename match.
+            var survivingByHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in tracks)
+            {
+                if (kv.Value == null) continue;
+                if (!File.Exists(PathHelper.NormalizeSeparators(kv.Key))) continue;
+                var sha = kv.Value.AsObject()["audioStreamSha256"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!)) survivingByHash[sha!] = kv.Key;
+            }
+
+            int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0;
             var newTracks = new JsonObject();
             var orphanedEntries = new List<(string OldPath, string Artist, string Title)>();
 
@@ -3441,11 +3454,30 @@ namespace Truedat
                 var moodTitle = trackData["title"]?.GetValue<string>() ?? "";
                 var moodAlbum = trackData["album"]?.GetValue<string>() ?? "";
                 var moodGenre = trackData["genre"]?.GetValue<string>() ?? "";
+
+                // File gone. If its audio survives at a DIFFERENT existing path (the kept
+                // copy of a deleted duplicate), drop this redundant entry — the survivor
+                // carries the same content + mood data. This is the dedupe cleanup path.
+                var goneSha = trackData["audioStreamSha256"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(goneSha)
+                    && survivingByHash.TryGetValue(goneSha!, out var survivorPath)
+                    && !PathComparer.Instance.Equals(survivorPath, normalizedOldPath))
+                {
+                    resolvedByHash++;
+                    Console.WriteLine($"  RESOLVED (identical copy kept): {moodArtist} - {moodTitle}");
+                    Console.WriteLine($"    gone: {oldPath}");
+                    Console.WriteLine($"    kept: {survivorPath}");
+                    continue;
+                }
+
                 ITunesTrack? match = null;
 
                 if (!string.IsNullOrEmpty(filename) && byFilename.TryGetValue(filename, out var candidates))
                 {
+                    // A remap target must actually EXIST on disk — a stale XML that still
+                    // lists a deleted file must not resurrect it via a no-op same-path remap.
                     var strictMatches = candidates.Where(c =>
+                        File.Exists(c.Location) &&
                         string.Equals(c.Artist, moodArtist, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(c.Name, moodTitle, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(c.Album, moodAlbum, StringComparison.OrdinalIgnoreCase) &&
@@ -3475,6 +3507,7 @@ namespace Truedat
             Console.WriteLine("=== Results ===");
             Console.WriteLine($"  Unchanged:   {unchanged}");
             Console.WriteLine($"  Remapped:    {remapped}");
+            Console.WriteLine($"  Resolved:    {resolvedByHash} (file gone, identical copy kept)");
             Console.WriteLine($"  Orphaned:    {orphaned}");
             Console.WriteLine($"  Unanalyzed:  {unanalyzed} (in library, no mood data)");
             Console.WriteLine($"  Total out:   {newTracks.Count}");
@@ -3491,7 +3524,7 @@ namespace Truedat
                 Console.WriteLine($"  ... and {orphanedEntries.Count - 20} more");
             }
 
-            if (remapped > 0 || orphaned > 0)
+            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0)
             {
                 var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
                 var bakPath = $"{moodsPath}.bak.{timestamp}";
@@ -6025,6 +6058,12 @@ namespace Truedat
   .fpair{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flink{color:#9cf;text-decoration:none;word-break:break-all}
   .flink:hover{text-decoration:underline}
+  .pairwrap{overflow-x:auto}
+  table.pair td.sep,table.pair th:empty{width:12px;background:#111;border-top:0}
+  table.pair .fhdr{color:#9cf;text-align:center}
+  table.pair td.kc{text-align:center}
+  table.pair td.muted{color:#666;text-align:center}
+  table.pair tr:has(td.kc input:checked) td{background:#17281b}
   .expbtn{margin-left:auto;font-size:12px;padding:4px 8px}
   .exp{border-top:1px solid #262626}
   .hint{color:#888;font-size:12px;margin:0 0 14px;line-height:1.5}
@@ -6056,6 +6095,7 @@ function esc(s){return(s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
 function folderOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(0,i);}
 function folderUrl(p){return 'file:///'+encodeURI(p.replace(/\\/g,'/'));}
+function fileOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(i+1);}
 function keeperOf(g){return st.keep[g.id]||g.keeper||g.members[0].path;}
 function visible(){const only=document.getElementById('onlysmfm').checked;return D.groups.filter(g=>!only||g.members.some(m=>m.smfm));}
 // A group is a folder-pair candidate when its members span exactly two folders.
@@ -6076,6 +6116,28 @@ function memberRow(g,m){
 function tableFor(groups){
   const rows=groups.map(g=>g.members.map(m=>memberRow(g,m)).join('')).join('');
   return `<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+// Side-by-side A vs B for a folder-pair cluster: one row per duplicate track, the
+// folder-A copy on the left and the folder-B copy on the right, so you compare
+// them row for row. The keep radios (left=keep A, right=keep B) override the
+// folder-level choice per track.
+function pairSide(m){
+  if(!m) return `<td class='muted' colspan='6'>&mdash;</td>`;
+  return `<td class='path'><a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
+    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num'>${m.bitDepth||''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
+}
+function pairTable(groups,fA,fB){
+  const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th>`;
+  const rows=groups.map(g=>{
+    const A=g.members.find(m=>folderOf(m.path)===fA),B=g.members.find(m=>folderOf(m.path)===fB);
+    const kp=keeperOf(g);
+    const rA=A?`<input type='radio' name='kg${g.id}' data-g='${g.id}' data-p='${esc(A.path)}' ${A.path===kp?'checked':''}>`:'';
+    const rB=B?`<input type='radio' name='kg${g.id}' data-g='${g.id}' data-p='${esc(B.path)}' ${B.path===kp?'checked':''}>`:'';
+    return `<tr><td class='kc'>${rA}</td>${pairSide(A)}<td class='sep'></td>${pairSide(B)}<td class='kc'>${rB}</td></tr>`;
+  }).join('');
+  return `<div class='pairwrap'><table class='pair'><thead>`
+    +`<tr><th></th><th colspan='6' class='fhdr'>${esc(fileOf(fA))}</th><th></th><th colspan='6' class='fhdr'>${esc(fileOf(fB))}</th><th></th></tr>`
+    +`<tr><th>keep</th>${sub}<th></th>${sub}<th>keep</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function groupCard(g){
   const included=!!st.inc[g.id];const hasSmfm=g.members.some(m=>m.smfm);
@@ -6105,7 +6167,7 @@ function clusterCard(key,groups){
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fA))}' title='open folder'>${esc(fA)}</a></span>`
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fB))}' title='open folder'>${esc(fB)}</a></span>`
     +`</div>`
-    +`<div class='exp' id='${eid}' style='display:none'>${tableFor(groups)}</div>`;
+    +`<div class='exp' id='${eid}' style='display:none'>${pairTable(groups,fA,fB)}</div>`;
   return div;
 }
 function render(){
