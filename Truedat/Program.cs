@@ -5633,16 +5633,42 @@ namespace Truedat
             return 0;
         }
 
-        /// <summary>Resolve where `--manifest` (no explicit path) writes: the running
-        /// MusicBee instance's MBXHub review drop folder. Finds the instance exactly like
-        /// MBXHub.Shell's MusicBeeDetector — the running MusicBee.exe's own folder (pure
-        /// Win32 process lookup, no plugin API) — then applies PluginLocator's layout
-        /// (&lt;root&gt;\AppData\MBXHub\review\dupes.json). Falls back to next-to-moods when no
-        /// running instance is found; an explicit --manifest &lt;path&gt; always wins.</summary>
-        static string ResolveManifestDest(string fallbackDir)
+        /// <summary>Resolve where `--manifest` (no explicit path) writes. Anchors to the
+        /// instance that OWNS the library being scanned, not "some running MusicBee":
+        /// MusicBee's layout puts the moods file in &lt;root&gt;\Library\, so &lt;root&gt; is the
+        /// parent of the moods dir, and MBXHub's data folder is &lt;root&gt;\AppData\MBXHub
+        /// (per MBXHub.Shell PluginLocator). This is correct even with several MusicBee
+        /// instances running — the manifest follows the library truedat actually scanned,
+        /// not whichever process the OS happens to list first. Falls back to matching a
+        /// running MusicBee by its exe folder (MusicBeeDetector's pure-Win32 lookup), then
+        /// to next-to-moods. An explicit --manifest &lt;path&gt; always wins over all of this.</summary>
+        static string ResolveManifestDest(string moodsDir)
         {
+            // 1. Library-anchored: <moodsDir>\..\AppData\MBXHub\review — the instance that owns this library.
             try
             {
+                var root = Path.GetDirectoryName(Path.GetFullPath(moodsDir));
+                if (!string.IsNullOrEmpty(root))
+                {
+                    var mbxhub = Path.Combine(root!, "AppData", "MBXHub");
+                    if (Directory.Exists(mbxhub))
+                    {
+                        var reviewDir = Path.Combine(mbxhub, "review");
+                        Directory.CreateDirectory(reviewDir);
+                        Console.WriteLine($"  (targeting the scanned library's instance: {root})");
+                        return Path.Combine(reviewDir, "dupes.json");
+                    }
+                }
+            }
+            catch { /* fall through to process match */ }
+
+            // 2. Fallback: a running MusicBee whose own folder carries an MBXHub data dir.
+            //    Prefer one whose root matches the scanned library's root; else first found.
+            try
+            {
+                string? scannedRoot = null;
+                try { scannedRoot = Path.GetDirectoryName(Path.GetFullPath(moodsDir)); } catch { }
+                string? firstMatch = null;
                 foreach (var proc in System.Diagnostics.Process.GetProcessesByName("MusicBee"))
                 {
                     try
@@ -5652,20 +5678,30 @@ namespace Truedat
                         var root = Path.GetDirectoryName(exe);
                         if (string.IsNullOrEmpty(root)) continue;
                         var mbxhub = Path.Combine(root!, "AppData", "MBXHub");
-                        if (Directory.Exists(mbxhub))
+                        if (!Directory.Exists(mbxhub)) continue;
+                        if (scannedRoot != null && string.Equals(root, scannedRoot, StringComparison.OrdinalIgnoreCase))
                         {
-                            var reviewDir = Path.Combine(mbxhub, "review");
-                            Directory.CreateDirectory(reviewDir);
-                            Console.WriteLine($"  (auto-located running MusicBee: {root} → MBXHub review folder)");
-                            return Path.Combine(reviewDir, "dupes.json");
+                            var rd = Path.Combine(mbxhub, "review");
+                            Directory.CreateDirectory(rd);
+                            Console.WriteLine($"  (matched running MusicBee to the scanned library: {root})");
+                            return Path.Combine(rd, "dupes.json");
                         }
+                        firstMatch ??= mbxhub;
                     }
                     catch { /* access denied / 32-vs-64-bit mismatch — try the next process */ }
                 }
+                if (firstMatch != null)
+                {
+                    var rd = Path.Combine(firstMatch, "review");
+                    Directory.CreateDirectory(rd);
+                    Console.WriteLine($"  (no instance owns this library directly; using the one running MusicBee with an MBXHub folder: {Path.GetDirectoryName(firstMatch)})");
+                    return Path.Combine(rd, "dupes.json");
+                }
             }
             catch { /* Process enumeration blocked — fall through */ }
-            Console.WriteLine("  (no running MusicBee found — writing manifest next to moods; pass --manifest <path> to override)");
-            return Path.Combine(fallbackDir, "mbxmoods-duplicates.manifest.json");
+
+            Console.WriteLine("  (no MusicBee/MBXHub instance found — writing manifest next to moods; pass --manifest <path> to override)");
+            return Path.Combine(moodsDir, "mbxmoods-duplicates.manifest.json");
         }
 
         /// <summary>Emit the kind:dupes review-surface manifest that MBXHub's review.html
