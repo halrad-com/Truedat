@@ -5652,7 +5652,13 @@ namespace Truedat
                 try
                 {
                     WriteDuplicatesManifest(manifestPath, moodsPath, groups, tracks);
-                    Console.WriteLine($"  Review manifest: {manifestPath} (kind:dupes — drop into <MBXHub AppData>\\review\\)");
+                    // Co-emit the interactive review page beside the manifest (same review
+                    // folder) so the hub's read-only display can link straight to the
+                    // "mark and build a playlist" tool. Manifest's source.reviewHtml names it.
+                    var manifestDir = Path.GetDirectoryName(Path.GetFullPath(manifestPath)) ?? outDir;
+                    var siblingHtml = Path.Combine(manifestDir, "dupes.html");
+                    try { WriteDuplicatesHtml(siblingHtml, moodsPath, groups, tracks); } catch { }
+                    Console.WriteLine($"  Review manifest: {manifestPath} (kind:dupes; interactive page beside it: {siblingHtml})");
                 }
                 catch (Exception ex)
                 {
@@ -5799,7 +5805,8 @@ namespace Truedat
             jw.WriteStartObject("source");
             jw.WriteString("tool", "truedat --duplicates");
             jw.WriteString("moodsFile", Path.GetFullPath(moodsPath));
-            jw.WriteString("note", "Catalog is only as fresh as truedat's last scan. Display only - marking a keeper here does nothing downstream.");
+            jw.WriteString("reviewHtml", "dupes.html");  // interactive "mark + build playlist" page co-emitted beside this manifest
+            jw.WriteString("note", "Catalog is only as fresh as truedat's last scan. Display only - marking a keeper here does nothing downstream; the interactive page (source.reviewHtml) is where you act.");
             jw.WriteEndObject();
             jw.WriteStartArray("classes");
             foreach (var d in defs)
