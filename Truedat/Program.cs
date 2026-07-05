@@ -392,6 +392,11 @@ namespace Truedat
         // to drop it straight into <MBXHub AppData>\review\dupes.json.
         static bool _manifest = false;
         static string? _manifestPath = null;
+        // --html [path]: emit a self-contained interactive review page (embedded data,
+        // inline JS/CSS, offline). Pick keepers per group, click "Build losers playlist"
+        // to download the .m3u8. Default mbxmoods-duplicates.html next to the moods file.
+        static bool _html = false;
+        static string? _htmlPath = null;
 
         // Per-process cache: drive root -> isNetwork. DriveInfo.DriveType is a Win32
         // call (~µs per hit but it touches the mount table). One lookup per unique
@@ -814,6 +819,13 @@ namespace Truedat
                         && args[i + 1].EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                     { _manifestPath = args[i + 1]; i++; }
                 }
+                else if (canonical == "html")
+                {
+                    _html = true;
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-")
+                        && args[i + 1].EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                    { _htmlPath = args[i + 1]; i++; }
+                }
                 else if (canonical == "quick-fingerprint") quickFingerprintMode = true;
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && string.Equals(args[i + 1], "max", StringComparison.OrdinalIgnoreCase)) { parallelism = Environment.ProcessorCount; i++; }
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
@@ -1003,6 +1015,7 @@ namespace Truedat
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
+                Console.WriteLine("  --html [path]      With --duplicates: write a self-contained interactive review page (offline, no server). Include groups in chunks, pick keepers, Build losers playlist. Default mbxmoods-duplicates.html next to the moods file");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2153,6 +2166,7 @@ namespace Truedat
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
+                Console.WriteLine("  --html [path]      With --duplicates: write a self-contained interactive review page (offline, no server). Include groups in chunks, pick keepers, Build losers playlist. Default mbxmoods-duplicates.html next to the moods file");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -5645,6 +5659,20 @@ namespace Truedat
                     Console.WriteLine($"  WARNING: could not write {manifestPath}: {ex.Message}");
                 }
             }
+
+            if (_html)
+            {
+                var htmlPath = _htmlPath ?? Path.Combine(outDir, "mbxmoods-duplicates.html");
+                try
+                {
+                    WriteDuplicatesHtml(htmlPath, moodsPath, groups, tracks);
+                    Console.WriteLine($"  Review page: {htmlPath} — open in a browser, include groups, Build losers playlist");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  WARNING: could not write {htmlPath}: {ex.Message}");
+                }
+            }
             return 0;
         }
 
@@ -5885,6 +5913,177 @@ namespace Truedat
             jw.WriteEndArray();
             jw.WriteEndObject();
         }
+
+        /// <summary>Emit a self-contained interactive dedupe review page: embedded group
+        /// data, inline CSS/JS, no external requests, opens offline in a browser. Groups
+        /// start NOT included (chunk-friendly) — the operator ticks the groups to act on
+        /// now, confirms a keeper per included group (recommended pre-selected; the SMFM
+        /// copy is preferred), then clicks Build losers playlist to download an .m3u8 of
+        /// every non-keeper in the included groups. Decisions persist in localStorage.
+        /// truedat removes nothing — the playlist is reviewed/removed inside MusicBee.</summary>
+        static void WriteDuplicatesHtml(string htmlPath, string moodsPath, List<DupGroup> groups, IDictionary<string, TrackEntry> tracks)
+        {
+            string dataJson;
+            using (var ms = new MemoryStream())
+            {
+                using (var jw = new Utf8JsonWriter(ms))
+                {
+                    jw.WriteStartObject();
+                    jw.WriteString("moodsFile", Path.GetFullPath(moodsPath));
+                    jw.WriteString("generated", DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+                    jw.WriteStartArray("groups");
+                    foreach (var g in groups)
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteNumber("id", g.Id);
+                        jw.WriteString("tier", g.Tier);
+                        jw.WriteString("scope", g.Scope);
+                        jw.WriteString("keeper", g.Keeper);
+                        jw.WriteStartArray("members");
+                        foreach (var p in g.Paths)
+                        {
+                            tracks.TryGetValue(p, out var e);
+                            var fp = e?.FingerprintV1;
+                            jw.WriteStartObject();
+                            jw.WriteString("path", p);
+                            jw.WriteString("title", e?.Features?.Title ?? "");
+                            jw.WriteString("artist", e?.Features?.Artist ?? "");
+                            jw.WriteString("album", e?.Features?.Album ?? "");
+                            jw.WriteString("codec", fp?.Codec ?? "");
+                            jw.WriteNumber("bitrate", fp?.Bitrate ?? 0);
+                            jw.WriteNumber("sampleRate", fp?.SampleRate ?? 0);
+                            jw.WriteNumber("bitDepth", fp?.BitDepth ?? 0);
+                            jw.WriteNumber("durationMs", fp?.DurationMs ?? 0);
+                            jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
+                            jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
+                            jw.WriteEndObject();
+                        }
+                        jw.WriteEndArray();
+                        jw.WriteEndObject();
+                    }
+                    jw.WriteEndArray();
+                    jw.WriteEndObject();
+                }
+                dataJson = Encoding.UTF8.GetString(ms.ToArray());
+            }
+            File.WriteAllText(htmlPath, DuplicatesHtmlTemplate.Replace("__DATA__", dataJson), new UTF8Encoding(false));
+        }
+
+        // Self-contained review page. All HTML attributes + JS strings use single quotes /
+        // backticks so this C# verbatim literal needs almost no doubled quotes (only esc()).
+        // __DATA__ is replaced with the embedded groups JSON at write time.
+        const string DuplicatesHtmlTemplate = @"<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>truedat — duplicate review</title>
+<style>
+  :root{color-scheme:dark light}
+  body{font-family:system-ui,'Segoe UI',sans-serif;margin:0;background:#141414;color:#e8e8e8}
+  header{position:sticky;top:0;z-index:5;background:#1c1c1c;border-bottom:1px solid #333;padding:10px 16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  .counts{font-size:13px;color:#9cf}
+  button{background:#2e7d46;color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:14px}
+  button:hover{background:#37984f}
+  button.sec{background:#3a3a3a}
+  button.sec:hover{background:#4a4a4a}
+  .tools{margin-left:auto;display:flex;gap:10px;align-items:center;font-size:13px;color:#bbb}
+  main{padding:16px;max-width:1200px;margin:0 auto}
+  .grp{border:1px solid #333;border-radius:8px;margin-bottom:12px;background:#191919;overflow:hidden}
+  .grp.inc{border-color:#2e7d46}
+  .ghead{padding:8px 12px;display:flex;gap:10px;align-items:center;font-size:12px;color:#aaa;border-bottom:1px solid #262626}
+  .ghead label{display:flex;gap:6px;align-items:center;color:#ddd;font-size:13px;cursor:pointer}
+  .badge{background:#333;border-radius:4px;padding:2px 7px}
+  .badge.exact{background:#22503a}
+  .badge.prob{background:#5a3a1e}
+  .hassmfm{color:#7d7;margin-left:auto;font-size:12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:6px 10px;text-align:left;border-top:1px solid #232323;vertical-align:top}
+  th{color:#888;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  td.num,th.num{text-align:right}
+  td.num{color:#bbb}
+  tr.keep td{background:#17281b}
+  .smfm{color:#7d7;font-weight:600}
+  .path{word-break:break-all;color:#dcdcdc}
+  .grp:not(.inc) tbody{opacity:.5}
+  .hint{color:#888;font-size:12px;margin:0 0 14px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <h1>Duplicate review</h1>
+  <span class='counts' id='counts'></span>
+  <button id='build'>Build losers playlist</button>
+  <div class='tools'>
+    <button class='sec' id='incall'>include all shown</button>
+    <button class='sec' id='clearall'>clear</button>
+    <label><input type='checkbox' id='onlysmfm'> only groups with an SMFM copy</label>
+  </div>
+</header>
+<main>
+  <p class='hint'>Groups start <b>not included</b>. Tick <b>include</b> on the ones you want to act on now, confirm the keeper (recommended is pre-picked), then <b>Build losers playlist</b> to download an .m3u8 of the non-keepers. Open it in MusicBee to remove. Work in chunks — nothing here touches your files.</p>
+  <div id='list'></div>
+</main>
+<script id='data' type='application/json'>__DATA__</script>
+<script>
+const D=JSON.parse(document.getElementById('data').textContent);
+const KEY='truedat-dupes:'+(D.moodsFile||'');
+let st={inc:{},keep:{}};
+try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if(s.keep)st.keep=s.keep;}catch(e){}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
+function esc(s){return(s==null?'':''+s).replace(/[&<>""]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','""':'&quot;'}[c]));}
+function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
+function keeperOf(g){return st.keep[g.id]||g.keeper||g.members[0].path;}
+function visible(){const only=document.getElementById('onlysmfm').checked;return D.groups.filter(g=>!only||g.members.some(m=>m.smfm));}
+function render(){
+  const list=document.getElementById('list');list.innerHTML='';
+  let inc=0,losers=0;const vis=visible();
+  vis.forEach(g=>{
+    const included=!!st.inc[g.id];const chosen=keeperOf(g);
+    if(included){inc++;losers+=g.members.filter(m=>m.path!==chosen).length;}
+    const hasSmfm=g.members.some(m=>m.smfm);
+    const div=document.createElement('div');div.className='grp'+(included?' inc':'');
+    const rows=g.members.map(m=>{
+      const k=m.path===chosen;
+      return `<tr class='${k?'keep':''}'>`
+        +`<td><label><input type='radio' name='k${g.id}' ${k?'checked':''} data-g='${g.id}' data-p='${esc(m.path)}'> keep</label></td>`
+        +`<td class='path'>${esc(m.path)}</td>`
+        +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
+        +`<td>${esc(m.codec)}</td>`
+        +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
+        +`<td class='num'>${bytes(m.fileSize)}</td>`
+        +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
+    }).join('');
+    div.innerHTML=`<div class='ghead'>`
+      +`<label><input type='checkbox' class='inc' data-g='${g.id}' ${included?'checked':''}> include</label>`
+      +`<span class='badge ${g.tier==='exact'?'exact':'prob'}'>${esc(g.tier)}</span>`
+      +`<span class='badge'>${esc(g.scope)}</span><span>group ${g.id}</span>`
+      +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')+`</div>`
+      +`<table><thead><tr><th></th><th>path</th><th>title</th><th>artist</th><th>album</th><th>codec</th><th class='num'>kbps</th><th class='num'>hz</th><th class='num'>bit</th><th class='num'>size</th><th>smfm</th></tr></thead><tbody>${rows}</tbody></table>`;
+    list.appendChild(div);
+  });
+  document.getElementById('counts').textContent=vis.length+' groups shown · '+inc+' included · '+losers+' losers queued';
+}
+document.addEventListener('change',e=>{
+  if(e.target.matches('input.inc')){st.inc[e.target.dataset.g]=e.target.checked;save();render();}
+  else if(e.target.matches('input[type=radio][data-g]')){st.keep[e.target.dataset.g]=e.target.dataset.p;save();render();}
+  else if(e.target.id==='onlysmfm'){render();}
+});
+document.getElementById('incall').addEventListener('click',()=>{visible().forEach(g=>st.inc[g.id]=true);save();render();});
+document.getElementById('clearall').addEventListener('click',()=>{st.inc={};save();render();});
+document.getElementById('build').addEventListener('click',()=>{
+  const lines=['#EXTM3U'];
+  D.groups.forEach(g=>{if(!st.inc[g.id])return;const c=keeperOf(g);g.members.forEach(m=>{if(m.path!==c)lines.push(m.path);});});
+  if(lines.length===1){alert('No groups included yet — tick include on the groups you want to remove.');return;}
+  const blob=new Blob([lines.join('\r\n')+'\r\n'],{type:'audio/x-mpegurl'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mbxmoods-duplicate-losers.m3u8';
+  document.body.appendChild(a);a.click();a.remove();
+});
+render();
+</script>
+</body>
+</html>";
 
         /// <summary>One duplicate group in the --duplicates report. Tier: "exact"
         /// (audioStreamSha256) or "probable" (quantized-feature candidate key).</summary>
