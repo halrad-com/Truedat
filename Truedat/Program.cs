@@ -395,7 +395,8 @@ namespace Truedat
         // --html [path]: emit a self-contained interactive review page (embedded data,
         // inline JS/CSS, offline). Pick keepers per group, click "Build losers playlist"
         // to download the .m3u8. Default mbxmoods-duplicates.html next to the moods file.
-        static bool _html = false;
+        // The interactive review page is a DEFAULT output of --duplicates (always written +
+        // printed as a clickable console link). --html <path> only overrides where it lands.
         static string? _htmlPath = null;
 
         // Per-process cache: drive root -> isNetwork. DriveInfo.DriveType is a Win32
@@ -821,7 +822,6 @@ namespace Truedat
                 }
                 else if (canonical == "html")
                 {
-                    _html = true;
                     if (i + 1 < args.Length && !args[i + 1].StartsWith("-")
                         && args[i + 1].EndsWith(".html", StringComparison.OrdinalIgnoreCase))
                     { _htmlPath = args[i + 1]; i++; }
@@ -1015,7 +1015,7 @@ namespace Truedat
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
-                Console.WriteLine("  --html [path]      With --duplicates: write a self-contained interactive review page (offline, no server). Include groups in chunks, pick keepers, Build losers playlist. Default mbxmoods-duplicates.html next to the moods file");
+                Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2166,7 +2166,7 @@ namespace Truedat
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
-                Console.WriteLine("  --html [path]      With --duplicates: write a self-contained interactive review page (offline, no server). Include groups in chunks, pick keepers, Build losers playlist. Default mbxmoods-duplicates.html next to the moods file");
+                Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -5666,13 +5666,16 @@ namespace Truedat
                 }
             }
 
-            if (_html)
+            // Interactive review page — a default output of --duplicates (not gated on a
+            // flag). --html <path> only overrides where it lands.
             {
                 var htmlPath = _htmlPath ?? Path.Combine(outDir, "mbxmoods-duplicates.html");
                 try
                 {
                     WriteDuplicatesHtml(htmlPath, moodsPath, groups, tracks);
-                    Console.WriteLine($"  Review page: {htmlPath} — open in a browser, include groups, Build losers playlist");
+                    // Clickable console link (OSC 8 file:// hyperlink — click/ctrl-click in
+                    // Windows Terminal opens it in the default browser).
+                    Console.WriteLine($"  Review page (click to open): {Linkify(htmlPath)}");
                 }
                 catch (Exception ex)
                 {
