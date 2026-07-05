@@ -381,6 +381,12 @@ namespace Truedat
 
         static bool _losersM3u = false;
         static string? _losersM3uPath = null;
+        // --manifest [path]: emit the kind:dupes review-surface manifest that MBXHub's
+        // review.html renders directly (no PowerShell producer in the middle). Default
+        // path = mbxmoods-duplicates.manifest.json next to the moods file; pass a path
+        // to drop it straight into <MBXHub AppData>\review\dupes.json.
+        static bool _manifest = false;
+        static string? _manifestPath = null;
 
         // Per-process cache: drive root -> isNetwork. DriveInfo.DriveType is a Win32
         // call (~µs per hit but it touches the mount table). One lookup per unique
@@ -791,6 +797,18 @@ namespace Truedat
                             || args[i + 1].EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)))
                     { _losersM3uPath = args[i + 1]; i++; }
                 }
+                else if (canonical == "manifest")
+                {
+                    _manifest = true;
+                    // Claim the next token as the output path only when it isn't the positional
+                    // library/moods arg (must look like a file path, not a flag).
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/")
+                        && args[i + 1].IndexOf(Path.DirectorySeparatorChar) >= 0)
+                    { _manifestPath = args[i + 1]; i++; }
+                    else if (i + 1 < args.Length && !args[i + 1].StartsWith("-")
+                        && args[i + 1].EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                    { _manifestPath = args[i + 1]; i++; }
+                }
                 else if (canonical == "quick-fingerprint") quickFingerprintMode = true;
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && string.Equals(args[i + 1], "max", StringComparison.OrdinalIgnoreCase)) { parallelism = Environment.ProcessorCount; i++; }
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
@@ -979,6 +997,7 @@ namespace Truedat
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
+                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly (default mbxmoods-duplicates.manifest.json; pass a path to drop into <MBXHub AppData>\\review\\dupes.json)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2128,6 +2147,7 @@ namespace Truedat
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
+                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly (default mbxmoods-duplicates.manifest.json; pass a path to drop into <MBXHub AppData>\\review\\dupes.json)");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -5596,7 +5616,117 @@ namespace Truedat
                     Console.WriteLine($"  WARNING: could not write {m3uPath}: {ex.Message}");
                 }
             }
+
+            if (_manifest)
+            {
+                var manifestPath = _manifestPath ?? Path.Combine(outDir, "mbxmoods-duplicates.manifest.json");
+                try
+                {
+                    WriteDuplicatesManifest(manifestPath, moodsPath, groups, tracks);
+                    Console.WriteLine($"  Review manifest: {manifestPath} (kind:dupes — drop into <MBXHub AppData>\\review\\)");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  WARNING: could not write {manifestPath}: {ex.Message}");
+                }
+            }
             return 0;
+        }
+
+        /// <summary>Emit the kind:dupes review-surface manifest that MBXHub's review.html
+        /// renders directly — one class per tier×scope, one row per member, keeper flagged.
+        /// truedat owns the dedup logic, so it emits the renderable manifest itself rather
+        /// than depending on an offline PowerShell producer. Schema mirrors the
+        /// review-surface contract (id/kind/title/generated/source/classes[columns,rows]);
+        /// album/bitDepth columns light up only when those member fields are present.
+        /// DISPLAY ONLY — marking a keeper here does nothing downstream.</summary>
+        static void WriteDuplicatesManifest(string manifestPath, string moodsPath,
+            List<DupGroup> groups, IDictionary<string, TrackEntry> tracks)
+        {
+            bool hasAlbum = groups.Any(g => g.Paths.Any(p => tracks.TryGetValue(p, out var e) && !string.IsNullOrEmpty(e.Features?.Album)));
+            bool hasBitDepth = groups.Any(g => g.Paths.Any(p => tracks.TryGetValue(p, out var e) && (e.FingerprintV1?.BitDepth ?? 0) > 0));
+
+            void WriteColumns(Utf8JsonWriter w)
+            {
+                void Col(string key, string label, string type)
+                {
+                    w.WriteStartObject(); w.WriteString("key", key); w.WriteString("label", label); w.WriteString("type", type); w.WriteEndObject();
+                }
+                w.WriteStartArray("columns");
+                Col("path", "path", "path");
+                Col("title", "title", "text");
+                Col("artist", "artist", "text");
+                if (hasAlbum) Col("album", "album", "text");
+                Col("codec", "codec", "text");
+                Col("bitrate", "kbps", "num");
+                Col("sampleRate", "hz", "num");
+                if (hasBitDepth) Col("bitDepth", "bit", "num");
+                Col("durationMs", "ms", "num");
+                Col("fileSize", "bytes", "num");
+                w.WriteEndArray();
+            }
+
+            var defs = new (string Key, string Tier, string Scope, string Title, string Hint)[]
+            {
+                ("exact-same-folder",     "exact",    "same-folder",  "Exact duplicates - same folder",        "Byte-identical audio (same audioStreamSha256), both copies in one folder. Certain - zero false positives."),
+                ("exact-cross-folder",    "exact",    "cross-folder", "Exact duplicates - different folders",  "Byte-identical audio (same audioStreamSha256), copies spread across folders. Certain."),
+                ("probable-same-folder",  "probable", "same-folder",  "Probable duplicates - same folder",     "Same acoustic fingerprint (mfcc/bpm/key/duration), likely different encodes (e.g. FLAC vs MP3), one folder. Candidates - confirm by ear."),
+                ("probable-cross-folder", "probable", "cross-folder", "Probable duplicates - different folders","Same acoustic fingerprint, copies across folders. Candidates - confirm by ear."),
+            };
+
+            using var fs = File.Create(manifestPath);
+            using var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true });
+            jw.WriteStartObject();
+            jw.WriteString("id", "dupes");
+            jw.WriteString("kind", "dupes");
+            jw.WriteString("title", "Duplicate groups (truedat)");
+            jw.WriteString("generated", DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+            jw.WriteStartObject("source");
+            jw.WriteString("tool", "truedat --duplicates");
+            jw.WriteString("moodsFile", Path.GetFullPath(moodsPath));
+            jw.WriteString("note", "Catalog is only as fresh as truedat's last scan. Display only - marking a keeper here does nothing downstream.");
+            jw.WriteEndObject();
+            jw.WriteStartArray("classes");
+            foreach (var d in defs)
+            {
+                var gs = groups.Where(g => g.Tier == d.Tier && g.Scope == d.Scope).ToList();
+                if (gs.Count == 0) continue;
+                int rowCount = gs.Sum(g => g.Paths.Count);
+                jw.WriteStartObject();
+                jw.WriteString("key", d.Key);
+                jw.WriteString("title", d.Title);
+                jw.WriteString("hint", d.Hint);
+                WriteColumns(jw);
+                jw.WriteNumber("groupCount", gs.Count);
+                jw.WriteNumber("rowCount", rowCount);
+                jw.WriteStartArray("rows");
+                foreach (var g in gs)
+                {
+                    foreach (var p in g.Paths)
+                    {
+                        tracks.TryGetValue(p, out var e);
+                        var fp = e?.FingerprintV1;
+                        jw.WriteStartObject();
+                        jw.WriteNumber("group", g.Id);
+                        jw.WriteBoolean("keeper", string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase));
+                        jw.WriteString("path", p);
+                        jw.WriteString("title", e?.Features?.Title ?? "");
+                        jw.WriteString("artist", e?.Features?.Artist ?? "");
+                        if (hasAlbum) jw.WriteString("album", e?.Features?.Album ?? "");
+                        jw.WriteString("codec", fp?.Codec ?? "");
+                        jw.WriteNumber("bitrate", fp?.Bitrate ?? 0);
+                        jw.WriteNumber("sampleRate", fp?.SampleRate ?? 0);
+                        if (hasBitDepth) jw.WriteNumber("bitDepth", fp?.BitDepth ?? 0);
+                        jw.WriteNumber("durationMs", fp?.DurationMs ?? 0);
+                        jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
+                        jw.WriteEndObject();
+                    }
+                }
+                jw.WriteEndArray();
+                jw.WriteEndObject();
+            }
+            jw.WriteEndArray();
+            jw.WriteEndObject();
         }
 
         /// <summary>Wrap a path in an OSC 8 file:// hyperlink so Windows Terminal makes
