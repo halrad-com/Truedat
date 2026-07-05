@@ -124,10 +124,19 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended
-                          keeper. Writes mbxmoods-duplicates.csv + mbxmoods-duplicates.json.
+                          keeper (lossless > bitDepth > sampleRate > bitrate > SMFM-tagged >
+                          size > shortest path). Writes mbxmoods-duplicates.csv + .json;
+                          per member: codec/bitrate/sampleRate/bitDepth/album + an smfm flag.
   --losers-m3u [path]     With --duplicates: write non-keeper members to an .m3u8 playlist
                           for review/removal inside MusicBee. Path must end in .m3u or .m3u8;
                           default is mbxmoods-duplicate-losers.m3u8 next to the moods file.
+  --html [path]           With --duplicates: write a self-contained interactive review page
+                          (offline, no server). Include duplicate groups in chunks, confirm
+                          keepers, click Build losers playlist to download the .m3u8. Default
+                          mbxmoods-duplicates.html next to the moods file.
+  --manifest [path]       With --duplicates: emit the kind:dupes review-surface manifest that
+                          MBXHub's review.html renders. No path auto-locates the running
+                          MusicBee instance's <root>\AppData\MBXHub\review\dupes.json.
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
