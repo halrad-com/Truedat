@@ -6022,6 +6022,9 @@ namespace Truedat
   .fchoice{display:flex;gap:6px;align-items:center;font-size:13px;color:#ddd;cursor:pointer}
   .fchoice b{color:#9cf;font-weight:600;word-break:break-all}
   .savings{color:#7c9;font-size:12px}
+  .fpair{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .flink{color:#9cf;text-decoration:none;word-break:break-all}
+  .flink:hover{text-decoration:underline}
   .expbtn{margin-left:auto;font-size:12px;padding:4px 8px}
   .exp{border-top:1px solid #262626}
   .hint{color:#888;font-size:12px;margin:0 0 14px;line-height:1.5}
@@ -6049,9 +6052,10 @@ const KEY='truedat-dupes:'+(D.moodsFile||'');
 let st={inc:{},keep:{},folderKeep:{}};
 try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if(s.keep)st.keep=s.keep;if(s.folderKeep)st.folderKeep=s.folderKeep;}catch(e){}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
-function esc(s){return(s==null?'':''+s).replace(/[&<>""]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','""':'&quot;'}[c]));}
+function esc(s){return(s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;');}
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
 function folderOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(0,i);}
+function folderUrl(p){return 'file:///'+encodeURI(p.replace(/\\/g,'/'));}
 function keeperOf(g){return st.keep[g.id]||g.keeper||g.members[0].path;}
 function visible(){const only=document.getElementById('onlysmfm').checked;return D.groups.filter(g=>!only||g.members.some(m=>m.smfm));}
 // A group is a folder-pair candidate when its members span exactly two folders.
@@ -6062,7 +6066,7 @@ function memberRow(g,m){
   const k=m.path===keeperOf(g);
   return `<tr class='${k?'keep':''}'>`
     +`<td><label><input type='radio' name='k${g.id}' ${k?'checked':''} data-g='${g.id}' data-p='${esc(m.path)}'> keep</label></td>`
-    +`<td class='path'>${esc(m.path)}</td>`
+    +`<td class='path'><a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='open containing folder'>${esc(m.path)}</a></td>`
     +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
     +`<td>${esc(m.codec)}</td>`
     +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num'>${m.bitDepth||''}</td>`
@@ -6098,8 +6102,8 @@ function clusterCard(key,groups){
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')
     +`<button class='sec expbtn' data-exp='${eid}'>show tracks</button></div>`
     +`<div class='folders'>keep:`
-      +`<label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> <b>${esc(fA)}</b></label>`
-      +`<label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> <b>${esc(fB)}</b></label>`
+      +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fA))}' title='open folder'>${esc(fA)}</a></span>`
+      +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fB))}' title='open folder'>${esc(fB)}</a></span>`
     +`</div>`
     +`<div class='exp' id='${eid}' style='display:none'>${tableFor(groups)}</div>`;
   return div;
