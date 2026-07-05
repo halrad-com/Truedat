@@ -653,7 +653,9 @@ namespace Truedat
         {
             Console.OutputEncoding = Encoding.UTF8;
 
-            var parallelism = Environment.ProcessorCount;
+            // Default leaves 2 cores for the foreground so a background scan isn't a hog.
+            // `-p max` or an explicit `-p N` (including N > core count) overrides this.
+            var parallelism = Math.Max(1, Environment.ProcessorCount - 2);
             string? xmlPath = null;
             bool fixupMode = false;
             string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
@@ -790,6 +792,7 @@ namespace Truedat
                     { _losersM3uPath = args[i + 1]; i++; }
                 }
                 else if (canonical == "quick-fingerprint") quickFingerprintMode = true;
+                else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && string.Equals(args[i + 1], "max", StringComparison.OrdinalIgnoreCase)) { parallelism = Environment.ProcessorCount; i++; }
                 else if ((canonical == "p" || canonical == "parallel") && i + 1 < args.Length && int.TryParse(args[i + 1], out var p) && p > 0) { parallelism = p; i++; }
                 else if (canonical == "synthesize") synthesize = true;
                 else if (canonical == "catalog" && i + 1 < args.Length) synthCatalog = args[++i];
@@ -949,7 +952,8 @@ namespace Truedat
                 Console.WriteLine("Usage: truedat.exe <path-to-iTunes-Music-Library.xml> [options]");
                 Console.WriteLine();
                 Console.WriteLine("Options:");
-                Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
+                Console.WriteLine($"  -p, --parallel      Parallel threads (default: {Math.Max(1, Environment.ProcessorCount - 2)} = cores-2, leaves 2 for foreground;");
+                Console.WriteLine($"                      '-p max' uses all {Environment.ProcessorCount}, '-p N' sets exactly N)");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing.");
                 Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
                 Console.WriteLine("  --remap <old>=<new> With --fixup: wholesale prefix swap on mbxmoods.json keys. Pass the");
@@ -2097,7 +2101,8 @@ namespace Truedat
                 Console.WriteLine("Usage: truedat.exe <path-to-iTunes-Music-Library.xml> [options]");
                 Console.WriteLine();
                 Console.WriteLine("Options:");
-                Console.WriteLine($"  -p, --parallel      Number of parallel threads (default: {Environment.ProcessorCount})");
+                Console.WriteLine($"  -p, --parallel      Parallel threads (default: {Math.Max(1, Environment.ProcessorCount - 2)} = cores-2, leaves 2 for foreground;");
+                Console.WriteLine($"                      '-p max' uses all {Environment.ProcessorCount}, '-p N' sets exactly N)");
                 Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing.");
                 Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
                 Console.WriteLine("  --remap <old>=<new> With --fixup: wholesale prefix swap on mbxmoods.json keys. Pass the");
