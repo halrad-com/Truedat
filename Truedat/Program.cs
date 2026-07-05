@@ -139,6 +139,11 @@ namespace Truedat
         public int?     SmfmChannel;        // dominant raw STMO slot index (argmax) — NOT a mood channel
         public string?  SmfmChannelName;    // device-refuted slot label; always null now (see SmfmReader)
         public double?  SmfmBpm;            // GBPM float32 BPM
+
+        /// <summary>True when this track carries Sony SMFM (12-TONE) data — the reusable
+        /// "has SMFM?" flag. Read-only computed getter (no state, net48-safe). Use this
+        /// everywhere instead of re-deriving the null/length check inline.</summary>
+        public bool HasSmfm => SmfmScores != null && SmfmScores.Length > 0;
     }
 
     /// <summary>--backfill-level scope. Identity = TagLib + cheap file IO; Features =
@@ -5403,8 +5408,10 @@ namespace Truedat
         /// <summary>Positive when pa outranks pb as keeper.</summary>
         static int CompareKeeper(string pa, string pb, Func<string, TrackEntry?> lookup)
         {
-            var a = lookup(pa)?.FingerprintV1;
-            var b = lookup(pb)?.FingerprintV1;
+            var ea = lookup(pa);
+            var eb = lookup(pb);
+            var a = ea?.FingerprintV1;
+            var b = eb?.FingerprintV1;
             int LosslessRank(FingerprintV1? fp) =>
                 fp != null && IsLosslessCodecForHiresCheck(fp.Codec) ? 1 : 0;
             int c = LosslessRank(a).CompareTo(LosslessRank(b));
@@ -5414,6 +5421,10 @@ namespace Truedat
             c = (a?.SampleRate ?? 0).CompareTo(b?.SampleRate ?? 0);
             if (c != 0) return c;
             c = (a?.Bitrate ?? 0).CompareTo(b?.Bitrate ?? 0);
+            if (c != 0) return c;
+            // SMFM-tagged copy wins when audio quality ties — the Sony-organized file
+            // (12-TONE tagged, usually the renamed keeper) beats the old untagged copy.
+            c = (ea?.Features?.HasSmfm == true ? 1 : 0).CompareTo(eb?.Features?.HasSmfm == true ? 1 : 0);
             if (c != 0) return c;
             c = (a?.FileSize ?? 0L).CompareTo(b?.FileSize ?? 0L);
             if (c != 0) return c;
@@ -5538,7 +5549,11 @@ namespace Truedat
                         if (shown >= cap) { Console.WriteLine($"    … +{gs.Count - shown} more groups — full list in the CSV"); break; }
                         Console.WriteLine($"    [{(g.Tier == "exact" ? g.Key.Substring(0, Math.Min(12, g.Key.Length)) : "probable")}]");
                         foreach (var p in g.Paths)
-                            Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{Linkify(p)}");
+                        {
+                            tracks.TryGetValue(p, out var de);
+                            var smfmTag = de?.Features?.HasSmfm == true ? " [smfm]" : "";
+                            Console.WriteLine($"      {(string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase) ? "keep " : "     ")}{Linkify(p)}{smfmTag}");
+                        }
                         shown++;
                     }
                 }
@@ -5734,6 +5749,7 @@ namespace Truedat
                 if (hasBitDepth) Col("bitDepth", "bit", "num");
                 Col("durationMs", "ms", "num");
                 Col("fileSize", "bytes", "num");
+                Col("smfm", "smfm", "text");
                 w.WriteEndArray();
             }
 
@@ -5790,6 +5806,7 @@ namespace Truedat
                         if (hasBitDepth) jw.WriteNumber("bitDepth", fp?.BitDepth ?? 0);
                         jw.WriteNumber("durationMs", fp?.DurationMs ?? 0);
                         jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
+                        jw.WriteString("smfm", e?.Features?.HasSmfm == true ? "smfm" : "");
                         jw.WriteEndObject();
                     }
                 }
@@ -5858,6 +5875,7 @@ namespace Truedat
                     if (fp?.BitDepth > 0) jw.WriteNumber("bitDepth", fp!.BitDepth);
                     if (fp?.FileSize > 0) jw.WriteNumber("fileSize", fp!.FileSize);
                     if (fp?.DurationMs > 0) jw.WriteNumber("durationMs", fp!.DurationMs);
+                    jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
                     if (string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase)) jw.WriteBoolean("keeper", true);
                     jw.WriteEndObject();
                 }
