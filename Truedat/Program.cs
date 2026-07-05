@@ -997,7 +997,7 @@ namespace Truedat
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
-                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly (default mbxmoods-duplicates.manifest.json; pass a path to drop into <MBXHub AppData>\\review\\dupes.json)");
+                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -2147,7 +2147,7 @@ namespace Truedat
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
-                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly (default mbxmoods-duplicates.manifest.json; pass a path to drop into <MBXHub AppData>\\review\\dupes.json)");
+                Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
@@ -5619,7 +5619,7 @@ namespace Truedat
 
             if (_manifest)
             {
-                var manifestPath = _manifestPath ?? Path.Combine(outDir, "mbxmoods-duplicates.manifest.json");
+                var manifestPath = _manifestPath ?? ResolveManifestDest(outDir);
                 try
                 {
                     WriteDuplicatesManifest(manifestPath, moodsPath, groups, tracks);
@@ -5631,6 +5631,41 @@ namespace Truedat
                 }
             }
             return 0;
+        }
+
+        /// <summary>Resolve where `--manifest` (no explicit path) writes: the running
+        /// MusicBee instance's MBXHub review drop folder. Finds the instance exactly like
+        /// MBXHub.Shell's MusicBeeDetector — the running MusicBee.exe's own folder (pure
+        /// Win32 process lookup, no plugin API) — then applies PluginLocator's layout
+        /// (&lt;root&gt;\AppData\MBXHub\review\dupes.json). Falls back to next-to-moods when no
+        /// running instance is found; an explicit --manifest &lt;path&gt; always wins.</summary>
+        static string ResolveManifestDest(string fallbackDir)
+        {
+            try
+            {
+                foreach (var proc in System.Diagnostics.Process.GetProcessesByName("MusicBee"))
+                {
+                    try
+                    {
+                        var exe = proc.MainModule?.FileName;
+                        if (string.IsNullOrEmpty(exe)) continue;
+                        var root = Path.GetDirectoryName(exe);
+                        if (string.IsNullOrEmpty(root)) continue;
+                        var mbxhub = Path.Combine(root!, "AppData", "MBXHub");
+                        if (Directory.Exists(mbxhub))
+                        {
+                            var reviewDir = Path.Combine(mbxhub, "review");
+                            Directory.CreateDirectory(reviewDir);
+                            Console.WriteLine($"  (auto-located running MusicBee: {root} → MBXHub review folder)");
+                            return Path.Combine(reviewDir, "dupes.json");
+                        }
+                    }
+                    catch { /* access denied / 32-vs-64-bit mismatch — try the next process */ }
+                }
+            }
+            catch { /* Process enumeration blocked — fall through */ }
+            Console.WriteLine("  (no running MusicBee found — writing manifest next to moods; pass --manifest <path> to override)");
+            return Path.Combine(fallbackDir, "mbxmoods-duplicates.manifest.json");
         }
 
         /// <summary>Emit the kind:dupes review-surface manifest that MBXHub's review.html
