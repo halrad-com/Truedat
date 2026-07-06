@@ -6049,6 +6049,10 @@ namespace Truedat
   header{position:sticky;top:0;z-index:5;background:#1c1c1c;border-bottom:1px solid #333;padding:10px 16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
   header h1{font-size:15px;margin:0;font-weight:600}
   .counts{font-size:13px;color:#9cf}
+  .pivot{display:flex;border:1px solid #3a3a3a;border-radius:7px;overflow:hidden}
+  .pivot .ptog{background:#242424;color:#bbb;border:0;border-radius:0;padding:6px 15px;font-size:13px}
+  .pivot .ptog.on{background:#2e7d46;color:#fff}
+  .atitle{color:#e8e8e8;font-weight:600}
   button{background:#2e7d46;color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:14px}
   button:hover{background:#37984f}
   button.sec{background:#3a3a3a}
@@ -6099,6 +6103,7 @@ namespace Truedat
 <body>
 <header>
   <h1>Duplicate review</h1>
+  <div class='pivot'><button class='ptog on' id='mAlbum'>Album</button><button class='ptog' id='mTrack'>Track</button></div>
   <span class='counts' id='counts'></span>
   <button id='accept'>Accept all recommended</button>
   <button id='build'>Build losers playlist</button>
@@ -6112,7 +6117,7 @@ namespace Truedat
   </div>
 </header>
 <main>
-  <p class='hint'>Groups start <b>not included</b>. Tick <b>include</b> on the ones you want to act on now, confirm the keeper (recommended is pre-picked), then <b>Build losers playlist</b> to download an .m3u8 of the non-keepers. Open it in MusicBee to remove. Work in chunks — nothing here touches your files.</p>
+  <p class='hint'><b>Album</b> mode rolls every duplicated track of an album into one card — pick the copy to keep once (biggest space wins on top); <b>Track</b> mode lists the scattered one-off dupes. Byte-identical (exact) dupes start <b>included</b> at the recommended keeper; cross-encode (probable) matches start off — they need eyes. <b>Accept all recommended</b> clears the easy pile in one click. Then <b>Build losers playlist</b> for an .m3u8 of the non-keepers — open it in MusicBee to remove. Nothing here touches your files.</p>
   <div id='list'></div>
 </main>
 <script id='data' type='application/json'>__DATA__</script>
@@ -6128,6 +6133,7 @@ function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
 // their recommended keeper so the easy pile is a review-and-accept. Probable
 // (cross-encode) groups stay off — they need eyes.
 if(!hadSaved){D.groups.forEach(g=>{if(g.tier==='exact')st.inc[g.id]=true;});save();}
+let mode=(st.mode==='track')?'track':'album';
 function esc(s){return(s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;');}
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
 function dur(ms){if(!ms)return '';const s=Math.round(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
@@ -6139,6 +6145,21 @@ function visible(){const only=document.getElementById('onlysmfm').checked;return
 // A group is a folder-pair candidate when its members span exactly two folders.
 function pairKey(g){const fs=[...new Set(g.members.map(m=>folderOf(m.path)))].sort();return fs.length===2?fs.join('|'):null;}
 function defWinner(groups,fA,fB){let a=0,b=0;groups.forEach(g=>{const f=folderOf(g.keeper||g.members[0].path);if(f===fA)a++;else if(f===fB)b++;});return a>=b?fA:fB;}
+// Space reclaimed if we act on a group / album: sum of the non-keeper members.
+function groupFrees(g){const kp=keeperOf(g);let s=0;g.members.forEach(m=>{if(m.path!==kp)s+=m.fileSize||0;});return s;}
+function clusterFrees(groups){let s=0;groups.forEach(g=>s+=groupFrees(g));return s;}
+// Album rollup key: artist+album when the group's members agree on the album
+// tag (the normal single-album case); falls back to the folder-pair key so
+// untagged dupes still cluster by their two folders. Compilations (per-track
+// artists) won't roll up — they land as loose track cards, which is fine.
+function albumKey(g){
+  const alb=(g.members[0].album||'').trim();
+  if(alb && g.members.every(m=>(m.album||'').trim().toLowerCase()===alb.toLowerCase())){
+    const art=(g.members[0].artist||'').trim().toLowerCase();
+    return 'alb:'+art+'/'+alb.toLowerCase();
+  }
+  return pairKey(g);
+}
 let CLUSTERS={};
 function memberRow(g,m){
   const k=m.path===keeperOf(g);
@@ -6187,42 +6208,64 @@ function groupCard(g){
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')+`</div>`+tableFor([g]);
   return div;
 }
-function clusterCard(key,groups){
-  const fs=key.split('|');const fA=fs[0],fB=fs[1];
-  const chosen=st.folderKeep[key]||defWinner(groups,fA,fB);
+// A rollup card for a set of duplicate groups that belong together — either an
+// album (keyed on artist+album) or a folder-pair fallback. When the set spans
+// exactly two folders (the common HiRes-vs-MP3 case) it shows the folder-level
+// keep choice + side-by-side pairTable; otherwise a flat per-track table.
+function albumCard(key,groups){
+  const isAlbum=key.slice(0,4)==='alb:';
+  const folders=[...new Set(groups.flatMap(g=>g.members.map(m=>folderOf(m.path))))].sort();
+  const m0=groups[0].members[0];
   const included=groups.every(g=>st.inc[g.id]);
-  let lose=0;groups.forEach(g=>{const kp=keeperOf(g);g.members.forEach(m=>{if(m.path!==kp)lose+=m.fileSize||0;});});
+  const lose=clusterFrees(groups);
   const hasSmfm=groups.some(g=>g.members.some(m=>m.smfm));
   const eid='exp'+key.replace(/[^a-z0-9]/gi,'');
   const div=document.createElement('div');div.className='grp cluster'+(included?' inc':'');
-  div.innerHTML=`<div class='ghead'>`
-    +`<label><input type='checkbox' class='cinc' data-key='${esc(key)}' ${included?'checked':''}> include set</label>`
-    +`<span class='badge exact'>folder duplicate</span><span>${groups.length} tracks</span>`
+  const label=isAlbum?'include album':'include set';
+  const badge=isAlbum
+    ?`<span class='badge exact'>album</span><span class='atitle'>${esc(m0.artist?m0.artist+' — ':'')}${esc(m0.album||'(unknown album)')}</span>`
+    :`<span class='badge exact'>folder duplicate</span>`;
+  let head=`<div class='ghead'>`
+    +`<label><input type='checkbox' class='cinc' data-key='${esc(key)}' ${included?'checked':''}> ${label}</label>`
+    +badge+`<span>${groups.length} tracks</span>`
     +`<span class='savings'>frees ${bytes(lose)}</span>`
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')
-    +`<button class='sec expbtn' data-exp='${eid}'>${expAll?'hide tracks':'show tracks'}</button></div>`
-    +`<div class='folders'>keep:`
+    +`<button class='sec expbtn' data-exp='${eid}'>${expAll?'hide tracks':'show tracks'}</button></div>`;
+  let body;
+  if(folders.length===2){
+    const fA=folders[0],fB=folders[1];
+    const chosen=st.folderKeep[key]||defWinner(groups,fA,fB);
+    body=`<div class='folders'>keep:`
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fA))}' title='open folder'>${esc(fA)}</a></span>`
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fB))}' title='open folder'>${esc(fB)}</a></span>`
-    +`</div>`
-    +`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${pairTable(groups,fA,fB)}</div>`;
+      +`</div>`
+      +`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${pairTable(groups,fA,fB)}</div>`;
+  }else{
+    body=`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${tableFor(groups)}</div>`;
+  }
+  div.innerHTML=head+body;
   return div;
 }
 function render(){
   const list=document.getElementById('list');list.innerHTML='';
   const vis=visible();
-  const map=new Map();
-  vis.forEach(g=>{const k=pairKey(g);if(k){if(!map.has(k))map.set(k,[]);map.get(k).push(g);}});
-  CLUSTERS={};const inClu=new Set();const clist=[];
-  map.forEach((groups,k)=>{if(groups.length>=2){CLUSTERS[k]=groups;clist.push([k,groups]);groups.forEach(g=>inClu.add(g.id));}});
-  clist.sort((a,b)=>b[1].length-a[1].length);
-  let inc=0,losers=0;
-  clist.forEach(([k,groups])=>{
-    list.appendChild(clusterCard(k,groups));
-    if(groups.every(g=>st.inc[g.id])){inc+=groups.length;groups.forEach(g=>{const kp=keeperOf(g);losers+=g.members.filter(m=>m.path!==kp).length;});}
-  });
-  vis.forEach(g=>{if(inClu.has(g.id))return;list.appendChild(groupCard(g));if(st.inc[g.id]){inc++;const kp=keeperOf(g);losers+=g.members.filter(m=>m.path!==kp).length;}});
-  document.getElementById('counts').textContent=vis.length+' groups · '+clist.length+' folder sets · '+inc+' included · '+losers+' losers queued';
+  CLUSTERS={};
+  let inc=0,losers=0,nClusters=0;
+  const tally=g=>{if(st.inc[g.id]){inc++;const kp=keeperOf(g);losers+=g.members.filter(m=>m.path!==kp).length;}};
+  if(mode==='track'){
+    vis.slice().sort((a,b)=>groupFrees(b)-groupFrees(a)).forEach(g=>{list.appendChild(groupCard(g));tally(g);});
+  }else{
+    const map=new Map();
+    vis.forEach(g=>{const k=albumKey(g);if(k){if(!map.has(k))map.set(k,[]);map.get(k).push(g);}});
+    const inClu=new Set();const clist=[];
+    map.forEach((groups,k)=>{if(groups.length>=2){CLUSTERS[k]=groups;clist.push([k,groups]);groups.forEach(g=>inClu.add(g.id));}});
+    clist.sort((a,b)=>clusterFrees(b[1])-clusterFrees(a[1]));  // biggest space wins on top
+    nClusters=clist.length;
+    clist.forEach(([k,groups])=>{list.appendChild(albumCard(k,groups));groups.forEach(tally);});
+    vis.filter(g=>!inClu.has(g.id)).sort((a,b)=>groupFrees(b)-groupFrees(a)).forEach(g=>{list.appendChild(groupCard(g));tally(g);});
+  }
+  const mid=mode==='track'?'':' · '+nClusters+' albums';
+  document.getElementById('counts').textContent=vis.length+' groups'+mid+' · '+inc+' included · '+losers+' losers queued';
 }
 document.addEventListener('change',e=>{
   if(e.target.matches('input.inc')){if(e.target.checked)st.inc[e.target.dataset.g]=true;else delete st.inc[e.target.dataset.g];save();render();}
@@ -6240,6 +6283,9 @@ document.getElementById('expand').addEventListener('click',()=>{expAll=true;rend
 document.getElementById('collapse').addEventListener('click',()=>{expAll=false;render();});
 document.getElementById('incall').addEventListener('click',()=>{visible().forEach(g=>st.inc[g.id]=true);save();render();});
 document.getElementById('clearall').addEventListener('click',()=>{st.inc={};save();render();});
+function setMode(m){mode=m;st.mode=m;document.getElementById('mAlbum').classList.toggle('on',m==='album');document.getElementById('mTrack').classList.toggle('on',m==='track');save();render();}
+document.getElementById('mAlbum').addEventListener('click',()=>setMode('album'));
+document.getElementById('mTrack').addEventListener('click',()=>setMode('track'));
 document.getElementById('build').addEventListener('click',()=>{
   const lines=['#EXTM3U'];
   D.groups.forEach(g=>{if(!st.inc[g.id])return;const c=keeperOf(g);g.members.forEach(m=>{if(m.path!==c)lines.push(m.path);});});
@@ -6248,7 +6294,7 @@ document.getElementById('build').addEventListener('click',()=>{
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mbxmoods-duplicate-losers.m3u8';
   document.body.appendChild(a);a.click();a.remove();
 });
-render();
+setMode(mode);  // sync the pivot toggle UI + initial render
 </script>
 </body>
 </html>";
