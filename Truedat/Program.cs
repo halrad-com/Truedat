@@ -6081,6 +6081,7 @@ namespace Truedat
   .fchoice{display:flex;gap:6px;align-items:center;font-size:13px;color:#ddd;cursor:pointer}
   .fchoice b{color:#9cf;font-weight:600;word-break:break-all}
   .savings{color:#7c9;font-size:12px}
+  .fnote{color:#c99;font-size:11px;background:#3a2e2e;border-radius:4px;padding:1px 6px}
   .fpair{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .flink{color:#9cf;text-decoration:none;word-break:break-all}
   .flink:hover{text-decoration:underline}
@@ -6140,11 +6141,24 @@ function dur(ms){if(!ms)return '';const s=Math.round(ms/1000);return Math.floor(
 function folderOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(0,i);}
 function folderUrl(p){return 'file:///'+encodeURI(p.replace(/\\/g,'/'));}
 function fileOf(p){const i=Math.max(p.lastIndexOf('\\'),p.lastIndexOf('/'));return i<0?p:p.slice(i+1);}
+// Case-insensitive, separator-normalized folder identity, mirroring the C#
+// PathComparer. Windows paths are case-insensitive, so D:\Music\x and
+// D:\music\x are the SAME folder — comparing raw strings invents phantom
+// folders and produces bogus keep-this-vs-that choices. Identity only; keep the
+// original-case folderOf() string for display.
+function folderKey(p){return folderOf(p).replace(/\//g,'\\').replace(/\\+$/,'').toLowerCase();}
 function keeperOf(g){return st.keep[g.id]||g.keeper||g.members[0].path;}
 function visible(){const only=document.getElementById('onlysmfm').checked;return D.groups.filter(g=>!only||g.members.some(m=>m.smfm));}
 // A group is a folder-pair candidate when its members span exactly two folders.
-function pairKey(g){const fs=[...new Set(g.members.map(m=>folderOf(m.path)))].sort();return fs.length===2?fs.join('|'):null;}
-function defWinner(groups,fA,fB){let a=0,b=0;groups.forEach(g=>{const f=folderOf(g.keeper||g.members[0].path);if(f===fA)a++;else if(f===fB)b++;});return a>=b?fA:fB;}
+function pairKey(g){const fs=[...new Set(g.members.map(m=>folderKey(m.path)))].sort();return fs.length===2?fs.join('|'):null;}
+// The folder (by identity key) holding the recommended keeper for the most
+// tracks — the sensible default source to keep. Generalizes to N folders.
+function defWinner(groups,keys){
+  const cnt={};keys.forEach(k=>cnt[k]=0);
+  groups.forEach(g=>{const k=folderKey(g.keeper||g.members[0].path);if(k in cnt)cnt[k]++;});
+  let best=keys[0];keys.forEach(k=>{if(cnt[k]>cnt[best])best=k;});
+  return best;
+}
 // Space reclaimed if we act on a group / album: sum of the non-keeper members.
 function groupFrees(g){const kp=keeperOf(g);let s=0;g.members.forEach(m=>{if(m.path!==kp)s+=m.fileSize||0;});return s;}
 function clusterFrees(groups){let s=0;groups.forEach(g=>s+=groupFrees(g));return s;}
@@ -6185,17 +6199,17 @@ function pairSide(m){
   return `<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
     +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
 }
-function pairTable(groups,fA,fB){
+function pairTable(groups,kA,kB,disp){
   const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th class='num'>len</th><th>smfm</th>`;
   const rows=groups.map(g=>{
-    const A=g.members.find(m=>folderOf(m.path)===fA),B=g.members.find(m=>folderOf(m.path)===fB);
+    const A=g.members.find(m=>folderKey(m.path)===kA),B=g.members.find(m=>folderKey(m.path)===kB);
     const kp=keeperOf(g);
     const rA=A?`<input type='radio' name='kg${g.id}' data-g='${g.id}' data-p='${esc(A.path)}' ${A.path===kp?'checked':''}>`:'';
     const rB=B?`<input type='radio' name='kg${g.id}' data-g='${g.id}' data-p='${esc(B.path)}' ${B.path===kp?'checked':''}>`:'';
     return `<tr><td class='kc'>${rA}</td>${pairSide(A)}<td class='sep'></td>${pairSide(B)}<td class='kc'>${rB}</td></tr>`;
   }).join('');
   return `<div class='pairwrap'><table class='pair'><thead>`
-    +`<tr><th></th><th colspan='7' class='fhdr'>${esc(fileOf(fA))}</th><th></th><th colspan='7' class='fhdr'>${esc(fileOf(fB))}</th><th></th></tr>`
+    +`<tr><th></th><th colspan='7' class='fhdr'>${esc(fileOf(disp[kA]))}</th><th></th><th colspan='7' class='fhdr'>${esc(fileOf(disp[kB]))}</th><th></th></tr>`
     +`<tr><th>keep</th>${sub}<th></th>${sub}<th>keep</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function groupCard(g){
@@ -6208,14 +6222,27 @@ function groupCard(g){
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')+`</div>`+tableFor([g]);
   return div;
 }
+// Album-level keep-source radios (one per distinct folder). Picking one sets the
+// keeper to that folder's copy for every track that has one; tracks missing from
+// it keep their per-track choice. data-f carries the folder IDENTITY key; the
+// label shows the original-case path from disp.
+function folderChoice(key,eid,fkeys,disp,chosen){
+  const opts=fkeys.map(fk=>
+    `<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fk)}' ${chosen===fk?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(disp[fk]))}' title='open folder'>${esc(disp[fk])}</a></span>`
+  ).join('');
+  return `<div class='folders'>keep:${opts}</div>`;
+}
 // A rollup card for a set of duplicate groups that belong together — either an
-// album (keyed on artist+album) or a folder-pair fallback. When the set spans
-// exactly two folders (the common HiRes-vs-MP3 case) it shows the folder-level
-// keep choice + side-by-side pairTable; otherwise a flat per-track table.
+// album (keyed on artist+album) or a folder-pair fallback. Folders are identified
+// case-insensitively. 2 folders => side-by-side pairTable; 3+ => keep-source list
+// over a flat table; 1 (same-folder dupes) => flat per-track keep only.
 function albumCard(key,groups){
   const isAlbum=key.slice(0,4)==='alb:';
-  const folders=[...new Set(groups.flatMap(g=>g.members.map(m=>folderOf(m.path))))].sort();
   const m0=groups[0].members[0];
+  // distinct folders by identity, each with a representative original-case path
+  const disp={};
+  groups.forEach(g=>g.members.forEach(m=>{const fk=folderKey(m.path);if(!(fk in disp))disp[fk]=folderOf(m.path);}));
+  const fkeys=Object.keys(disp).sort();
   const included=groups.every(g=>st.inc[g.id]);
   const lose=clusterFrees(groups);
   const hasSmfm=groups.some(g=>g.members.some(m=>m.smfm));
@@ -6225,23 +6252,23 @@ function albumCard(key,groups){
   const badge=isAlbum
     ?`<span class='badge exact'>album</span><span class='atitle'>${esc(m0.artist?m0.artist+' — ':'')}${esc(m0.album||'(unknown album)')}</span>`
     :`<span class='badge exact'>folder duplicate</span>`;
+  const fnote=fkeys.length>2?`<span class='fnote'>${fkeys.length} folders</span>`:(fkeys.length===1?`<span class='fnote'>same folder</span>`:'');
   let head=`<div class='ghead'>`
     +`<label><input type='checkbox' class='cinc' data-key='${esc(key)}' ${included?'checked':''}> ${label}</label>`
-    +badge+`<span>${groups.length} tracks</span>`
+    +badge+`<span>${groups.length} tracks</span>${fnote}`
     +`<span class='savings'>frees ${bytes(lose)}</span>`
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')
     +`<button class='sec expbtn' data-exp='${eid}'>${expAll?'hide tracks':'show tracks'}</button></div>`;
+  const exp=inner=>`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${inner}</div>`;
   let body;
-  if(folders.length===2){
-    const fA=folders[0],fB=folders[1];
-    const chosen=st.folderKeep[key]||defWinner(groups,fA,fB);
-    body=`<div class='folders'>keep:`
-      +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fA))}' title='open folder'>${esc(fA)}</a></span>`
-      +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fB))}' title='open folder'>${esc(fB)}</a></span>`
-      +`</div>`
-      +`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${pairTable(groups,fA,fB)}</div>`;
+  if(fkeys.length===2){
+    const chosen=st.folderKeep[key]||defWinner(groups,fkeys);
+    body=folderChoice(key,eid,fkeys,disp,chosen)+exp(pairTable(groups,fkeys[0],fkeys[1],disp));
+  }else if(fkeys.length>=3){
+    const chosen=st.folderKeep[key]||defWinner(groups,fkeys);
+    body=folderChoice(key,eid,fkeys,disp,chosen)+exp(tableFor(groups));
   }else{
-    body=`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${tableFor(groups)}</div>`;
+    body=exp(tableFor(groups));  // 1 folder: same-folder dupes, per-track keep only
   }
   div.innerHTML=head+body;
   return div;
@@ -6270,7 +6297,7 @@ function render(){
 document.addEventListener('change',e=>{
   if(e.target.matches('input.inc')){if(e.target.checked)st.inc[e.target.dataset.g]=true;else delete st.inc[e.target.dataset.g];save();render();}
   else if(e.target.matches('input.cinc')){(CLUSTERS[e.target.dataset.key]||[]).forEach(g=>{if(e.target.checked)st.inc[g.id]=true;else delete st.inc[g.id];});save();render();}
-  else if(e.target.matches('input.ckeep')){const key=e.target.dataset.key,f=e.target.dataset.f;st.folderKeep[key]=f;(CLUSTERS[key]||[]).forEach(g=>{const m=g.members.find(x=>folderOf(x.path)===f);if(m)st.keep[g.id]=m.path;});save();render();}
+  else if(e.target.matches('input.ckeep')){const key=e.target.dataset.key,f=e.target.dataset.f;st.folderKeep[key]=f;(CLUSTERS[key]||[]).forEach(g=>{const m=g.members.find(x=>folderKey(x.path)===f);if(m)st.keep[g.id]=m.path;});save();render();}
   else if(e.target.matches('input[type=radio][data-g]')){st.keep[e.target.dataset.g]=e.target.dataset.p;save();render();}
   else if(e.target.id==='onlysmfm'){render();}
 });
