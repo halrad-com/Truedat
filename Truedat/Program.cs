@@ -6100,9 +6100,12 @@ namespace Truedat
 <header>
   <h1>Duplicate review</h1>
   <span class='counts' id='counts'></span>
+  <button id='accept'>Accept all recommended</button>
   <button id='build'>Build losers playlist</button>
   <audio id='player' class='player' controls preload='none'></audio>
   <div class='tools'>
+    <button class='sec' id='expand'>expand all</button>
+    <button class='sec' id='collapse'>collapse all</button>
     <button class='sec' id='incall'>include all shown</button>
     <button class='sec' id='clearall'>clear</button>
     <label><input type='checkbox' id='onlysmfm'> only groups with an SMFM copy</label>
@@ -6116,9 +6119,15 @@ namespace Truedat
 <script>
 const D=JSON.parse(document.getElementById('data').textContent);
 const KEY='truedat-dupes:'+(D.moodsFile||'');
+const hadSaved=localStorage.getItem(KEY)!=null;
 let st={inc:{},keep:{},folderKeep:{}};
+let expAll=false;
 try{const s=JSON.parse(localStorage.getItem(KEY)||'{}');if(s.inc)st.inc=s.inc;if(s.keep)st.keep=s.keep;if(s.folderKeep)st.folderKeep=s.folderKeep;}catch(e){}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(st));}catch(e){}}
+// First visit (no saved state): pre-include the byte-identical exact dupes at
+// their recommended keeper so the easy pile is a review-and-accept. Probable
+// (cross-encode) groups stay off — they need eyes.
+if(!hadSaved){D.groups.forEach(g=>{if(g.tier==='exact')st.inc[g.id]=true;});save();}
 function esc(s){return(s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;');}
 function bytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++;}return x.toFixed(i?1:0)+' '+u[i];}
 function dur(ms){if(!ms)return '';const s=Math.round(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
@@ -6191,12 +6200,12 @@ function clusterCard(key,groups){
     +`<span class='badge exact'>folder duplicate</span><span>${groups.length} tracks</span>`
     +`<span class='savings'>frees ${bytes(lose)}</span>`
     +(hasSmfm?`<span class='hassmfm'>has SMFM</span>`:'')
-    +`<button class='sec expbtn' data-exp='${eid}'>show tracks</button></div>`
+    +`<button class='sec expbtn' data-exp='${eid}'>${expAll?'hide tracks':'show tracks'}</button></div>`
     +`<div class='folders'>keep:`
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fA)}' ${chosen===fA?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fA))}' title='open folder'>${esc(fA)}</a></span>`
       +`<span class='fpair'><label class='fchoice'><input type='radio' name='f${eid}' class='ckeep' data-key='${esc(key)}' data-f='${esc(fB)}' ${chosen===fB?'checked':''}> keep</label> <a class='flink' href='${esc(folderUrl(fB))}' title='open folder'>${esc(fB)}</a></span>`
     +`</div>`
-    +`<div class='exp' id='${eid}' style='display:none'>${pairTable(groups,fA,fB)}</div>`;
+    +`<div class='exp' id='${eid}' style='display:${expAll?'':'none'}'>${pairTable(groups,fA,fB)}</div>`;
   return div;
 }
 function render(){
@@ -6226,6 +6235,9 @@ document.addEventListener('click',e=>{
   if(e.target.matches('[data-exp]')){const el=document.getElementById(e.target.dataset.exp);if(el){const show=el.style.display==='none';el.style.display=show?'':'none';e.target.textContent=show?'hide tracks':'show tracks';}}
   else if(e.target.matches('.play')){const p=document.getElementById('player');p.src=e.target.dataset.u;p.play().catch(()=>{});document.querySelectorAll('.play.on').forEach(b=>b.classList.remove('on'));e.target.classList.add('on');}
 });
+document.getElementById('accept').addEventListener('click',()=>{D.groups.forEach(g=>{st.inc[g.id]=true;delete st.keep[g.id];});st.folderKeep={};save();render();});
+document.getElementById('expand').addEventListener('click',()=>{expAll=true;render();});
+document.getElementById('collapse').addEventListener('click',()=>{expAll=false;render();});
 document.getElementById('incall').addEventListener('click',()=>{visible().forEach(g=>st.inc[g.id]=true);save();render();});
 document.getElementById('clearall').addEventListener('click',()=>{st.inc={};save();render();});
 document.getElementById('build').addEventListener('click',()=>{
