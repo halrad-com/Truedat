@@ -411,10 +411,14 @@ namespace Truedat
         internal static int _stageFallbackCount;
 
 
-        // Essentia streaming ChordsDetection buffer limit: 262144 elements (forMultipleFrames).
-        // At 44100 Hz / 2048 hop size = ~21.53 frames/sec -> max ~12172s before buffer overflow.
-        // Use 12000s (200 min) as safe limit with margin.
-        const int MaxEssentiaDurationSecs = 12000;
+        // Essentia streaming ChordsDetection buffer limit caps analyzable track length.
+        // Unpatched extractor (essentia-build/output-x64.1): 262144-element buffer
+        // (forMultipleFrames) -> at 44100 Hz / 2048 hop = ~21.53 frames/sec the buffer
+        // overflows at ~12172s; default 12000s (200 min) leaves margin.
+        // Patched extractor (output-x64.2, forLargeAudioStream = 1048576 elements):
+        // ceiling ~48695s -> pass --max-duration 48000 (~13.3 h) when running against it.
+        // See essentia-build/OUTPUT-BUILDS.md. Overridable via --max-duration <secs>.
+        static int _maxEssentiaDurationSecs = 12000;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
@@ -865,6 +869,15 @@ namespace Truedat
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
+                else if (canonical == "max-duration" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out _maxEssentiaDurationSecs) || _maxEssentiaDurationSecs <= 0)
+                    {
+                        Console.Error.WriteLine($"Error: --max-duration requires a positive integer (seconds), got '{args[i]}'");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                }
                 else if (canonical == "no-bitusage") _noBitUsage = true;
                 else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
                 else if (canonical == "version" || canonical == "v")
@@ -1027,6 +1040,9 @@ namespace Truedat
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
                 Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --max-duration <s>  Max track length in seconds for Essentia analysis (default 12000 = 200 min,");
+                Console.WriteLine("                      the stock extractor's ChordsDetection buffer limit; pass 48000 when using");
+                Console.WriteLine("                      the large-buffer extractor build — see essentia-build/OUTPUT-BUILDS.md)");
                 Console.WriteLine("  --no-quick-cache    Disable the tags-only quick cache tier (head-64k check);");
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
@@ -2178,6 +2194,9 @@ namespace Truedat
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
                 Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
                 Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
+                Console.WriteLine("  --max-duration <s>  Max track length in seconds for Essentia analysis (default 12000 = 200 min,");
+                Console.WriteLine("                      the stock extractor's ChordsDetection buffer limit; pass 48000 when using");
+                Console.WriteLine("                      the large-buffer extractor build — see essentia-build/OUTPUT-BUILDS.md)");
                 Console.WriteLine("  --no-quick-cache    Disable the tags-only quick cache tier (head-64k check);");
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
@@ -2796,12 +2815,12 @@ namespace Truedat
 
                         // Pre-flight: skip files that exceed Essentia's ChordsDetection buffer
                         var trackDurationSecs = t.TotalTimeMs / 1000;
-                        if (trackDurationSecs > MaxEssentiaDurationSecs)
+                        if (trackDurationSecs > _maxEssentiaDurationSecs)
                         {
                             var durationMin = trackDurationSecs / 60.0;
-                            var limitMin = MaxEssentiaDurationSecs / 60.0;
+                            var limitMin = _maxEssentiaDurationSecs / 60.0;
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                            var msg = $"Skipped: duration {durationMin:F0} min exceeds Essentia ChordsDetection buffer limit ({limitMin:F0} min)";
+                            var msg = $"Skipped: duration {durationMin:F0} min exceeds Essentia ChordsDetection buffer limit ({limitMin:F0} min; --max-duration to override)";
                             Console.WriteLine($"  WARNING: {msg}");
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, msg, sizeMb, 0, saveLock);
                             Interlocked.Increment(ref failed);

@@ -163,6 +163,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
   --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --max-duration <secs>   Max track length for Essentia analysis (default 12000 = 200 min —
+                          the stock extractor's ChordsDetection buffer limit). Longer tracks
+                          are skipped and logged. Raise only when running an extractor built
+                          with the larger buffer.
   --no-quick-cache        Disable the tags-only quick cache tier (head-64k check);
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
