@@ -68,6 +68,30 @@ essentia-build/
 └── output/               ← final .exe lands here
 ```
 
+## Rebuild Notes (2026-07-10 large-file-patch build)
+
+Lessons from the second full build (in-place on `/mnt/c`, WSL Ubuntu-24.04 — see
+`OUTPUT-BUILDS.md` for what `.1`/`.2` outputs are):
+
+- **Deps tarball extracts INTO `3rdparty/`** — it's rooted at `lib/`/`include/`:
+  `tar xzf 3rdparty-x64-deps.tar.gz -C 3rdparty/`
+- **Fix pkg-config prefixes after extracting.** The `.pc` files hardcode the
+  original build home (`/home/builder/essentia-build/3rdparty`). When building
+  in-place, rewrite them or WAF configure gets dead paths:
+  ```bash
+  sed -i 's|/home/builder/essentia-build/3rdparty|/mnt/c/<this-repo>/essentia-build/3rdparty|g' 3rdparty/lib/pkgconfig/*.pc
+  ```
+- **Cap parallelism.** WAF defaults to `-j$(nproc)` (22 on this box); each mingw
+  g++ peaks ~1 GB, and 22 of them OOM-killed the build on a 15 GB WSL VM. Use
+  `python3 waf -j8` — `resume-build.sh` does this and skips the reconfigure.
+- **The build must finish in one uninterrupted run.** WAF persists its
+  incremental state only on clean exit — a killed build (timeout, OOM, closed
+  terminal) restarts from step 0 next time. Run it from a shell that won't be
+  killed; ~19 min at `-j8` on `/mnt/c`.
+- `build_essentia.sh` does `rm -rf build` + reconfigure (full rebuild every
+  time) and sed-patches `essentia-src/wscript` in place (idempotent, but shows
+  as working-tree churn in git).
+
 ## Troubleshooting
 
 **`x86_64-w64-mingw32-g++ not found`**: Install the cross-compiler:

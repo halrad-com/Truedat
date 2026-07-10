@@ -120,9 +120,13 @@ ChordsDetection::ChordsDetection() : AlgorithmComposite() {
   //        the correct way to do this is to have the algorithm output the chords
   //        continuously while processing, which requires a FrameCutter for vectors
   // Need to set the buffer type to multiple frames as all the chords
-  // are output all at once
-  _chords.setBufferType(BufferUsage::forMultipleFrames);
-  _strength.setBufferType(BufferUsage::forMultipleFrames);
+  // are output all at once. Local patch (2026-07-09): forMultipleFrames
+  // (262144 elements) capped analyzable duration at ~12172s (~200 min) at
+  // 44.1kHz/2048-hop; forLargeAudioStream (1048576 elements) raises the
+  // ceiling to ~48695s (~13.5 h). Truedat's MaxEssentiaDurationSecs
+  // pre-flight must stay in sync with this buffer size.
+  _chords.setBufferType(BufferUsage::forLargeAudioStream);
+  _strength.setBufferType(BufferUsage::forLargeAudioStream);
 
   attach(_pcp, _poolStorage->input("data"));
 }

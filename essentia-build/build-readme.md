@@ -6,7 +6,13 @@ This project cross-compiles a **64-bit** static binary using WSL2. The x64 build
 
 ## Pre-Built x64 Binaries
 
-Ready-to-use 64-bit binaries are in [`essentia-build/output-x64/`](essentia-build/output-x64/) — 53 tools including the primary `essentia_streaming_extractor_music.exe` (28MB). These are static binaries with no external dependencies.
+Ready-to-use 64-bit binaries are in `essentia-build/output-x64.1/` (original
+x64 port) and `essentia-build/output-x64.2/` (adds the ChordsDetection
+large-file patch, ~13.5 h track ceiling) — 54 tools each, including the primary
+`essentia_streaming_extractor_music.exe` (28MB). These are static binaries with
+no external dependencies. See
+[`essentia-build/OUTPUT-BUILDS.md`](essentia-build/OUTPUT-BUILDS.md) for the
+differences between the two builds.
 
 The deployed Truedat distribution is in [`dist/truedat/`](dist/truedat/) with both i686 and x64 binaries for comparison.
 
@@ -27,6 +33,23 @@ tar xzf ../3rdparty-x64-deps.tar.gz
 cd ..
 bash build_essentia.sh
 ```
+
+**Option A' — Build in place on `/mnt/c`** (no copy to Linux home; used for the
+2026-07-10 rebuild). The archived `.pc` files hardcode `/home/builder/...`, so
+rewrite their prefixes first:
+
+```bash
+cd /mnt/c/Users/<you>/source/repos/truedat/essentia-build
+tar xzf 3rdparty-x64-deps.tar.gz -C 3rdparty/
+sed -i "s|/home/builder/essentia-build/3rdparty|$(pwd)/3rdparty|g" 3rdparty/lib/pkgconfig/*.pc
+bash build_essentia.sh          # full build, ~19 min at -j8
+# or, to resume/limit memory: bash resume-build.sh  (waf -j8, no reconfigure)
+```
+
+Caveats that bit us (details in `essentia-build/BUILD.md` Rebuild Notes):
+WAF's default `-j$(nproc)` can OOM-kill mingw on a 15 GB WSL VM (use `-j8`);
+a killed build loses all incremental state (WAF saves it only on clean exit),
+so let it run uninterrupted.
 
 **Option B — Build everything from source:**
 
