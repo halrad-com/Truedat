@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# extract-sony-sensme.py - extract 10-channel SensMe scores + BPM from Sony Music
-# Center smfmf.bin sidecar files. Joins to mbxhub mood cache by filename and
-# emits a JSON suitable as labeled training data for the AutoQ v4 model.
+# extract-sony-sensme.py - extract the 10 raw SMFM slot scores + BPM from Sony
+# Music Center smfmf.bin sidecar files. Joins to mbxhub mood cache by filename
+# and emits a JSON suitable as labeled training data for the AutoQ v4 model.
 #
 # Sony stores SMFM (12-TONE) analysis as binary TLV sub-blocks. STMO sub-block
-# contains 10 channels x 4 segments x 4-byte records. Each record: 01 CH SG SC
-# where CH=channel(0-9), SG=segment(0-3), SC=score(0-255).
+# contains 40 4-byte records: 01 SL SI SC where SL=slot(0-9), SI=sub-index(0-3),
+# SC=score(0-255). The 4 sub-indices per slot are always identical (raw-byte
+# verified; NOT temporal segments) — averaging them is a no-op. The 10 slots are
+# mood-model scores, not SensMe channels (device-refuted 2026-06-27).
+# Format docs: ../smfm-tools/SMFM-FORMAT.md and ../smfm-tools/SMFM-KNOWLEDGE.md.
 #
 # Usage:
-#   python3 extract-sony-sensme.py --sony "C:/Users/scott/AppData/Roaming/Sony/Music Center" #     --moods P:/Library/mbxmoods.json --out sony-sensme-labels.json
+#   python3 extract-sony-sensme.py --sony "C:/Users/<you>/AppData/Roaming/Sony/Music Center" #     --moods path/to/mbxmoods.json --out sony-sensme-labels.json
 
 from __future__ import annotations
 import argparse, io, json, os, struct

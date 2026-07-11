@@ -214,6 +214,11 @@ the scan path (commit `6283ce6` and follow-ups), which populates the
 slots are raw STMO scores, not mood channels.) The Python script remains
 useful for one-shot bulk extraction outside the scan pipeline.
 
+The SMFM wire format, the full state of knowledge (including falsified
+claims), and an SMFM-vs-Essentia comparison are documented in
+[`../smfm-tools/`](../smfm-tools/), which also ships broader extraction
+tooling (FLAC/MP3/WMA carriers, folder scan, dump/diff).
+
 ```
 python extract-sony-sensme.py \
     --sony "C:/Users/<you>/AppData/Roaming/Sony/Music Center" \
