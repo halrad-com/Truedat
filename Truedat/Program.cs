@@ -384,6 +384,15 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
+        // Whole-file MD5 maintenance. Default OFF: no dedicated read is ever spent
+        // on fileMd5 (worker fan-out task, tier-1 null backfill, --backfill Tier A
+        // fill all skip it). It is still written when it falls out of the shared
+        // single-pass read (ComputeFileMd5AndAudioSha in the cache-tier walks), and
+        // existing stored values are always preserved. Nothing consumes fileMd5
+        // today (MBXHub indexes audioStreamSha256 only); --file-md5 restores full
+        // maintenance for external-interop use.
+        internal static bool _fileMd5Enabled = false;
+
         static bool _losersM3u = false;
         static string? _losersM3uPath = null;
         // --manifest [path]: emit the kind:dupes review-surface manifest that MBXHub's
@@ -868,6 +877,7 @@ namespace Truedat
                 else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
+                else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -1015,7 +1025,7 @@ namespace Truedat
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
-                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
+                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
                 Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
                 Console.WriteLine("                      features (bitUsage, hfEnergyRatio, hfSpectralStructure — requires ffmpeg,");
                 Console.WriteLine("                      ~30s per applicable");
@@ -1047,6 +1057,9 @@ namespace Truedat
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
+                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: no dedicated read is spent");
+                Console.WriteLine("                      on it; still recorded when it falls out of a shared read, and stored");
+                Console.WriteLine("                      values are always preserved). Also gates the --backfill fileMd5 fill.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -2169,7 +2182,7 @@ namespace Truedat
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
-                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5,");
+                Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
                 Console.WriteLine("                      fingerprint.v1, bitDepth, encoder, mp3LameTag — TagLib + cheap IO) AND");
                 Console.WriteLine("                      features (bitUsage, hfEnergyRatio, hfSpectralStructure — requires ffmpeg,");
                 Console.WriteLine("                      ~30s per applicable");
@@ -2201,6 +2214,9 @@ namespace Truedat
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
+                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: no dedicated read is spent");
+                Console.WriteLine("                      on it; still recorded when it falls out of a shared read, and stored");
+                Console.WriteLine("                      values are always preserved). Also gates the --backfill fileMd5 fill.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -2546,8 +2562,10 @@ namespace Truedat
                                     else
                                     {
                                         // Path-cache hit: same path, same mtime, canary passed.
-                                        // Backfill fileMd5 if older entry lacked it.
-                                        var refreshedMd5 = existing.FileMd5 ?? ComputeFileMd5(t.Location);
+                                        // Backfill fileMd5 if older entry lacked it — only under
+                                        // --file-md5: this is a dedicated full read on the original
+                                        // path (the wave that follows a retag scan's tier-1.5 clears).
+                                        var refreshedMd5 = existing.FileMd5 ?? (_fileMd5Enabled ? ComputeFileMd5(t.Location) : null);
                                         // Backfill canonical audioStreamSha256 if missing — legacy entries
                                         // from before the Phase 2 identity layer lack it, which silently
                                         // weakens the cross-SHA cache tier on future runs. Cheap (~50ms).
@@ -3958,8 +3976,10 @@ namespace Truedat
         /// Tier C sub-fields, MP3 LAME tag). TagLib + cheap file IO only; no audio decode.</summary>
         static void ApplyBackfillIdentity(string path, long fileSize, TrackEntry entry, List<string> filled)
         {
-            // Tier A — fileMd5
-            if (string.IsNullOrEmpty(entry.FileMd5))
+            // Tier A — fileMd5 (only under --file-md5: whole-file MD5 costs a full
+            // read per entry and nothing consumes it; sha/fingerprint fills below
+            // are unaffected)
+            if (_fileMd5Enabled && string.IsNullOrEmpty(entry.FileMd5))
             {
                 var md5 = ComputeFileMd5(path);
                 if (!string.IsNullOrEmpty(md5))
@@ -6418,7 +6438,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var analyzeStart = Stopwatch.GetTimestamp();
 
             var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct));
-            var fileMd5Task = Task.Run(() => ComputeFileMd5(readPath));
+            var fileMd5Task = Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
             var fingerprintTask = Task.Run(() =>
             {
                 var swFp = Stopwatch.StartNew();
