@@ -384,13 +384,14 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
-        // Whole-file MD5 maintenance. Default OFF: no dedicated read is ever spent
-        // on fileMd5 (worker fan-out task, tier-1 null backfill, --backfill Tier A
-        // fill all skip it). It is still written when it falls out of the shared
-        // single-pass read (ComputeFileMd5AndAudioSha in the cache-tier walks), and
-        // existing stored values are always preserved. Nothing consumes fileMd5
-        // today (MBXHub indexes audioStreamSha256 only); --file-md5 restores full
-        // maintenance for external-interop use.
+        // Whole-file MD5 maintenance. Default OFF: truedat never WRITES fileMd5 —
+        // the worker fan-out task, tier-1 null backfill, tier-2/4 refreshes, and
+        // --backfill Tier A all skip it, and --migrate strips stored values. The
+        // md5 half of the shared single-pass read (ComputeFileMd5AndAudioSha) is
+        // still COMPUTED for the tier-3 cross-MD5 lookup against old entries; it
+        // just isn't persisted. Nothing consumes fileMd5 (MBXHub indexes
+        // audioStreamSha256 only); --file-md5 restores full maintenance for
+        // external-interop use.
         internal static bool _fileMd5Enabled = false;
 
         static bool _losersM3u = false;
@@ -1039,7 +1040,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -1057,9 +1058,9 @@ namespace Truedat
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
-                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: no dedicated read is spent");
-                Console.WriteLine("                      on it; still recorded when it falls out of a shared read, and stored");
-                Console.WriteLine("                      values are always preserved). Also gates the --backfill fileMd5 fill.");
+                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
+                Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
+                Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -1370,6 +1371,7 @@ namespace Truedat
                                     var freshTags = ExtractFileTags(afStagedPath);
                                     trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
                                         freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                                    if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                     afHitTag = "cached·sha";
                                     afFingerprintV1 = trackEntry.FingerprintV1;
                                     afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -1415,6 +1417,7 @@ namespace Truedat
                             var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                 freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                            if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                             RemoveIfMoved(afMoodsTracks, xs.OldKey);
                             afHitTag = "cached·sha";
                             afFingerprintV1 = trackEntry.FingerprintV1;
@@ -1946,6 +1949,7 @@ namespace Truedat
                                         var flShaPathEntry = RebuildCacheEntryFromTags(
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                        if (!_fileMd5Enabled) flShaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                         var flShaPathSmfmTag = ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
@@ -1998,6 +2002,7 @@ namespace Truedat
                                     var flCrossShaEntry = RebuildCacheEntryFromTags(
                                         xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                    if (!_fileMd5Enabled) flCrossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                     var flCrossShaSmfmTag = ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
@@ -2196,7 +2201,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields, rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --fingerprint       Run fingerprint mode (chromaprint + md5) -> mbxhub-fingerprints.json");
                 Console.WriteLine("  --chromaprint-only  Fingerprint mode: only run chromaprint (skip md5)");
                 Console.WriteLine("  --md5-only          Fingerprint mode: only run audio md5 (skip chromaprint)");
@@ -2214,9 +2219,9 @@ namespace Truedat
                 Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
                 Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
                 Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
-                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: no dedicated read is spent");
-                Console.WriteLine("                      on it; still recorded when it falls out of a shared read, and stored");
-                Console.WriteLine("                      values are always preserved). Also gates the --backfill fileMd5 fill.");
+                Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
+                Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
+                Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --quick-fingerprint Use fpcalc to generate 30-second chromaprint -> mbxhub-quickfp.json");
@@ -2657,6 +2662,7 @@ namespace Truedat
                                                 var refreshedMd5 = EnsureBodyHashes().md5;
                                                 var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
+                                                if (!_fileMd5Enabled) shaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                                 var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
@@ -2805,6 +2811,7 @@ namespace Truedat
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
                                         var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        if (!_fileMd5Enabled) crossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                         var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, t.Location, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
@@ -4199,6 +4206,8 @@ namespace Truedat
         {
             Console.WriteLine("=== Migrate Mode ===");
             Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields, renames SMFM keys (sensme*->smfm*), removes podcast entries");
+            if (!_fileMd5Enabled)
+                Console.WriteLine("Also strips fileMd5 (nothing consumes it; pass --file-md5 to keep it)");
             Console.WriteLine();
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
@@ -4211,7 +4220,7 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
 
-            int stripped = 0, renamed = 0, total = tracks.Count;
+            int stripped = 0, renamed = 0, md5Stripped = 0, total = tracks.Count;
             foreach (var kv in tracks)
             {
                 var trackData = kv.Value?.AsObject();
@@ -4220,6 +4229,10 @@ namespace Truedat
                 if (trackData.Remove("valence")) va = true;
                 if (trackData.Remove("arousal")) va = true;
                 if (va) stripped++;
+                // fileMd5 cleanup — the field is unconsumed (MBXHub indexes
+                // audioStreamSha256 only) and no longer maintained by default.
+                // --migrate --file-md5 keeps it for external-interop users.
+                if (!_fileMd5Enabled && trackData.Remove("fileMd5")) md5Stripped++;
                 // SMFM key rename: sensme* -> smfm* (rename, not removal — the data is kept).
                 bool tr = false;
                 if (RenameJsonKey(trackData, "sensmeScores",      "smfmScores"))      tr = true;
@@ -4240,10 +4253,12 @@ namespace Truedat
                 Console.WriteLine($"Stripped valence/arousal from: {stripped}");
             if (renamed > 0)
                 Console.WriteLine($"Renamed SMFM keys (sensme*->smfm*) on: {renamed}");
+            if (md5Stripped > 0)
+                Console.WriteLine($"Stripped fileMd5 from: {md5Stripped}");
             if (podcastKeys.Count > 0)
                 Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
 
-            if (stripped == 0 && renamed == 0 && podcastKeys.Count == 0)
+            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && podcastKeys.Count == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
