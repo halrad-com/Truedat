@@ -362,12 +362,9 @@ namespace Truedat
 
         // Whole-file MD5 maintenance. Default OFF: truedat never WRITES fileMd5 —
         // the worker fan-out task, tier-1 null backfill, tier-2/4 refreshes, and
-        // --backfill Tier A all skip it, and --migrate strips stored values. The
-        // md5 half of the shared single-pass read (ComputeFileMd5AndAudioSha) is
-        // still COMPUTED for the tier-3 cross-MD5 lookup against old entries; it
-        // just isn't persisted. Nothing consumes fileMd5 (MBXHub indexes
-        // audioStreamSha256 only); --file-md5 restores full maintenance for
-        // external-interop use.
+        // --backfill Tier A all skip it, and --migrate strips stored values.
+        // Nothing consumes fileMd5 (MBXHub indexes audioStreamSha256 only);
+        // --file-md5 restores full maintenance for external-interop use.
         internal static bool _fileMd5Enabled = false;
 
         static bool _losersM3u = false;
@@ -1272,8 +1269,7 @@ namespace Truedat
                 // Cache hierarchy — same tiers as MoodsMode and --file-list.
                 if (afMoodsTracks != null)
                 {
-                    var afMoodMd5Index = BuildMd5Index(afMoodsTracks, e => e.FileMd5);
-                    var afMoodShaIndex = BuildMd5Index(afMoodsTracks, e => e.AudioStreamSha256);
+                    var afMoodShaIndex = BuildHashIndex(afMoodsTracks, e => e.AudioStreamSha256);
 
                     if (afMoodsTracks.TryGetValue(afKey, out var afEx)
                         && afEx.Features.DynamicRange.HasValue
@@ -1337,27 +1333,6 @@ namespace Truedat
                                     afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
                                 }
                             }
-                        }
-                    }
-
-                    // Tier 3: cross-MD5
-                    if (trackEntry == null && afMoodMd5Index != null)
-                    {
-                        var afStagedPath = EnsureStagedSrc();
-                        var localMd5 = EnsureBodyHashes().md5;
-                        if (!string.IsNullOrEmpty(localMd5)
-                            && afMoodMd5Index.TryGetValue(localMd5!, out var xp)
-                            && xp.Entry.Features.DynamicRange.HasValue
-                            && xp.Entry.Features.LoudnessMomentary.HasValue)
-                        {
-                            var freshTags = ExtractFileTags(afStagedPath);
-                            trackEntry = RebuildCacheEntryFromTags(xp.Entry, freshTags.Artist, freshTags.Title,
-                                freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, localMd5, null);
-                            RemoveIfMoved(afMoodsTracks, xp.OldKey);
-                            afHitTag = "cached·md5";
-                            afFingerprintV1 = trackEntry.FingerprintV1;
-                            afAudioStreamSha256 = trackEntry.AudioStreamSha256;
-                            afAudioStreamSha256Source = trackEntry.AudioStreamSha256Source ?? "";
                         }
                     }
 
@@ -1753,7 +1728,6 @@ namespace Truedat
                 var flCachedByMtime = 0;
                 var flCachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k says tags-only
                 var flCachedByShaPath = 0;
-                var flCachedByMd5Cross = 0;
                 var flCachedByShaCross = 0;
                 var flFailed = 0;
                 var flDsdSkipped = 0;
@@ -1766,16 +1740,14 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
                     LoadExistingMoods(analyzeFileMoods!, flMoodsTracks);
 
-                // Cross-indexes for cache reuse — same shape as MoodsMode. Built once
+                // Cross-index for cache reuse — same shape as MoodsMode. Built once
                 // before the worker pool spins up. Plugin-driven workflows where this
                 // mode is invoked repeatedly (e.g. after MusicBee scans add new files)
                 // get path-cache hits ~free; only genuinely new files run Essentia.
-                Dictionary<string, (TrackEntry Entry, string OldKey)>? flMoodMd5Index =
-                    BuildMd5Index(flMoodsTracks, e => e.FileMd5);
                 Dictionary<string, (TrackEntry Entry, string OldKey)>? flMoodShaIndex =
-                    BuildMd5Index(flMoodsTracks, e => e.AudioStreamSha256);
+                    BuildHashIndex(flMoodsTracks, e => e.AudioStreamSha256);
                 if (flMoodsTracks.Count > 0)
-                    Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (md5={flMoodMd5Index?.Count ?? 0}, sha={flMoodShaIndex?.Count ?? 0})");
+                    Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
 
                 Parallel.ForEach(filePaths, new ParallelOptions
                 {
@@ -1920,31 +1892,6 @@ namespace Truedat
                                 }
                             }
 
-                            // Tier 3: cross-MD5 hit (file at a different path, same bytes)
-                            if (flMoodMd5Index != null)
-                            {
-                                var flStagedPath = EnsureStagedSrc();
-                                var localMd5 = EnsureBodyHashes().md5;
-                                if (!string.IsNullOrEmpty(localMd5)
-                                    && flMoodMd5Index.TryGetValue(localMd5!, out var xp)
-                                    && xp.Entry.Features.DynamicRange.HasValue
-                                    && xp.Entry.Features.LoudnessMomentary.HasValue)
-                                {
-                                    var freshTags = ExtractFileTags(flStagedPath);
-                                    var flCrossMd5Entry = RebuildCacheEntryFromTags(
-                                        xp.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
-                                        freshTags.Genre, fullPath, currentLastMod, localMd5, null);
-                                    var flCrossMd5SmfmTag = ApplySmfmInPlace(flCrossMd5Entry.Features, filePath, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
-                                    if (flCrossMd5SmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
-                                    flMoodsTracks[fullPath] = flCrossMd5Entry;
-                                    RemoveIfMoved(flMoodsTracks, xp.OldKey);
-                                    Interlocked.Increment(ref flProcessed);
-                                    Interlocked.Increment(ref flCachedByMd5Cross);
-                                    Console.Error.WriteLine($"[CACHED·md5{flCrossMd5SmfmTag}] {Path.GetFileName(filePath)}");
-                                    return;
-                                }
-                            }
-
                             // Tier 4: cross-SHA hit (file moved AND tag-edited)
                             if (flMoodShaIndex != null)
                             {
@@ -2069,7 +2016,7 @@ namespace Truedat
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                 }
 
-                int flCachedTotal = flCachedByMtime + flCachedByHeadPath + flCachedByShaPath + flCachedByMd5Cross + flCachedByShaCross;
+                int flCachedTotal = flCachedByMtime + flCachedByHeadPath + flCachedByShaPath + flCachedByShaCross;
 
                 // Summary JSON on stdout
                 if (jsonOutput || flFailed > 0)
@@ -2082,7 +2029,6 @@ namespace Truedat
                         cachedByMtime = flCachedByMtime,
                         cachedByHeadPath = flCachedByHeadPath,
                         cachedByShaPath = flCachedByShaPath,
-                        cachedByMd5Cross = flCachedByMd5Cross,
                         cachedByShaCross = flCachedByShaCross,
                         failed = flFailed,
                         skipped = flDsdSkipped,
@@ -2355,16 +2301,12 @@ namespace Truedat
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
-            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodMd5Index = BuildMd5Index(allTracks, e => e.FileMd5);
-            if (moodMd5Index != null)
-                Console.WriteLine($"  MD5 index:  {moodMd5Index.Count} entries available for cross-machine matching");
-            // Secondary cross-index keyed by audioStreamSha256 — invariant-region hash,
-            // stable across tag edits. Catches "audio bytes unchanged but tags drifted"
-            // (cross-MD5 misses these because fileMd5 covers the whole file including tags).
-            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodShaIndex = BuildMd5Index(allTracks, e => e.AudioStreamSha256);
+            // Cross-index keyed by audioStreamSha256 — invariant-region hash, stable
+            // across tag edits. Catches "audio bytes unchanged but tags/path drifted",
+            // including clean moves and cross-machine matching.
+            Dictionary<string, (TrackEntry Entry, string OldKey)>? moodShaIndex = BuildHashIndex(allTracks, e => e.AudioStreamSha256);
             if (moodShaIndex != null)
                 Console.WriteLine($"  SHA index:  {moodShaIndex.Count} entries available for tag-edit / cross-machine matching");
-            int crossPathMoods = 0;
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
@@ -2618,112 +2560,9 @@ namespace Truedat
                             catch (Exception ex) { if (_audit) Console.WriteLine($"  DEBUG cache: lastmod error: {ex.Message}"); }
                         }
 
-                        // Cross-machine MD5 fallback — same file at a different path.
-                        // Body read goes through the staged copy (FIX 4).
-                        if (moodMd5Index != null)
-                        {
-                            var localMd5 = EnsureBodyHashes().md5;
-                            if (localMd5 != null && moodMd5Index.TryGetValue(localMd5, out var xp))
-                            {
-                                var xf = xp.Entry.Features;
-                                // Same fall-through as the path-cache branch — missing DR or extended
-                                // canary means we can't reuse the MD5-matched entry; fresh Essentia needed.
-                                if (!xf.DynamicRange.HasValue
-                                    || !xf.LoudnessMomentary.HasValue)
-                                {
-                                    if (_audit) Console.WriteLine($"  DEBUG cache-md5: re-extracting (DR / extended missing)");
-                                }
-                                else
-                                {
-                                    var currentLastMod = DateTime.MinValue;
-                                    try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
-                                    allTracks[t.Location] = new TrackEntry
-                                    {
-                                        Features = new TrackFeatures
-                                        {
-                                            TrackId = t.TrackId, Artist = t.Artist, Title = t.Name,
-                                            Album = t.Album, Genre = t.Genre, FilePath = t.Location,
-                                            Bpm = xf.Bpm, Key = xf.Key, Mode = xf.Mode,
-                                            SpectralCentroid = xf.SpectralCentroid, SpectralFlux = xf.SpectralFlux,
-                                            Loudness = xf.Loudness, Danceability = xf.Danceability,
-                                            OnsetRate = xf.OnsetRate, ZeroCrossingRate = xf.ZeroCrossingRate,
-                                            SpectralRms = xf.SpectralRms, SpectralFlatness = xf.SpectralFlatness,
-                                            Dissonance = xf.Dissonance, PitchSalience = xf.PitchSalience,
-                                            ChordsChangesRate = xf.ChordsChangesRate, Mfcc = xf.Mfcc,
-                                            DynamicRange = xf.DynamicRange,
-                                            DynamicRangeSource = xf.DynamicRangeSource,
-                                            // Extended features carried through the cross-MD5 cache copy.
-                                            LoudnessMomentary = xf.LoudnessMomentary,
-                                            LoudnessShortTerm = xf.LoudnessShortTerm,
-                                            ReplayGain = xf.ReplayGain,
-                                            SilenceRate20dB = xf.SilenceRate20dB,
-                                            SilenceRate30dB = xf.SilenceRate30dB,
-                                            SilenceRate60dB = xf.SilenceRate60dB,
-                                            SpectralRolloff = xf.SpectralRolloff,
-                                            SpectralComplexity = xf.SpectralComplexity,
-                                            SpectralEntropy = xf.SpectralEntropy,
-                                            SpectralKurtosis = xf.SpectralKurtosis,
-                                            SpectralSkewness = xf.SpectralSkewness,
-                                            SpectralSpread = xf.SpectralSpread,
-                                            SpectralStrongPeak = xf.SpectralStrongPeak,
-                                            SpectralDecrease = xf.SpectralDecrease,
-                                            SpectralEnergy = xf.SpectralEnergy,
-                                            SpectralEnergyLow = xf.SpectralEnergyLow,
-                                            SpectralEnergyMidLow = xf.SpectralEnergyMidLow,
-                                            SpectralEnergyMidHigh = xf.SpectralEnergyMidHigh,
-                                            SpectralEnergyHigh = xf.SpectralEnergyHigh,
-                                            Hfc = xf.Hfc,
-                                            BarkCrest = xf.BarkCrest,
-                                            BarkFlatness = xf.BarkFlatness,
-                                            BarkKurtosis = xf.BarkKurtosis,
-                                            BarkSkewness = xf.BarkSkewness,
-                                            BarkSpread = xf.BarkSpread,
-                                            ErbCrest = xf.ErbCrest,
-                                            ErbFlatness = xf.ErbFlatness,
-                                            ErbKurtosis = xf.ErbKurtosis,
-                                            ErbSkewness = xf.ErbSkewness,
-                                            ErbSpread = xf.ErbSpread,
-                                            MelCrest = xf.MelCrest,
-                                            MelFlatness = xf.MelFlatness,
-                                            MelKurtosis = xf.MelKurtosis,
-                                            MelSkewness = xf.MelSkewness,
-                                            MelSpread = xf.MelSpread,
-                                            BeatsLoudness = xf.BeatsLoudness,
-                                            ChordsStrength = xf.ChordsStrength,
-                                            HpcpCrest = xf.HpcpCrest,
-                                            HpcpEntropy = xf.HpcpEntropy,
-                                            BitUsage = xf.BitUsage,    // Phase 2.5 — preserve on cross-MD5 cache reuse
-                                            HfEnergyRatio = xf.HfEnergyRatio,    // Phase 3 — preserve on cross-MD5 cache reuse
-                                            HfEnergyMethod = xf.HfEnergyMethod,
-                                            HfSpectralStructure = xf.HfSpectralStructure,    // Phase 5 — preserve on cross-MD5 cache reuse
-                                        },
-                                        LastModified = currentLastMod,
-                                        AnalysisDurationSecs = xp.Entry.AnalysisDurationSecs,
-                                        FileMd5 = localMd5,
-                                        AudioMd5 = xp.Entry.AudioMd5,
-                                        // Cross-machine MD5 means same audio bytes — identity hashes are
-                                        // bit-for-bit reusable, no recompute needed.
-                                        AudioStreamSha256 = xp.Entry.AudioStreamSha256,
-                                        AudioStreamSha256Source = xp.Entry.AudioStreamSha256Source,
-                                        FingerprintV1 = xp.Entry.FingerprintV1,
-                                        Chromaprint = xp.Entry.Chromaprint,
-                                        ChromaprintDuration = xp.Entry.ChromaprintDuration,
-                                    };
-                                    var crossMd5SmfmTag = ApplySmfmInPlace(allTracks[t.Location].Features, t.Location, xp.Entry.Features.SmfmScores) ? " +smfm" : "";
-                                    if (crossMd5SmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
-                                    RemoveIfMoved(allTracks, xp.OldKey);
-                                    Interlocked.Increment(ref crossPathMoods);
-                                    Interlocked.Increment(ref cachedCount);
-                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7md5{crossMd5SmfmTag})");
-                                    return;
-                                }
-                            }
-                        }
-
-                        // Cross-machine SHA fallback \u2014 same audio bytes (invariant region) at
-                        // a different path. Catches "moved + tag-edited" where cross-MD5 misses
-                        // because fileMd5 covers the whole file. Body read goes through the
-                        // staged copy (FIX 4).
+                        // Cross-machine SHA fallback \u2014 same audio bytes (invariant region)
+                        // at a different path. Catches clean moves and "moved + tag-edited"
+                        // alike. Body read goes through the staged copy (FIX 4).
                         if (moodShaIndex != null)
                         {
                             if (msSourceSize == 0)
@@ -2741,9 +2580,8 @@ namespace Truedat
                                     }
                                     else
                                     {
-                                        // Audio bytes match. fileMd5 likely differs (else cross-MD5
-                                        // would have caught it); fingerprint.v1 is also tag-affected.
-                                        // Recompute both, reuse Essentia features.
+                                        // Audio bytes match; fingerprint.v1 is tag-affected —
+                                        // recompute it, reuse Essentia features.
                                         var refreshedMd5 = EnsureBodyHashes().md5;
                                         var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                         var currentLastMod = DateTime.MinValue;
@@ -2754,7 +2592,6 @@ namespace Truedat
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
                                         RemoveIfMoved(allTracks, xs.OldKey);
-                                        Interlocked.Increment(ref crossPathMoods);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha{crossShaSmfmTag})");
@@ -2920,8 +2757,6 @@ namespace Truedat
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
             Console.WriteLine();
             Console.WriteLine($"  Cached:     {cachedCount}");
-            if (crossPathMoods > 0)
-                Console.WriteLine($"  Cross-MD5:  {crossPathMoods}  (of {cachedCount} cached)");
             if (cachedByHeadPath > 0)
                 Console.WriteLine($"  Head-quick: {cachedByHeadPath}  (of {cachedCount} cached: tags-only via audioHead64kMd5)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
@@ -3342,7 +3177,7 @@ namespace Truedat
         /// duplicate, not a move — removing it makes two live duplicate files ping-pong
         /// between scans forever: each scan cross-matches one twin, deletes the other,
         /// and the next scan recreates the deleted one and deletes the first. The library
-        /// never converges (visible as Cross-MD5/SHA counts and "SMFM added" oscillating
+        /// never converges (visible as Cross-SHA counts and "SMFM added" oscillating
         /// run-to-run on an otherwise-unchanged library). Guarding the removal on
         /// File.Exists lets legitimate duplicates coexist as two stable entries. Surface
         /// them with --duplicates.</summary>
@@ -8970,18 +8805,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             jw.WriteEndObject();
         }
 
-        static Dictionary<string, (T Entry, string OldKey)>? BuildMd5Index<T>(
+        static Dictionary<string, (T Entry, string OldKey)>? BuildHashIndex<T>(
             ConcurrentDictionary<string, T> cache,
-            Func<T, string?> getMd5) where T : class
+            Func<T, string?> getHash) where T : class
         {
             Dictionary<string, (T, string)>? index = null;
             foreach (var kvp in cache)
             {
-                var md5 = getMd5(kvp.Value);
-                if (string.IsNullOrEmpty(md5)) continue;
+                var hash = getHash(kvp.Value);
+                if (string.IsNullOrEmpty(hash)) continue;
                 index ??= new Dictionary<string, (T, string)>(StringComparer.OrdinalIgnoreCase);
-                if (!index.ContainsKey(md5!))
-                    index[md5!] = (kvp.Value, kvp.Key);
+                if (!index.ContainsKey(hash!))
+                    index[hash!] = (kvp.Value, kvp.Key);
             }
             return index;
         }
@@ -8990,7 +8825,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Build a fresh TrackEntry that reuses cached Essentia features but takes
         /// fresh metadata from the iTunes XML track and (optionally) refreshes
         /// identity fields the caller has just recomputed off disk. Used by every
-        /// cache-reuse path (path-mtime, cross-MD5, sha-path, sha-cross). Centralized
+        /// cache-reuse path (path-mtime, sha-path, sha-cross). Centralized
         /// so adding a new TrackFeatures field doesn't have to be done four places.
         ///
         /// `refreshedFileMd5` / `refreshedFp`: pass non-null when the caller knows
