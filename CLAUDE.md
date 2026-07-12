@@ -92,7 +92,7 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 **Identity tier — TagLib + cheap file IO, no audio decode:**
 
 - **Tier A** — entry-level: `audioStreamSha256` (computed if absent), `fileMd5` (computed if absent, only under `--file-md5`).
-- **Tier B** — whole `fingerprint.v1` block, when null (legacy 2012-era entries). Calls `ComputeFingerprintV1` directly; a fresh fingerprint contains every IdentityField so Tier C is moot for that entry.
+- **Tier B** — whole `fingerprint.v1` block, when null (entries written by pre-fingerprint.v1 builds; they pass the re-extract canary so the tier-1 cache pins them forever — backfill is the only path that adds the block). Calls `ComputeFingerprintV1` directly; a fresh fingerprint contains every IdentityField so Tier C is moot for that entry.
 - **Tier C** — sub-fields inside an existing `fingerprint.v1`, driven by the `IdentityFields[]` spec list (one entry per field). Adding a future TagLib-readable identity field = one new `IdentityFieldSpec` + one new class field + matching read/write — same four-surfaces rule.
 - **Tier C/Phase 2 — MP3 LAME tag (FileBytesShallow)**: when `codec=="mp3"` and the LAME-tag fields are unpopulated, `ApplyBackfillIdentity` invokes `Mp3LameTagParser.TryParse` (pure-managed, reads ~8 KB from file start, skips any ID3v2, finds first MPEG frame, locates Xing/Info magic, decodes the appended LAME tag). Off the `IdentityFields[]` list because it doesn't use TagLib — kept as a separate guarded branch to preserve the spec list's "TagLib-only" contract.
 
