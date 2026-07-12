@@ -53,7 +53,7 @@ Output: D:\MusicBee\Library\mbxmoods.json
 | Line | Meaning |
 |------|---------|
 | `Cached: N` | Tracks already in the cache (path + mtime matched exactly, no body read). Fast tier-1 reuse. No Essentia re-run. |
-| `Cross-SHA: M (of N cached: A same-path tag-edits, B cross-path)` | Subset of cached entries re-keyed via audioStreamSha256 match. `A`: same path + different mtime but unchanged audio (tag editor rewrote metadata). `B`: different path + audio unchanged (moved files detected by audio hash, not path). The `M of N` format shows this is a subset of the `Cached` total, not additional reuse. (Older runs also printed a `Cross-MD5` subset line — that tier was removed in v5.4.1.) |
+| `Cross-SHA: M (of N cached: A same-path tag-edits, B cross-path)` | Subset of cached entries re-keyed via audioStreamSha256 match. `A`: same path + different mtime but unchanged audio (tag editor rewrote metadata). `B`: different path + audio unchanged (moved files detected by audio hash, not path). The `M of N` format shows this is a subset of the `Cached` total, not additional reuse. (Older runs also printed a `Cross-MD5` subset line — that tier was removed in v5.4.0.) |
 
 #### Analysis & Skips
 
@@ -109,7 +109,7 @@ The user's scan analyzed a **71,790-track library** over **5h25m**:
 
 - **66,651 cached** → Most of the library was already analyzed (tier-1 fast path).
 - **4,953 analyzed** → Only ~7% of the library required Essentia re-run (cache hits were excellent).
-- **203 + 18,908 cross-matched** → ~28% of cached entries were re-identified via MD5/SHA because of path changes or tag edits, but audio was unchanged (no Essentia re-run).
+- **18,908 cross-matched** → ~28% of cached entries were re-identified via audio SHA because of path changes or tag edits, but audio was unchanged (no Essentia re-run). (This run predates v5.4.0 and also cross-matched 203 entries via the since-removed MD5 tier.)
 - **151 skipped** → Pre-existing errors from a prior scan (not retried this run).
 - **34 DSD** → Niche format, logged to skipped CSV.
 - **1 failed** → One track failed during this run (logged to errors CSV).
