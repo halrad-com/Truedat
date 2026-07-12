@@ -16,7 +16,7 @@ All native helpers are located via `FindTool(exeName, params searchDirs)` in `Pr
 | **`ffprobe.exe`** | **SOFT** | `--transcode` (source-rate matching) | Lazy. `--transcode` still works without it but loses native-rate matching. Default scan does not call ffprobe. |
 | **NuGet: `TagLibSharp`, `System.Text.Json`** | Merged into exe via ILRepack | All TagLib reads, all JSON I/O | Not separable at runtime — already inside `truedat.exe`. |
 
-The legacy fingerprint binaries (`essentia_streaming_md5.exe`, `fpcalc.exe`, `essentia_standard_chromaprinter.exe`) and the modes that invoked them (`--fingerprint` / `--md5-only` / `--quick-fingerprint` / `--details`) were removed on 2026-07-11.
+The legacy fingerprint binaries (`essentia_streaming_md5.exe`, `fpcalc.exe`, `essentia_standard_chromaprinter.exe`) and the modes that invoked them (`--fingerprint` / `--md5-only` / `--quick-fingerprint` / `--details`) were removed on 2026-07-11 (v5.4.1).
 
 ## Source staging
 

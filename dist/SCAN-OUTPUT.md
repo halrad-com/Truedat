@@ -22,7 +22,6 @@ Finished:   2026-06-10 05:51:15
 Elapsed:    5h25m
 
   Cached:     66651
-  Cross-MD5:  203  (of 66651 cached)
   Cross-SHA:  18908  (of 66651 cached: 18853 same-path tag-edits, 55 cross-path)
   Analyzed:   4953
   Skipped:    151  (errors from previous run)
@@ -54,8 +53,7 @@ Output: D:\MusicBee\Library\mbxmoods.json
 | Line | Meaning |
 |------|---------|
 | `Cached: N` | Tracks already in the cache (path + mtime matched exactly, no body read). Fast tier-1 reuse. No Essentia re-run. |
-| `Cross-MD5: M (of N cached)` | Subset of cached entries re-keyed via MD5 match (file moved to a different path, mtime signature changed, audio bytes unchanged). Tag-affected fields refreshed, Essentia features reused. `M of N` format shows count vs. total cached. |
-| `Cross-SHA: M (of N cached: A same-path tag-edits, B cross-path)` | Subset of cached entries re-keyed via audioStreamSha256 match. `A`: same path + different mtime but unchanged audio (tag editor rewrote metadata). `B`: different path + audio unchanged (moved files detected by audio hash, not path). Total available reuse = `Cached + Cross-MD5 + Cross-SHA` minus overlaps. |
+| `Cross-SHA: M (of N cached: A same-path tag-edits, B cross-path)` | Subset of cached entries re-keyed via audioStreamSha256 match. `A`: same path + different mtime but unchanged audio (tag editor rewrote metadata). `B`: different path + audio unchanged (moved files detected by audio hash, not path). The `M of N` format shows this is a subset of the `Cached` total, not additional reuse. (Older runs also printed a `Cross-MD5` subset line — that tier was removed in v5.4.1.) |
 
 #### Analysis & Skips
 
@@ -70,7 +68,7 @@ Output: D:\MusicBee\Library\mbxmoods.json
 
 | Line | Meaning |
 |------|---------|
-| `Processed: N` | Total tracks touched = `Cached + Cross-MD5 + Cross-SHA + Analyzed + Skipped + SkippedDSD + Failed`. Should equal the total in the source (iTunes XML count, file-list line count, or folder walk). |
+| `Processed: N` | Total tracks touched = `Cached + Analyzed + Skipped + SkippedDSD + Failed` (Cross-SHA is a subset of Cached, not an addend — the example sums confirm: 66651 + 4953 + 151 + 34 + 1 = 71790). Should equal the total in the source (iTunes XML count, file-list line count, or folder walk). |
 | `Output: M tracks in moods file` | Entries written to `mbxmoods.json`. Equals `Processed - Failed` (failed tracks are not written). In the example, `71790 - 1 failed = 71789`, but the actual value is `71404`, indicating some entries were also pruned or consolidated (e.g., duplicates by path, or entries dropped from the cache due to a schema bump). |
 
 #### Performance Metrics

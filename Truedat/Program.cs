@@ -2850,8 +2850,9 @@ namespace Truedat
                 List<char>? warnList = null;
 
                 // Scan the full path (not just the filename) — non-ASCII chars in
-                // any directory component trigger the same legacy-mode (RunTool)
-                // path-escape failure as non-ASCII in the filename. ASCII chars
+                // any directory component are the same portability hazard as in the
+                // filename (subprocess tools and 8.3-disabled volumes choke on them;
+                // the default scan sidesteps via staged-fallback copies). ASCII chars
                 // (<=127) include the path separators (\ /) and drive colon, so
                 // the threshold-only filter is sufficient.
                 var seen = new HashSet<char>();
@@ -7548,7 +7549,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // buffer. Result is discarded — essentia's per-file output is in tempJson.
                 var stdoutDrainTask = proc.StandardOutput.ReadToEndAsync();
 
-                // CPU activity monitoring — same approach as RunTool
+                // CPU activity monitoring — kill the subprocess if it stops burning CPU
                 const int pollMs = 5000;
                 const int maxIdlePolls = 12; // 60s of no CPU activity
                 var lastCpu = TimeSpan.Zero;
@@ -7594,7 +7595,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     catch { break; }
                 }
 
-                // Flush async stderr read buffer (matches RunTool pattern).
+                // Flush async stderr read buffer before reading the result.
                 proc.WaitForExit();
 
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
