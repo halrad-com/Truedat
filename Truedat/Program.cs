@@ -185,7 +185,6 @@ namespace Truedat
         public DateTime LastModified;
         public double? AnalysisDurationSecs;
         public string? FileMd5;
-        public string? AudioMd5;
         // Identity fields — already computed in the parallel scan task block but
         // historically dropped on the moods-file write path. Persisting them here
         // means every scanned track lands in mbxmoods.json with the full identity
@@ -193,8 +192,6 @@ namespace Truedat
         public string? AudioStreamSha256;
         public string? AudioStreamSha256Source;   // "whole-file" only when invariant bounds were unavailable
         public Program.FingerprintV1? FingerprintV1;
-        public string? Chromaprint;
-        public double? ChromaprintDuration;
     }
 
     class AudioDetails
@@ -1002,7 +999,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -1420,14 +1417,6 @@ namespace Truedat
                         AudioStreamSha256Source = afAudioStreamSha256Source,
                         FingerprintV1 = afFingerprintV1,
                     };
-
-                    // Carry forward legacy fields if entry already exists in the moods file.
-                    if (afMoodsTracks != null && afMoodsTracks.TryGetValue(afKey, out var afPrior))
-                    {
-                        trackEntry.AudioMd5 ??= afPrior.AudioMd5;
-                        trackEntry.Chromaprint ??= afPrior.Chromaprint;
-                        trackEntry.ChromaprintDuration ??= afPrior.ChromaprintDuration;
-                    }
                 }
 
                 // For cache-hit paths, SMFM wasn't in the concurrent task batch — apply now.
@@ -1983,14 +1972,6 @@ namespace Truedat
                         if (!string.IsNullOrEmpty(analyzeFileMoods))
                         {
                             var flKey = Path.GetFullPath(filePath);
-                            // Carry forward legacy fields that this mode doesn't compute,
-                            // so a user with prior --fingerprint output doesn't silently lose them.
-                            if (flMoodsTracks.TryGetValue(flKey, out var flPrior))
-                            {
-                                trackEntry.AudioMd5 ??= flPrior.AudioMd5;
-                                trackEntry.Chromaprint ??= flPrior.Chromaprint;
-                                trackEntry.ChromaprintDuration ??= flPrior.ChromaprintDuration;
-                            }
                             flMoodsTracks[flKey] = trackEntry;
                         }
 
@@ -2106,7 +2087,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -2629,8 +2610,7 @@ namespace Truedat
 
                         // Cache miss — full Essentia + ride-along, all reads through the
                         // staged copy (FIX 4 / FIX 7). Wall-clock per track ≈ max(analysis,
-                        // slowest-task). Legacy audio MD5 / chromaprint subprocesses live in
-                        // --fingerprint mode now.
+                        // slowest-task).
                         msSourceSize = fileSizeBytes;
                         EnsureStagedSrc();
                         var msResults = RunSourceWorkers(
@@ -2690,24 +2670,15 @@ namespace Truedat
                         if (lastMod == DateTime.MinValue)
                             try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
 
-                        // Carry forward legacy fields the default codepath doesn't compute
-                        // (audioMd5, chromaprint), so a re-extract triggered by the cache
-                        // canary doesn't silently wipe them on entries seeded by a prior
-                        // --fingerprint run. The audio is unchanged from those tools' POV;
-                        // only Essentia's features need refresh.
-                        allTracks.TryGetValue(t.Location, out var priorEntry);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
                             LastModified = lastMod,
                             AnalysisDurationSecs = analyzeDuration.TotalSeconds,
                             FileMd5 = fileMd5,
-                            AudioMd5 = priorEntry?.AudioMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
-                            Chromaprint = priorEntry?.Chromaprint,
-                            ChromaprintDuration = priorEntry?.ChromaprintDuration,
                         };
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -3977,7 +3948,7 @@ namespace Truedat
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields, renames SMFM keys (sensme*->smfm*), removes podcast entries");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*), removes podcast entries");
             if (!_fileMd5Enabled)
                 Console.WriteLine("Also strips fileMd5 (nothing consumes it; pass --file-md5 to keep it)");
             Console.WriteLine();
@@ -3992,7 +3963,7 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
 
-            int stripped = 0, renamed = 0, md5Stripped = 0, total = tracks.Count;
+            int stripped = 0, renamed = 0, md5Stripped = 0, legacyStripped = 0, total = tracks.Count;
             foreach (var kv in tracks)
             {
                 var trackData = kv.Value?.AsObject();
@@ -4005,6 +3976,13 @@ namespace Truedat
                 // audioStreamSha256 only) and no longer maintained by default.
                 // --migrate --file-md5 keeps it for external-interop users.
                 if (!_fileMd5Enabled && trackData.Remove("fileMd5")) md5Stripped++;
+                // Legacy fingerprint-pipeline keys — the producing modes are gone;
+                // nothing reads these. Strip unconditionally.
+                bool legacy = false;
+                if (trackData.Remove("audioMd5")) legacy = true;
+                if (trackData.Remove("chromaprint")) legacy = true;
+                if (trackData.Remove("chromaprintDuration")) legacy = true;
+                if (legacy) legacyStripped++;
                 // SMFM key rename: sensme* -> smfm* (rename, not removal — the data is kept).
                 bool tr = false;
                 if (RenameJsonKey(trackData, "sensmeScores",      "smfmScores"))      tr = true;
@@ -4027,10 +4005,12 @@ namespace Truedat
                 Console.WriteLine($"Renamed SMFM keys (sensme*->smfm*) on: {renamed}");
             if (md5Stripped > 0)
                 Console.WriteLine($"Stripped fileMd5 from: {md5Stripped}");
+            if (legacyStripped > 0)
+                Console.WriteLine($"Stripped audioMd5/chromaprint from: {legacyStripped}");
             if (podcastKeys.Count > 0)
                 Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
 
-            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && podcastKeys.Count == 0)
+            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0 && podcastKeys.Count == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
@@ -4384,8 +4364,6 @@ namespace Truedat
             public bool Sha256;       // audioStreamSha256 — primary cross-system identity
             public bool FileMd5;
             public bool Head64k;      // fingerprint.v1.audioHead64kMd5
-            public bool AudioMd5;     // legacy (essentia_streaming_md5)
-            public bool Chromaprint;  // legacy (fpcalc)
             public bool Smfm;         // Sony 12-TONE (smfmScores populated)
         }
 
@@ -4398,8 +4376,6 @@ namespace Truedat
                 Sha256      = e != null && !string.IsNullOrEmpty(e.AudioStreamSha256),
                 FileMd5     = e != null && !string.IsNullOrEmpty(e.FileMd5),
                 Head64k     = e?.FingerprintV1 != null && !string.IsNullOrEmpty(e.FingerprintV1.AudioHead64kMd5),
-                AudioMd5    = e != null && !string.IsNullOrEmpty(e.AudioMd5),
-                Chromaprint = e != null && !string.IsNullOrEmpty(e.Chromaprint),
                 Smfm        = f?.SmfmScores != null && f.SmfmScores.Length > 0,
             };
         }
@@ -4411,8 +4387,6 @@ namespace Truedat
             public int AudioStreamSha256;
             public int FileMd5;
             public int AudioHead64kMd5;
-            public int AudioMd5Legacy;
-            public int ChromaprintLegacy;
             public int Smfm;
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
@@ -4431,8 +4405,6 @@ namespace Truedat
                 if (pr.Sha256)      s.AudioStreamSha256++;
                 if (pr.FileMd5)     s.FileMd5++;
                 if (pr.Head64k)     s.AudioHead64kMd5++;
-                if (pr.AudioMd5)    s.AudioMd5Legacy++;
-                if (pr.Chromaprint) s.ChromaprintLegacy++;
                 if (pr.Smfm)        s.Smfm++;
                 if (pr.Sha256)
                 {
@@ -4500,13 +4472,6 @@ namespace Truedat
             Console.WriteLine(Cov("fileMd5", s.FileMd5));
             Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5));
             Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
-            if (s.AudioMd5Legacy > 0 || s.ChromaprintLegacy > 0)
-            {
-                Console.WriteLine();
-                Console.WriteLine("  legacy hashes (only from older fingerprint-mode scans):");
-                Console.WriteLine($"    audioMd5            {s.AudioMd5Legacy,9:N0}");
-                Console.WriteLine($"    chromaprint         {s.ChromaprintLegacy,9:N0}");
-            }
             if (s.DuplicateGroups > 0)
             {
                 Console.WriteLine();
@@ -7183,8 +7148,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             if (!string.IsNullOrEmpty(entry.FileMd5))
                 jw.WriteString("fileMd5", entry.FileMd5);
-            if (!string.IsNullOrEmpty(entry.AudioMd5))
-                jw.WriteString("audioMd5", entry.AudioMd5);
             if (!string.IsNullOrEmpty(entry.AudioStreamSha256))
             {
                 jw.WriteString("audioStreamSha256", entry.AudioStreamSha256);
@@ -7195,12 +7158,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             if (entry.FingerprintV1 != null)
                 WriteFingerprintV1(jw, entry.FingerprintV1);
-            if (!string.IsNullOrEmpty(entry.Chromaprint))
-            {
-                jw.WriteString("chromaprint", entry.Chromaprint);
-                if (entry.ChromaprintDuration.HasValue && entry.ChromaprintDuration.Value > 0)
-                    jw.WriteNumber("chromaprintDuration", entry.ChromaprintDuration.Value);
-            }
 
             // Phase 4 — TruedatVerdict, computed inline. Emit only when at least one
             // verdict produced a real yes/no decision. "unknown" without source signals
@@ -7268,12 +7225,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         Features = features,
                         AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
                         FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
-                        AudioMd5 = GetStr(track, "audioMd5") is var amd5Str && amd5Str.Length > 0 ? amd5Str : null,
                         AudioStreamSha256 = GetStr(track, "audioStreamSha256") is var shaStr && shaStr.Length > 0 ? shaStr : null,
                         AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
                         FingerprintV1 = ParseFingerprintV1FromJson(track),
-                        Chromaprint = GetStr(track, "chromaprint") is var cpStr && cpStr.Length > 0 ? cpStr : null,
-                        ChromaprintDuration = GetNullableDbl(track, "chromaprintDuration"),
                     };
                 }
                 return allTracks.Count;
@@ -8935,12 +8889,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 LastModified = newLastMod,
                 AnalysisDurationSecs = source.AnalysisDurationSecs,
                 FileMd5 = refreshedFileMd5 ?? source.FileMd5,
-                AudioMd5 = source.AudioMd5,
                 AudioStreamSha256 = refreshedSha ?? source.AudioStreamSha256,
                 AudioStreamSha256Source = refreshedShaSource ?? source.AudioStreamSha256Source,
                 FingerprintV1 = refreshedFp ?? source.FingerprintV1,
-                Chromaprint = source.Chromaprint,
-                ChromaprintDuration = source.ChromaprintDuration,
             };
         }
 
