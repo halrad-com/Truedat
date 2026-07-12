@@ -46,7 +46,7 @@ Truedat reads an iTunes Music Library XML file (or a `--folder`, `--file-list`, 
 A single default invocation produces the full per-track record:
 
 - **Mood features (Essentia)** — Valence (0-1, sad ↔ happy; 8 input features), Arousal (0-1, calm ↔ energetic; 7 input features), and 15 core + 40 extended Essentia features stored per track for runtime recomputation (extended set covers loudness envelope, silence profile, spectral shape, psychoacoustic bands, rhythm/tonal aggregates).
-- **Identity (truedat-native, pure-managed)** — `fingerprint.v1` composite, `audioStreamSha256` (TagLib invariant audio region), `fileMd5`. All computed concurrently with the Essentia decode so they're effectively free.
+- **Identity (truedat-native, pure-managed)** — `fingerprint.v1` composite, `audioStreamSha256` (TagLib invariant audio region), and optionally `fileMd5` (whole-file MD5, maintained only with `--file-md5`). All computed concurrently with the Essentia decode so they're effectively free.
 - **Authenticity signals (truedat-native, ffmpeg-driven)** — `bitUsage` block (LSB walk for fake-hi-res detection on lossless 24-bit files), `hfEnergyRatio` + `hfSpectralStructure` (single managed-FFT pass over the same 30 s mid-track segment — bin-sharp HF energy ratio plus Wiener-entropy flatness, peak-to-mean, and mid↔HF mirror correlation; catches ffmpeg-upsampled fakes the bit-level signals miss), MP3 LAME-tag parsing (Xing/Info+LAME header decode for transcode detection).
 - **`truedat.*` verdict block** — multi-signal voted hi-res / lossy-transcode verdicts computed inline at write time from the signals above. Threshold changes ship without rescanning.
 
@@ -108,7 +108,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           never modified. No Essentia re-run. Idempotent. Two tiers,
                           both run by default — scope down with --backfill-level:
                             identity tier (TagLib + cheap file IO; fast):
-                              audioStreamSha256, fileMd5, whole fingerprint.v1, sub-fields
+                              audioStreamSha256, fileMd5 (with --file-md5), whole fingerprint.v1, sub-fields
                               (bitDepth, encoder, ...), and the MP3 LAME tag block for
                               codec=mp3 entries.
                             features tier (ffmpeg-driven; slow — ~30s of decode per
@@ -163,10 +163,21 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
   --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --max-duration <secs>   Max track length for Essentia analysis (default 12000 = 200 min —
+                          the stock extractor's ChordsDetection buffer limit). Longer tracks
+                          are skipped and logged. Raise only when running an extractor built
+                          with the larger buffer.
   --no-quick-cache        Disable the tags-only quick cache tier (head-64k check);
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
+  --file-md5              Maintain the whole-file fileMd5 field (default off). Off means no
+                          dedicated read is ever spent on it: fresh analysis omits it, and the
+                          --backfill fileMd5 fill is skipped. It is still recorded when it falls
+                          out of a read the scan does anyway, and values already in the JSON are
+                          always preserved. The durable audio identity is audioStreamSha256
+                          either way; enable this only if you compare whole-file MD5s with
+                          external tools.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
@@ -188,7 +199,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fin
 - **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
-- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
+- **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 with `--file-md5` / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - Shows per-track rate and estimated completion time.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
@@ -309,7 +320,7 @@ Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or
 | [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 | [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 
-All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. Bundle `essentia_streaming_md5.exe` and `fpcalc.exe` alongside `truedat.exe` so every analysis run emits the full identity tier set (`fileMd5` + `audioMd5` + `chromaprint`) without a separate `--fingerprint` pass. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
+All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. `essentia_streaming_md5.exe` and `fpcalc.exe` are used only by the legacy `--fingerprint` / `--md5-only` / `--quick-fingerprint` modes — the default scan computes its identity fields (`fingerprint.v1`, `audioStreamSha256`, and `fileMd5` with `--file-md5`) in pure-managed code with no subprocess. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
 
 ### Essentia Builds
 
@@ -531,9 +542,11 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 
 When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Music Center — truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant raw slot index), and `smfmBpm` (Sony's tempo estimate). These are nullable and omitted when absent. The per-slot *channel names* are deliberately **not** emitted: a 2026-06-27 live device test refuted the old slot→name mapping (the device's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so any interpreted mood label is derived downstream by MBXHub, not by truedat. These keys were renamed from `sensme*` on 2026-06-28 — `--migrate` converts existing libraries (with backup), and the reader still accepts the old keys for un-migrated files.
 
+The SMFM format itself is documented in [`smfm-tools/`](smfm-tools/) — an unofficial wire-format spec, a confidence-tiered state of knowledge (including the claims device testing refuted), an SMFM-vs-Essentia comparison, and standalone Python tooling for extracting SMFM data outside truedat.
+
 Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
 
-`fileMd5` (MD5 of the file bytes), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`, plus the nested `mp3LameTag` block for MP3s), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
+`fileMd5` (MD5 of the file bytes; maintained only with `--file-md5` — nothing downstream consumes it), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`, plus the nested `mp3LameTag` block for MP3s), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
 
 The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) is almost certainly transcoded from a lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `bitUsage.lowestNonZeroBit` lands at 16 is upsampled CD audio. The `truedat.*` verdict block (see below) consumes these fields plus the `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure` signals to produce a per-track classification.
 
