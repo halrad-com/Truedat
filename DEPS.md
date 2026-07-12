@@ -6,7 +6,7 @@ FFmpeg binaries are `.gitignore`d — stored on the [`truedat-deps`](https://git
 
 ## FFmpeg (Optional)
 
-Enables multi-channel audio downmixing and `--details` audio probing.
+Enables multi-channel audio downmixing, the `Unsupported codec` decode retry (e.g. `.opus`), the `bitUsage` / HF-analysis authenticity signals, and the standalone `--transcode` utility (`ffprobe.exe` matches source rate/depth for `--transcode`).
 
 | File | Size | SHA-256 |
 |------|------|---------|

@@ -3,6 +3,23 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [5.4.0] — 2026-07-11
+
+### Removed — legacy fingerprint pipeline
+- **`--fingerprint`, `--md5-only`, `--quick-fingerprint`, `--details`** modes and the
+  binaries that backed them (`essentia_streaming_md5.exe`, `fpcalc.exe`). Identity is
+  now pure-managed: `fingerprint.v1` + `audioStreamSha256`, computed on every scan.
+- **`audioMd5` / `chromaprint` passthrough** — old scans' values are no longer carried
+  forward; keys are ignored on read and **`--migrate` strips them** (with backup).
+- **Tier-3 cross-MD5 cache tier** — the cross-SHA tier catches a strict superset
+  (clean moves, preserved-mtime copies, moved-plus-retagged files), so nothing is lost.
+- **`fileMd5` is now opt-in** — written only under `--file-md5`; without the flag,
+  scans never write it and `--migrate` strips stored values. Nothing consumes it
+  (MBXHub indexes `audioStreamSha256` only).
+
+No rescan needed — existing `mbxmoods.json` files load unchanged; run `--migrate`
+once to clean stripped fields out of the file.
+
 ## [5.3.9] — 2026-07-05
 
 ### Duplicate review workflow

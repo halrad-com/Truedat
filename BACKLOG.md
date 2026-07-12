@@ -342,7 +342,8 @@ Review: `docs/reviews/2026-04-18-extended-features-review.md`
 
 Chromaprint (`fpcalc`) was the signal that matched *same recording, different
 encode/format* (FLAC vs MP3, V0 vs 320, resample). It was demoted to legacy-only
-chiefly for output size (~5–8 KB/track → hundreds of MB across a large library).
+chiefly for output size (~5–8 KB/track → hundreds of MB across a large library),
+then removed with the rest of the legacy fingerprint pipeline on 2026-07-11.
 Captured here so the design isn't re-derived. Detector would be a read-only
 JSON post-pass (no rescan/decode), sibling to `--verify` / `--merge-moods`,
 emitting clusters with a suggested keeper — never auto-deletes.
