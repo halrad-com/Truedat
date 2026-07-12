@@ -295,7 +295,7 @@ handles download with SHA-256 manifest, retry/backoff, and atomic outputs.
 Design: `docs/plans/2026-02-26-ab-seeding-and-robustness-design.md`
 
 **Future:** MBXHub Shell integration for background incremental seeding (.6 sprint),
-MBID tag lookup (tier 2), Chromaprint fingerprint matching (tier 3).
+MBID tag lookup (tier 2).
 
 ## ~~Batch File-List Analysis~~ DONE
 

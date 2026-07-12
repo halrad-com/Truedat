@@ -37,11 +37,10 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 ## Essentia (Dependency)
 
-Truedat uses Essentia tools (essentia_streaming_extractor_music.exe,
-essentia_standard_chromaprinter.exe, essentia_streaming_md5.exe) as external
-dependencies. This repository includes build scripts for custom x64 Essentia
-builds in essentia-build/. Essentia is licensed under AGPL-3.0 by the Music
-Technology Group, Universitat Pompeu Fabra.
+Truedat uses the Essentia tool essentia_streaming_extractor_music.exe as an
+external dependency. This repository includes build scripts for custom x64
+Essentia builds in essentia-build/. Essentia is licensed under AGPL-3.0 by the
+Music Technology Group, Universitat Pompeu Fabra.
 
     Essentia
     Copyright (c) Music Technology Group, Universitat Pompeu Fabra

@@ -1,6 +1,6 @@
 # Truedat dependency surface — what's needed, what breaks if missing
 
-Date: 2026-05-23 (updated 2026-06-21)
+Date: 2026-05-23 (updated 2026-07-11 — legacy fingerprint pipeline removed)
 Scope: runtime dependencies of `dist/truedat/truedat.exe` and what happens when each is absent. Authoritative source: `Truedat/Program.cs` + `dist/truedat/` contents.
 
 ## Lookup mechanism
@@ -13,11 +13,10 @@ All native helpers are located via `FindTool(exeName, params searchDirs)` in `Pr
 |---|---|---|---|
 | **`essentia_streaming_extractor_music.exe`** | **HARD** (default scan) | `MoodsMode`, `--file-list`, `--analyze-file`, `--folder` | `Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found")` and the mode aborts. No fallback — moods cannot be computed without it. |
 | **`ffmpeg.exe`** | **SOFT** for default scan / **HARD** for some modes | `ComputeBitUsage`, `ComputeHfAnalysis` (Phase 2.5+3+5 signals), multi-channel downmix retry, `Unsupported codec` retry (e.g. `.opus`), `--transcode`, backfill features tier | Lazy-resolved via `_ffmpegPath`. On null: every helper that consumes it returns `null` and the worker continues — affected features simply omit from JSON. Status banner prints `not found (multi-channel files will be skipped)`. **Hard fail** in `--transcode` and the backfill features tier prints `WARNING: ffmpeg not found on PATH — features tier will silently skip every entry.` Phase 4 verdict block downgrades to `"unknown"`/`"n/a"` because Signal F (`hfSpectralStructure`) and `bitUsage` vote weights vanish. **Same omission shape can be requested explicitly** via `--no-bitusage` (drops `ComputeBitUsage` only) or `--no-hf-analysis` (drops `ComputeHfAnalysis` only) — both flags are orthogonal to ffmpeg presence and skip the subprocess regardless. |
-| **`ffprobe.exe`** | **SOFT** | `--details` (`mbxhub-details.json`), `--transcode` (source-rate matching) | Lazy. Null = `--details` silently skipped with a warning; fingerprint write continues. `--transcode` still works but loses native-rate matching. Default scan does not call ffprobe. |
-| **`essentia_streaming_md5.exe`** | **HARD** *only in legacy modes* | `--fingerprint`, `--md5-only` | If absent, the legacy mode that needs it aborts. **Default scan does not call it** — it's been out of the default codepath since the 2026-05-04 decouple. Per `feedback_hard_cut_no_soft_deprecation` it would normally be deleted, but it's retained for the legacy modes. |
-| **`fpcalc.exe`** | **HARD** *only for `--quick-fingerprint`* | `--quick-fingerprint` | Prints `fpcalc not found. --quick-fingerprint requires fpcalc.exe next to truedat.exe...` and aborts that mode. Otherwise unreferenced. |
-| **`essentia_standard_chromaprinter.exe`** | Unused at runtime | (shipped in dist; not invoked by `Program.cs`) | No code references — kept in the curated tool collection (`feedback_dist_contents_are_intentional`). |
+| **`ffprobe.exe`** | **SOFT** | `--transcode` (source-rate matching) | Lazy. `--transcode` still works without it but loses native-rate matching. Default scan does not call ffprobe. |
 | **NuGet: `TagLibSharp`, `System.Text.Json`** | Merged into exe via ILRepack | All TagLib reads, all JSON I/O | Not separable at runtime — already inside `truedat.exe`. |
+
+The legacy fingerprint binaries (`essentia_streaming_md5.exe`, `fpcalc.exe`, `essentia_standard_chromaprinter.exe`) and the modes that invoked them (`--fingerprint` / `--md5-only` / `--quick-fingerprint` / `--details`) were removed on 2026-07-11.
 
 ## Source staging
 
@@ -30,7 +29,7 @@ Staging triggers for:
 - **Local non-ASCII paths** — method `staged-fallback`. Covers the case where the existing `TryCreateHardlink` mitigation can't help (hardlinks don't help paths on volumes that don't host hardlinks).
 - Local ASCII-only paths on local NTFS pass through directly — no copy.
 
-The cache hierarchy is stage-aware: tier-1 (path + mtime equality, the fast path) does NOT open a staging handle. Tier-2 (path + audioStreamSha256), tier-3 (cross-MD5), tier-4 (cross-SHA), and the cache-miss worker fan-out all route their body reads through one lazily-opened staged copy via `EnsureStagedSrc()` — opened on first body read, reused for every subsequent read, disposed in `finally`. So a tier-1 hit on a UNC library track stays free; a tier-2/3/4 hit or cache miss copies once and amortizes the copy across all 8-9 reads.
+The cache hierarchy is stage-aware: tier-1 (path + mtime equality, the fast path) does NOT open a staging handle. Tier-2 (path + audioStreamSha256), tier-4 (cross-SHA), and the cache-miss worker fan-out all route their body reads through one lazily-opened staged copy via `EnsureStagedSrc()` — opened on first body read, reused for every subsequent read, disposed in `finally`. So a tier-1 hit on a UNC library track stays free; a tier-2/4 hit or cache miss copies once and amortizes the copy across all 8-9 reads.
 
 `SourceHandle.SourceLastWriteUtc` captures the source's mtime inside `OpenStagedSource` immediately after `File.Copy`. The scan modes record `TrackEntry.LastModified` from this snapshot instead of re-stat'ing at end-of-work, so a tag touch between the copy and the entry being persisted can't make the recorded mtime newer than the analyzed audio.
 
@@ -62,10 +61,7 @@ Three categories:
    - Backfill `features` tier becomes a no-op (prints warning).
 
 3. **Mode-specific aborts** with clear error messages:
-   - `--quick-fingerprint` → needs `fpcalc.exe`.
-   - `--fingerprint` / `--md5-only` → need `essentia_streaming_md5.exe`.
    - `--transcode` → needs `ffmpeg.exe` (ffprobe optional).
-   - `--details` → silently skipped without `ffprobe.exe`.
 
 ## Recommendations
 

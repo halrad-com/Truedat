@@ -9,10 +9,10 @@ Truedat is a Windows .NET CLI that extracts **per-track mood** across a music li
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
 
-- **Composite track identity** — `fingerprint.v1` (file size + path tail + audio properties + 64 KB head MD5 + MP3 LAME tag block), `audioStreamSha256` (SHA-256 over TagLib's invariant audio region; cross-machine portable, tag-edit resilient), and traditional file/audio MD5.
+- **Composite track identity** — `fingerprint.v1` (file size + path tail + audio properties + 64 KB head MD5 + MP3 LAME tag block), `audioStreamSha256` (SHA-256 over TagLib's invariant audio region; cross-machine portable, tag-edit resilient), and an optional whole-file MD5 (`--file-md5`).
 - **Authenticity signals** — `bitUsage` (ffmpeg-driven LSB walk that catches fake-hi-res 24-bit padding), `hfEnergyRatio` (bin-sharp energy above 22.05 kHz via managed FFT), `hfSpectralStructure` (flatness / peak-to-mean / mirror-imaging from the same FFT pass — catches ffmpeg-upsampled fakes the bit-level signals miss), MP3 LAME-tag parsing (pure-managed Xing/Info+LAME decoder for transcode detection).
 - **`truedat.*` verdict block** — multi-signal voted hi-res / lossy-transcode verdicts (`yes` / `no` / `unknown` / `n/a`) computed inline at write time, so threshold changes ship without rescanning.
-- **Library-scale operations** — incremental & cache-aware scanning across four cache tiers (path+mtime, path+sha, cross-md5, cross-sha), `--verify` / `--verify --backfill` (identity + features tiers), `--merge-moods`, deterministic multi-machine `--chunk M/N`, `--hash-only` NDJSON manifest mode, opus auto-retry, and a standalone `--transcode` utility.
+- **Library-scale operations** — incremental & cache-aware scanning across four cache tiers (path+mtime, head-64k quick, path+sha, cross-sha), `--verify` / `--verify --backfill` (identity + features tiers), `--merge-moods`, deterministic multi-machine `--chunk M/N`, `--hash-only` NDJSON manifest mode, opus auto-retry, and a standalone `--transcode` utility.
 
 The output (`mbxmoods.json`) carries all of this in a single per-track object that MBXHub reads directly.
 
@@ -21,12 +21,9 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 **Output:**
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
-- `mbxhub-fingerprints.json` - Chromaprint perceptual fingerprints and audio MD5 hashes
-- `mbxhub-details.json` - audio metadata from ffprobe (codec, bitrate, sample rate, etc.)
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
 - `mbxmoods-skipped.csv` - tracks skipped at scan entry because the codec isn't supported (currently `.dsf` / `.dff` / `.dsd` DSD streams). Columns: `path,extension,reason,timestamp`.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
-- `mbxhub-fingerprints-errors.csv` - tracks that failed fingerprinting (`--fingerprint` mode)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
 ## Download
@@ -52,15 +49,6 @@ A single default invocation produces the full per-track record:
 
 MBXHub consumes the whole record: mood features drive AutoQ vibe selection; identity drives cross-cache matching; authenticity drives the hi-res / transcode classifiers.
 
-### Fingerprint mode (`--fingerprint`) — legacy
-
-The original identity pipeline, still available for compatibility:
-
-- **Chromaprint** — Perceptual audio fingerprint (AcoustID). Identifies the same *song* regardless of encoding, bitrate, or format.
-- **Audio MD5** — Hash of raw decoded audio data (ignores metadata tags). Identifies the exact same *audio data*.
-
-The default scan's `fingerprint.v1` + `audioStreamSha256` have superseded this for new work; `--fingerprint` is kept for libraries that still depend on `mbxhub-fingerprints.json`.
-
 ### Verify & backfill (`--verify`, `--verify --backfill`)
 
 Walks an existing `mbxmoods.json` and either reports drift (read-only) or repairs missing fields in place (no Essentia re-run). Two backfill tiers — identity (TagLib + cheap IO) and features (ffmpeg-driven `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure`) — both gated by an SHA drift check so drifted entries are flagged for re-analysis rather than touched. See [Verify & Backfill](#large-libraries) for tier scoping via `--backfill-level`.
@@ -78,12 +66,9 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 ```cmd
 REM Mood analysis (default)
 truedat.exe "iTunes Music Library.xml"
-
-REM Fingerprint mode
-truedat.exe "iTunes Music Library.xml" --fingerprint
 ```
 
-Output: `mbxmoods.json` / `mbxhub-fingerprints.json` (next to the XML file)
+Output: `mbxmoods.json` (next to the XML file)
 
 **Auto-discovery:** if you omit the positional XML arg, truedat probes (first hit wins): `<exe-dir>\..\iTunes Music Library.xml` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>\iTunes Music Library.xml`, then `.\iTunes Music Library.xml` (cwd). The error message lists the probed locations so a no-hit failure is self-diagnosing.
 
@@ -140,13 +125,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
-  --migrate               Clean up mbxmoods.json: strip legacy valence/arousal fields and
-                          fileMd5 (kept with --file-md5),
+  --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
+                          audioMd5, chromaprint) and fileMd5 (kept with --file-md5),
                           rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)
-  --fingerprint           Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json
-  --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
-  --md5-only              Fingerprint mode: only run audio md5 (skip chromaprint)
-  --details               Use ffprobe → mbxhub-details.json (implies --fingerprint)
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
@@ -186,16 +167,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 **Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
 - Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
 - Auto-retry of files essentia can't decode natively — e.g. `.opus`, which this essentia build lacks. The file is transcoded to a stereo WAV and essentia is re-run against it, all transparently.
-- `--details` probe mode.
 - Standalone `--transcode` mode for converting opus/etc. to uncompressed FLAC.
 
 ### Large Libraries
 
-For large libraries (50K+ tracks), expect multi-day scans for mood analysis. Fingerprinting is much faster. Both modes are designed for this:
+For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The scan is designed for this:
 
 - **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
 - **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
-- **Cross-path resilient** - File moved or renamed? Cross-MD5 / cross-SHA fallbacks re-key the cached entry to the new path without re-analyzing.
+- **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 with `--file-md5` / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
@@ -216,17 +196,8 @@ REM Re-key mbxmoods.json from one root to another (e.g., scanned local copy of
 REM a NAS mirror, need entries keyed by the UNC path). No iTunes XML needed.
 truedat.exe --fixup --remap "D:\Music\=\\nas\share\Music\" mbxmoods.json
 
-REM Generate fingerprints for the whole library
-truedat.exe "iTunes Music Library.xml" --fingerprint
-
-REM Only chromaprint (e.g., for duplicate detection)
-truedat.exe "iTunes Music Library.xml" --chromaprint-only
-
 REM Check for problematic filenames before scanning
 truedat.exe "iTunes Music Library.xml" --check-filenames
-
-REM Probe audio details (codec, bitrate, sample rate, etc.)
-truedat.exe "iTunes Music Library.xml" --details
 
 REM Analyze a single file (no iTunes XML needed)
 truedat.exe --analyze-file "C:\Music\song.mp3" --json-output
@@ -313,13 +284,10 @@ Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or
 | Tool | Enables | License | Source |
 | ---- | ------- | ------- | ------ |
 | [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
-| [Essentia](https://essentia.upf.edu/) `essentia_streaming_md5.exe` | `--fingerprint` and `--md5-only` modes only (decoded-PCM MD5). Not used by default mood scan. | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
-| [Chromaprint](https://acoustid.org/chromaprint) `fpcalc.exe` | `--fingerprint` and `--quick-fingerprint` modes only (perceptual fingerprint). Not used by default mood scan. | LGPL-2.1+ | [AcoustID](https://acoustid.org/chromaprint) |
-| [Essentia](https://essentia.upf.edu/) `essentia_standard_chromaprinter.exe` | `--fingerprint` mode (chromaprint persisted to `mbxhub-fingerprints.json`) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
-| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel audio downmix | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
-| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--details` audio probing | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
+| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel downmix, opus decode retry, `bitUsage` / HF-analysis authenticity signals, `--transcode` | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
+| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--transcode` source-property matching | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
 
-All tools are optional — truedat runs without them but the corresponding features are unavailable. Only install the tools for the modes you need. `essentia_streaming_md5.exe` and `fpcalc.exe` are used only by the legacy `--fingerprint` / `--md5-only` / `--quick-fingerprint` modes — the default scan computes its identity fields (`fingerprint.v1`, `audioStreamSha256`, and `fileMd5` with `--file-md5`) in pure-managed code with no subprocess. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
+All tools are optional — truedat runs without them but the corresponding features are unavailable. The scan's identity fields (`fingerprint.v1`, `audioStreamSha256`, and `fileMd5` with `--file-md5`) are computed in pure-managed code with no subprocess. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
 
 ### Essentia Builds
 
@@ -581,63 +549,6 @@ Computed inline at write time, not persisted in cache. Threshold changes ship wi
 
 **Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). One known gap remains for Phase 5+: LAME-to-LAME re-encode chains verdict `"no"` because the second LAME encode rewrites the Xing tag — needs cascade-encode artifact detection. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
 
-### Fingerprint Output
-
-`mbxhub-fingerprints.json`:
-
-```json
-{
-  "version": "1.0",
-  "generatedAt": "2026-02-14T...",
-  "trackCount": 70000,
-  "tracks": {
-    "C:\\Music\\Artist\\Song.mp3": {
-      "trackId": 123,
-      "artist": "Artist",
-      "title": "Song",
-      "album": "Album",
-      "genre": "Rock",
-      "chromaprint": "AQADtNIyhZKo...",
-      "duration": 245,
-      "md5": "a1b2c3d4e5f6...",
-      "lastModified": "2026-01-15T00:00:00.0000000Z"
-    }
-  }
-}
-```
-
-Fields are omitted when the tool wasn't run (`--chromaprint-only` omits `md5`, `--md5-only` omits `chromaprint`/`duration`). Existing cached entries with both fields are preserved even when re-running with a subset flag.
-
-### Details Output
-
-`mbxhub-details.json` (generated by `--details`):
-
-```json
-{
-  "version": "1.0",
-  "generatedAt": "2026-02-14T...",
-  "trackCount": 70000,
-  "tracks": {
-    "C:\\Music\\Artist\\Song.mp3": {
-      "trackId": 123,
-      "artist": "Artist",
-      "title": "Song",
-      "codec": "mp3",
-      "channels": 2,
-      "sampleRate": 44100,
-      "bitRate": 320,
-      "bitDepth": 0,
-      "duration": 245.3,
-      "format": "mp3",
-      "sizeMb": 9.4,
-      "lastProbed": "2026-02-14T00:00:00.0000000Z",
-      "lastModified": "2026-01-15T00:00:00.0000000Z"
-    }
-  }
-}
-```
-
-Audio metadata extracted via ffprobe. `bitRate` is in kbps, `bitDepth` is 0 for lossy codecs that don't have a fixed bit depth (e.g. MP3, AAC).
 
 ## How Mood Vectors Work
 

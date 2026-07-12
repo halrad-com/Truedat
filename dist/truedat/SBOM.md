@@ -44,7 +44,6 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 | zlib | 1.2.12 | zlib | Compression |
 | TagLib | 1.11.1 | LGPL-2.1 | Audio metadata reading |
 | libyaml | 0.1.5 | MIT | YAML/JSON output |
-| Chromaprint | 1.5.1 | LGPL-2.1+ | Audio fingerprinting |
 
 **Licensing:** Essentia is AGPL-3.0 for non-commercial use, with commercial licensing available from UPF. See https://essentia.upf.edu/licensing_information.html for full details including third-party dependency licenses.
 
@@ -55,7 +54,7 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 | Ubuntu (WSL2) | 24.04 LTS | Build host |
 | MinGW g++ | 13 | x86_64 cross-compiler (win32 threads) |
 | Python | 3.12 | WAF build system |
-| CMake | 3.28 | TagLib, Chromaprint, Eigen builds |
+| CMake | 3.28 | TagLib, Eigen builds |
 | NASM | 2.16 | FFmpeg SIMD assembly |
 
 **Build documentation:** `essentia-build/bringup.md` (full step-by-step), `essentia-build/tools-summary.md` (all 53 built tools)
@@ -67,25 +66,23 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 | File | Architecture | Source |
 |------|-------------|--------|
 | `essentia_streaming_extractor_music.exe` | x64 | Built from `essentia-build/` — mood analysis |
-| `essentia_standard_chromaprinter.exe` | x64 | Built from `essentia-build/` — Chromaprint/AcoustID fingerprinting |
-| `essentia_streaming_md5.exe` | x64 | Built from `essentia-build/` — Audio payload MD5 hashing |
 
-All Essentia tools share the same dependency tree above. Place them in the same folder as `truedat.exe`.
+Place it in the same folder as `truedat.exe`.
 
 ### FFmpeg (Optional Dependency)
 
-Truedat can optionally use FFmpeg for multi-channel audio downmixing and audio stream probing (`--details` mode). FFmpeg is a separate download, not built by this project. Pre-built Windows binaries are available from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/).
+Truedat can optionally use FFmpeg for multi-channel audio downmixing, opus decode retry, the bitUsage / HF-analysis authenticity signals, and the standalone `--transcode` utility. FFmpeg is a separate download, not built by this project. Pre-built Windows binaries are available from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/).
 
 Source: [FFmpeg](https://ffmpeg.org/)
 
 | Component | Version | License | Purpose |
 |-----------|---------|---------|---------|
-| ffmpeg.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio downmixing (multi-channel → stereo) |
-| ffprobe.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio stream probing (`--details` mode) |
+| ffmpeg.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio downmixing, decode retry, bitUsage / HF analysis, `--transcode` |
+| ffprobe.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | `--transcode` source-property matching |
 
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
-**Note:** FFmpeg is an optional external dependency. Without it, multi-channel audio files are skipped with a warning and `--details` mode is unavailable. Truedat itself (MIT) does not link against FFmpeg — it invokes the executables as subprocesses.
+**Note:** FFmpeg is an optional external dependency. Without it, multi-channel audio files are skipped with a warning and the bitUsage / HF-analysis fields are omitted. Truedat itself (MIT) does not link against FFmpeg — it invokes the executables as subprocesses.
 
 ## Output Files
 
@@ -93,13 +90,10 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5` (maintained only with `--file-md5`), `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). The legacy `audioMd5` and `chromaprint` fields stay nullable in schema; pre-existing values are preserved on cache reuse but new entries do not populate them — those are produced by `--fingerprint` mode now. |
+| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5` (maintained only with `--file-md5`), `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). Legacy `audioMd5` / `chromaprint` keys from old scans are ignored on read and stripped by `--migrate`. |
 | `mbxmoods.<host>.json` | Output of `--chunk M/N` — hostname-suffixed shard. Each machine in a chunked scan writes its own shard; combine with `--merge-moods` for a unified file. |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. |
 | `mbxmoods-verify.csv` | Output of `--verify` — per-entry integrity report (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Tab-separated. Excludes OK rows to keep size small. |
-| `mbxhub-fingerprints.json` | Chromaprint fingerprints and audio MD5 hashes per track |
-| `mbxhub-fingerprints-errors.csv` | Failed tracks with error reasons (fingerprint mode) |
-| `mbxhub-details.json` | Audio stream details: codec, bitrate, sample rate, channels per track (requires ffprobe) |
 | `truedat.log` | Console output log (when `--audit` is used) |
 
 ### Synthetic Library Mode (`--synthesize`)
@@ -165,6 +159,6 @@ Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt
 - Reads audio files (read-only) and iTunes Music Library XML
 - Writes JSON output next to input XML file
 - No telemetry or external services
-- Child process arguments (ffmpeg, ffprobe, fpcalc, Essentia) are sanitized via `PathHelper.QuoteArg()` to prevent command injection from malicious file paths in the iTunes XML
+- Child process arguments (ffmpeg, ffprobe, Essentia) are sanitized via `PathHelper.QuoteArg()` to prevent command injection from malicious file paths in the iTunes XML
 - iTunes XML parser uses `DtdProcessing.Ignore` to prevent XXE entity expansion
 - Podcast episodes and video files are filtered out before processing
