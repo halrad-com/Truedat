@@ -140,7 +140,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
-  --migrate               Clean up mbxmoods.json: strip legacy valence/arousal fields,
+  --migrate               Clean up mbxmoods.json: strip legacy valence/arousal fields and
+                          fileMd5 (kept with --file-md5),
                           rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)
   --fingerprint           Run fingerprint mode (chromaprint + md5) → mbxhub-fingerprints.json
   --chromaprint-only      Fingerprint mode: only run chromaprint (skip md5)
@@ -171,13 +172,11 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
-  --file-md5              Maintain the whole-file fileMd5 field (default off). Off means no
-                          dedicated read is ever spent on it: fresh analysis omits it, and the
-                          --backfill fileMd5 fill is skipped. It is still recorded when it falls
-                          out of a read the scan does anyway, and values already in the JSON are
-                          always preserved. The durable audio identity is audioStreamSha256
-                          either way; enable this only if you compare whole-file MD5s with
-                          external tools.
+  --file-md5              Maintain the whole-file fileMd5 field (default off). Off means it is
+                          never written: fresh analysis omits it, cache-tier refreshes drop it,
+                          the --backfill fileMd5 fill is skipped, and --migrate strips stored
+                          values. The durable audio identity is audioStreamSha256 either way;
+                          enable this only if you compare whole-file MD5s with external tools.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
