@@ -4440,12 +4440,15 @@ namespace Truedat
             if (total < detailThreshold)
             {
                 Console.WriteLine($"Catalog summary: {path}  ({total} track{(total == 1 ? "" : "s")})");
+                // Show the opt-in fileMd5 column only when some entry actually carries it,
+                // matching the aggregate view (the two views must never disagree).
+                bool anyFileMd5 = entries.Any(e => e != null && !string.IsNullOrEmpty(e.FileMd5));
                 int n = 0;
                 foreach (var e in entries)
                 {
                     var pr = Probe(e);
                     Console.WriteLine($"  {++n}. {e?.Features?.FilePath ?? "(unknown path)"}");
-                    Console.WriteLine($"       essentia:{YN(pr.Essentia)}  audioStreamSha256:{YN(pr.Sha256)}  fileMd5:{YN(pr.FileMd5)}  audioHead64kMd5:{YN(pr.Head64k)}  smfm:{YN(pr.Smfm)}");
+                    Console.WriteLine($"       essentia:{YN(pr.Essentia)}  audioStreamSha256:{YN(pr.Sha256)}{(anyFileMd5 ? $"  fileMd5:{YN(pr.FileMd5)}" : "")}  audioHead64kMd5:{YN(pr.Head64k)}  smfm:{YN(pr.Smfm)}");
                 }
                 return;
             }
@@ -4470,7 +4473,11 @@ namespace Truedat
             Console.WriteLine();
             Console.WriteLine(Cov("Essentia analysis", s.EssentiaAnalyzed));
             Console.WriteLine(Cov("audioStreamSha256", s.AudioStreamSha256) + "   (primary identity)");
-            Console.WriteLine(Cov("fileMd5", s.FileMd5));
+            // fileMd5 is opt-in (--file-md5) and unwritten by default — omit the row entirely
+            // when nothing carries it, so a default catalog doesn't report a misleading
+            // "0 / N  0%  N missing" for a field that's absent by design.
+            if (s.FileMd5 > 0)
+                Console.WriteLine(Cov("fileMd5", s.FileMd5));
             Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5));
             Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
             if (s.DuplicateGroups > 0)
