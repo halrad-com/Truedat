@@ -383,3 +383,36 @@ Analysis detail in the local (gitignored) plans tree:
 
 Convert DSD, multi-channel, and other non-PCM formats via ffmpeg before Essentia
 analysis. Design doc at `docs/dsd-conversion-plan.md`.
+
+## Scan-summary perf diagnostics (LOW priority)
+
+Add CPU + disk-IO lines to the end-of-scan summary so a run self-reports whether it was
+CPU-bound or IO-bound. Motivated by a 2026-07-14 storage benchmark: analysis time was
+flat at ~59 s/track across WiFi / LAN / USB HDD / SSD, pointing to an on-box (CPU)
+bottleneck — the scan runs `ProcessorCount-2` uncapped Essentia subprocesses, each doing
+a heavy multi-pass FFT workload, so storage location barely moves the needle. These lines
+turn that inference into a measured, per-run fact.
+
+Target output (near the existing `Peak mem` line):
+
+```
+  CPU:        avg 96%   peak 100%          (all cores)
+  Disk read:  avg 18 MB/s  peak 140 MB/s   (2.9 GB total)
+  Disk write: avg 0.3 MB/s peak 12 MB/s    (72 MB total)
+```
+
+- **Existing Windows counters only** — `System.Diagnostics.PerformanceCounter` (in net48,
+  no P/Invoke, no new deps): `Processor(_Total)\% Processor Time`,
+  `PhysicalDisk(_Total)\Disk Read Bytes/sec`, `Disk Write Bytes/sec`.
+- Sample ~1 s on a background thread; track avg + peak. "Total bytes" falls out of
+  integrating the rate already being sampled — not a separate counter.
+- Use `_Total` (whole box), **not** per-process: the real disk IO happens inside the
+  Essentia/ffmpeg **child** processes, so a `Process\truedat` counter reads ~0 and would
+  mislead. This makes the numbers system-wide — fine on a dedicated benchmark box, noisy
+  on a busy workstation (worth a note in the output).
+- Wrap counter creation in try/catch and degrade to `unavailable` — a diagnostic must
+  never abort a scan. Discard the first `.NextValue()` (rate counters return 0 on the
+  first read).
+
+Interpretation: CPU ≈ 100% + disk read low ⇒ CPU-bound (scale out via `--chunk`); CPU low
++ disk high ⇒ IO-bound. Observability only, not a functional gap — hence LOW.
