@@ -31,3 +31,13 @@ vam-tools/.venv/
 
 # Brainstorm companion scratch (visual mockups, previews)
 .superpowers/
+
+# essentia-build local build output — the 3rd-party deps ship (sanitized) as
+# essentia-build/3rdparty-x64-deps.tar.gz. A local build/extraction repopulates
+# 3rdparty/include + lib, whose .pc/.la metadata bake in the real build path
+# (leaks the username), so the loose copies must never be tracked. Build recipes
+# (build_*.sh) and the sanitized archive stay tracked.
+essentia-build/3rdparty/include/
+essentia-build/3rdparty/lib/
+# build logs — transient, can carry local paths / private info
+essentia-build/**/*.log
