@@ -225,6 +225,25 @@ python calibrate-valence-arousal.py \
 
 ## Step 5 — deploy the model
 
+**Gate it first — the new model must beat the one it replaces.** `loocv_r` alone
+can't prove this: each model's `loocv_r` is cross-validated on its *own* anchor
+set, so a bigger/harder label set can post a lower number while being a better
+model. The only fair test scores both models on one fixed label set:
+
+```
+python model-gate.py \
+    --incumbent path/to/current/mood-model.json \
+    --candidate my-model-v2.json \
+    --moods train-moods.json \
+    --labels <DATA>/mbxvam-labels.json \
+    --eval-out gate-report.json
+```
+
+Exit 0 = the candidate matches or beats the incumbent on **both** axes — safe to
+promote. Exit 1 = it regresses on at least one axis; don't ship it. Keep
+`gate-report.json` with the generation (see Archiving). Only on a pass do you
+continue below.
+
 The model file drops into MBXHub's data folder as `mood-model.json`, overriding
 the model embedded in the plugin.
 
@@ -286,6 +305,33 @@ When your library grows or your taste shifts:
 
 Versioning is your call; the trainer stamps `trainedAt` and `anchorsUsed` into
 every model so you can always trace one back to a label set.
+
+---
+
+## Archiving each generation
+
+Keep every model generation so a shipped model can always be traced back to the
+data that produced it. One folder per generation, named `<version>_<anchors>_<MMDD>`
+(e.g. `0.5.4.2_180_717` — the consuming app's version, 180 anchors, baked 7/17).
+Preserve original filenames inside; don't rename, just group.
+
+**Archive these — the human-made inputs and the model output (all small, unique):**
+
+| Artifact | I/O | What it is / why keep it |
+| --- | --- | --- |
+| `mbxvam-labels*.json` | input | The annotations (valence/arousal 0..1 per track). The training target. Unique per generation — the whole point of the archive. |
+| `mbxtune-pairs.json` | input | Pairwise A/B judgments. Supplemental signal. Small; keep if it existed for this gen. |
+| `auto-cal-seed.json` | input | The seed corner picks that drove annotation. Records how the label set was sampled. Optional. |
+| `<model>.json` | output | The trained model. Embeds its own scaler + impute means + coefficients, so the file carries the fitted state — no external files needed to serve or inspect it. |
+| `gate-report.json` | output | `model-gate.py --eval-out` result: incumbent-vs-candidate scores that justified promoting this generation. Proof it cleared "better than the last build." Small; keep it. |
+
+**Do NOT archive `mbxmoods.json` or the `/vam/train/moods` export.** They're
+derived artifacts — regenerable any time by re-scanning the library and re-fetching
+the export. Re-scanning reproduces the features to within rounding for a given
+truedat/Essentia build (insignificant to a model whose coefficients are already
+fixed); the only thing that shifts features beyond rounding is a different Essentia
+version, so the provenance worth noting per generation is the **truedat/Essentia
+build**, not the multi-hundred-MB file.
 
 ---
 
