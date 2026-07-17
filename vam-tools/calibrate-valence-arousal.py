@@ -8,32 +8,118 @@ FEATURES = [
     "spectralEntropy", "spectralComplexity", "hpcpCrest", "hpcpEntropy",
     "hfc", "beatsLoudness", "chordsStrength", "bpm", "loudness",
     "onsetRate", "zeroCrossingRate", "spectralRms", "dynamicRange",
+    # v3: Sony SMFM (SensMe) projected V/A as low-weight fusion features (validated 2026-07-06 —
+    # AutoQ stays the authority; the fit down-weights these). Present ONLY in the enriched
+    # /vam/train/moods export (the plugin owns the SMFM->V/A projection; raw mbxmoods.json has
+    # no such keys). Missing values are MEAN-IMPUTED: the column mean over present values is
+    # stored in the model's "impute" block and MBXHub's MoodModelLoader substitutes the SAME
+    # number at serve time — train/serve parity. A library with no SMFM at all still trains:
+    # the columns impute flat and Ridge zeroes their weight (see the essentiaOnly head below).
+    "smfmValence", "smfmArousal",
+    # Mode-aware valence prior: major=1.0,
+    # minor=0.0, unknown=mean-imputed. The export emits numeric modeMajor; raw mbxmoods.json
+    # carries the string "mode" key, which extract_feature_vector derives from directly.
+    "modeMajor",
 ]
+
+# Features whose missing values are mean-imputed (all others are required-numeric;
+# a track missing one of those is dropped exactly as before).
+IMPUTED_FEATURES = ("smfmValence", "smfmArousal", "modeMajor")
+# Fallbacks when a column has NO present values anywhere in the corpus:
+# smfm columns keep the legacy 0.0; modeMajor centers at 0.5.
+IMPUTE_DEFAULTS = {"smfmValence": 0.0, "smfmArousal": 0.0, "modeMajor": 0.5}
 
 def load_json(path):
     with io.open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
-def extract_feature_vector(entry):
+def raw_feature(entry, fk):
+    """Feature value or None. Derives modeMajor from the string 'mode' key when the
+    numeric key is absent (raw mbxmoods.json compatibility)."""
+    v = entry.get(fk)
+    if v is None and fk == "modeMajor":
+        m = entry.get("mode")
+        if isinstance(m, str):
+            ml = m.strip().lower()
+            if ml == "major": return 1.0
+            if ml == "minor": return 0.0
+        return None
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return "BAD"
+
+def compute_impute_means(moods_values):
+    """Column mean over PRESENT values for each imputed feature (IMPUTE_DEFAULTS
+    when a column is empty corpus-wide)."""
+    sums = {fk: 0.0 for fk in IMPUTED_FEATURES}
+    counts = {fk: 0 for fk in IMPUTED_FEATURES}
+    for e in moods_values:
+        for fk in IMPUTED_FEATURES:
+            v = raw_feature(e, fk)
+            if v is None or v == "BAD":
+                continue
+            sums[fk] += v; counts[fk] += 1
+    return {fk: (sums[fk] / counts[fk] if counts[fk] else IMPUTE_DEFAULTS[fk])
+            for fk in IMPUTED_FEATURES}
+
+def extract_feature_vector(entry, impute):
     vec = []
     for fk in FEATURES:
-        v = entry.get(fk)
+        v = raw_feature(entry, fk)
+        if v == "BAD":
+            return None  # unparseable numeric -> drop the track (matches pre-wave behavior)
         if v is None:
-            vec.append(0.0); continue
-        try:
-            vec.append(float(v))
-        except (TypeError, ValueError):
-            return None
+            if fk in impute:
+                vec.append(impute[fk])
+                continue
+            # Missing non-imputed feature -> 0.0-fill, exact parity with serve:
+            # MoodModelLoader.LookupFeatureNullable "?? 0.0"-fills these same nullable
+            # extended-essentia features at serve time. Dropping the track here would
+            # desync the retrain corpus/scaler from what serve actually scores.
+            vec.append(0.0)
+            continue
+        vec.append(v)
     return vec
 
-def join_labels(labels, moods):
+def build_lookup(moods):
+    """Index the corpus by BOTH audioStreamSha256 and path, so a track resolves from
+    either identifier regardless of how the corpus is keyed.
+
+    Raw mbxmoods.json is keyed by track PATH, which is box-specific: labels rated against a
+    library mounted at one drive/root won't match a corpus keyed at another. The
+    /vam/train/moods export is keyed by SHA instead, so a bare moods.get(<path>) resolves
+    nothing at all against it — silently, with no error. Every consumer of the corpus
+    (labels AND tune pairs) must go through this index, not moods.get()."""
+    by_sha, by_path = {}, {}
+    for key, e in moods.items():
+        k = e.get("audioStreamSha256")
+        if k: by_sha[k] = e
+        p = e.get("path") or key
+        if p: by_path[p] = e
+    def resolve(*ids):
+        """First id that hits, tried against sha then path. Callers pass whatever they
+        hold: labels have (Key, Path); tune pairs hold a bare path in A/B."""
+        for i in ids:
+            if not i: continue
+            e = by_sha.get(i) or by_path.get(i)
+            if e is not None: return e
+        return None
+    return resolve
+
+def join_labels(labels, moods, impute, resolve):
+    # Join by audioStreamSha256 (the label's Key) — box-independent audio-bytes identity —
+    # and fall back to Path when the Key is stale (a re-scan/re-encode after rating changes
+    # the sha). Path-only joins have been measured dropping a third of an anchor set.
     Xs, yV, yA = [], [], []
     for lbl in labels:
-        p = lbl.get("Path")
-        if not p or p not in moods: continue
         tv = lbl.get("Valence"); ta = lbl.get("Arousal")
         if tv is None or ta is None: continue
-        v = extract_feature_vector(moods[p])
+        e = resolve(lbl.get("Key"), lbl.get("Path"))
+        if e is None: continue
+        v = extract_feature_vector(e, impute)
         if v is None: continue
         Xs.append(v); yV.append(float(tv)); yA.append(float(ta))
     return Xs, yV, yA
@@ -92,14 +178,18 @@ def main():
     if isinstance(labels, dict): labels = labels.get("labels", [])
     print(" ", len(labels), "labels", file=sys.stderr)
 
-    X, yV, yA = join_labels(labels, moods)
+    impute = compute_impute_means(moods.values())
+    print("  impute means:", {k: round(v, 4) for k, v in impute.items()}, file=sys.stderr)
+
+    resolve = build_lookup(moods)
+    X, yV, yA = join_labels(labels, moods, impute, resolve)
     if len(X) < 10:
         print("FATAL: only", len(X), "anchors", file=sys.stderr); sys.exit(2)
     print("  joined", len(X), "of", len(labels), file=sys.stderr)
     X = np.asarray(X); yV = np.asarray(yV); yA = np.asarray(yA)
 
     print("fitting StandardScaler + PCA on full mood cache", file=sys.stderr)
-    full_X = [v for v in (extract_feature_vector(e) for e in moods.values()) if v is not None]
+    full_X = [v for v in (extract_feature_vector(e, impute) for e in moods.values()) if v is not None]
     full_X = np.asarray(full_X)
     scaler = StandardScaler().fit(full_X)
     full_Xs = scaler.transform(full_X)
@@ -169,9 +259,11 @@ def main():
                 if pp.get("B"): relevant.add(pp["B"])
             preds_v = {}; preds_a = {}
             for path in relevant:
-                e = moods.get(path)
+                # Pairs hold a bare path in A/B; the corpus may be SHA-keyed (the
+                # /vam/train/moods export) — resolve, never moods.get().
+                e = resolve(path)
                 if e is None: continue
-                v = extract_feature_vector(e)
+                v = extract_feature_vector(e, impute)
                 if v is None: continue
                 x = scaler.transform([v])[0]
                 # Both V and A use raw standardized features now (no PCA).
@@ -198,15 +290,15 @@ def main():
             X_v_extra = []; y_v_extra = []
             X_a_extra = []; y_a_extra = []
             for url, z in v_bt.items():
-                e = moods.get(url)
+                e = resolve(url)
                 if e is None: continue
-                fv = extract_feature_vector(e)
+                fv = extract_feature_vector(e, impute)
                 if fv is None: continue
                 X_v_extra.append(fv); y_v_extra.append(_sig(z))
             for url, z in a_bt.items():
-                e = moods.get(url)
+                e = resolve(url)
                 if e is None: continue
-                fv = extract_feature_vector(e)
+                fv = extract_feature_vector(e, impute)
                 if fv is None: continue
                 X_a_extra.append(fv); y_a_extra.append(_sig(z))
 
@@ -237,16 +329,63 @@ def main():
                 else:
                     print("  -> blended arousal not better; keeping anchors-only", file=sys.stderr)
 
+    # Output spread-stretch calibration. A weak Ridge fit regresses to the mean, so
+    # raw output is compressed to ~half the human-rated spread and piles up near the
+    # intercept (the "everything pinned to 0.5" symptom). Bake a per-axis stretch that
+    # the loader (MoodModelLoader.PredictAxis) applies: out = clamp(center + (raw-center)*stretch).
+    # center = mean raw output over the FULL cache (matches the served population);
+    # stretch = human-target-std / model-output-std, floored at 1.0 (never compress) and
+    # capped at 2.0 (avoid over-railing). Monotonic — ranking is unchanged.
+    def axis_calib(model_fit, target_y):
+        raw = model_fit.predict(full_Xs)
+        pred = np.clip(raw, 0.0, 1.0)
+        pstd = pred.std() if pred.std() > 1e-9 else 1.0
+        center = float(np.mean(raw))
+        stretch = float(min(2.0, max(1.0, target_y.std() / pstd)))
+        return round(center, 4), round(stretch, 4)
+    v_center, v_stretch = axis_calib(mv, yV)
+    a_center, a_stretch = axis_calib(ma, yA)
+    print("  valence stretch: center=" + format(v_center, ".4f") + " stretch=" + format(v_stretch, ".3f"), file=sys.stderr)
+    print("  arousal stretch: center=" + format(a_center, ".4f") + " stretch=" + format(a_stretch, ".3f"), file=sys.stderr)
+
+    # --- Essentia-only fallback head -------------------------------------
+    # Same anchors, drop the 2 SMFM columns so Ridge restores loudness/onset/
+    # bpm weights (no SMFM shrinkage). Served for tracks with no SMFM so a
+    # low-SMFM library degrades gracefully instead of collapsing to center.
+    ESSENTIA_FEATURES = [f for f in FEATURES if f not in ("smfmValence", "smfmArousal")]
+    ess_idx = [FEATURES.index(f) for f in ESSENTIA_FEATURES]
+    full_X_ess = full_X[:, ess_idx]
+    scaler_ess = StandardScaler().fit(full_X_ess)
+    full_Xs_ess = scaler_ess.transform(full_X_ess)
+    Xs_ess = scaler_ess.transform(X[:, ess_idx])
+
+    rmse_v_e, r_v_e = loo_cv(Xs_ess, yV, args.alpha_v)
+    rmse_a_e, r_a_e = loo_cv(Xs_ess, yA, args.alpha_a)
+    print("  [essentia-only] valence LOO-CV r=" + format(r_v_e, "+.3f") +
+          "  arousal LOO-CV r=" + format(r_a_e, "+.3f"), file=sys.stderr)
+    mv_e = Ridge(alpha=args.alpha_v); mv_e.fit(Xs_ess, yV)
+    ma_e = Ridge(alpha=args.alpha_a); ma_e.fit(Xs_ess, yA)
+
+    def axis_calib_ess(m, target_y):
+        raw = m.predict(full_Xs_ess)
+        pstd = raw.std() or 1e-9
+        return round(float(np.mean(raw)), 4), round(float(min(2.0, max(1.0, target_y.std() / pstd))), 4)
+    v_center_e, v_stretch_e = axis_calib_ess(mv_e, yV)
+    a_center_e, a_stretch_e = axis_calib_ess(ma_e, yA)
+    impute_ess = {k: round(float(v), 6) for k, v in impute.items() if k in ESSENTIA_FEATURES}
+
     model = {
         "version": 3,
         "trainedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "anchorsUsed": len(X),
         "features": FEATURES,
+        "impute": {k: round(float(v), 6) for k, v in impute.items()},
         "scaler": {"mean": scaler.mean_.tolist(), "std": scaler.scale_.tolist()},
         "valence": {
             "transform": "raw",
             "coef": mv.coef_.tolist(),
             "intercept": float(mv.intercept_),
+            "center": v_center, "stretch": v_stretch,
             "alpha": args.alpha_v,
             "loocv_rmse": rmse_v, "loocv_r": r_v,
         },
@@ -254,8 +393,24 @@ def main():
             "transform": "raw",
             "coef": ma.coef_.tolist(),
             "intercept": float(ma.intercept_),
+            "center": a_center, "stretch": a_stretch,
             "alpha": args.alpha_a,
             "loocv_rmse": rmse_a, "loocv_r": r_a,
+        },
+        "essentiaOnly": {
+            "features": ESSENTIA_FEATURES,
+            "scaler": {"mean": scaler_ess.mean_.tolist(), "std": scaler_ess.scale_.tolist()},
+            "impute": impute_ess,
+            "valence": {
+                "transform": "raw", "coef": mv_e.coef_.tolist(), "intercept": float(mv_e.intercept_),
+                "center": v_center_e, "stretch": v_stretch_e, "alpha": args.alpha_v,
+                "loocv_rmse": rmse_v_e, "loocv_r": r_v_e,
+            },
+            "arousal": {
+                "transform": "raw", "coef": ma_e.coef_.tolist(), "intercept": float(ma_e.intercept_),
+                "center": a_center_e, "stretch": a_stretch_e, "alpha": args.alpha_a,
+                "loocv_rmse": rmse_a_e, "loocv_r": r_a_e,
+            },
         },
     }
     if pair_info: model["pairEval"] = pair_info

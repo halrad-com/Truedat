@@ -56,7 +56,8 @@ the file-shaped work, you just listen and tap keys.
 | `auto-cal.m3u`              | `picks-to-m3u.py` (step 2.5)                                    | Playlist of the picks — load this in MusicBee so MBXHub's annotate / tune pages have something to drive playback over.                             |
 | `mbxvam-labels.json`        | MBXHub `/pages/annotate.html` (step 3)                          | Scalar V/A scores per track. **MBXHub writes this automatically** as you annotate — appears in MBXHub's AppData storage path.                      |
 | `mbxtune-pairs.json`        | MBXHub `/pages/tune.html` (step 3, optional)                    | Pairwise A/B comparisons for V/A. **MBXHub writes this automatically.** Optional supplemental signal for the trainer.                              |
-| `my-baseline-model-vN.json` | `calibrate-valence-arousal.py` (step 4)                         | Trained Ridge + PCA model. Drop into `%AppData%\MBXHub\mood-model.json` (default; defer to MBXHub README for the canonical path). Regenerable from labels + pairs at any time. |
+| `train-moods.json`          | MBXHub `GET /vam/train/moods` (step 4)                          | **The trainer's actual `--moods` input.** `mbxmoods.json` enriched with the plugin's SMFM→V/A projection (`smfmValence` / `smfmArousal` / `modeMajor`), keyed by `audioStreamSha256`. Raw `mbxmoods.json` lacks these keys. |
+| `my-baseline-model-vN.json` | `calibrate-valence-arousal.py` (step 4)                         | Trained Ridge model (raw standardised features; the PCA path was dropped 2026-06-16). Drop into `%AppData%\MBXHub\mood-model.json` (default; defer to MBXHub README for the canonical path). Regenerable from labels + pairs at any time. |
 
 Versioning is your call — bump `vN` on the model whenever you re-train.
 The trainer stamps every model with `trainedAt` and `anchorsUsed` so
@@ -68,11 +69,14 @@ you can always trace a model back to a label set.
 ┌─────────────────┐  ┌────────────────────────────┐  ┌──────────────────┐  ┌────────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────┐
 │ truedat.exe     │→ │ seed-autocal-from-extremes │→ │ picks-to-m3u.py  │→ │ MBXHub /pages/annotate     │→ │ calibrate-valence-arousal│→ │ my-baseline-model-vN │
 │ (already run)   │  │ .py                        │  │                  │  │  + /pages/tune (browser)   │  │ .py                      │  │ .json                │
-│ mbxmoods.json   │  │ auto-cal-seed.json         │  │ auto-cal.m3u     │  │ MBXHub auto-writes:        │  │ Ridge + PCA regression   │  │ → drop into MBXHub   │
-│                 │  │ (corner candidates)        │  │ load in MusicBee │  │  mbxvam-labels.json        │  │                          │  │   AutoQ resources    │
-│                 │  │                            │  │                  │  │  mbxtune-pairs.json (opt)  │  │                          │  │   path               │
-└─────────────────┘  └────────────────────────────┘  └──────────────────┘  └────────────────────────────┘  └──────────────────────────┘  └──────────────────────┘
-   step 1                step 2                          step 2.5             step 3                          step 4                         step 5 (deploy)
+│ mbxmoods.json   │  │ auto-cal-seed.json         │  │ auto-cal.m3u     │  │ MBXHub auto-writes:        │  │ raw-Ridge regression     │  │ → drop into MBXHub   │
+│                 │  │ (corner candidates)        │  │ load in MusicBee │  │  mbxvam-labels.json        │  │ inputs:                  │  │   AutoQ resources    │
+│                 │  │                            │  │                  │  │  mbxtune-pairs.json (opt)  │  │  train-moods.json ◄──┐   │  │   path               │
+└─────────────────┘  └────────────────────────────┘  └──────────────────┘  └────────────────────────────┘  │  mbxvam-labels.json  │   │  └──────────────────────┘
+   step 1                step 2                          step 2.5             step 3                        │  mbxtune-pairs.json  │      step 5 (deploy)
+                                                                                                            └──────────────────────┘
+                                          MBXHub GET /vam/train/moods ─────────────────────────────────────► train-moods.json (step 4)
+                                          (mbxmoods.json + SMFM→V/A projection, SHA-keyed)
 ```
 
 ### Step 1 — produce `mbxmoods.json` with truedat
@@ -131,7 +135,7 @@ both pages persist their output automatically into MBXHub's AppData
 storage path:
 
 - **`/pages/annotate.html`** — scalar V/A annotation. For each track you
-  score valence (-1..+1) and arousal (-1..+1). Verdicts accumulate to
+  score valence (0..1) and arousal (0..1), 0.5 neutral. Verdicts accumulate to
   `mbxvam-labels.json`. This is the primary input to the trainer.
 
 - **`/pages/tune.html`** — pairwise A/B comparisons (optional). MBXHub
@@ -158,25 +162,55 @@ later; until then, MBXHub is the annotation surface.
 
 ### Step 4 — train your baseline model
 
+**Use the enriched export as `--moods`, not raw `mbxmoods.json`.** Fetch it
+from a running MBXHub:
+
+```
+curl http://<mbxhub-host>:8080/vam/train/moods -o train-moods.json
+```
+
 ```
 python calibrate-valence-arousal.py \
-    --moods  path/to/mbxmoods.json \
+    --moods  train-moods.json \
     --labels path/to/mbxvam-labels.json \
     --pairs  path/to/mbxtune-pairs.json     # optional — pairs from /pages/tune.html, used to further define + tune the model
     --out    path/to/my-baseline-model-v1.json \
     [--alpha-v 1.0] [--alpha-a 10.0] [--pca-k 6]
 ```
 
-Joins labels to feature vectors via track path, fits a StandardScaler +
-Ridge regression for both valence and arousal (raw standardised features
-on both axes). Reports leave-one-out cross-validation RMSE and Pearson r
-per axis. Optionally blends a Bradley-Terry-derived pairwise comparison
-file (`--pairs`) as additional training rows; the blend wins if it
-improves LOO-CV r. `--pca-k` is still accepted but currently unused on
-the valence path.
+Two of the 24 input features — `smfmValence` and `smfmArousal` — are the
+plugin's projection of Sony SMFM data into V/A space, and they exist **only in
+the `/vam/train/moods` export**. Raw `mbxmoods.json` has no such keys. Training
+against the raw file still *works* (those columns mean-impute flat and Ridge
+zeroes their weight) but it silently discards the strongest valence signal you
+have, and the resulting model file looks perfectly valid. On a real 180-anchor
+set the difference measured **valence LOO-CV r = 0.86 with the SMFM columns vs
+0.32 without** — the script prints the latter every run as the `[essentia-only]`
+line, so you can always see what you'd be giving up.
 
-The 21 features used as inputs are listed in `FEATURES` at the top of
+Joins labels to feature vectors by `audioStreamSha256` with a path fallback,
+fits a StandardScaler + Ridge regression for both valence and arousal (raw
+standardised features on both axes). Reports leave-one-out cross-validation
+RMSE and Pearson r per axis. Optionally blends a Bradley-Terry-derived pairwise
+comparison file (`--pairs`) as additional training rows; the blend wins only if
+it improves LOO-CV r, so passing it can't make the model worse. `--pca-k` is
+still accepted but currently unused on the valence path.
+
+The 24 features used as inputs are listed in `FEATURES` at the top of
 the script. Adding/removing features means regenerating models.
+
+The trainer also bakes three blocks the plugin's `MoodModelLoader` reads at
+serve time — a model file without them loads but misbehaves:
+
+- **`impute`** — column means for the mean-imputed features. The loader
+  substitutes the *same* numbers at serve time (train/serve parity).
+- **`center` / `stretch`** per axis — a monotonic output spread-stretch. A Ridge
+  fit regresses to the mean, so raw output is compressed to roughly half the
+  human-rated spread; without this the model piles every track up near 0.5.
+  Ranking is unchanged.
+- **`essentiaOnly`** — a second head trained without the two SMFM columns,
+  served for tracks that have no SMFM so a sparse-SMFM library degrades
+  gracefully instead of collapsing to centre.
 
 Output: `my-baseline-model-v1.json` — drop into MBXHub. Default path
 is `%AppData%\MBXHub\mood-model.json`, which supersedes the model
@@ -192,8 +226,10 @@ When your library grows or your taste shifts:
    tracks pay full Essentia cost).
 2. Either re-run `seed-autocal-from-extremes.py` for fresh candidates,
    or add more annotations directly to your existing `my-baseline-labels-vN.json`.
-3. Re-run `calibrate-valence-arousal.py` with the updated labels and
-   write to a new versioned output (`my-baseline-model-v2.json`, etc.).
+3. Re-fetch the enriched export (`GET /vam/train/moods -o train-moods.json`) so
+   it reflects the refreshed library, then re-run `calibrate-valence-arousal.py`
+   with the updated `--moods` + labels and write to a new versioned output
+   (`my-baseline-model-v2.json`, etc.).
 4. Watch `loocv_r` (Pearson r) in the model JSON — higher is better.
    If a new label set makes LOO-CV r worse, your new labels disagree
    with the old ones; reconcile before deploying.
@@ -245,8 +281,8 @@ label object:
 {
   "Key": "<audioStreamSha256>",
   "Path": "<filesystem path>",
-  "Valence": -1..+1,
-  "Arousal": -1..+1,
+  "Valence": 0.0..1.0,
+  "Arousal": 0.0..1.0,
   "Confidence": "sure" | "unsure",
   "IsAnchor": true | false,
   "RatedAt": "<ISO-8601>",
@@ -255,8 +291,16 @@ label object:
 }
 ```
 
-`Path` is what's used to join into `mbxmoods.json`. `Key` and the other
-fields are bookkeeping the trainer ignores.
+`Valence` and `Arousal` are **0..1**, not -1..+1 — 0.5 is neutral on each axis.
+(The annotate page's plot is drawn with a centre origin, which reads as a
+-1..+1 space; the persisted scalars are not.)
+
+The trainer joins on `Key` (`audioStreamSha256`) **first**, falling back to
+`Path` only when the Key doesn't resolve. Prefer the Key: it's box-independent
+audio-bytes identity, so labels rated on one machine still join against a corpus
+built on another. `Path` joins break the moment the library is mounted at a
+different root, and the `/vam/train/moods` export isn't path-keyed at all. The
+remaining fields are bookkeeping the trainer ignores.
 
 ## Model file format
 
@@ -267,18 +311,27 @@ fields are bookkeeping the trainer ignores.
   "version": 3,
   "trainedAt": "<ISO-8601>",
   "anchorsUsed": N,
-  "features": [ ... 21 feature names ... ],
+  "features": [ ... 24 feature names ... ],
+  "impute": { "smfmValence": float, "smfmArousal": float, "modeMajor": float },
   "scaler": { "mean": [...], "std": [...] },
   "valence": {
     "transform": "raw",
     "coef": [...], "intercept": float,
+    "center": float, "stretch": float,
     "alpha": float, "loocv_rmse": float, "loocv_r": float
   },
   "arousal": {
     "transform": "raw",
     "coef": [...], "intercept": float,
+    "center": float, "stretch": float,
     "alpha": float, "loocv_rmse": float, "loocv_r": float
-  }
+  },
+  "essentiaOnly": {
+    "features": [ ... 22 names — FEATURES minus the 2 SMFM columns ... ],
+    "scaler": { ... }, "impute": { ... },
+    "valence": { ... }, "arousal": { ... }
+  },
+  "pairEval": { ... }        // only when --pairs was supplied
 }
 ```
 
