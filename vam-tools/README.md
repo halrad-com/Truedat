@@ -13,6 +13,10 @@ Reach for `vam-tools/` only when both of these are true:
    own taste — either because the baseline doesn't fit your library, or
    because you want a model trained from your hand annotations.
 
+**Just want the steps?** See **[RUNBOOK.md](RUNBOOK.md)** — a command-by-command
+walkthrough from nothing to a deployed, verified model. This README is the
+reference behind it (what each file is, every flag, the model format).
+
 ## Why Python (not C#)
 
 The retrain script uses `numpy` + `scikit-learn` + `scipy` (Ridge regression,
