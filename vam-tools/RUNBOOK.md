@@ -1,15 +1,24 @@
-# AutoCal — From-Zero Training Runbook
+# AutoCal — Retraining Runbook
 
-A command-by-command path from **nothing** to a deployed, verified V/A
-(valence/arousal) mood model trained on your own library and your own ears.
+**This guide is for you if you already have an `mbxmoods.json` for your catalog
+and want to retrain how the engine uses it.**
 
-This is the operator's checklist. The [`README.md`](README.md) is the reference —
-what each file is, every flag, the model format. Read this to *do it*; read the
-README to *understand it*.
+It's an advanced guide — for people working *under the covers* of the V/A
+(valence/arousal) model, not people using MBXHub. If you just want AutoQ to
+play music, you're done already: it ships with a baseline model that works out
+of the box, and nothing here is required. Come back when you've listened to
+AutoQ on your library and decided its sense of "happy" or "intense" doesn't
+match yours — that's the honest trigger for retraining.
 
-> **You do not need any of this to use MBXHub.** AutoQ ships with a baseline model
-> that works out of the box. Reach for this only when you want a model trained
-> against your own taste.
+It's a command-by-command path to a deployed, verified model trained on your own
+library and your own ears. The [`README.md`](README.md) is the reference behind
+it — what each file is, every flag, the model format. Read this to *do it*; read
+the README to *understand it*.
+
+A full library scan and a running MBXHub are assumed — in the normal case you
+already have both (that's how you noticed retraining was warranted). The
+Prerequisites and step 1 spell out setup anyway, so a genuine from-scratch
+environment is also complete; skim past them if your library is already scanned.
 
 Throughout, substitute your own values for these placeholders:
 

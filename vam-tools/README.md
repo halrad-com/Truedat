@@ -13,9 +13,10 @@ Reach for `vam-tools/` only when both of these are true:
    own taste — either because the baseline doesn't fit your library, or
    because you want a model trained from your hand annotations.
 
-**Just want the steps?** See **[RUNBOOK.md](RUNBOOK.md)** — a command-by-command
-walkthrough from nothing to a deployed, verified model. This README is the
-reference behind it (what each file is, every flag, the model format).
+**Ready to retrain?** See **[RUNBOOK.md](RUNBOOK.md)** — the advanced,
+command-by-command walkthrough for when you already have an `mbxmoods.json` and
+want to change how the engine uses it. This README is the reference behind it
+(what each file is, every flag, the model format).
 
 ## Why Python (not C#)
 
