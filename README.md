@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - tracks skipped at scan entry because the codec isn't supported (currently `.dsf` / `.dff` / `.dsd` DSD streams). Columns: `path,extension,reason,timestamp`.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast episodes (including which iTunes XML key triggered the classification — `Podcast=true` or the MusicBee `Episode Date` heuristic), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -179,7 +179,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 with `--file-md5` / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
-- **ETA tracking** - Shows per-track rate and estimated completion time.
+- **ETA tracking** - The progress line shows estimated completion, running average per track, and the live analyzed-data rate (MB/s over a trailing window). The estimate is two-class aware: tracks new to the catalog are costed in bytes at the measured rate (the iTunes XML `Size` field supplies the totals), already-cataloged tracks at the measured cache-hit average — so a mostly-cached rescan doesn't wildly overshoot and a fresh scan doesn't undershoot. The end-of-scan summary breaks down count and average cost per outcome class (analyzed vs each cache tier vs skips).
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
 ```cmd

@@ -341,6 +341,101 @@ namespace Truedat
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
+
+        // ---- Scan telemetry (MoodsMode) ----
+        // Per-outcome class stats: [0]=count, [1]=Stopwatch ticks of thread-time.
+        // Shown in the end-of-scan breakdown; the cached/skip classes feed the ETA
+        // model's "known tracks are near-free" term.
+        static readonly ConcurrentDictionary<string, long[]> _classStats = new ConcurrentDictionary<string, long[]>();
+        // Bytes fully analyzed (cache misses — the Essentia-dominated cost), total +
+        // trailing-window events for the live MB/s rate on the progress line.
+        static long _analyzedBytesTotal;
+        static readonly ConcurrentQueue<(double AtSecs, long Bytes)> _rateEvents = new ConcurrentQueue<(double, long)>();
+        const double RateWindowSecs = 120.0;
+        // ETA model pre-flight (set by MoodsMode; -1 = model unavailable, naive ETA):
+        // tracks absent from the existing catalog need the full Essentia pass; the
+        // XML <Size> key supplies their byte total so remaining work is bytes-costed
+        // at the measured rate instead of count-costed at a blended average.
+        static int _etaNewTotal = -1;
+        static int _etaNewDone;
+        static long _etaNewBytesTotal;
+        static long _etaNewBytesDone;
+        static int _scanParallelism;
+
+        static void RecordTrackOutcome(string cls, long swTicks)
+        {
+            var a = _classStats.GetOrAdd(cls, _ => new long[2]);
+            Interlocked.Increment(ref a[0]);
+            Interlocked.Add(ref a[1], swTicks);
+        }
+
+        static void RecordAnalyzedBytes(double atSecs, long bytes)
+        {
+            if (bytes <= 0) return;
+            Interlocked.Add(ref _analyzedBytesTotal, bytes);
+            _rateEvents.Enqueue((atSecs, bytes));
+        }
+
+        /// <summary>Analyzed throughput over the trailing window, MB/s. 0 when no
+        /// analysis completed recently (pure-cached stretches).</summary>
+        static double CurrentRateMBps(double nowSecs)
+        {
+            while (_rateEvents.TryPeek(out var head) && nowSecs - head.AtSecs > RateWindowSecs)
+                _rateEvents.TryDequeue(out _);
+            long bytes = 0;
+            int n = 0;
+            foreach (var e in _rateEvents) { bytes += e.Bytes; n++; }
+            if (n == 0) return 0;
+            var span = Math.Min(Math.Max(nowSecs, 1.0), RateWindowSecs);
+            return bytes / span / (1024.0 * 1024.0);
+        }
+
+        /// <summary>Avg thread-seconds across the near-free outcome classes (cached tiers + skips).</summary>
+        static double KnownAvgThreadSecs()
+        {
+            long n = 0, ticks = 0;
+            foreach (var kv in _classStats)
+            {
+                if (kv.Key.StartsWith("cached", StringComparison.Ordinal) || kv.Key.StartsWith("skip", StringComparison.Ordinal))
+                {
+                    n += Interlocked.Read(ref kv.Value[0]);
+                    ticks += Interlocked.Read(ref kv.Value[1]);
+                }
+            }
+            return n == 0 ? 0.0 : (double)ticks / Stopwatch.Frequency / n;
+        }
+
+        /// <summary>
+        /// ETA in seconds. Two-class model when MoodsMode primed it: new-to-catalog
+        /// tracks are bytes-costed at the measured analyzed MB/s (falling back to the
+        /// avg Essentia time per track / parallelism), known tracks at the measured
+        /// cache-tier average. Falls back to the naive blended average (elapsed/done ×
+        /// remaining) when the model has no signal yet.
+        /// </summary>
+        static double ComputeEtaSecs(TimeSpan elapsed, int done, int total)
+        {
+            var remaining = total - done;
+            double naive = elapsed.TotalSeconds / done * remaining;
+            if (_etaNewTotal < 0 || _scanParallelism <= 0) return naive;
+
+            int newRemaining = Math.Max(0, Math.Min(_etaNewTotal - Volatile.Read(ref _etaNewDone), remaining));
+            int knownRemaining = remaining - newRemaining;
+
+            double newSecs;
+            var rate = CurrentRateMBps(elapsed.TotalSeconds);
+            long newBytesRemaining = Math.Max(0, _etaNewBytesTotal - Interlocked.Read(ref _etaNewBytesDone));
+            if (rate > 0.01 && newBytesRemaining > 0)
+                newSecs = newBytesRemaining / (1024.0 * 1024.0) / rate;
+            else if (Volatile.Read(ref _analyzeCount) > 0)
+                newSecs = newRemaining * ((double)Interlocked.Read(ref _analyzeTicksTotal) / Stopwatch.Frequency / _analyzeCount) / _scanParallelism;
+            else if (newRemaining > 0)
+                return naive;  // analysis work ahead but nothing measured yet
+            else
+                newSecs = 0;
+
+            double knownSecs = knownRemaining * KnownAvgThreadSecs() / _scanParallelism;
+            return newSecs + knownSecs;
+        }
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
@@ -564,15 +659,31 @@ namespace Truedat
             catch { }
         }
 
-        /// <summary>Remove podcast episodes from a parsed track list and log the count.</summary>
-        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks)
+        /// <summary>Remove podcast episodes from a parsed track list. Every dropped
+        /// track lands in mbxmoods-skipped.csv (when a path is supplied) with the XML
+        /// key that triggered the classification; --audit also lists each on console.</summary>
+        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null)
         {
-            int before = tracks.Count;
-            var filtered = tracks.Where(t => !t.IsPodcast).ToList();
-            int removed = before - filtered.Count;
-            if (removed > 0)
-                Console.WriteLine($"  Skipped {removed} podcast episode(s)");
-            return filtered;
+            var removed = tracks.Where(t => t.IsPodcast).ToList();
+            if (removed.Count == 0) return tracks;
+            foreach (var t in removed)
+            {
+                var reason = $"podcast (XML key: {(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
+                if (skippedPath != null)
+                    AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
+                if (_audit)
+                    Console.WriteLine($"  [skipped {reason}] {t.Artist} - {t.Name} :: {t.Location}");
+            }
+            Console.WriteLine($"  Skipped {removed.Count} podcast episode(s)"
+                + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
+                + (_audit ? "" : " (--audit lists each)"));
+            return tracks.Where(t => !t.IsPodcast).ToList();
+        }
+
+        /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
+        static string GetExtensionSafe(string path)
+        {
+            try { return Path.GetExtension(path) ?? ""; } catch { return ""; }
         }
 
         /// <summary>Video file extensions that should not be analyzed as audio.</summary>
@@ -581,17 +692,32 @@ namespace Truedat
             ".mp4", ".m4v", ".mkv", ".avi", ".wmv", ".mov", ".webm", ".flv", ".mpg", ".mpeg", ".vob", ".ts"
         };
 
-        /// <summary>Remove video files from a parsed track list and log the count.</summary>
-        static List<ITunesTrack> FilterVideoFiles(List<ITunesTrack> tracks)
+        /// <summary>Remove video files from a parsed track list. Dropped tracks land in
+        /// mbxmoods-skipped.csv (when a path is supplied); --audit lists each on console.</summary>
+        static List<ITunesTrack> FilterVideoFiles(List<ITunesTrack> tracks, string? skippedPath = null)
         {
-            int before = tracks.Count;
-            var filtered = tracks.Where(t =>
-                string.IsNullOrEmpty(t.Location) ||
-                !VideoExtensions.Contains(Path.GetExtension(t.Location))).ToList();
-            int removed = before - filtered.Count;
-            if (removed > 0)
-                Console.WriteLine($"  Skipped {removed} video file(s)");
-            return filtered;
+            bool IsVideo(ITunesTrack t) => !string.IsNullOrEmpty(t.Location)
+                && VideoExtensions.Contains(GetExtensionSafe(t.Location));
+            return FilterByPredicate(tracks, IsVideo, "video file(s)", "video file extension", skippedPath);
+        }
+
+        /// <summary>Shared drop-and-ledger tail for the pre-scan extension filters.</summary>
+        static List<ITunesTrack> FilterByPredicate(List<ITunesTrack> tracks, Func<ITunesTrack, bool> drop,
+            string label, string reason, string? skippedPath)
+        {
+            var removed = tracks.Where(drop).ToList();
+            if (removed.Count == 0) return tracks;
+            foreach (var t in removed)
+            {
+                if (skippedPath != null)
+                    AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
+                if (_audit)
+                    Console.WriteLine($"  [skipped {reason}] {t.Artist} - {t.Name} :: {t.Location}");
+            }
+            Console.WriteLine($"  Skipped {removed.Count} {label}"
+                + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
+                + (_audit ? "" : " (--audit lists each)"));
+            return tracks.Where(t => !drop(t)).ToList();
         }
 
         /// <summary>Playlist / redirector file extensions that point at audio but
@@ -638,16 +764,12 @@ namespace Truedat
         };
 
         /// <summary>Remove playlist / redirector files from a parsed track list and log the count.</summary>
-        static List<ITunesTrack> FilterNonAudio(List<ITunesTrack> tracks)
+        static List<ITunesTrack> FilterNonAudio(List<ITunesTrack> tracks, string? skippedPath = null)
         {
-            int before = tracks.Count;
-            var filtered = tracks.Where(t =>
-                string.IsNullOrEmpty(t.Location) ||
-                !NonAudioExtensions.Contains(Path.GetExtension(t.Location))).ToList();
-            int removed = before - filtered.Count;
-            if (removed > 0)
-                Console.WriteLine($"  Skipped {removed} playlist / redirector file(s)");
-            return filtered;
+            bool IsNonAudio(ITunesTrack t) => !string.IsNullOrEmpty(t.Location)
+                && NonAudioExtensions.Contains(GetExtensionSafe(t.Location));
+            return FilterByPredicate(tracks, IsNonAudio, "playlist / redirector file(s)",
+                "playlist / redirector extension", skippedPath);
         }
 
         static void Main(string[] args)
@@ -2252,9 +2374,9 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
-            tracks = FilterPodcasts(tracks);
-            tracks = FilterVideoFiles(tracks);
-            tracks = FilterNonAudio(tracks);
+            tracks = FilterPodcasts(tracks, skippedPath);
+            tracks = FilterVideoFiles(tracks, skippedPath);
+            tracks = FilterNonAudio(tracks, skippedPath);
 
             // --chunk M/N: hash-mod assignment across machines. Each track's path
             // hashes to a fixed bucket via PathComparer's FNV-1a (deterministic
@@ -2288,6 +2410,26 @@ namespace Truedat
             Dictionary<string, (TrackEntry Entry, string OldKey)>? moodShaIndex = BuildHashIndex(allTracks, e => e.AudioStreamSha256);
             if (moodShaIndex != null)
                 Console.WriteLine($"  SHA index:  {moodShaIndex.Count} entries available for tag-edit / cross-machine matching");
+
+            // ETA model pre-flight: catalog membership splits the work list into
+            // near-free cache hits vs full Essentia passes. Dictionary lookups only —
+            // no file IO. The XML <Size> key supplies the byte total so remaining
+            // analysis work is bytes-costed at the measured MB/s.
+            {
+                int etaNew = 0; long etaNewBytes = 0;
+                foreach (var tt in tracks)
+                    if (!string.IsNullOrEmpty(tt.Location) && !allTracks.ContainsKey(tt.Location))
+                    { etaNew++; etaNewBytes += tt.SizeBytes; }
+                _etaNewTotal = etaNew;
+                _etaNewBytesTotal = etaNewBytes;
+                _scanParallelism = parallelism;
+                if (etaNew > 0)
+                {
+                    var newMb = etaNewBytes / (1024.0 * 1024.0);
+                    var newSizeTag = etaNewBytes <= 0 ? "" : newMb >= 1024 ? $" / {newMb / 1024.0:F1} GB" : $" / {newMb:F0} MB";
+                    Console.WriteLine($"  New to catalog: {etaNew} track(s){newSizeTag} — full analysis expected");
+                }
+            }
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
@@ -2354,6 +2496,11 @@ namespace Truedat
                 {
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
+                    // Outcome telemetry: thread-time + class per track, recorded in the
+                    // finally below. Default "failed" covers exception paths.
+                    var trackSw = Stopwatch.StartNew();
+                    var trackClass = "failed";
+                    bool wasKnown = allTracks.ContainsKey(t.Location);
 
                     // FIX 4 — lazy-opened staging handle, reused by every tier-2/3/4
                     // body read and the cache-miss worker fan-out. Tier-1 (path-mtime
@@ -2399,6 +2546,7 @@ namespace Truedat
                             AppendSkipped(skippedPath, t.Location, skipExt, "unsupported codec: DSD");
                             Console.WriteLine($"[skipped DSD] {t.Location}");
                             Interlocked.Increment(ref dsdSkipped);
+                            trackClass = "skip·dsd";
                             return;
                         }
 
@@ -2406,6 +2554,7 @@ namespace Truedat
                         {
                             Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
                             Interlocked.Increment(ref skipped);
+                            trackClass = "skip·error";
                             return;
                         }
 
@@ -2459,6 +2608,7 @@ namespace Truedat
                                         if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
                                         Interlocked.Increment(ref cachedCount);
+                                        trackClass = "cached";
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag}{mtimeSmfmTag})");
                                         return;
                                     }
@@ -2494,6 +2644,7 @@ namespace Truedat
                                                 allTracks[t.Location] = headEntry;
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByHeadPath);
+                                                trackClass = "cached·head";
                                                 Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·head{headSmfmTag})");
                                                 return;
                                             }
@@ -2529,6 +2680,7 @@ namespace Truedat
                                                 allTracks[t.Location] = shaPathEntry;
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByShaPath);
+                                                trackClass = "cached·sha";
                                                 Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha{shaPathSmfmTag})");
                                                 return;
                                             }
@@ -2575,6 +2727,7 @@ namespace Truedat
                                         RemoveIfMoved(allTracks, xs.OldKey);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
+                                        trackClass = "cached\u00b7sha\u00b7x";
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha{crossShaSmfmTag})");
                                         return;
                                     }
@@ -2619,6 +2772,15 @@ namespace Truedat
                             extractTags: false, _stageOpts, cts.Token);
                         Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
+                        // Rate + ETA model: bytes were processed whether the analysis
+                        // succeeded or failed, and a new-to-catalog track leaves the
+                        // remaining-work pool either way.
+                        RecordAnalyzedBytes(sw.Elapsed.TotalSeconds, fileSizeBytes);
+                        if (!wasKnown)
+                        {
+                            Interlocked.Increment(ref _etaNewDone);
+                            Interlocked.Add(ref _etaNewBytesDone, fileSizeBytes);
+                        }
 
                         var feat = msResults.Features;
                         var fileMd5 = msResults.FileMd5;
@@ -2680,6 +2842,7 @@ namespace Truedat
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
                         };
+                        trackClass = "analyzed";
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
                         if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
@@ -2707,7 +2870,11 @@ namespace Truedat
                         catch { }
                         Interlocked.Increment(ref failed);
                     }
-                    finally { msStagedSrc?.Dispose(); }
+                    finally
+                    {
+                        msStagedSrc?.Dispose();
+                        RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
+                    }
                 });
             }
             catch (OperationCanceledException) { }
@@ -2748,6 +2915,28 @@ namespace Truedat
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
                 Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only)");
+            }
+            // Per-outcome cost breakdown: what each track-handling class actually
+            // cost this run (thread-time, so per-track, not wall). Makes the
+            // Essentia-dominated class visible next to the near-free cache tiers.
+            if (!_classStats.IsEmpty)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  Per-track cost by outcome (thread-time avg):");
+                foreach (var kv in _classStats.OrderByDescending(k => k.Value[1]))
+                {
+                    var n = kv.Value[0];
+                    if (n == 0) continue;
+                    var avgSecs = (double)kv.Value[1] / Stopwatch.Frequency / n;
+                    var avgTag = avgSecs >= 1 ? $"{avgSecs:F1}s" : $"{avgSecs * 1000:F0}ms";
+                    Console.WriteLine($"    {kv.Key,-14} {avgTag,8}  (n={n})");
+                }
+            }
+            if (_analyzedBytesTotal > 0)
+            {
+                var mb = _analyzedBytesTotal / (1024.0 * 1024.0);
+                var sizeTagStr = mb >= 1024 ? $"{mb / 1024.0:F1} GB" : $"{mb:F0} MB";
+                Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / Math.Max(sw.Elapsed.TotalSeconds, 1):F1} MB/s scan-wide");
             }
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
@@ -8917,8 +9106,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static string FormatEta(TimeSpan elapsed, int done, int total)
         {
             if (done < 10 || total <= done) return "";
-            var remaining = total - done;
-            return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(elapsed.TotalSeconds / done * remaining))}";
+            var etaSecs = ComputeEtaSecs(elapsed, done, total);
+            // Running blended avg — shows the actual mix (cache tiers vs Essentia) as it goes.
+            var avg = elapsed.TotalSeconds / done;
+            var avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
+            // Live analyzed throughput (trailing window) — size-normalized, so it's
+            // comparable across libraries with different track lengths.
+            var rate = CurrentRateMBps(elapsed.TotalSeconds);
+            var rateTag = rate > 0 ? $" · {rate:F1} MB/s" : "";
+            return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · {avgTag}{rateTag}";
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>

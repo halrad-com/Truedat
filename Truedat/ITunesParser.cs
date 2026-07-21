@@ -16,8 +16,14 @@ namespace Truedat
         public string Location { get; set; } = "";
         /// <summary>Duration in milliseconds from iTunes XML (Total Time). 0 if unavailable.</summary>
         public int TotalTimeMs { get; set; }
+        /// <summary>File size in bytes from iTunes XML (Size). 0 if unavailable.
+        /// Feeds the scan ETA model (bytes remaining / measured MB/s) without per-file stats.</summary>
+        public long SizeBytes { get; set; }
         /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
         public bool IsPodcast { get; set; }
+        /// <summary>Which XML key(s) triggered the podcast classification
+        /// ("Podcast=true", "Episode Date", or both) — traceability for skip logs.</summary>
+        public string PodcastReason { get; set; } = "";
     }
 
     /// <summary>
@@ -275,14 +281,29 @@ namespace Truedat
                             if (int.TryParse(val, out var ms))
                                 track.TotalTimeMs = ms;
                             break;
+                        case "Size":
+                            var sizeVal = reader.ReadElementContentAsString();
+                            if (long.TryParse(sizeVal, out var sizeBytes))
+                                track.SizeBytes = sizeBytes;
+                            break;
                         case "Podcast":
-                            // iTunes/Apple Music writes <key>Podcast</key><true/>
-                            track.IsPodcast = reader.Name == "true";
+                            // iTunes/Apple Music writes <key>Podcast</key><true/>.
+                            // Sticky: only set on <true/> so key order can't un-flag.
+                            if (reader.Name == "true")
+                            {
+                                track.IsPodcast = true;
+                                track.PodcastReason = track.PodcastReason.Length == 0
+                                    ? "Podcast=true" : track.PodcastReason + " + Podcast=true";
+                            }
                             SkipElement(reader);
                             break;
                         case "Episode Date":
-                            // MusicBee writes <key>Episode Date</key> for podcast episodes
+                            // MusicBee writes <key>Episode Date</key> for podcast episodes.
+                            // Heuristic — presence of the key alone classifies. The skip log
+                            // records this reason so false positives are diagnosable.
                             track.IsPodcast = true;
+                            track.PodcastReason = track.PodcastReason.Length == 0
+                                ? "Episode Date" : track.PodcastReason + " + Episode Date";
                             SkipElement(reader);
                             break;
                         default:
