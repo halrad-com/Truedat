@@ -668,7 +668,7 @@ namespace Truedat
             if (removed.Count == 0) return tracks;
             foreach (var t in removed)
             {
-                var reason = $"podcast (XML key: {(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
+                var reason = $"podcast ({(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
                 if (skippedPath != null)
                     AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
                 if (_audit)

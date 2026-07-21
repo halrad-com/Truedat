@@ -21,8 +21,9 @@ namespace Truedat
         public long SizeBytes { get; set; }
         /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
         public bool IsPodcast { get; set; }
-        /// <summary>Which XML key(s) triggered the podcast classification
-        /// ("Podcast=true", "Episode Date", or both) — traceability for skip logs.</summary>
+        /// <summary>What triggered the podcast classification ("Podcast=true" —
+        /// iTunes-native boolean — or "Genre=Podcast" — MusicBee exports) —
+        /// traceability for skip logs.</summary>
         public string PodcastReason { get; set; } = "";
     }
 
@@ -289,21 +290,15 @@ namespace Truedat
                         case "Podcast":
                             // iTunes/Apple Music writes <key>Podcast</key><true/>.
                             // Sticky: only set on <true/> so key order can't un-flag.
+                            // (The former "Episode Date implies podcast" heuristic was
+                            // removed 2026-07-21: real MusicBee exports stamp Episode Date
+                            // on plain music — e.g. YouTube-sourced covers — while actual
+                            // podcast episodes carry Genre=Podcast and no Episode Date.)
                             if (reader.Name == "true")
                             {
                                 track.IsPodcast = true;
-                                track.PodcastReason = track.PodcastReason.Length == 0
-                                    ? "Podcast=true" : track.PodcastReason + " + Podcast=true";
+                                track.PodcastReason = "Podcast=true";
                             }
-                            SkipElement(reader);
-                            break;
-                        case "Episode Date":
-                            // MusicBee writes <key>Episode Date</key> for podcast episodes.
-                            // Heuristic — presence of the key alone classifies. The skip log
-                            // records this reason so false positives are diagnosable.
-                            track.IsPodcast = true;
-                            track.PodcastReason = track.PodcastReason.Length == 0
-                                ? "Episode Date" : track.PodcastReason + " + Episode Date";
                             SkipElement(reader);
                             break;
                         default:
@@ -321,6 +316,16 @@ namespace Truedat
             // Consume the end element of this track's <dict>
             if (reader.NodeType == XmlNodeType.EndElement)
                 reader.Read();
+
+            // MusicBee's iTunes XML export has no Podcast boolean, no podcast Kind,
+            // and no Track Type marker — actual podcast episodes are identified by
+            // Genre=Podcast (the same rule --migrate uses on stored entries).
+            // Checked after the dict so key order doesn't matter.
+            if (!track.IsPodcast && string.Equals(track.Genre, "Podcast", StringComparison.OrdinalIgnoreCase))
+            {
+                track.IsPodcast = true;
+                track.PodcastReason = "Genre=Podcast";
+            }
 
             return track;
         }

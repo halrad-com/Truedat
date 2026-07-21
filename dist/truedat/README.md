@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast episodes (including which iTunes XML key triggered the classification — `Podcast=true` or the MusicBee `Episode Date` heuristic), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
