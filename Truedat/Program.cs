@@ -700,6 +700,17 @@ namespace Truedat
             try { return Path.GetExtension(path) ?? ""; } catch { return ""; }
         }
 
+        /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
+        /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
+        /// for over-length paths only — never for identity, cache keys, or display.</summary>
+        internal static string ExtendedLengthPath(string path)
+        {
+            if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path;
+            return path.StartsWith(@"\\", StringComparison.Ordinal)
+                ? @"\\?\UNC\" + path.Substring(2)   // \\server\share\… -> \\?\UNC\server\share\…
+                : @"\\?\" + path;
+        }
+
         /// <summary>Video file extensions that should not be analyzed as audio.</summary>
         internal static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -2477,6 +2488,7 @@ namespace Truedat
             int analyzed = 0;
             int skipped = 0;
             int dsdSkipped = 0;
+            int missingSkipped = 0;
             int failed = 0;
             int timedOut = 0;
             int processed = 0;
@@ -2523,6 +2535,15 @@ namespace Truedat
                     var trackClass = "failed";
                     bool wasKnown = allTracks.ContainsKey(t.Location);
 
+                    // Long-path fallback: over-MAX_PATH paths fail normal Win32 IO
+                    // ("file not found" even though the file exists). Managed IO on
+                    // net48 accepts the \\?\ extended-length form, and \\?\ paths
+                    // trigger staging (StartsWith(@"\\")), so subprocess tools
+                    // (Essentia/ffmpeg) only ever see the short staged copy. Used
+                    // for IO ONLY — t.Location stays the cache key, JSON key,
+                    // fingerprint pathTail, and display path throughout.
+                    var scanPath = t.Location.Length >= 260 ? ExtendedLengthPath(t.Location) : t.Location;
+
                     // FIX 4 — lazy-opened staging handle, reused by every tier-2/3/4
                     // body read and the cache-miss worker fan-out. Tier-1 (path-mtime
                     // equality) does NOT open it; SHA-backfill within tier-1 still
@@ -2533,7 +2554,7 @@ namespace Truedat
                     long msSourceSize = 0;
                     string EnsureStagedSrc()
                     {
-                        msStagedSrc ??= OpenStagedSource(t.Location, _stageOpts, msSourceSize);
+                        msStagedSrc ??= OpenStagedSource(scanPath, _stageOpts, msSourceSize);
                         return msStagedSrc.Path;
                     }
 
@@ -2547,7 +2568,7 @@ namespace Truedat
                         if (msBodyHashes == null)
                         {
                             if (msSourceSize == 0)
-                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                             var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, out _);
                             msBodyHashes = (m, s);
                         }
@@ -2579,12 +2600,31 @@ namespace Truedat
                             return;
                         }
 
+                        // Missing-file skip: catch it at scan entry with an accurate reason
+                        // instead of letting it die deep in staging/Essentia as a generic
+                        // analysis error. scanPath already carries the \\?\ fallback for
+                        // over-MAX_PATH paths, so a miss here means the file is genuinely
+                        // gone (not merely unreachable by normal Win32 IO).
+                        if (!File.Exists(scanPath))
+                        {
+                            var reason = t.Location.Length >= 260
+                                ? $"file not found (path {t.Location.Length} chars >= 260 MAX_PATH)"
+                                : "file not found";
+                            AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
+                            Console.WriteLine($"[skipped missing] {t.Location} ({reason})");
+                            Interlocked.Increment(ref missingSkipped);
+                            trackClass = "skip·missing";
+                            return;
+                        }
+                        if (!ReferenceEquals(scanPath, t.Location) && _audit)
+                            Console.WriteLine($"  DEBUG long-path: \\\\?\\ fallback engaged ({t.Location.Length} chars): {t.Location}");
+
                         // Check if already in moods and file unchanged
                         if (allTracks.TryGetValue(t.Location, out var existing))
                         {
                             try
                             {
-                                var currentLastMod = File.GetLastWriteTimeUtc(t.Location);
+                                var currentLastMod = File.GetLastWriteTimeUtc(scanPath);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
                                     // Re-extract when DR or the extended-feature canary is missing.
@@ -2611,10 +2651,10 @@ namespace Truedat
                                         if (string.IsNullOrEmpty(existing.AudioStreamSha256))
                                         {
                                             long fileSizeForBackfill = 0;
-                                            try { fileSizeForBackfill = new FileInfo(t.Location).Length; } catch { }
+                                            try { fileSizeForBackfill = new FileInfo(scanPath).Length; } catch { }
                                             if (fileSizeForBackfill > 0)
                                             {
-                                                var (sha, shaSource) = ComputeAudioStreamSha256FromFile(t.Location, fileSizeForBackfill, out _);
+                                                var (sha, shaSource) = ComputeAudioStreamSha256FromFile(scanPath, fileSizeForBackfill, out _);
                                                 if (!string.IsNullOrEmpty(sha))
                                                 {
                                                     backfilledSha = sha;
@@ -2625,7 +2665,7 @@ namespace Truedat
                                             }
                                         }
                                         var mtimeEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
-                                        var mtimeSmfmTag = ApplySmfmInPlace(mtimeEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                        var mtimeSmfmTag = ApplySmfmInPlace(mtimeEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                         if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
                                         Interlocked.Increment(ref cachedCount);
@@ -2652,15 +2692,15 @@ namespace Truedat
                                         && existing.Features.LoudnessMomentary.HasValue)
                                     {
                                         if (msSourceSize == 0)
-                                            try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                            try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                                         if (msSourceSize > 0)
                                         {
-                                            msQuickFp = ComputeFingerprintV1(t.Location, msSourceSize, out _);
+                                            msQuickFp = ComputeFingerprintV1(scanPath, msSourceSize, out _);
                                             if (msQuickFp != null && IsTagsOnlyChange(msQuickFp, existing.FingerprintV1))
                                             {
                                                 var headEntry = RebuildCacheEntry(existing, t, currentLastMod, null, msQuickFp);
                                                 headEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
-                                                var headSmfmTag = ApplySmfmInPlace(headEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                var headSmfmTag = ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = headEntry;
                                                 Interlocked.Increment(ref cachedCount);
@@ -2681,7 +2721,7 @@ namespace Truedat
                                         && existing.Features.DynamicRange.HasValue
                                         && existing.Features.LoudnessMomentary.HasValue)
                                     {
-                                        try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                        try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                                         if (msSourceSize > 0)
                                         {
                                             var msStagedPath = EnsureStagedSrc();
@@ -2696,7 +2736,7 @@ namespace Truedat
                                                 var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                                 var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 if (!_fileMd5Enabled) shaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                                var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, t.Location, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
                                                 Interlocked.Increment(ref cachedCount);
@@ -2720,7 +2760,7 @@ namespace Truedat
                         if (moodShaIndex != null)
                         {
                             if (msSourceSize == 0)
-                                try { msSourceSize = new FileInfo(t.Location).Length; } catch { }
+                                try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                             if (msSourceSize > 0)
                             {
                                 var msStagedPath = EnsureStagedSrc();
@@ -2739,10 +2779,10 @@ namespace Truedat
                                         var refreshedMd5 = EnsureBodyHashes().md5;
                                         var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                         var currentLastMod = DateTime.MinValue;
-                                        try { currentLastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                                        try { currentLastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
                                         var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
                                         if (!_fileMd5Enabled) crossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                        var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, t.Location, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                        var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
                                         RemoveIfMoved(allTracks, xs.OldKey);
@@ -2760,7 +2800,7 @@ namespace Truedat
                         var sizeTag = "";
                         try
                         {
-                            fileSizeBytes = new FileInfo(t.Location).Length;
+                            fileSizeBytes = new FileInfo(scanPath).Length;
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                             if (sizeMb >= 100) sizeTag = $" [{sizeMb:F0} MB]";
                         }
@@ -2851,7 +2891,7 @@ namespace Truedat
                         // failed (kept for the rare case both stats throw).
                         var lastMod = msStagedSrc!.SourceLastWriteUtc;
                         if (lastMod == DateTime.MinValue)
-                            try { lastMod = File.GetLastWriteTimeUtc(t.Location); } catch { }
+                            try { lastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
 
                         allTracks[t.Location] = new TrackEntry
                         {
@@ -2928,9 +2968,11 @@ namespace Truedat
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             if (dsdSkipped > 0)
                 Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
+            if (missingSkipped > 0)
+                Console.WriteLine($"  Missing:    {missingSkipped}  (file not found / path too long — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + failed}");
+            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
@@ -3043,7 +3085,9 @@ namespace Truedat
             var zeroByteFiles = new List<ITunesTrack>();
             var smallFiles = new List<(ITunesTrack Track, long Bytes)>();
             var unsupportedFiles = new List<(ITunesTrack Track, string Ext)>();
+            var longPaths = new List<(ITunesTrack Track, int Length)>();
             const long SmallFileThreshold = 50 * 1024; // 50 KB
+            const int MaxPathLimit = 260;              // Windows MAX_PATH
 
             foreach (var t in tracks)
             {
@@ -3055,6 +3099,11 @@ namespace Truedat
                 var ext = Path.GetExtension(pathToScan);
                 if (!string.IsNullOrEmpty(ext) && UnsupportedExtensions.Contains(ext))
                     unsupportedFiles.Add((t, ext));
+
+                // Over-MAX_PATH paths make normal Win32 IO report "file not found"
+                // even when the file exists — the scan can never reach them.
+                if (pathToScan.Length >= MaxPathLimit)
+                    longPaths.Add((t, pathToScan.Length));
 
                 List<char>? errorList = null;
                 List<char>? warnList = null;
@@ -3184,6 +3233,20 @@ namespace Truedat
                 Console.WriteLine();
             }
 
+            // Over-MAX_PATH paths — the scan handles these via its \\?\ long-path
+            // fallback (staged copy), but other tools may still choke on them.
+            if (longPaths.Count > 0)
+            {
+                Console.WriteLine($"PATH TOO LONG: {longPaths.Count} file(s) at or over {MaxPathLimit} chars (scanned via \\?\\ long-path fallback; consider shortening for other tools):");
+                Console.WriteLine();
+                foreach (var (t, len) in longPaths)
+                {
+                    Console.WriteLine($"  {t.Artist} - {t.Name}");
+                    Console.WriteLine($"    {t.Location}  ({len} chars)");
+                }
+                Console.WriteLine();
+            }
+
             // Summary
             Console.WriteLine("=== Summary ===");
             Console.WriteLine($"  Total tracks:     {tracks.Count}");
@@ -3193,6 +3256,7 @@ namespace Truedat
             Console.WriteLine($"  Unsupported:      {unsupportedFiles.Count}  (DSD/DSF — Essentia cannot decode)");
             Console.WriteLine($"  Zero-byte files:  {zeroByteFiles.Count}  (length == 0)");
             Console.WriteLine($"  Suspect files:    {smallFiles.Count}  (over 0 and under {SmallFileThreshold / 1024} KB)");
+            Console.WriteLine($"  Long paths:       {longPaths.Count}  (>= {MaxPathLimit} chars — scan uses \\?\\ fallback; other tools may not)");
             Console.WriteLine($"  Clean:            {tracks.Count - errors.Count - warnings.Count}");
             if (errors.Count > 0)
             {

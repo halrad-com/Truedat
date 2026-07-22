@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them; `--include-podcasts` analyzes them instead), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them; `--include-podcasts` analyzes them instead), video files, playlist/redirector entries, and missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH). Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -60,6 +60,7 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 - **Errors** — Fullwidth Unicode substitution characters (e.g. `⧸` `：` `＂`) that are known to break Essentia's ANSI argv parsing. These files will always fail analysis.
 - **Warnings** — Other non-ASCII characters where 8.3 short path fallback is unavailable. These files may fail depending on system configuration.
 - **Suspects** — Audio files under 50 KB that may be corrupt or truncated.
+- **Long paths** — Paths at or over the Windows 260-char MAX_PATH. The scan handles these automatically (`\\?\` long-path fallback through a staged copy), but other tools may not — consider shortening.
 
 ## Quick Start
 
