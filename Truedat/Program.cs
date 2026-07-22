@@ -7808,14 +7808,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // Rev-1 thresholds are UNTUNED and conservative: borderline lands on
             // "unknown"; only confident talk returns "yes" (--migrate acts on
             // "yes" alone). Calibrate against known talk entries before tightening.
+            //
+            // Denominator rule: maxWeight counts every APPLICABLE signal, not just
+            // ones that fired a vote — abstains still dilute confidence. A minority
+            // of weak agreeing signals must not normalize to a high-confidence
+            // "yes" just because the rest of the panel abstained (e.g. a sine-tone
+            // WAV where only danceability+zcr fire). This is what keeps --migrate's
+            // "yes"-only purge safe.
             {
                 double score = 0, maxWeight = 0;
 
                 // Danceability: Essentia's value sits >1 for most music, far lower for speech.
-                if (f.Danceability > 0)
+                // Core field, always present — no presence gate (0 is a legitimate value).
                 {
                     int vote = f.Danceability < 0.7 ? 1 : f.Danceability > 1.1 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.30; maxWeight += 0.30; }
+                    maxWeight += 0.30;
+                    if (vote != 0) score += vote * 0.30;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech danceability={f.Danceability:F2} vote={vote:+#;-#;0} weight=0.30");
                 }
                 // Chords strength: speech has no harmonic bed.
@@ -7823,7 +7831,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     double cs = f.ChordsStrength.Value;
                     int vote = cs < 0.46 ? 1 : cs > 0.53 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.25; maxWeight += 0.25; }
+                    maxWeight += 0.25;
+                    if (vote != 0) score += vote * 0.25;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech chordsStrength={cs:F3} vote={vote:+#;-#;0} weight=0.25");
                 }
                 // Silence rate: conversational pauses push it up.
@@ -7831,14 +7840,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     double sr = f.SilenceRate30dB.Value;
                     int vote = sr > 0.25 ? 1 : sr < 0.05 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    maxWeight += 0.20;
+                    if (vote != 0) score += vote * 0.20;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech silenceRate30dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
                 }
                 // Zero-crossing rate: speech sits higher than most music.
-                if (f.ZeroCrossingRate > 0)
+                // Core field, always present — no presence gate (0 is a legitimate value).
                 {
                     int vote = f.ZeroCrossingRate > 0.09 ? 1 : 0;
-                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
+                    maxWeight += 0.15;
+                    if (vote != 0) score += vote * 0.15;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={vote:+#;-#;0} weight=0.15");
                 }
                 // Tempo-peak weight (2026-07-22 wave, when present): speech has no
@@ -7847,7 +7858,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     double bw = f.BpmFirstPeakWeight.Value;
                     int vote = bw < 0.05 ? 1 : bw > 0.15 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    maxWeight += 0.20;
+                    if (vote != 0) score += vote * 0.20;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech bpmFirstPeakWeight={bw:F3} vote={vote:+#;-#;0} weight=0.20");
                 }
                 // Key confidence (2026-07-22 wave, when present): craters on speech.
@@ -7855,7 +7867,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     double ks = f.KeyVoteEdma.Strength;
                     int vote = ks < 0.50 ? 1 : ks > 0.65 ? -1 : 0;
-                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
+                    maxWeight += 0.15;
+                    if (vote != 0) score += vote * 0.15;
                     if (_audit) Console.Error.WriteLine($"  TRUEDAT speech keyStrength={ks:F3} vote={vote:+#;-#;0} weight=0.15");
                 }
 
