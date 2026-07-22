@@ -6999,6 +6999,67 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmp2); } catch { } }
             }
 
+            // --- PodcastTagSniffer (spec 2026-07-22 A1) ---
+            {
+                // Synthetic ID3v2.3 tag: header + one frame, no padding.
+                byte[] Id3(string frameId, byte[] payload)
+                {
+                    using var ms = new MemoryStream();
+                    int frameLen = 10 + payload.Length;
+                    ms.Write(new byte[] { (byte)'I', (byte)'D', (byte)'3', 3, 0, 0 }, 0, 6);
+                    int tagSize = frameLen;   // syncsafe
+                    ms.Write(new byte[] { (byte)((tagSize >> 21) & 0x7F), (byte)((tagSize >> 14) & 0x7F), (byte)((tagSize >> 7) & 0x7F), (byte)(tagSize & 0x7F) }, 0, 4);
+                    var id = Encoding.ASCII.GetBytes(frameId);
+                    ms.Write(id, 0, 4);
+                    ms.Write(new byte[] { (byte)((payload.Length >> 24) & 0xFF), (byte)((payload.Length >> 16) & 0xFF), (byte)((payload.Length >> 8) & 0xFF), (byte)(payload.Length & 0xFF) }, 0, 4);
+                    ms.Write(new byte[2], 0, 2);   // frame flags
+                    ms.Write(payload, 0, payload.Length);
+                    ms.Write(new byte[] { 0xFF, 0xFB, 0x90, 0x00 }, 0, 4);   // fake MPEG frame
+                    ms.Position = 0;
+                    return ms.ToArray();
+                }
+                byte[] Text(string s) { var b = new byte[1 + s.Length]; b[0] = 0; Encoding.ASCII.GetBytes(s, 0, s.Length, b, 1); return b; }
+
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("PCST", new byte[] { 0, 0, 0, 0 }))) == "PCST", "sniffer: PCST frame detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("WFED", Text("https://feed.example/rss")))) == "WFED", "sniffer: WFED frame detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TGID", Text("guid-123")))) == "TGID", "sniffer: TGID frame detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TCON", Text("Podcast")))) == "TCON=Podcast", "sniffer: TCON=Podcast detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TCON", Text("Rock")))) == null, "sniffer: TCON=Rock is not a podcast");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(new byte[] { 1, 2, 3 })) == null, "sniffer: junk stream returns null");
+                var trunc = Id3("PCST", new byte[] { 0, 0, 0, 0 });
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(trunc, 0, 8)) == null, "sniffer: truncated header returns null");
+
+                // Synthetic MP4: ftyp + moov>udta>meta(v/f)>ilst>pcst
+                byte[] Mp4WithAtom(string leaf)
+                {
+                    byte[] Atom(string type, byte[] body)
+                    {
+                        var b = new byte[8 + body.Length];
+                        int sz = b.Length;
+                        b[0] = (byte)((sz >> 24) & 0xFF); b[1] = (byte)((sz >> 16) & 0xFF); b[2] = (byte)((sz >> 8) & 0xFF); b[3] = (byte)(sz & 0xFF);
+                        Encoding.ASCII.GetBytes(type, 0, 4, b, 4);
+                        Array.Copy(body, 0, b, 8, body.Length);
+                        return b;
+                    }
+                    var pcst = Atom(leaf, new byte[4]);
+                    var ilst = Atom("ilst", pcst);
+                    var metaBody = new byte[4 + ilst.Length];   // 4-byte version/flags
+                    Array.Copy(ilst, 0, metaBody, 4, ilst.Length);
+                    var meta = Atom("meta", metaBody);
+                    var udta = Atom("udta", meta);
+                    var moov = Atom("moov", udta);
+                    var ftyp = Atom("ftyp", Encoding.ASCII.GetBytes("M4A "));
+                    using var ms = new MemoryStream();
+                    ms.Write(ftyp, 0, ftyp.Length);
+                    ms.Write(moov, 0, moov.Length);
+                    ms.Position = 0;
+                    return ms.ToArray();
+                }
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("pcst"))) == "pcst atom", "sniffer: mp4 pcst atom detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("purl"))) == "purl atom", "sniffer: mp4 purl atom detected");
+                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("cprt"))) == null, "sniffer: mp4 without podcast atoms returns null");
+            }
+
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
             {
                 FingerprintV1 Mk() => new FingerprintV1
