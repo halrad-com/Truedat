@@ -3084,7 +3084,7 @@ namespace Truedat
             if (dsdSkipped > 0)
                 Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
             if (missingSkipped > 0)
-                Console.WriteLine($"  Missing:    {missingSkipped}  (file not found / path too long — see mbxmoods-skipped.csv)");
+                Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + failed}");
@@ -3107,7 +3107,7 @@ namespace Truedat
                     if (n == 0) continue;
                     var avgSecs = (double)kv.Value[1] / Stopwatch.Frequency / n;
                     var avgTag = avgSecs >= 1 ? $"{avgSecs:F1}s" : $"{avgSecs * 1000:F0}ms";
-                    Console.WriteLine($"    {kv.Key,-14} {avgTag,8}  (n={n})");
+                    Console.WriteLine($"    {kv.Key,-14} {avgTag,8} avg  ({n} track{(n == 1 ? "" : "s")})");
                 }
             }
             if (_analyzedBytesTotal > 0)
@@ -4910,12 +4910,17 @@ namespace Truedat
             Console.WriteLine();
             Console.WriteLine(Cov("Essentia analysis", s.EssentiaAnalyzed));
             Console.WriteLine(Cov("audioStreamSha256", s.AudioStreamSha256) + "   (primary identity)");
-            // fileMd5 is opt-in (--file-md5) and unwritten by default — omit the row entirely
-            // when nothing carries it, so a default catalog doesn't report a misleading
-            // "0 / N  0%  N missing" for a field that's absent by design.
-            if (s.FileMd5 > 0)
+            // Internal hash plumbing only earns a line when it's ACTIONABLE:
+            //  - fileMd5 is opt-in (--file-md5) and unconsumed; without the flag, stray
+            //    stored values just mean "--migrate strips these" — say that, once.
+            //  - audioHead64kMd5 (quick-cache evidence inside fingerprint.v1) only
+            //    matters when incomplete (legacy entries → --verify --backfill fills).
+            if (_fileMd5Enabled && s.FileMd5 > 0)
                 Console.WriteLine(Cov("fileMd5", s.FileMd5));
-            Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5));
+            else if (s.FileMd5 > 0)
+                Console.WriteLine($"  {"fileMd5",-20} {s.FileMd5,9:N0} stray values   (unused; truedat --migrate strips)");
+            if (s.AudioHead64kMd5 < total)
+                Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5) + "   (quick-cache; --verify --backfill fills)");
             Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
             if (s.DuplicateGroups > 0)
             {
@@ -9592,9 +9597,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (done < 10 || total <= done) return "";
             var etaSecs = ComputeEtaSecs(elapsed, done, total);
-            // Running blended avg — shows the actual mix (cache tiers vs Essentia) as it goes.
-            var avg = elapsed.TotalSeconds / done;
-            var avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
+            // Per-track avg. Once anything has analyzed, show the ANALYZED-class
+            // average (Essentia thread-time — the cost that actually matters); the
+            // blended wall average is dominated by ~0ms cache hits and reads as
+            // nonsense ("163ms/trk" while podcasts take minutes). The blend only
+            // remains for pure-cache runs, where it genuinely is the per-track cost.
+            string avgTag;
+            int an = Volatile.Read(ref _analyzeCount);
+            if (an > 0)
+            {
+                var aAvg = (double)Interlocked.Read(ref _analyzeTicksTotal) / Stopwatch.Frequency / an;
+                avgTag = aAvg >= 60 ? $"{FormatTimeSpan(TimeSpan.FromSeconds(aAvg))}/analyzed" : $"{aAvg:F1}s/analyzed";
+            }
+            else
+            {
+                var avg = elapsed.TotalSeconds / done;
+                avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
+            }
             // Live analyzed throughput (trailing window) — size-normalized, so it's
             // comparable across libraries with different track lengths.
             var rate = CurrentRateMBps(elapsed.TotalSeconds);
