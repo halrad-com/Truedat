@@ -115,6 +115,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           fileMd5, speech-likely entries) to the exact command that fixes it —
                           truedat never prompts interactively.
   --stats-detail N        List per-file status when a catalog has < N tracks (default 5).
+  --list-speech [path]    Read-only: list the entries whose verdict is speechLikely=yes
+                          — the exact set --migrate purges — so you can review them before
+                          deleting. Writes mbxmoods-speech.csv (path, artist, title, album,
+                          genre, codec, confidence, method) next to the moods file and prints
+                          a count + preview. The speech verdict is still -untuned, so real
+                          music with talk-like shape (ambient, field recordings, spoken
+                          intros) can appear here; review before purging.
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended

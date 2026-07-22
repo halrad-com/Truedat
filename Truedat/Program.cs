@@ -934,6 +934,7 @@ namespace Truedat
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
+            bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate purges them)
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
@@ -1024,6 +1025,7 @@ namespace Truedat
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
+                else if (canonical == "list-speech") listSpeechMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -1258,6 +1260,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (what --migrate purges) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -1442,6 +1445,34 @@ namespace Truedat
                 if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); }
                 ReportCatalog(statsPath!, statsTracks.Values, statsDetailThreshold);
                 if (statsTee != null) { Console.WriteLine($"Log:    {statsLog}"); statsTee.Dispose(); }
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --list-speech: read-only. Lists the entries whose talk-vs-music verdict is a
+            // confident "yes" — the exact set --migrate would purge — so the operator can
+            // review them first (the verdict is -untuned; high-zcr real music such as
+            // ambient / field recordings can reach "yes"). Recomputes the verdict from
+            // stored features per entry, same as the --stats advisor count. Path resolution
+            // mirrors --stats. Writes mbxmoods-speech.csv next to the moods file; console
+            // gets a count + first-N preview. Writes no changes to the moods file itself.
+            if (listSpeechMode)
+            {
+                string? speechPath = analyzeFileMoods ?? xmlPath;
+                if (string.IsNullOrEmpty(speechPath))
+                    speechPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
+                else if (Directory.Exists(speechPath))
+                    speechPath = Path.Combine(speechPath, "mbxmoods.json");
+                if (!File.Exists(speechPath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {speechPath}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var speechTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(speechPath!, speechTracks);
+                RunListSpeech(speechPath!, speechTracks.Values);
                 Environment.ExitCode = 0;
                 return;
             }
@@ -2414,6 +2445,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (what --migrate purges) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -5097,6 +5129,46 @@ namespace Truedat
             public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
             public int SpeechYes;         // ComputeTruedatVerdict.SpeechLikely == "yes"
             public int MissingFingerprint; // entries with no fingerprint.v1 block
+        }
+
+        /// <summary>Read-only: list the entries whose stored features recompute to a
+        /// confident speechLikely=="yes" verdict — the set --migrate purges. Writes
+        /// mbxmoods-speech.csv (path,artist,title,album,genre,codec,speechConfidence,method)
+        /// next to the moods file and prints a count + first-20 preview. The verdict is
+        /// recomputed via ComputeTruedatVerdict so it matches the --stats advisor exactly
+        /// (write-time verdict, not persisted in the entry).</summary>
+        static void RunListSpeech(string moodsPath, IEnumerable<TrackEntry> entries)
+        {
+            var hits = new List<(string Path, string Artist, string Title, string Album, string Genre, string Codec, double? Conf, string Method)>();
+            foreach (var e in entries)
+            {
+                if (e?.Features == null) continue;
+                var v = ComputeTruedatVerdict(e.Features.FilePath ?? "", e);
+                if (!string.Equals(v.SpeechLikely, "yes", StringComparison.OrdinalIgnoreCase)) continue;
+                hits.Add((e.Features.FilePath ?? "", e.Features.Artist, e.Features.Title,
+                    e.Features.Album, e.Features.Genre, e.FingerprintV1?.Codec ?? "", v.SpeechConfidence, v.SpeechMethod));
+            }
+            hits.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
+
+            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-speech.csv");
+            var sb = new StringBuilder();
+            sb.AppendLine("path,artist,title,album,genre,codec,speechConfidence,method");
+            foreach (var h in hits)
+                sb.AppendLine($"{CsvEscape(h.Path)},{CsvEscape(h.Artist)},{CsvEscape(h.Title)},{CsvEscape(h.Album)},{CsvEscape(h.Genre)},{CsvEscape(h.Codec)},{(h.Conf.HasValue ? h.Conf.Value.ToString("F2") : "")},{CsvEscape(h.Method)}");
+            File.WriteAllText(csvPath, sb.ToString());
+
+            Console.WriteLine($"Speech-likely entries: {hits.Count:N0}");
+            if (hits.Count > 0)
+            {
+                int preview = Math.Min(20, hits.Count);
+                foreach (var h in hits.Take(preview))
+                    Console.WriteLine($"  [{(h.Conf.HasValue ? h.Conf.Value.ToString("F2") : "  ? ")}] {h.Path}");
+                if (hits.Count > preview)
+                    Console.WriteLine($"  ... {hits.Count - preview:N0} more (see CSV)");
+                Console.WriteLine();
+                Console.WriteLine($"CSV:    {csvPath}");
+                Console.WriteLine("Review, then purge with: truedat --migrate   (or keep them all with --include-podcasts)");
+            }
         }
 
         static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
