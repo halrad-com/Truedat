@@ -3359,7 +3359,13 @@ namespace Truedat
             }
             catch { }
             EmitStagingSummary();
-            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys);
+            // The FILTERED work list = exactly what a rescan re-analyzes. Wave-missing
+            // entries outside it (podcast/video/URL filtered) can't be reached by
+            // --refresh-features, so the advisor must not point there for them.
+            var workListKeys = new HashSet<string>(
+                tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
+                PathComparer.Instance);
+            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys, workListKeys);
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
@@ -5134,7 +5140,7 @@ namespace Truedat
         /// --audit tee captures it in truedat.log). When the catalog has fewer than
         /// <paramref name="detailThreshold"/> tracks it lists each file with its per-field
         /// status instead of aggregate counts — aggregates over 1-4 files aren't useful.</summary>
-        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null)
+        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
             int total = entries.Count;
@@ -5216,7 +5222,15 @@ namespace Truedat
             {
                 var errs = LoadExistingErrors(
                     Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", "mbxmoods-errors.csv"));
-                int waveErrored = 0, waveOrphan = 0, waveStale = 0;
+                // Only entries the scan actually re-analyzes can be cleared by
+                // --refresh-features. Precedence per entry:
+                //   errored (on the error list)          -> --retry-errors   (bad file)
+                //   orphan  (not in the library at all)  -> --fixup          (drop it)
+                //   filtered (in library, excluded from  -> unreachable by a rescan; a
+                //             the scan work list)            podcast/video/URL entry
+                //   stale   (in the work list, no error) -> --refresh-features (the ONLY
+                //                                            bucket a rescan fixes)
+                int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveStale = 0;
                 foreach (var e in entries)
                 {
                     if (e?.Features == null) continue;
@@ -5225,6 +5239,7 @@ namespace Truedat
                     var key = e.Features.FilePath ?? "";
                     if (key.Length > 0 && errs.ContainsKey(key)) waveErrored++;
                     else if (libraryKeys != null && key.Length > 0 && !libraryKeys.Contains(key)) waveOrphan++;
+                    else if (scanWorkList != null && key.Length > 0 && !scanWorkList.Contains(key)) waveFiltered++;
                     else waveStale++;
                 }
                 waveBreakdown = new List<string>();
@@ -5234,6 +5249,8 @@ namespace Truedat
                     waveBreakdown.Add($"{waveErrored,6:N0}  previously errored      ->  truedat --retry-errors   (one-off; bad files keep failing)");
                 if (waveOrphan > 0)
                     waveBreakdown.Add($"{waveOrphan,6:N0}  no longer in library    ->  truedat --fixup          (drops orphaned entries)");
+                if (waveFiltered > 0)
+                    waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: podcast/video/URL/non-audio)");
                 if (waveStale > 0)
                     waveBreakdown.Add($"{waveStale,6:N0}  analyzable, just stale  ->  truedat --refresh-features");
             }
