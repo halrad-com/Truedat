@@ -7112,6 +7112,38 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("cprt"))) == null, "sniffer: mp4 without podcast atoms returns null");
             }
 
+            // --- podcast 2-of-3 signal vote (spec 2026-07-22 A2) ---
+            {
+                string Entry(int id, string name, string extra, int totalTimeMs) => $@"
+        <key>{id}</key>
+        <dict>
+            <key>Track ID</key><integer>{id}</integer>
+            <key>Name</key><string>{name}</string>
+            <key>Artist</key><string>A</string>
+            <key>Total Time</key><integer>{totalTimeMs}</integer>
+            {extra}
+            <key>Location</key><string>file://localhost/C:/tmp/{id}.mp3</string>
+        </dict>";
+                var xml = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Tracks</key><dict>"
+                    + Entry(1, "YtRipMusic", "<key>Episode Date</key><string>1/1/2020</string>", 180000)
+                    + Entry(2, "LongEpisode", "<key>Episode Date</key><string>1/1/2020</string>", 3120000)
+                    + Entry(3, "PublishedEpisode", "<key>Episode Date</key><string>1/1/2020</string><key>Publisher</key><string>Show</string>", 180000)
+                    + Entry(4, "LongClassical", "", 3120000)
+                    + "</dict></dict></plist>";
+                var tmpXml = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.xml");
+                try
+                {
+                    File.WriteAllText(tmpXml, xml);
+                    var parsed = ITunesParser.Parse(tmpXml, out _);
+                    Assert(!parsed.First(p => p.Name == "YtRipMusic").IsPodcast, "vote: Episode Date alone is NOT a podcast");
+                    Assert(parsed.First(p => p.Name == "LongEpisode").IsPodcast, "vote: Episode Date + 52min IS a podcast");
+                    Assert(parsed.First(p => p.Name == "LongEpisode").PodcastReason.StartsWith("signals: Episode Date"), "vote: reason records the evidence");
+                    Assert(parsed.First(p => p.Name == "PublishedEpisode").IsPodcast, "vote: Episode Date + Publisher IS a podcast");
+                    Assert(!parsed.First(p => p.Name == "LongClassical").IsPodcast, "vote: duration alone is NOT a podcast");
+                }
+                finally { try { File.Delete(tmpXml); } catch { } }
+            }
+
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
             {
                 FingerprintV1 Mk() => new FingerprintV1
