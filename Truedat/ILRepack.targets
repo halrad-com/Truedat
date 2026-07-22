@@ -24,11 +24,17 @@
     <Message Importance="high" Text="ILRepack (truedat): merging @(_TruedatMergeInputs->Count()) managed assemblies into $(TargetName)$(TargetExt)" />
     <Message Importance="normal" Text="  input: %(_TruedatMergeInputs.Identity)" />
 
+    <!-- AllowDuplicateResources=true: System.Text.Json's transitive deps each
+         embed ILLink.Substitutions.xml (trimmer metadata, unused at net48
+         runtime); with =false ILRepack drops the duplicates and logs
+         "WARN: Ignoring duplicate resource" on every retail build. Permitting
+         the duplicate is harmless (resource reader takes the first) and keeps
+         the build warning-free. -->
     <ILRepack
         Parallel="true"
         DebugInfo="true"
         Internalize="true"
-        AllowDuplicateResources="false"
+        AllowDuplicateResources="true"
         InputAssemblies="@(_TruedatMergeInputs)"
         TargetKind="SameAsPrimaryAssembly"
         OutputFile="$(OutputPath)$(TargetName)$(TargetExt)"
