@@ -161,4 +161,4 @@ Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt
 - No telemetry or external services
 - Child process arguments (ffmpeg, ffprobe, Essentia) are sanitized via `PathHelper.QuoteArg()` to prevent command injection from malicious file paths in the iTunes XML
 - iTunes XML parser uses `DtdProcessing.Ignore` to prevent XXE entity expansion
-- Video files and playlist/redirector entries are filtered out before processing
+- Podcast episodes and video files are filtered out before processing

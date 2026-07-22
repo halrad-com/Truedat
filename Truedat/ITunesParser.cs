@@ -19,6 +19,12 @@ namespace Truedat
         /// <summary>File size in bytes from iTunes XML (Size). 0 if unavailable.
         /// Feeds the scan ETA model (bytes remaining / measured MB/s) without per-file stats.</summary>
         public long SizeBytes { get; set; }
+        /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
+        public bool IsPodcast { get; set; }
+        /// <summary>What triggered the podcast classification ("Podcast=true" —
+        /// iTunes-native boolean — or "Genre=Podcast" — MusicBee exports) —
+        /// traceability for skip logs.</summary>
+        public string PodcastReason { get; set; } = "";
     }
 
     /// <summary>
@@ -281,6 +287,20 @@ namespace Truedat
                             if (long.TryParse(sizeVal, out var sizeBytes))
                                 track.SizeBytes = sizeBytes;
                             break;
+                        case "Podcast":
+                            // iTunes/Apple Music writes <key>Podcast</key><true/>.
+                            // Sticky: only set on <true/> so key order can't un-flag.
+                            // (The former "Episode Date implies podcast" heuristic was
+                            // removed 2026-07-21: real MusicBee exports stamp Episode Date
+                            // on plain music — e.g. YouTube-sourced covers — while actual
+                            // podcast episodes carry Genre=Podcast and no Episode Date.)
+                            if (reader.Name == "true")
+                            {
+                                track.IsPodcast = true;
+                                track.PodcastReason = "Podcast=true";
+                            }
+                            SkipElement(reader);
+                            break;
                         default:
                             // Skip value elements we don't care about
                             SkipElement(reader);
@@ -297,14 +317,16 @@ namespace Truedat
             if (reader.NodeType == XmlNodeType.EndElement)
                 reader.Read();
 
-            // Note: truedat does NOT classify or skip podcasts (removed 2026-07-21).
-            // No XML field can do it cleanly — MusicBee's export has no podcast marker
-            // at all (no Podcast boolean, no podcast Kind; Genre is just a tag and
-            // podcast feeds deliver music too, e.g. KEXP Song of the Day), the former
-            // "Episode Date implies podcast" heuristic misfired on plain music, and
-            // even the iTunes-native Podcast=true boolean flags feeds whose episodes
-            // ARE music. Audio is audio: everything gets analyzed, and downstream
-            // consumers exclude by their own tags if they want to.
+            // MusicBee's iTunes XML export has no Podcast boolean, no podcast Kind,
+            // and no Track Type marker — actual podcast episodes are identified by
+            // Genre=Podcast (the same rule --migrate uses on stored entries).
+            // Checked after the dict so key order doesn't matter.
+            if (!track.IsPodcast && string.Equals(track.Genre, "Podcast", StringComparison.OrdinalIgnoreCase))
+            {
+                track.IsPodcast = true;
+                track.PodcastReason = "Genre=Podcast";
+            }
+
             return track;
         }
 
