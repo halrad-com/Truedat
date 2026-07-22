@@ -2568,6 +2568,7 @@ namespace Truedat
                     Console.WriteLine($"  New to catalog: {etaNew} track(s){newSizeTag} — full analysis expected");
                 }
             }
+            int flacRekeyed = 0;       // tier 2.5: FLAC transition rescue (pre-flac-frames sha + tag rewrite; props-gated re-key)
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
@@ -2878,6 +2879,44 @@ namespace Truedat
                                                 Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·sha{shaPathSmfmTag})");
                                                 return;
                                             }
+
+                                            // Tier 2.5 — FLAC transition rescue. Stored sha predates
+                                            // the flac-frames algorithm AND the tags were rewritten
+                                            // before any migration ran, so NEITHER sha form can match
+                                            // (the stored hash covered metadata bytes that no longer
+                                            // exist). Without this, the track falls through to a full
+                                            // Essentia re-analysis it doesn't need. Evidence gate:
+                                            // audio props must match the stored fingerprint exactly
+                                            // (same rule as --verify's --accept-flac-tag-drift, now
+                                            // automatic in the default scan). Fires only for
+                                            // transition-era entries — self-extinguishing.
+                                            if (bodyHashes.leg != null   // current file is FLAC (legacy sha computed)
+                                                && (existing.AudioStreamSha256Source ?? "invariant") != "flac-frames"
+                                                && existing.FingerprintV1 != null
+                                                && !string.IsNullOrEmpty(recomputedSha))
+                                            {
+                                                var rescueFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
+                                                var storedFp = existing.FingerprintV1;
+                                                bool propsOk = rescueFp != null
+                                                    && rescueFp.Codec == storedFp.Codec
+                                                    && rescueFp.SampleRate == storedFp.SampleRate
+                                                    && rescueFp.Channels == storedFp.Channels
+                                                    && rescueFp.BitDepth == storedFp.BitDepth
+                                                    && Math.Abs(rescueFp.DurationMs - storedFp.DurationMs) <= 500;
+                                                if (propsOk)
+                                                {
+                                                    var rekeyEntry = RebuildCacheEntry(existing, t, currentLastMod, bodyHashes.md5, rescueFp, recomputedSha, "flac-frames");
+                                                    if (!_fileMd5Enabled) rekeyEntry.FileMd5 = null;
+                                                    var rekeySmfmTag = ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                    if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
+                                                    allTracks[t.Location] = rekeyEntry;
+                                                    Interlocked.Increment(ref cachedCount);
+                                                    Interlocked.Increment(ref flacRekeyed);
+                                                    trackClass = "cached·rekey";
+                                                    Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached·rekey{rekeySmfmTag})");
+                                                    return;
+                                                }
+                                            }
                                         }
                                     }
                                     if (_audit)
@@ -3108,6 +3147,8 @@ namespace Truedat
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
             if (shaBackfilled > 0)
                 Console.WriteLine($"  SHA backfill: {shaBackfilled}  (legacy cache hits gained audioStreamSha256)");
+            if (flacRekeyed > 0)
+                Console.WriteLine($"  FLAC re-key: {flacRekeyed}  (pre-transition hash + tag rewrite; audio props verified, no re-analysis)");
             if (smfmAdded > 0)
                 Console.WriteLine($"  SMFM added: {smfmAdded}  (tracks that gained Sony 12-TONE data this scan)");
             Console.WriteLine($"  Analyzed:   {analyzed}");
