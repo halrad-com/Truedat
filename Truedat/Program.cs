@@ -7163,6 +7163,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(music.SpeechLikely == "no", "speech: music-shaped features -> no");
                 var sparse = ComputeTruedatVerdict("s", new TrackEntry { Features = new TrackFeatures() });
                 Assert(sparse.SpeechLikely == "n/a" || sparse.SpeechLikely == "unknown", "speech: sparse features -> n/a or unknown");
+                // Rev-1 safety gate: a sine-tone/ambient bed shares talk's shape on
+                // danceability/chords/silence but sits LOW on zcr — must NOT reach
+                // "yes" (--migrate deletes on "yes").
+                var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.35, 0.05));
+                Assert(tone.SpeechLikely == "unknown", "speech: tone-shaped features (low zcr) -> unknown, not yes");
             }
 
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
@@ -7846,11 +7851,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 // Zero-crossing rate: speech sits higher than most music.
                 // Core field, always present — no presence gate (0 is a legitimate value).
+                int zcrVote = f.ZeroCrossingRate > 0.09 ? 1 : 0;
                 {
-                    int vote = f.ZeroCrossingRate > 0.09 ? 1 : 0;
                     maxWeight += 0.15;
-                    if (vote != 0) score += vote * 0.15;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={vote:+#;-#;0} weight=0.15");
+                    if (zcrVote != 0) score += zcrVote * 0.15;
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={zcrVote:+#;-#;0} weight=0.15");
                 }
                 // Tempo-peak weight (2026-07-22 wave, when present): speech has no
                 // stable tempo peak.
@@ -7874,6 +7879,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 if (maxWeight > 0)
                     (v.SpeechLikely, v.SpeechConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.50);
+                // Rev-1 safety gate: "yes" additionally requires the zero-crossing
+                // signal to have voted speech. Tones/drones/ambient share talk's
+                // no-rhythm/no-chords/high-silence shape but sit LOW on zcr, while
+                // real speech sits high — without this gate a sine tone reaches
+                // "yes", and --migrate deletes on "yes". Demote to "unknown", never
+                // to "no" (the content is genuinely not-music-shaped).
+                if (v.SpeechLikely == "yes" && zcrVote != 1)
+                    v.SpeechLikely = "unknown";
                 if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.SpeechLikely}");
             }
 
