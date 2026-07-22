@@ -19,6 +19,20 @@ namespace Truedat
         private const int MaxId3Walk = 128 * 1024;
         private const int MaxAtomsVisited = 64;
 
+        /// <summary>Read exactly count bytes unless EOF intervenes — Stream.Read may
+        /// return short before EOF (network streams). House pattern: Mp3LameTagParser.</summary>
+        private static bool ReadFully(Stream fs, byte[] buf, int offset, int count)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int r = fs.Read(buf, offset + total, count - total);
+                if (r <= 0) return false;
+                total += r;
+            }
+            return true;
+        }
+
         /// <summary>Marker name identifying the file as a podcast, or null.</summary>
         public static string? TryDetect(string path)
         {
@@ -36,7 +50,7 @@ namespace Truedat
             try
             {
                 var head = new byte[10];
-                if (fs.Read(head, 0, 10) != 10) return null;
+                if (!ReadFully(fs, head, 0, 10)) return null;
                 if (head[0] == (byte)'I' && head[1] == (byte)'D' && head[2] == (byte)'3')
                     return ScanId3v2(fs, head);
                 if (head[4] == (byte)'f' && head[5] == (byte)'t' && head[6] == (byte)'y' && head[7] == (byte)'p')
@@ -62,7 +76,7 @@ namespace Truedat
             var fh = new byte[10];
             while (pos + hdrLen <= walk)
             {
-                if (fs.Read(fh, 0, hdrLen) != hdrLen) return null;
+                if (!ReadFully(fs, fh, 0, hdrLen)) return null;
                 if (fh[0] == 0) return null;   // padding reached
                 string id = Encoding.ASCII.GetString(fh, 0, idLen);
                 long frameSize = major == 2
@@ -78,7 +92,7 @@ namespace Truedat
                 {
                     int len = (int)Math.Min(frameSize, 256);
                     var buf = new byte[len];
-                    if (fs.Read(buf, 0, len) != len) return null;
+                    if (!ReadFully(fs, buf, 0, len)) return null;
                     var text = DecodeId3Text(buf);
                     if (text.IndexOf("podcast", StringComparison.OrdinalIgnoreCase) >= 0)
                         return "TCON=Podcast";
@@ -135,13 +149,13 @@ namespace Truedat
             {
                 visited++;
                 long atomStart = fs.Position;
-                if (fs.Read(hdr, 0, 8) != 8) return null;
+                if (!ReadFully(fs, hdr, 0, 8)) return null;
                 long size = ((long)hdr[0] << 24) | ((long)hdr[1] << 16) | ((long)hdr[2] << 8) | hdr[3];
                 string type = Encoding.ASCII.GetString(hdr, 4, 4);
                 if (size == 1)
                 {
                     var big = new byte[8];
-                    if (fs.Read(big, 0, 8) != 8) return null;
+                    if (!ReadFully(fs, big, 0, 8)) return null;
                     size = ((long)big[0] << 56) | ((long)big[1] << 48) | ((long)big[2] << 40) | ((long)big[3] << 32)
                          | ((long)big[4] << 24) | ((long)big[5] << 16) | ((long)big[6] << 8) | big[7];
                 }
