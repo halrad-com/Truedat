@@ -171,6 +171,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
                           values. The durable audio identity is audioStreamSha256 either way;
                           enable this only if you compare whole-file MD5s with external tools.
+  --pause                 Hold the console open at exit (press any key). For double-click
+                          launches; no effect on redirected/scheduled runs.
   --include-podcasts      Analyze podcast-labeled tracks too. Default: skip anything the XML
                           labels podcast (iTunes-native Podcast=true, or Genre=Podcast), anything
                           that trips the 2-of-3 XML signal vote (Episode Date key / Publisher key

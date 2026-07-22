@@ -901,6 +901,28 @@ namespace Truedat
 
         static void Main(string[] args)
         {
+            // --pause: opt-in "hold the console open at exit" for double-click /
+            // shortcut launches whose window would close before the summary can be
+            // read. Wrapper-level so it fires on EVERY exit path (returns, error
+            // exits, exceptions). ReadKey throws when input is redirected
+            // (scheduler / piped runs) — swallowed, so automation never hangs.
+            bool pause = args.Any(a =>
+                string.Equals(a, "--pause", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a, "/pause", StringComparison.OrdinalIgnoreCase));
+            try { MainCore(args); }
+            finally
+            {
+                if (pause)
+                {
+                    Console.WriteLine();
+                    Console.Write("Done - press any key to close...");
+                    try { Console.ReadKey(true); } catch { }
+                }
+            }
+        }
+
+        static void MainCore(string[] args)
+        {
             Console.OutputEncoding = Encoding.UTF8;
 
             // Default leaves 2 cores for the foreground so a background scan isn't a hog.
@@ -1090,6 +1112,7 @@ namespace Truedat
                 else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "refresh-features") _refreshFeatures = true;
+                else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -1278,6 +1301,8 @@ namespace Truedat
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
                 Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
+                Console.WriteLine("  --pause             Hold the console open at exit (press any key). For double-click");
+                Console.WriteLine("                      launches; no effect on redirected/scheduled runs.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -2432,6 +2457,8 @@ namespace Truedat
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
                 Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
+                Console.WriteLine("  --pause             Hold the console open at exit (press any key). For double-click");
+                Console.WriteLine("                      launches; no effect on redirected/scheduled runs.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
