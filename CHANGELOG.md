@@ -54,6 +54,10 @@ NOT part of the re-extract canary, so existing caches stay valid):
   `tuningNontemperedEnergyRatio`** — tuning reference (~440 Hz) and temperament.
 - **`averageLoudness`** — simple 0..1 loudness (distinct from the LUFS envelope).
 
+Fill an existing catalog with **`--refresh-features`**: entries missing the new
+fields re-analyze during a normal scan, everything else stays cached; resumable
+(saves every 25 tracks), idempotent — run in sessions until coverage completes.
+
 ### Schema change — FLAC identity is frame-anchored (2026-07-21)
 
 `audioStreamSha256` / `audioHead64kMd5` for FLAC now cover the audio frames only

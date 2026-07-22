@@ -523,6 +523,14 @@ namespace Truedat
         // and every exclusion is visible in mbxmoods-skipped.csv with its reason.
         internal static bool _includePodcasts;
 
+        // --refresh-features: widen the re-extract canary so entries missing the
+        // 2026-07-22 tonal/rhythm wave (keyVotes / bpm peaks / chords / tuning /
+        // averageLoudness) re-analyze during a normal cache-aware scan. Off by
+        // default — the wave is deliberately NOT in the base canary so existing
+        // caches stay valid. Opt in per session to chew through coverage
+        // incrementally (resumable: progress saves every 25 analyzed tracks).
+        internal static bool _refreshFeatures;
+
         // --accept-flac-tag-drift (--verify --backfill only): re-key FLAC entries
         // whose stored sha predates the flac-frames algorithm AND whose tags were
         // rewritten after scan (both compares fail — the stored hash covered
@@ -771,6 +779,15 @@ namespace Truedat
         {
             try { return Path.GetExtension(path) ?? ""; } catch { return ""; }
         }
+
+        /// <summary>Re-extract canary, single source of truth for every cache tier.
+        /// Base: DynamicRange + LoudnessMomentary present (pre-LRA / pre-extended
+        /// builds re-analyze). Under --refresh-features, entries lacking the
+        /// 2026-07-22 tonal/rhythm wave also count as stale — averageLoudness is
+        /// the marker because the extractor emits it unconditionally.</summary>
+        static bool HasCurrentFeatures(TrackFeatures? f)
+            => f != null && f.DynamicRange.HasValue && f.LoudnessMomentary.HasValue
+               && (!_refreshFeatures || f.AverageLoudness.HasValue);
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
         /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
@@ -1069,6 +1086,7 @@ namespace Truedat
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
+                else if (canonical == "refresh-features") _refreshFeatures = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -1252,6 +1270,10 @@ namespace Truedat
                 Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
                 Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
                 Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
+                Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
+                Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
+                Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
+                Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -1507,8 +1529,7 @@ namespace Truedat
                     var afMoodShaIndex = BuildHashIndex(afMoodsTracks, e => e.AudioStreamSha256);
 
                     if (afMoodsTracks.TryGetValue(afKey, out var afEx)
-                        && afEx.Features.DynamicRange.HasValue
-                        && afEx.Features.LoudnessMomentary.HasValue)
+                        && HasCurrentFeatures(afEx.Features))
                     {
                         // Tier 1: path-mtime. No body read — staging not opened.
                         if (TruncateToSeconds(afCurrentLastMod) == TruncateToSeconds(afEx.LastModified))
@@ -1589,8 +1610,7 @@ namespace Truedat
                         bool afXLegacyHit = !afXHit && !string.IsNullOrEmpty(afXHashes.leg)
                             && afMoodShaIndex.TryGetValue(afXHashes.leg!, out xs);
                         if ((afXHit || afXLegacyHit)
-                            && xs.Entry!.Features.DynamicRange.HasValue
-                            && xs.Entry.Features.LoudnessMomentary.HasValue)
+                            && HasCurrentFeatures(xs.Entry!.Features))
                         {
                             var refreshedMd5 = afXHashes.md5;
                             var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
@@ -2060,8 +2080,7 @@ namespace Truedat
                         {
                             // Tier 1: path-mtime hit — no body read, staging not opened.
                             if (flMoodsTracks.TryGetValue(fullPath, out var fEx)
-                                && fEx.Features.DynamicRange.HasValue
-                                && fEx.Features.LoudnessMomentary.HasValue)
+                                && HasCurrentFeatures(fEx.Features))
                             {
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(fEx.LastModified))
                                 {
@@ -2152,8 +2171,7 @@ namespace Truedat
                                 bool flXLegacyHit = !flXHit && !string.IsNullOrEmpty(flXHashes.leg)
                                     && flMoodShaIndex.TryGetValue(flXHashes.leg!, out xs);
                                 if ((flXHit || flXLegacyHit)
-                                    && xs.Entry!.Features.DynamicRange.HasValue
-                                    && xs.Entry.Features.LoudnessMomentary.HasValue)
+                                    && HasCurrentFeatures(xs.Entry!.Features))
                                 {
                                     var refreshedMd5 = flXHashes.md5;
                                     var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
@@ -2377,6 +2395,10 @@ namespace Truedat
                 Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
                 Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
                 Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
+                Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
+                Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
+                Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
+                Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -2590,8 +2612,13 @@ namespace Truedat
             {
                 int etaNew = 0; long etaNewBytes = 0; long etaNewAudioMs = 0;
                 foreach (var tt in tracks)
-                    if (!string.IsNullOrEmpty(tt.Location) && !allTracks.ContainsKey(tt.Location))
-                    { etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs; }
+                {
+                    if (string.IsNullOrEmpty(tt.Location)) continue;
+                    // Refresh-stale entries (see HasCurrentFeatures) will analyze too,
+                    // so they belong in the "new work" pool for an honest estimate.
+                    if (allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentFeatures(etaEntry.Features)) continue;
+                    etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs;
+                }
                 _etaNewTotal = etaNew;
                 _etaNewBytesTotal = etaNewBytes;
                 _etaNewAudioMsTotal = etaNewAudioMs;
@@ -2675,7 +2702,9 @@ namespace Truedat
                     // finally below. Default "failed" covers exception paths.
                     var trackSw = Stopwatch.StartNew();
                     var trackClass = "failed";
-                    bool wasKnown = allTracks.ContainsKey(t.Location);
+                    // "Known" for ETA purposes = present AND feature-complete; a
+                    // refresh-stale entry analyzes, so it lives in the new-work pool.
+                    bool wasKnown = allTracks.TryGetValue(t.Location, out var wkEntry) && HasCurrentFeatures(wkEntry.Features);
 
                     // Long-path fallback: over-MAX_PATH paths fail normal Win32 IO
                     // ("file not found" even though the file exists). Managed IO on
@@ -2787,11 +2816,10 @@ namespace Truedat
                                 var currentLastMod = File.GetLastWriteTimeUtc(scanPath);
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
-                                    // Re-extract when DR or the extended-feature canary is missing.
-                                    // Older entries from pre-LRA or pre-extended-feature builds need
-                                    // a fresh Essentia pass to backfill the current schema.
-                                    if (!existing.Features.DynamicRange.HasValue
-                                        || !existing.Features.LoudnessMomentary.HasValue)
+                                    // Re-extract when the canary says the entry is stale (pre-LRA /
+                                    // pre-extended builds; with --refresh-features also entries
+                                    // missing the 2026-07-22 tonal/rhythm wave).
+                                    if (!HasCurrentFeatures(existing.Features))
                                     {
                                         if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR / extended missing)");
                                     }
@@ -2848,8 +2876,7 @@ namespace Truedat
                                     FingerprintV1? msQuickFp = null;
                                     if (_quickCache
                                         && existing.FingerprintV1 != null
-                                        && existing.Features.DynamicRange.HasValue
-                                        && existing.Features.LoudnessMomentary.HasValue)
+                                        && HasCurrentFeatures(existing.Features))
                                     {
                                         if (msSourceSize == 0)
                                             try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
@@ -2878,8 +2905,7 @@ namespace Truedat
                                     // identity fields the tag edit invalidated. Body reads
                                     // go through the staged copy (FIX 4).
                                     if (!string.IsNullOrEmpty(existing.AudioStreamSha256)
-                                        && existing.Features.DynamicRange.HasValue
-                                        && existing.Features.LoudnessMomentary.HasValue)
+                                        && HasCurrentFeatures(existing.Features))
                                     {
                                         try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                                         if (msSourceSize > 0)
@@ -2982,7 +3008,7 @@ namespace Truedat
                                 if (crossHit || crossLegacyHit)
                                 {
                                     var xsf = xs.Entry!.Features;
-                                    if (!xsf.DynamicRange.HasValue || !xsf.LoudnessMomentary.HasValue)
+                                    if (!HasCurrentFeatures(xsf))
                                     {
                                         if (_audit) Console.WriteLine($"  DEBUG cache-sha: re-extracting (DR / extended missing)");
                                     }
