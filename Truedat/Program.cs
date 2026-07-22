@@ -2608,6 +2608,14 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            // True library membership, captured BEFORE the podcast/video/remote/non-audio
+            // filters run. An mbxmoods.json entry whose path isn't in here is genuinely gone
+            // from the library (→ --fixup); a still-present entry that a filter excluded
+            // (e.g. a labeled podcast) must NOT read as an orphan. Feeds the wave-missing
+            // breakdown in ReportCatalog.
+            var libraryKeys = new HashSet<string>(
+                tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
+                PathComparer.Instance);
             var skippedPodcasts = new List<ITunesTrack>();
             tracks = FilterRemoteUrls(tracks, skippedPath);
             tracks = FilterPodcasts(tracks, skippedPath, skippedPodcasts);
@@ -3351,7 +3359,7 @@ namespace Truedat
             }
             catch { }
             EmitStagingSummary();
-            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold);
+            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys);
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
@@ -5126,7 +5134,7 @@ namespace Truedat
         /// --audit tee captures it in truedat.log). When the catalog has fewer than
         /// <paramref name="detailThreshold"/> tracks it lists each file with its per-field
         /// status instead of aggregate counts — aggregates over 1-4 files aren't useful.</summary>
-        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold)
+        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
             int total = entries.Count;
@@ -5198,18 +5206,53 @@ namespace Truedat
             // Recommended next steps — detected state -> exact command. Advisory
             // only: truedat NEVER prompts; it prints what to run and moves on.
             var rec = new List<string>();
+            // The wave-missing count is one number but several different fixes. Split it
+            // into disjoint, individually-actionable buckets so the operator can see WHY a
+            // plain --refresh-features never clears the total (errored + orphaned entries
+            // are unreachable by a rescan). Precedence: errored, then orphaned, then the
+            // genuinely-stale remainder. Zero-count buckets are hidden.
+            List<string>? waveBreakdown = null;
             if (s.MissingWave > 0)
-                rec.Add($"{s.MissingWave:N0} entries lack the latest features        ->  truedat --refresh-features");
+            {
+                var errs = LoadExistingErrors(
+                    Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", "mbxmoods-errors.csv"));
+                int waveErrored = 0, waveOrphan = 0, waveStale = 0;
+                foreach (var e in entries)
+                {
+                    if (e?.Features == null) continue;
+                    if (!(e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
+                          && e.Features.AverageLoudness == null)) continue;
+                    var key = e.Features.FilePath ?? "";
+                    if (key.Length > 0 && errs.ContainsKey(key)) waveErrored++;
+                    else if (libraryKeys != null && key.Length > 0 && !libraryKeys.Contains(key)) waveOrphan++;
+                    else waveStale++;
+                }
+                waveBreakdown = new List<string>();
+                // --retry-errors only surfaces when there ARE errored entries — it re-attempts
+                // known-bad files, so it's a one-off, not a step to run on every scan.
+                if (waveErrored > 0)
+                    waveBreakdown.Add($"{waveErrored,6:N0}  previously errored      ->  truedat --retry-errors   (one-off; bad files keep failing)");
+                if (waveOrphan > 0)
+                    waveBreakdown.Add($"{waveOrphan,6:N0}  no longer in library    ->  truedat --fixup          (drops orphaned entries)");
+                if (waveStale > 0)
+                    waveBreakdown.Add($"{waveStale,6:N0}  analyzable, just stale  ->  truedat --refresh-features");
+            }
             if (s.MissingFingerprint > 0)
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
             if (!_includePodcasts && s.SpeechYes > 0)
                 rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --migrate");
-            if (rec.Count > 0)
+            bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
+            if (anyRec)
             {
                 Console.WriteLine();
                 Console.WriteLine("  Recommended:");
+                if (waveBreakdown != null && waveBreakdown.Count > 0)
+                {
+                    Console.WriteLine($"    {s.MissingWave:N0} entries lack the latest features:");
+                    foreach (var w in waveBreakdown) Console.WriteLine($"      {w}");
+                }
                 foreach (var r in rec) Console.WriteLine($"    {r}");
             }
         }
