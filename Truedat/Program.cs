@@ -4569,6 +4569,19 @@ namespace Truedat
             return true;
         }
 
+        /// <summary>Read a string property from a JsonNode without ever throwing —
+        /// malformed shapes (non-object parents, non-string values) return null.
+        /// --migrate must never crash on the files it exists to repair.</summary>
+        static string? SafeStr(JsonNode? node, params string[] path)
+        {
+            foreach (var seg in path)
+            {
+                node = (node as JsonObject)?[seg];
+                if (node == null) return null;
+            }
+            return (node as JsonValue)?.TryGetValue<string>(out var s) == true ? s : null;
+        }
+
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
@@ -4620,7 +4633,7 @@ namespace Truedat
             var podcastKeys = _includePodcasts
                 ? new List<string>()
                 : tracks
-                    .Where(kv => string.Equals(kv.Value?["genre"]?.GetValue<string>(), "Podcast", StringComparison.OrdinalIgnoreCase))
+                    .Where(kv => string.Equals(SafeStr(kv.Value, "genre"), "Podcast", StringComparison.OrdinalIgnoreCase))
                     .Select(kv => kv.Key)
                     .ToList();
             foreach (var key in podcastKeys) tracks.Remove(key);
@@ -4631,7 +4644,7 @@ namespace Truedat
             var speechKeys = _includePodcasts
                 ? new List<string>()
                 : tracks
-                    .Where(kv => string.Equals(kv.Value?["truedat"]?["speechLikely"]?.GetValue<string>(), "yes", StringComparison.OrdinalIgnoreCase))
+                    .Where(kv => string.Equals(SafeStr(kv.Value, "truedat", "speechLikely"), "yes", StringComparison.OrdinalIgnoreCase))
                     .Select(kv => kv.Key)
                     .ToList();
             foreach (var key in speechKeys) tracks.Remove(key);
