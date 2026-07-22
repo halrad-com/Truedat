@@ -2649,22 +2649,20 @@ namespace Truedat
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
 
-            // Entries analyzed BEFORE their track was podcast-labeled keep a stale
-            // genre forever (skipped tracks never hit a cache tier), which blinds
-            // --migrate's genre-based podcast removal. Refresh the stored genre from
-            // the XML so those entries become purgeable. Metadata-only — features,
-            // hashes, and lastModified stay untouched.
+            // A track the podcast filter excludes is never scanned again, so a stale
+            // mood entry left over from before it was labeled (or before the filter
+            // existed) can never be refreshed OR removed by --migrate: its stored genre
+            // is whatever the XML carries (often empty for downloaded episodes) and it
+            // lacks the wave features speechLikely needs to fire. The scan holds the
+            // authoritative podcast determination (from the XML signals), so drop the
+            // dead entry here. Nothing consumes a mood record for a file we won't analyze.
             {
-                int genreRefreshed = 0;
+                int podcastEntriesRemoved = 0;
                 foreach (var pt in skippedPodcasts)
-                    if (allTracks.TryGetValue(pt.Location, out var pe) && pe.Features != null
-                        && !string.Equals(pe.Features.Genre, pt.Genre, StringComparison.Ordinal))
-                    {
-                        pe.Features.Genre = pt.Genre;
-                        genreRefreshed++;
-                    }
-                if (genreRefreshed > 0)
-                    Console.WriteLine($"  Genre refreshed on {genreRefreshed} skipped podcast entr{(genreRefreshed == 1 ? "y" : "ies")} (truedat --migrate removes them)");
+                    if (allTracks.TryRemove(pt.Location, out _))
+                        podcastEntriesRemoved++;
+                if (podcastEntriesRemoved > 0)
+                    Console.WriteLine($"  Removed {podcastEntriesRemoved} stale mood entr{(podcastEntriesRemoved == 1 ? "y" : "ies")} for podcast-filtered track(s)");
             }
             // Cross-index keyed by audioStreamSha256 — invariant-region hash, stable
             // across tag edits. Catches "audio bytes unchanged but tags/path drifted",

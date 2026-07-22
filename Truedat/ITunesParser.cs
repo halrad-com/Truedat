@@ -364,19 +364,21 @@ namespace Truedat
                 track.PodcastReason = "Genre=Podcast";
             }
 
-            // A2 — multi-signal podcast vote (spec 2026-07-22), 2-of-3 required:
-            // Episode Date, Publisher, duration >= 30 min. One signal alone is
-            // never enough — the removed Episode-Date-only heuristic misclassified
-            // 3-minute YouTube-rip music. Two corroborating signals (e.g. an
-            // Episode Date on a 52-minute file) are decisive.
-            if (!track.IsPodcast)
+            // A2 — multi-signal podcast vote (spec 2026-07-22): an Episode Date
+            // (podcast-feed date stamp) corroborated by Publisher OR duration >= 30 min.
+            // Episode Date is REQUIRED, not merely one of three interchangeable votes:
+            // live/long music (KEXP full performances, festival sets, full-album streams)
+            // carries a Publisher tag AND runs 30-100 min, so "Publisher + duration" alone
+            // false-flagged real music as podcasts (2026-07-22 — Portugal The Man, Viagra
+            // Boys, Billy Strings, etc.). It's also never enough on its own — Episode Date
+            // rides on 3-minute YouTube-rip music too, so a corroborating signal (a
+            // publisher, or 30+ min of runtime) is what makes it decisive.
+            if (!track.IsPodcast && track.HasEpisodeDate)
             {
-                int signals = 0;
-                var evidence = new List<string>();
-                if (track.HasEpisodeDate) { signals++; evidence.Add("Episode Date"); }
-                if (track.HasPublisher) { signals++; evidence.Add("Publisher"); }
-                if (track.TotalTimeMs >= PodcastVoteMinDurationMs) { signals++; evidence.Add($"{track.TotalTimeMs / 60000}min"); }
-                if (signals >= 2)
+                var evidence = new List<string> { "Episode Date" };
+                if (track.HasPublisher) evidence.Add("Publisher");
+                if (track.TotalTimeMs >= PodcastVoteMinDurationMs) evidence.Add($"{track.TotalTimeMs / 60000}min");
+                if (evidence.Count >= 2)
                 {
                     track.IsPodcast = true;
                     track.PodcastReason = "signals: " + string.Join(" + ", evidence);
