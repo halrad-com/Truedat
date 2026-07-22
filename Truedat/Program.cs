@@ -452,6 +452,14 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
+        // Podcast handling: anything LABELED podcast in the XML (iTunes-native
+        // Podcast=true boolean, or Genre=Podcast — the only marker MusicBee writes)
+        // is excluded from analysis by default. No label is perfect (podcast feeds
+        // can deliver music, e.g. KEXP Song of the Day), so --include-podcasts
+        // overrides and analyzes them; mis-labeled music is a retag away either way,
+        // and every exclusion is visible in mbxmoods-skipped.csv with its reason.
+        internal static bool _includePodcasts;
+
         // Whole-file MD5 maintenance. Default OFF: truedat never WRITES fileMd5 —
         // the worker fan-out task, tier-1 null backfill, tier-2/4 refreshes, and
         // --backfill Tier A all skip it, and --migrate strips stored values.
@@ -659,13 +667,19 @@ namespace Truedat
             catch { }
         }
 
-        /// <summary>Remove podcast episodes from a parsed track list. Every dropped
-        /// track lands in mbxmoods-skipped.csv (when a path is supplied) with the XML
-        /// key that triggered the classification; --audit also lists each on console.</summary>
+        /// <summary>Remove podcast-labeled episodes from a parsed track list (default;
+        /// --include-podcasts overrides and analyzes them). Every dropped track lands
+        /// in mbxmoods-skipped.csv (when a path is supplied) with what triggered the
+        /// classification; --audit also lists each on console.</summary>
         static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null)
         {
             var removed = tracks.Where(t => t.IsPodcast).ToList();
             if (removed.Count == 0) return tracks;
+            if (_includePodcasts)
+            {
+                Console.WriteLine($"  Including {removed.Count} podcast-labeled track(s) (--include-podcasts)");
+                return tracks;
+            }
             foreach (var t in removed)
             {
                 var reason = $"podcast ({(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
@@ -960,6 +974,7 @@ namespace Truedat
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
+                else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -1121,7 +1136,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (kept with --include-podcasts) (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -1137,6 +1152,9 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
+                Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
+                Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
+                Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -2209,7 +2227,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (kept with --include-podcasts) (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -2225,6 +2243,9 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
+                Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
+                Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
+                Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
                 Console.WriteLine("  --version, -v       Print version (1.0.0.0-[branch-]epoch) and exit");
                 Console.WriteLine("  --check-filenames   Scan paths for non-ASCII / problem chars + zero-byte / small files -> mbxhub-filenames.json");
                 Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
@@ -4181,11 +4202,14 @@ namespace Truedat
                 if (tr) renamed++;
             }
 
-            // Remove podcast entries (identified by genre)
-            var podcastKeys = tracks
-                .Where(kv => string.Equals(kv.Value?["genre"]?.GetValue<string>(), "Podcast", StringComparison.OrdinalIgnoreCase))
-                .Select(kv => kv.Key)
-                .ToList();
+            // Remove podcast entries (identified by genre — the only label stored
+            // entries carry). --include-podcasts keeps them, matching scan behavior.
+            var podcastKeys = _includePodcasts
+                ? new List<string>()
+                : tracks
+                    .Where(kv => string.Equals(kv.Value?["genre"]?.GetValue<string>(), "Podcast", StringComparison.OrdinalIgnoreCase))
+                    .Select(kv => kv.Key)
+                    .ToList();
             foreach (var key in podcastKeys) tracks.Remove(key);
 
             Console.WriteLine($"Tracks: {total}");

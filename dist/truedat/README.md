@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them; `--include-podcasts` analyzes them instead), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -127,7 +127,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5),
-                          rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)
+                          rename SMFM keys (sensme*->smfm*), remove podcast entries
+                          (kept with --include-podcasts) (creates backup)
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
@@ -158,6 +159,12 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
                           values. The durable audio identity is audioStreamSha256 either way;
                           enable this only if you compare whole-file MD5s with external tools.
+  --include-podcasts      Analyze podcast-labeled tracks too. Default: anything the XML labels
+                          podcast (iTunes-native Podcast=true, or Genre=Podcast — the only
+                          marker MusicBee writes) is skipped and listed in mbxmoods-skipped.csv
+                          with its reason. No label is perfect (podcast feeds can deliver
+                          music), so mis-labeled tracks are a retag — or this flag — away.
+                          Also keeps podcast entries under --migrate.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.

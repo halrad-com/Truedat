@@ -65,9 +65,12 @@ namespace Truedat
             Console.Write("Parsing iTunes library...");
             var library = ITunesParser.Parse(_xmlPath, out _);
             Console.WriteLine($" {library.Count:N0} tracks");
-            int podcastCount = library.RemoveAll(t => t.IsPodcast);
-            if (podcastCount > 0)
-                Console.WriteLine($"  Skipped {podcastCount} podcast episode(s)");
+            if (!Program._includePodcasts)
+            {
+                int podcastCount = library.RemoveAll(t => t.IsPodcast);
+                if (podcastCount > 0)
+                    Console.WriteLine($"  Skipped {podcastCount} podcast episode(s)");
+            }
             int videoCount = library.RemoveAll(t =>
                 !string.IsNullOrEmpty(t.Location) &&
                 Program.VideoExtensions.Contains(Path.GetExtension(t.Location)));
