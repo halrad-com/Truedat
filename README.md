@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), video files, and playlist/redirector entries. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Note: podcasts are *not* skipped — no iTunes XML field identifies them reliably (music delivered via podcast feeds is still music), so everything with an audio extension is analyzed and consumers exclude by their own tags.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -127,7 +127,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5),
-                          rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)
+                          rename SMFM keys (sensme*->smfm*) (creates backup)
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)

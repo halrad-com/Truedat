@@ -659,26 +659,11 @@ namespace Truedat
             catch { }
         }
 
-        /// <summary>Remove podcast episodes from a parsed track list. Every dropped
-        /// track lands in mbxmoods-skipped.csv (when a path is supplied) with the XML
-        /// key that triggered the classification; --audit also lists each on console.</summary>
-        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null)
-        {
-            var removed = tracks.Where(t => t.IsPodcast).ToList();
-            if (removed.Count == 0) return tracks;
-            foreach (var t in removed)
-            {
-                var reason = $"podcast ({(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
-                if (skippedPath != null)
-                    AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
-                if (_audit)
-                    Console.WriteLine($"  [skipped {reason}] {t.Artist} - {t.Name} :: {t.Location}");
-            }
-            Console.WriteLine($"  Skipped {removed.Count} podcast episode(s)"
-                + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
-                + (_audit ? "" : " (--audit lists each)"));
-            return tracks.Where(t => !t.IsPodcast).ToList();
-        }
+        // Podcast filtering was removed 2026-07-21: no iTunes XML field identifies
+        // podcasts cleanly (MusicBee exports carry no marker at all; Episode Date and
+        // Genre=Podcast both flag plain music; even the iTunes-native Podcast=true
+        // boolean flags feeds whose episodes ARE music). Audio is audio — everything
+        // is analyzed; downstream consumers exclude by their own tags.
 
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
         static string GetExtensionSafe(string path)
@@ -1121,7 +1106,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*) (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -2209,7 +2194,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*) (creates backup)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -2374,7 +2359,6 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
-            tracks = FilterPodcasts(tracks, skippedPath);
             tracks = FilterVideoFiles(tracks, skippedPath);
             tracks = FilterNonAudio(tracks, skippedPath);
 
@@ -3012,7 +2996,6 @@ namespace Truedat
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
-            tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
             tracks = FilterNonAudio(tracks);
             Console.WriteLine();
@@ -4138,7 +4121,7 @@ namespace Truedat
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*), removes podcast entries");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*)");
             if (!_fileMd5Enabled)
                 Console.WriteLine("Also strips fileMd5 (nothing consumes it; pass --file-md5 to keep it)");
             Console.WriteLine();
@@ -4181,12 +4164,10 @@ namespace Truedat
                 if (tr) renamed++;
             }
 
-            // Remove podcast entries (identified by genre)
-            var podcastKeys = tracks
-                .Where(kv => string.Equals(kv.Value?["genre"]?.GetValue<string>(), "Podcast", StringComparison.OrdinalIgnoreCase))
-                .Select(kv => kv.Key)
-                .ToList();
-            foreach (var key in podcastKeys) tracks.Remove(key);
+            // (The former genre-based podcast-entry removal was dropped 2026-07-21:
+            // genre isn't a clean podcast signal — podcast feeds deliver music too —
+            // and scans no longer skip by genre, so stripping here would just force
+            // an expensive re-analysis on the next scan.)
 
             Console.WriteLine($"Tracks: {total}");
             if (stripped > 0)
@@ -4197,10 +4178,8 @@ namespace Truedat
                 Console.WriteLine($"Stripped fileMd5 from: {md5Stripped}");
             if (legacyStripped > 0)
                 Console.WriteLine($"Stripped audioMd5/chromaprint from: {legacyStripped}");
-            if (podcastKeys.Count > 0)
-                Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
 
-            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0 && podcastKeys.Count == 0)
+            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
