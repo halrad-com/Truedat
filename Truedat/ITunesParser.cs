@@ -19,6 +19,11 @@ namespace Truedat
         /// <summary>File size in bytes from iTunes XML (Size). 0 if unavailable.
         /// Feeds the scan ETA model (bytes remaining / measured MB/s) without per-file stats.</summary>
         public long SizeBytes { get; set; }
+        /// <summary>True when the XML Location is a remote URL (http/https) rather than
+        /// a file — e.g. un-downloaded podcast-feed episodes, which MusicBee exports
+        /// with the stream URL as their location. Not scannable; Location keeps the
+        /// original URL for skip-ledger display.</summary>
+        public bool IsRemote { get; set; }
         /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
         public bool IsPodcast { get; set; }
         /// <summary>What triggered the podcast classification ("Podcast=true" —
@@ -275,7 +280,21 @@ namespace Truedat
                             track.Genre = reader.ReadElementContentAsString();
                             break;
                         case "Location":
-                            track.Location = ParseLocation(reader.ReadElementContentAsString());
+                            var rawLocation = reader.ReadElementContentAsString();
+                            // Remote stream URLs (un-downloaded podcast-feed episodes)
+                            // must be flagged BEFORE ParseLocation: Uri.LocalPath mangles
+                            // "https://host/p/x/audio.mp3" into a fake local path
+                            // ("\p\x\audio.mp3") that then masquerades as a missing file.
+                            if (rawLocation.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                                || rawLocation.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                            {
+                                track.Location = rawLocation;
+                                track.IsRemote = true;
+                            }
+                            else
+                            {
+                                track.Location = ParseLocation(rawLocation);
+                            }
                             break;
                         case "Total Time":
                             var val = reader.ReadElementContentAsString();

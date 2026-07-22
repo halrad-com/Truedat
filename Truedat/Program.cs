@@ -834,6 +834,16 @@ namespace Truedat
                 "playlist / redirector extension", skippedPath);
         }
 
+        /// <summary>Drop remote-URL entries (un-downloaded podcast-feed episodes whose
+        /// XML Location is the stream URL). Categorically unscannable — truedat
+        /// analyzes files — and numerous enough to distort the ETA pre-flight and
+        /// flood the missing ledger every run if allowed through.</summary>
+        static List<ITunesTrack> FilterRemoteUrls(List<ITunesTrack> tracks, string? skippedPath = null)
+        {
+            return FilterByPredicate(tracks, t => t.IsRemote, "remote stream URL(s)",
+                "remote stream URL (not a file)", skippedPath);
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -2482,6 +2492,7 @@ namespace Truedat
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
             var skippedPodcasts = new List<ITunesTrack>();
+            tracks = FilterRemoteUrls(tracks, skippedPath);
             tracks = FilterPodcasts(tracks, skippedPath, skippedPodcasts);
             tracks = FilterVideoFiles(tracks, skippedPath);
             tracks = FilterNonAudio(tracks, skippedPath);
@@ -3210,6 +3221,7 @@ namespace Truedat
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            tracks = FilterRemoteUrls(tracks);
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
             tracks = FilterNonAudio(tracks);

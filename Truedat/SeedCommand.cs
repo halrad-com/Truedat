@@ -65,6 +65,9 @@ namespace Truedat
             Console.Write("Parsing iTunes library...");
             var library = ITunesParser.Parse(_xmlPath, out _);
             Console.WriteLine($" {library.Count:N0} tracks");
+            int remoteCount = library.RemoveAll(t => t.IsRemote);
+            if (remoteCount > 0)
+                Console.WriteLine($"  Skipped {remoteCount} remote stream URL(s)");
             if (!Program._includePodcasts)
             {
                 int podcastCount = library.RemoveAll(t => t.IsPodcast);
