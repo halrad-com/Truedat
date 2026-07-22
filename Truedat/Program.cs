@@ -707,7 +707,7 @@ namespace Truedat
         /// --include-podcasts overrides and analyzes them). Every dropped track lands
         /// in mbxmoods-skipped.csv (when a path is supplied) with what triggered the
         /// classification; --audit also lists each on console.</summary>
-        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null)
+        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null, List<ITunesTrack>? removedOut = null)
         {
             var removed = tracks.Where(t => t.IsPodcast).ToList();
             if (removed.Count == 0) return tracks;
@@ -716,6 +716,7 @@ namespace Truedat
                 Console.WriteLine($"  Including {removed.Count} podcast-labeled track(s) (--include-podcasts)");
                 return tracks;
             }
+            removedOut?.AddRange(removed);
             foreach (var t in removed)
             {
                 var reason = $"podcast ({(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
@@ -2480,7 +2481,8 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
-            tracks = FilterPodcasts(tracks, skippedPath);
+            var skippedPodcasts = new List<ITunesTrack>();
+            tracks = FilterPodcasts(tracks, skippedPath, skippedPodcasts);
             tracks = FilterVideoFiles(tracks, skippedPath);
             tracks = FilterNonAudio(tracks, skippedPath);
 
@@ -2510,6 +2512,24 @@ namespace Truedat
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
+
+            // Entries analyzed BEFORE their track was podcast-labeled keep a stale
+            // genre forever (skipped tracks never hit a cache tier), which blinds
+            // --migrate's genre-based podcast removal. Refresh the stored genre from
+            // the XML so those entries become purgeable. Metadata-only — features,
+            // hashes, and lastModified stay untouched.
+            {
+                int genreRefreshed = 0;
+                foreach (var pt in skippedPodcasts)
+                    if (allTracks.TryGetValue(pt.Location, out var pe) && pe.Features != null
+                        && !string.Equals(pe.Features.Genre, pt.Genre, StringComparison.Ordinal))
+                    {
+                        pe.Features.Genre = pt.Genre;
+                        genreRefreshed++;
+                    }
+                if (genreRefreshed > 0)
+                    Console.WriteLine($"  Genre refreshed on {genreRefreshed} skipped podcast entr{(genreRefreshed == 1 ? "y" : "ies")} (truedat --migrate removes them)");
+            }
             // Cross-index keyed by audioStreamSha256 — invariant-region hash, stable
             // across tag edits. Catches "audio bytes unchanged but tags/path drifted",
             // including clean moves and cross-machine matching.
