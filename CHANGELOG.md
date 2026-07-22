@@ -61,6 +61,12 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 - **`--migrate` purges `speechLikely == "yes"` entries** (kept with
   `--include-podcasts`, whole-file backup as always, throw-safe on malformed
   JSON nodes via `SafeStr`).
+- **Recommended-commands advisor.** `--stats` (and the end-of-scan catalog
+  summary) now ends with a `Recommended:` block mapping detected catalog state
+  — entries lacking the tonal/rhythm wave, missing `fingerprint.v1`, stray
+  `fileMd5` values, speech-likely entries — to the exact command that fixes
+  it. A matching one-line advisory prints at scan startup when wave-missing
+  entries exist. Advisory only: truedat never prompts interactively.
 
 ### Schema addition — tonal/rhythm extension wave (2026-07-22)
 

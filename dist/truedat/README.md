@@ -107,6 +107,14 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                             all       (default) identity + features
                             identity  fast tier only (TagLib + cheap file IO)
                             features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)
+  --stats [path]          Read-only catalog summary: Essentia-analyzed count, hash coverage
+                          per kind, and SMFM track count. Path defaults to ./mbxmoods.json.
+                          Also printed at end of every scan. With --audit, written to the log.
+                          The summary ends with a Recommended section mapping detected catalog
+                          state (missing tonal/rhythm wave, missing fingerprint.v1, stray
+                          fileMd5, speech-likely entries) to the exact command that fixes it —
+                          truedat never prompts interactively.
+  --stats-detail N        List per-file status when a catalog has < N tracks (default 5).
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended

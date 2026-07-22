@@ -2662,6 +2662,16 @@ namespace Truedat
                     var newSizeTag = etaNewBytes <= 0 ? "" : newMb >= 1024 ? $" / {newMb / 1024.0:F1} GB" : $" / {newMb:F0} MB";
                     Console.WriteLine($"  New to catalog: {etaNew} track(s){newSizeTag} — full analysis expected");
                 }
+                if (!_refreshFeatures)
+                {
+                    int waveMissing = 0;
+                    foreach (var e in allTracks.Values)
+                        if (e.Features != null && e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
+                            && e.Features.AverageLoudness == null)
+                            waveMissing++;
+                    if (waveMissing > 0)
+                        Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh-features");
+                }
             }
             int flacRekeyed = 0;       // tier 2.5: FLAC transition rescue (pre-flac-frames sha + tag rewrite; props-gated re-key)
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
@@ -5045,6 +5055,9 @@ namespace Truedat
             public int Smfm;
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
+            public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
+            public int SpeechYes;         // ComputeTruedatVerdict.SpeechLikely == "yes"
+            public int MissingFingerprint; // entries with no fingerprint.v1 block
         }
 
         static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
@@ -5065,6 +5078,16 @@ namespace Truedat
                 {
                     shaCount.TryGetValue(e.AudioStreamSha256!, out var c);
                     shaCount[e.AudioStreamSha256!] = c + 1;
+                }
+                // Wave-missing: analyzed but lacking the 2026-07-22 tonal/rhythm wave.
+                // Deliberately flag-independent (HasCurrentFeatures widens only under
+                // --refresh-features; the advisor must see the gap regardless).
+                if (pr.Essentia && e.Features?.AverageLoudness == null) s.MissingWave++;
+                if (e.FingerprintV1 == null) s.MissingFingerprint++;
+                if (e.Features != null)
+                {
+                    var vrd = ComputeTruedatVerdict(e.Features.FilePath ?? "", e);
+                    if (vrd.SpeechLikely == "yes") s.SpeechYes++;
                 }
             }
             foreach (var c in shaCount.Values)
@@ -5143,6 +5166,24 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
+            }
+
+            // Recommended next steps — detected state -> exact command. Advisory
+            // only: truedat NEVER prompts; it prints what to run and moves on.
+            var rec = new List<string>();
+            if (s.MissingWave > 0)
+                rec.Add($"{s.MissingWave:N0} entries lack the latest features        ->  truedat --refresh-features");
+            if (s.MissingFingerprint > 0)
+                rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
+            if (!_fileMd5Enabled && s.FileMd5 > 0)
+                rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
+            if (!_includePodcasts && s.SpeechYes > 0)
+                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --migrate");
+            if (rec.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  Recommended:");
+                foreach (var r in rec) Console.WriteLine($"    {r}");
             }
         }
 
