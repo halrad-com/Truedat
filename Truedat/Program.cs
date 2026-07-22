@@ -212,6 +212,9 @@ namespace Truedat
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
         public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
+        public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
+        public double? SpeechConfidence;
+        public string SpeechMethod = "truedat-speech-v1-untuned-2026-07-22";  // rev-1: conservative thresholds, calibrate against the P: catalog before tightening
     }
 
     class TrackEntry
@@ -7144,6 +7147,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmpXml); } catch { } }
             }
 
+            // --- speechLikely verdict (spec 2026-07-22 B1) ---
+            {
+                TrackEntry Mk(double dance, double? chords, double? silence, double zcr) => new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        Danceability = dance, ChordsStrength = chords,
+                        SilenceRate30dB = silence, ZeroCrossingRate = zcr,
+                    },
+                };
+                var talk = ComputeTruedatVerdict("t", Mk(0.4, 0.40, 0.35, 0.12));
+                Assert(talk.SpeechLikely == "yes", "speech: talk-shaped features -> yes");
+                var music = ComputeTruedatVerdict("m", Mk(1.4, 0.58, 0.01, 0.05));
+                Assert(music.SpeechLikely == "no", "speech: music-shaped features -> no");
+                var sparse = ComputeTruedatVerdict("s", new TrackEntry { Features = new TrackFeatures() });
+                Assert(sparse.SpeechLikely == "n/a" || sparse.SpeechLikely == "unknown", "speech: sparse features -> n/a or unknown");
+            }
+
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
             {
                 FingerprintV1 Mk() => new FingerprintV1
@@ -7780,6 +7801,69 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.LossyTranscodeLikely}");
             }
 
+            // ----- speechLikely verdict (spec 2026-07-22 B1) -----
+            // Talk content vs music, from features every analyzed entry already
+            // stores — write-time like the hi-res verdict, so the whole catalog
+            // gains it on the next save and thresholds retune without rescan.
+            // Rev-1 thresholds are UNTUNED and conservative: borderline lands on
+            // "unknown"; only confident talk returns "yes" (--migrate acts on
+            // "yes" alone). Calibrate against known talk entries before tightening.
+            {
+                double score = 0, maxWeight = 0;
+
+                // Danceability: Essentia's value sits >1 for most music, far lower for speech.
+                if (f.Danceability > 0)
+                {
+                    int vote = f.Danceability < 0.7 ? 1 : f.Danceability > 1.1 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.30; maxWeight += 0.30; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech danceability={f.Danceability:F2} vote={vote:+#;-#;0} weight=0.30");
+                }
+                // Chords strength: speech has no harmonic bed.
+                if (f.ChordsStrength.HasValue)
+                {
+                    double cs = f.ChordsStrength.Value;
+                    int vote = cs < 0.46 ? 1 : cs > 0.53 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.25; maxWeight += 0.25; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech chordsStrength={cs:F3} vote={vote:+#;-#;0} weight=0.25");
+                }
+                // Silence rate: conversational pauses push it up.
+                if (f.SilenceRate30dB.HasValue)
+                {
+                    double sr = f.SilenceRate30dB.Value;
+                    int vote = sr > 0.25 ? 1 : sr < 0.05 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech silenceRate30dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
+                }
+                // Zero-crossing rate: speech sits higher than most music.
+                if (f.ZeroCrossingRate > 0)
+                {
+                    int vote = f.ZeroCrossingRate > 0.09 ? 1 : 0;
+                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={vote:+#;-#;0} weight=0.15");
+                }
+                // Tempo-peak weight (2026-07-22 wave, when present): speech has no
+                // stable tempo peak.
+                if (f.BpmFirstPeakWeight.HasValue)
+                {
+                    double bw = f.BpmFirstPeakWeight.Value;
+                    int vote = bw < 0.05 ? 1 : bw > 0.15 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech bpmFirstPeakWeight={bw:F3} vote={vote:+#;-#;0} weight=0.20");
+                }
+                // Key confidence (2026-07-22 wave, when present): craters on speech.
+                if (f.KeyVoteEdma != null)
+                {
+                    double ks = f.KeyVoteEdma.Strength;
+                    int vote = ks < 0.50 ? 1 : ks > 0.65 ? -1 : 0;
+                    if (vote != 0) { score += vote * 0.15; maxWeight += 0.15; }
+                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech keyStrength={ks:F3} vote={vote:+#;-#;0} weight=0.15");
+                }
+
+                if (maxWeight > 0)
+                    (v.SpeechLikely, v.SpeechConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.50);
+                if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.SpeechLikely}");
+            }
+
             return v;
         }
 
@@ -7985,7 +8069,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var verdict = ComputeTruedatVerdict(path, entry);
             bool hiresDecided = verdict.HiresGenuine == "yes" || verdict.HiresGenuine == "no";
             bool transcodeDecided = verdict.LossyTranscodeLikely == "yes" || verdict.LossyTranscodeLikely == "no";
-            if (hiresDecided || transcodeDecided)
+            bool speechDecided = verdict.SpeechLikely == "yes" || verdict.SpeechLikely == "no";
+            if (hiresDecided || transcodeDecided || speechDecided)
             {
                 jw.WritePropertyName("truedat");
                 jw.WriteStartObject();
@@ -7995,6 +8080,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WriteString("lossyTranscodeLikely", verdict.LossyTranscodeLikely);
                 if (verdict.LossyTranscodeConfidence.HasValue)
                     jw.WriteNumber("lossyTranscodeConfidence", verdict.LossyTranscodeConfidence.Value);
+                jw.WriteString("speechLikely", verdict.SpeechLikely);
+                if (verdict.SpeechConfidence.HasValue)
+                    jw.WriteNumber("speechConfidence", verdict.SpeechConfidence.Value);
+                jw.WriteString("speechMethod", verdict.SpeechMethod);
                 jw.WriteString("method", verdict.Method);
                 jw.WriteEndObject();
             }
