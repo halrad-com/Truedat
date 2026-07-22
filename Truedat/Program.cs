@@ -361,6 +361,16 @@ namespace Truedat
         static long _etaNewBytesTotal;
         static long _etaNewBytesDone;
         static int _scanParallelism;
+        // Duration-based ETA model: Essentia cost scales with AUDIO DURATION, not
+        // file size (a 3-hour 64kbps podcast costs ~90x a 4-minute FLAC of the same
+        // byte size). The XML Total Time supplies per-track durations up front; the
+        // measured real-time-factor (analysis thread-seconds per audio-second) is
+        // stable from the first completion, unlike the byte-rate window which is
+        // hostage to whichever file sizes happen to finish first.
+        static long _etaNewAudioMsTotal;
+        static long _etaNewAudioMsDone;
+        static long _rtfAnalyzeTicks;   // thread ticks, only for tracks with known duration
+        static long _rtfAudioMs;        // matching audio-ms sum
 
         static void RecordTrackOutcome(string cls, long swTicks)
         {
@@ -384,9 +394,12 @@ namespace Truedat
                 _rateEvents.TryDequeue(out _);
             long bytes = 0;
             int n = 0;
-            foreach (var e in _rateEvents) { bytes += e.Bytes; n++; }
+            double oldest = nowSecs;
+            foreach (var e in _rateEvents) { bytes += e.Bytes; n++; if (e.AtSecs < oldest) oldest = e.AtSecs; }
             if (n == 0) return 0;
-            var span = Math.Min(Math.Max(nowSecs, 1.0), RateWindowSecs);
+            // Span from the oldest surviving event, floored at 10s so a burst of
+            // fresh completions doesn't read as an absurd rate, capped at the window.
+            var span = Math.Min(Math.Max(nowSecs - oldest, 10.0), RateWindowSecs);
             return bytes / span / (1024.0 * 1024.0);
         }
 
@@ -412,6 +425,9 @@ namespace Truedat
         /// cache-tier average. Falls back to the naive blended average (elapsed/done ×
         /// remaining) when the model has no signal yet.
         /// </summary>
+        /// <summary>Negative return = no honest estimate yet (analysis work ahead,
+        /// nothing measured) — the caller omits the ETA segment rather than printing
+        /// a misleading near-zero blended average.</summary>
         static double ComputeEtaSecs(TimeSpan elapsed, int done, int total)
         {
             var remaining = total - done;
@@ -422,14 +438,26 @@ namespace Truedat
             int knownRemaining = remaining - newRemaining;
 
             double newSecs;
-            var rate = CurrentRateMBps(elapsed.TotalSeconds);
+            long rtfAudioMs = Interlocked.Read(ref _rtfAudioMs);
+            long newAudioMsRemaining = Math.Max(0, _etaNewAudioMsTotal - Interlocked.Read(ref _etaNewAudioMsDone));
             long newBytesRemaining = Math.Max(0, _etaNewBytesTotal - Interlocked.Read(ref _etaNewBytesDone));
-            if (rate > 0.01 && newBytesRemaining > 0)
+            var rate = CurrentRateMBps(elapsed.TotalSeconds);
+            if (rtfAudioMs > 0 && newAudioMsRemaining > 0)
+            {
+                // Duration model (preferred): Essentia cost scales with audio length,
+                // so the measured real-time-factor is meaningful from the very first
+                // completion — a byte rate learned from small files wildly misprices
+                // long low-bitrate audio (observed: 3h podcast queue costed at a rate
+                // learned from two tiny samples → 10h ETA spike).
+                double rtf = (double)Interlocked.Read(ref _rtfAnalyzeTicks) / Stopwatch.Frequency / (rtfAudioMs / 1000.0);
+                newSecs = newAudioMsRemaining / 1000.0 * rtf / _scanParallelism;
+            }
+            else if (rate > 0.01 && newBytesRemaining > 0)
                 newSecs = newBytesRemaining / (1024.0 * 1024.0) / rate;
             else if (Volatile.Read(ref _analyzeCount) > 0)
                 newSecs = newRemaining * ((double)Interlocked.Read(ref _analyzeTicksTotal) / Stopwatch.Frequency / _analyzeCount) / _scanParallelism;
             else if (newRemaining > 0)
-                return naive;  // analysis work ahead but nothing measured yet
+                return -1;  // analysis ahead, nothing measured — omit rather than mislead
             else
                 newSecs = 0;
 
@@ -2494,12 +2522,13 @@ namespace Truedat
             // no file IO. The XML <Size> key supplies the byte total so remaining
             // analysis work is bytes-costed at the measured MB/s.
             {
-                int etaNew = 0; long etaNewBytes = 0;
+                int etaNew = 0; long etaNewBytes = 0; long etaNewAudioMs = 0;
                 foreach (var tt in tracks)
                     if (!string.IsNullOrEmpty(tt.Location) && !allTracks.ContainsKey(tt.Location))
-                    { etaNew++; etaNewBytes += tt.SizeBytes; }
+                    { etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs; }
                 _etaNewTotal = etaNew;
                 _etaNewBytesTotal = etaNewBytes;
+                _etaNewAudioMsTotal = etaNewAudioMs;
                 _scanParallelism = parallelism;
                 if (etaNew > 0)
                 {
@@ -2590,6 +2619,19 @@ namespace Truedat
                     // fingerprint pathTail, and display path throughout.
                     var scanPath = t.Location.Length >= 260 ? ExtendedLengthPath(t.Location) : t.Location;
 
+                    // A new-to-catalog track that exits via a skip path never analyzes —
+                    // drain it from the ETA new-work pool or the estimate hangs on it
+                    // (and stays suppressed when nothing has been measured yet).
+                    void EtaDrainNewPool()
+                    {
+                        if (!wasKnown)
+                        {
+                            Interlocked.Increment(ref _etaNewDone);
+                            Interlocked.Add(ref _etaNewBytesDone, t.SizeBytes);
+                            Interlocked.Add(ref _etaNewAudioMsDone, t.TotalTimeMs);
+                        }
+                    }
+
                     // FIX 4 — lazy-opened staging handle, reused by every tier-2/3/4
                     // body read and the cache-miss worker fan-out. Tier-1 (path-mtime
                     // equality) does NOT open it; SHA-backfill within tier-1 still
@@ -2636,6 +2678,7 @@ namespace Truedat
                             AppendSkipped(skippedPath, t.Location, skipExt, "unsupported codec: DSD");
                             Console.WriteLine($"[skipped DSD] {t.Location}");
                             Interlocked.Increment(ref dsdSkipped);
+                            EtaDrainNewPool();
                             trackClass = "skip·dsd";
                             return;
                         }
@@ -2644,6 +2687,7 @@ namespace Truedat
                         {
                             Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
                             Interlocked.Increment(ref skipped);
+                            EtaDrainNewPool();
                             trackClass = "skip·error";
                             return;
                         }
@@ -2661,6 +2705,7 @@ namespace Truedat
                             AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
                             Console.WriteLine($"[skipped missing] {t.Location} ({reason})");
                             Interlocked.Increment(ref missingSkipped);
+                            EtaDrainNewPool();
                             trackClass = "skip·missing";
                             return;
                         }
@@ -2885,6 +2930,7 @@ namespace Truedat
                             Console.WriteLine($"  WARNING: {msg}");
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, msg, sizeMb, 0, saveLock);
                             Interlocked.Increment(ref failed);
+                            EtaDrainNewPool();
                             return;
                         }
 
@@ -2903,11 +2949,14 @@ namespace Truedat
                         // succeeded or failed, and a new-to-catalog track leaves the
                         // remaining-work pool either way.
                         RecordAnalyzedBytes(sw.Elapsed.TotalSeconds, fileSizeBytes);
-                        if (!wasKnown)
+                        if (t.TotalTimeMs > 0)
                         {
-                            Interlocked.Increment(ref _etaNewDone);
-                            Interlocked.Add(ref _etaNewBytesDone, fileSizeBytes);
+                            // Real-time-factor sample (duration-known tracks only, so
+                            // ticks and audio-ms stay a matched pair).
+                            Interlocked.Add(ref _rtfAnalyzeTicks, msResults.AnalyzeTicks);
+                            Interlocked.Add(ref _rtfAudioMs, t.TotalTimeMs);
                         }
+                        EtaDrainNewPool();  // XML-size based, matching the pre-flight totals
 
                         var feat = msResults.Features;
                         var fileMd5 = msResults.FileMd5;
@@ -9550,7 +9599,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // comparable across libraries with different track lengths.
             var rate = CurrentRateMBps(elapsed.TotalSeconds);
             var rateTag = rate > 0 ? $" · {rate:F1} MB/s" : "";
-            return $" ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · {avgTag}{rateTag}";
+            // Negative = no honest estimate yet; show the measured bits without an ETA.
+            var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
+            return $" {etaTag}{avgTag}{rateTag}";
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>
