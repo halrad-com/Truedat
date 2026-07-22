@@ -35,6 +35,33 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   `--verify --backfill --accept-flac-tag-drift` applies the same rule in a
   verify pass.
 
+### Added — stricter podcast detection + speech cleanup (2026-07-22)
+
+- **File-marker sniff on cache-miss.** All three scan paths (MoodsMode,
+  `--file-list`, `--analyze-file`) now open cache-miss files and check for
+  embedded podcast markers before spending Essentia time on them — ID3v2
+  `PCST`/`WFED`/`TGID`/`TCON` containing "podcast", or MP4 `pcst`/`purl` atoms.
+  Ledger reason: `podcast (file marker: PCST)`. MoodsMode's end-of-scan summary
+  reports these separately: `Podcast: N (file markers — see mbxmoods-skipped.csv)`.
+  Bypassed by `--include-podcasts`.
+- **2-of-3 XML signal vote.** At parse time, a track trips podcast
+  classification when at least 2 of {Episode Date key present, Publisher key
+  present, duration ≥30 min} hold — catching feeds that don't set the explicit
+  `Podcast=true` / `Genre=Podcast` labels. Ledger reason: `podcast (signals:
+  Episode Date + 52min)`. Explicit labels remain single-signal sufficient.
+  `--include-podcasts` bypasses.
+- **`speechLikely` verdict.** New field in the `truedat` verdict block
+  (`speechLikely` "yes"/"no"/"unknown"/"n/a", `speechConfidence`,
+  `speechMethod` = `truedat-speech-v1-untuned-2026-07-22`), computed at write
+  time from stored features (danceability, chordsStrength, silenceRate30dB,
+  zeroCrossingRate, bpmFirstPeakWeight, keyVotes strength) — no rescan needed,
+  the whole catalog picks it up on next save. `"yes"` additionally requires
+  the zero-crossing signal to fire, so tones/ambient beds demote to
+  `"unknown"` instead of a false positive. Per-signal trace under `--audit`.
+- **`--migrate` purges `speechLikely == "yes"` entries** (kept with
+  `--include-podcasts`, whole-file backup as always, throw-safe on malformed
+  JSON nodes via `SafeStr`).
+
 ### Schema addition — tonal/rhythm extension wave (2026-07-22)
 
 **Additive, NOT breaking** — all new keys are omit-when-missing; tolerant readers

@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes (including what triggered the classification — the iTunes-native `Podcast=true` boolean or `Genre=Podcast`, which is how MusicBee exports mark them; `--include-podcasts` analyzes them instead), video files, playlist/redirector entries, and missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH). Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes — three independent classifiers, all bypassed by `--include-podcasts`: the iTunes-native `Podcast=true` boolean or `Genre=Podcast` (explicit label, single-signal sufficient), a 2-of-3 XML signal vote across Episode Date key / Publisher key / duration ≥30 min at parse time (reason format `podcast (signals: Episode Date + 52min)`), and an embedded file-marker sniff on cache-miss files — ID3v2 `PCST`/`WFED`/`TGID`/`TCON` containing "podcast", or MP4 `pcst`/`purl` atoms (reason format `podcast (file marker: PCST)`; MoodsMode's end-of-scan summary reports these separately as `Podcast: N (file markers — see mbxmoods-skipped.csv)`) — video files, playlist/redirector entries, and missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH). Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -129,7 +129,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5),
                           rename SMFM keys (sensme*->smfm*), remove podcast entries
-                          (kept with --include-podcasts) (creates backup)
+                          (kept with --include-podcasts), remove speech-likely entries
+                          — stored truedat.speechLikely == "yes" (kept with
+                          --include-podcasts) (creates backup)
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
@@ -160,12 +162,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
                           values. The durable audio identity is audioStreamSha256 either way;
                           enable this only if you compare whole-file MD5s with external tools.
-  --include-podcasts      Analyze podcast-labeled tracks too. Default: anything the XML labels
-                          podcast (iTunes-native Podcast=true, or Genre=Podcast — the only
-                          marker MusicBee writes) is skipped and listed in mbxmoods-skipped.csv
-                          with its reason. No label is perfect (podcast feeds can deliver
-                          music), so mis-labeled tracks are a retag — or this flag — away.
-                          Also keeps podcast entries under --migrate.
+  --include-podcasts      Analyze podcast-labeled tracks too. Default: skip anything the XML
+                          labels podcast (iTunes-native Podcast=true, or Genre=Podcast), anything
+                          that trips the 2-of-3 XML signal vote (Episode Date key / Publisher key
+                          / duration >=30 min), and files carrying embedded podcast markers
+                          (ID3v2 PCST/WFED/TGID/TCON, or MP4 pcst/purl atoms) sniffed on
+                          cache-miss — all listed in mbxmoods-skipped.csv with their reason.
+                          No label is perfect (podcast feeds can deliver music), so mis-labeled
+                          tracks are a retag — or this flag — away. Also keeps podcast entries
+                          and stored speech-likely entries (truedat.speechLikely == "yes")
+                          under --migrate.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
@@ -551,7 +557,7 @@ The same FFT pass also emits `hfSpectralStructure: { flatness, peakToMean, imagi
 
 ### Authenticity verdict (`truedat.*` block)
 
-Each track in `mbxmoods.json` carries a nested `truedat` block with two verdicts and per-question confidence, plus a method tag:
+Each track in `mbxmoods.json` carries a nested `truedat` block with two authenticity verdicts, a talk-vs-music verdict, and per-question confidence:
 
 ```json
 "truedat": {
@@ -559,17 +565,22 @@ Each track in `mbxmoods.json` carries a nested `truedat` block with two verdicts
   "hiresConfidence":         0.85,
   "lossyTranscodeLikely":    "yes" | "no" | "unknown" | "n/a",
   "lossyTranscodeConfidence": 0.92,
+  "speechLikely":            "yes" | "no" | "unknown" | "n/a",
+  "speechConfidence":        0.78,
+  "speechMethod":            "truedat-speech-v1-untuned-2026-07-22",
   "method":                  "truedat-v1-fft-corpus1-2026-05-18"
 }
 ```
 
 Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
 
-The block is **omitted entirely** when both questions would be `"n/a"` (legacy entries without `fingerprint.v1`, weird-codec files) OR when both would be `"unknown"` from lack of signal (legacy lossless 24-bit entries that predate the `bitUsage` / `hfEnergyRatio` work). Run `--verify --backfill` to populate those fields and pick up a real verdict on the next pass.
+The block is **omitted entirely** when none of the three verdicts reached a decided `"yes"`/`"no"` — i.e. `hiresGenuine`, `lossyTranscodeLikely`, and `speechLikely` are all `"unknown"` or `"n/a"` (legacy entries without `fingerprint.v1`, weird-codec files, or entries lacking enough signal). Run `--verify --backfill` to populate the authenticity fields and pick up a real verdict on the next pass; `speechLikely` has no backfill path — it's computed from features already present, so it fills in for the whole catalog automatically the next time each entry is saved (any scan, cache hit or miss).
 
 Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — corpus-1 tuning showed this discipline avoided false flips on peaky-but-genuine cymbal content.
 
-Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tag bumps when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
+`speechLikely` classifies talk content (podcast/audiobook/spoken-word survivors of the podcast filters above, or any music-library track that's actually speech) vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight`, and tonal `keyVotes` strength. `"yes"` additionally requires the zero-crossing signal to fire on its own — a sine-tone or ambient bed can share talk's shape on the other signals but sits low on zcr, and without this gate it would wrongly reach `"yes"` (which `--migrate` treats as delete-eligible); tone/ambient content demotes to `"unknown"` instead. `speechMethod` carries its own tag (`truedat-speech-v1-untuned-2026-07-22`), independent of the authenticity `method` tag, since the two verdict families tune on separate schedules.
+
+Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
 **Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). One known gap remains for Phase 5+: LAME-to-LAME re-encode chains verdict `"no"` because the second LAME encode rewrites the Xing tag — needs cascade-encode artifact detection. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
 
