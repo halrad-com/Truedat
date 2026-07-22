@@ -190,7 +190,7 @@ namespace Truedat
         // means every scanned track lands in mbxmoods.json with the full identity
         // signal set, no separate hash backfill needed.
         public string? AudioStreamSha256;
-        public string? AudioStreamSha256Source;   // "whole-file" only when invariant bounds were unavailable
+        public string? AudioStreamSha256Source;   // "whole-file" (invariant bounds unavailable) | "flac-frames" (frame-anchored FLAC) | null = invariant
         public Program.FingerprintV1? FingerprintV1;
     }
 
@@ -459,6 +459,14 @@ namespace Truedat
         // overrides and analyzes them; mis-labeled music is a retag away either way,
         // and every exclusion is visible in mbxmoods-skipped.csv with its reason.
         internal static bool _includePodcasts;
+
+        // --accept-flac-tag-drift (--verify --backfill only): re-key FLAC entries
+        // whose stored sha predates the flac-frames algorithm AND whose tags were
+        // rewritten after scan (both compares fail — the stored hash covered
+        // metadata bytes that no longer exist). Gated on audio props still matching
+        // the stored fingerprint. Opt-in because it trades certainty for avoiding a
+        // mass re-analysis: a genuine same-props audio swap would slip through.
+        internal static bool _acceptFlacTagDrift;
 
         // Whole-file MD5 maintenance. Default OFF: truedat never WRITES fileMd5 —
         // the worker fan-out task, tier-1 null backfill, tier-2/4 refreshes, and
@@ -986,6 +994,7 @@ namespace Truedat
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "include-podcasts") _includePodcasts = true;
+                else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -1142,6 +1151,9 @@ namespace Truedat
                 Console.WriteLine("                        all       (default) identity + features");
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
+                Console.WriteLine("  --accept-flac-tag-drift  With --verify --backfill: re-key FLAC entries whose stored sha");
+                Console.WriteLine("                      predates the frame-anchored hash AND whose tags were rewritten after");
+                Console.WriteLine("                      scan (audio props must still match) instead of REANALYZE_NEEDED.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
@@ -1399,15 +1411,16 @@ namespace Truedat
                     return afStagedSrc.Path;
                 }
 
-                // One body read serves tiers 2/3/4: both digests come from a single pass
+                // One body read serves tiers 2/3/4: all digests come from a single pass
                 // over the staged copy. Lazy — tier-1 hits never read the body.
-                (string? md5, string? sha)? afBodyHashes = null;
-                (string? md5, string? sha) EnsureBodyHashes()
+                // leg = legacy TagLib-region sha (FLAC transition compare).
+                (string? md5, string? sha, string? leg)? afBodyHashes = null;
+                (string? md5, string? sha, string? leg) EnsureBodyHashes()
                 {
                     if (afBodyHashes == null)
                     {
-                        var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, out _);
-                        afBodyHashes = (m, s);
+                        var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, out _, out var leg);
+                        afBodyHashes = (m, s, leg);
                     }
                     return afBodyHashes.Value;
                 }
@@ -1465,15 +1478,22 @@ namespace Truedat
                             if (trackEntry == null && !string.IsNullOrEmpty(afEx.AudioStreamSha256))
                             {
                                 var afStagedPath = EnsureStagedSrc();
-                                var recompSha = EnsureBodyHashes().sha;
-                                if (!string.IsNullOrEmpty(recompSha)
-                                    && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                var afHashes = EnsureBodyHashes();
+                                var recompSha = afHashes.sha;
+                                bool afShaHit = !string.IsNullOrEmpty(recompSha)
+                                    && string.Equals(recompSha, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                bool afLegacyHit = !afShaHit && !string.IsNullOrEmpty(afHashes.leg)
+                                    && string.Equals(afHashes.leg, afEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                if (afShaHit || afLegacyHit)
                                 {
-                                    var refreshedMd5 = EnsureBodyHashes().md5;
+                                    var refreshedMd5 = afHashes.md5;
                                     var refreshedFp = afQuickFp ?? ComputeFingerprintV1(afStagedPath, afFileSize, out _);
                                     var freshTags = ExtractFileTags(afStagedPath);
-                                    trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
-                                        freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                                    trackEntry = afLegacyHit
+                                        ? RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                            freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, recompSha, "flac-frames")
+                                        : RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
+                                            freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
                                     if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                     afHitTag = "cached·sha";
                                     afFingerprintV1 = trackEntry.FingerprintV1;
@@ -1488,19 +1508,26 @@ namespace Truedat
                     if (trackEntry == null && afMoodShaIndex != null)
                     {
                         var afStagedPath = EnsureStagedSrc();
-                        var localSha = EnsureBodyHashes().sha;
-                        if (!string.IsNullOrEmpty(localSha)
-                            && afMoodShaIndex.TryGetValue(localSha!, out var xs)
-                            && xs.Entry.Features.DynamicRange.HasValue
+                        var afXHashes = EnsureBodyHashes();
+                        var localSha = afXHashes.sha;
+                        (TrackEntry Entry, string OldKey) xs = default;
+                        bool afXHit = !string.IsNullOrEmpty(localSha) && afMoodShaIndex.TryGetValue(localSha!, out xs);
+                        bool afXLegacyHit = !afXHit && !string.IsNullOrEmpty(afXHashes.leg)
+                            && afMoodShaIndex.TryGetValue(afXHashes.leg!, out xs);
+                        if ((afXHit || afXLegacyHit)
+                            && xs.Entry!.Features.DynamicRange.HasValue
                             && xs.Entry.Features.LoudnessMomentary.HasValue)
                         {
-                            var refreshedMd5 = EnsureBodyHashes().md5;
+                            var refreshedMd5 = afXHashes.md5;
                             var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
                             var freshTags = ExtractFileTags(afStagedPath);
-                            trackEntry = RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
-                                freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                            trackEntry = afXLegacyHit
+                                ? RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
+                                    freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
+                                : RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
+                                    freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
                             if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                            RemoveIfMoved(afMoodsTracks, xs.OldKey);
+                            RemoveIfMoved(afMoodsTracks, xs.OldKey!);
                             afHitTag = "cached·sha";
                             afFingerprintV1 = trackEntry.FingerprintV1;
                             afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -1941,13 +1968,13 @@ namespace Truedat
 
                         // One body read serves tiers 2/3/4: both digests come from a single pass
                         // over the staged copy. Lazy — tier-1 hits never read the body.
-                        (string? md5, string? sha)? flBodyHashes = null;
-                        (string? md5, string? sha) EnsureBodyHashes()
+                        (string? md5, string? sha, string? leg)? flBodyHashes = null;
+                        (string? md5, string? sha, string? leg) EnsureBodyHashes()
                         {
                             if (flBodyHashes == null)
                             {
-                                var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, out _);
-                                flBodyHashes = (m, s);
+                                var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, out _, out var leg);
+                                flBodyHashes = (m, s, leg);
                             }
                             return flBodyHashes.Value;
                         }
@@ -2010,16 +2037,24 @@ namespace Truedat
                                 if (!string.IsNullOrEmpty(fEx.AudioStreamSha256))
                                 {
                                     var flStagedPath = EnsureStagedSrc();
-                                    var recomputedSha = EnsureBodyHashes().sha;
-                                    if (!string.IsNullOrEmpty(recomputedSha)
-                                        && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                    var flHashes = EnsureBodyHashes();
+                                    var recomputedSha = flHashes.sha;
+                                    bool flShaHit = !string.IsNullOrEmpty(recomputedSha)
+                                        && string.Equals(recomputedSha, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                    bool flLegacyHit = !flShaHit && !string.IsNullOrEmpty(flHashes.leg)
+                                        && string.Equals(flHashes.leg, fEx.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                    if (flShaHit || flLegacyHit)
                                     {
-                                        var refreshedMd5 = EnsureBodyHashes().md5;
+                                        var refreshedMd5 = flHashes.md5;
                                         var refreshedFp = flQuickFp ?? ComputeFingerprintV1(flStagedPath, flFileSize, out _);
                                         var freshTags = ExtractFileTags(flStagedPath);
-                                        var flShaPathEntry = RebuildCacheEntryFromTags(
-                                            fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
-                                            freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                        var flShaPathEntry = flLegacyHit
+                                            ? RebuildCacheEntryFromTags(
+                                                fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                                freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
+                                            : RebuildCacheEntryFromTags(
+                                                fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                                freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
                                         if (!_fileMd5Enabled) flShaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                         var flShaPathSmfmTag = ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
@@ -2036,23 +2071,31 @@ namespace Truedat
                             if (flMoodShaIndex != null)
                             {
                                 var flStagedPath = EnsureStagedSrc();
-                                var localSha = EnsureBodyHashes().sha;
-                                if (!string.IsNullOrEmpty(localSha)
-                                    && flMoodShaIndex.TryGetValue(localSha!, out var xs)
-                                    && xs.Entry.Features.DynamicRange.HasValue
+                                var flXHashes = EnsureBodyHashes();
+                                var localSha = flXHashes.sha;
+                                (TrackEntry Entry, string OldKey) xs = default;
+                                bool flXHit = !string.IsNullOrEmpty(localSha) && flMoodShaIndex.TryGetValue(localSha!, out xs);
+                                bool flXLegacyHit = !flXHit && !string.IsNullOrEmpty(flXHashes.leg)
+                                    && flMoodShaIndex.TryGetValue(flXHashes.leg!, out xs);
+                                if ((flXHit || flXLegacyHit)
+                                    && xs.Entry!.Features.DynamicRange.HasValue
                                     && xs.Entry.Features.LoudnessMomentary.HasValue)
                                 {
-                                    var refreshedMd5 = EnsureBodyHashes().md5;
+                                    var refreshedMd5 = flXHashes.md5;
                                     var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
                                     var freshTags = ExtractFileTags(flStagedPath);
-                                    var flCrossShaEntry = RebuildCacheEntryFromTags(
-                                        xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
-                                        freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                    var flCrossShaEntry = flXLegacyHit
+                                        ? RebuildCacheEntryFromTags(
+                                            xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                            freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
+                                        : RebuildCacheEntryFromTags(
+                                            xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
+                                            freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
                                     if (!_fileMd5Enabled) flCrossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                     var flCrossShaSmfmTag = ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
-                                    RemoveIfMoved(flMoodsTracks, xs.OldKey);
+                                    RemoveIfMoved(flMoodsTracks, xs.OldKey!);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByShaCross);
                                     Console.Error.WriteLine($"[CACHED·sha{flCrossShaSmfmTag}] {Path.GetFileName(filePath)}");
@@ -2233,6 +2276,9 @@ namespace Truedat
                 Console.WriteLine("                        all       (default) identity + features");
                 Console.WriteLine("                        identity  fast tier only (TagLib + cheap file IO)");
                 Console.WriteLine("                        features  ffmpeg tier only (bitUsage / hfEnergyRatio / hfSpectralStructure)");
+                Console.WriteLine("  --accept-flac-tag-drift  With --verify --backfill: re-key FLAC entries whose stored sha");
+                Console.WriteLine("                      predates the frame-anchored hash AND whose tags were rewritten after");
+                Console.WriteLine("                      scan (audio props must still match) instead of REANALYZE_NEEDED.");
                 Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
                 Console.WriteLine("  --duplicates [path] Read-only: exact (audioStreamSha256) + probable (cross-encode candidate) duplicate tiers, recommended keeper per group -> mbxmoods-duplicates.csv + .json");
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
@@ -2558,19 +2604,21 @@ namespace Truedat
                         return msStagedSrc.Path;
                     }
 
-                    // One body read serves tiers 2/3/4: both digests come from a single pass
+                    // One body read serves tiers 2/3/4: all digests come from a single pass
                     // over the staged copy. Lazy — tier-1 hits never read the body.
                     // msSourceSize is assigned lazily in multiple branches below, so resolve
                     // it at call time rather than capturing a stale 0.
-                    (string? md5, string? sha)? msBodyHashes = null;
-                    (string? md5, string? sha) EnsureBodyHashes()
+                    // leg = legacy TagLib-region sha (FLAC only) — recognizes stored
+                    // pre-flac-frames values so the transition costs zero re-analysis.
+                    (string? md5, string? sha, string? leg)? msBodyHashes = null;
+                    (string? md5, string? sha, string? leg) EnsureBodyHashes()
                     {
                         if (msBodyHashes == null)
                         {
                             if (msSourceSize == 0)
                                 try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
-                            var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, out _);
-                            msBodyHashes = (m, s);
+                            var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, out _, out var leg);
+                            msBodyHashes = (m, s, leg);
                         }
                         return msBodyHashes.Value;
                     }
@@ -2725,16 +2773,25 @@ namespace Truedat
                                         if (msSourceSize > 0)
                                         {
                                             var msStagedPath = EnsureStagedSrc();
-                                            var recomputedSha = EnsureBodyHashes().sha;
-                                            if (!string.IsNullOrEmpty(recomputedSha)
-                                                && string.Equals(recomputedSha, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase))
+                                            var bodyHashes = EnsureBodyHashes();
+                                            var recomputedSha = bodyHashes.sha;
+                                            // Transition: a stored pre-flac-frames value matches the
+                                            // LEGACY (TagLib-region) sha instead — same "audio bytes
+                                            // unchanged" conclusion; upgrade the stored sha in place.
+                                            bool shaHit = !string.IsNullOrEmpty(recomputedSha)
+                                                && string.Equals(recomputedSha, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                            bool legacyHit = !shaHit && !string.IsNullOrEmpty(bodyHashes.leg)
+                                                && string.Equals(bodyHashes.leg, existing.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+                                            if (shaHit || legacyHit)
                                             {
                                                 // Audio bytes unchanged — tag edit only. Refresh
                                                 // fileMd5 + fingerprint.v1 (both tag-affected),
                                                 // reuse everything else.
-                                                var refreshedMd5 = EnsureBodyHashes().md5;
+                                                var refreshedMd5 = bodyHashes.md5;
                                                 var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
-                                                var shaPathEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
+                                                var shaPathEntry = legacyHit
+                                                    ? RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
+                                                    : RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 if (!_fileMd5Enabled) shaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                                 var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
@@ -2764,10 +2821,17 @@ namespace Truedat
                             if (msSourceSize > 0)
                             {
                                 var msStagedPath = EnsureStagedSrc();
-                                var localSha = EnsureBodyHashes().sha;
-                                if (!string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out var xs))
+                                var crossHashes = EnsureBodyHashes();
+                                var localSha = crossHashes.sha;
+                                // Index holds STORED values — for un-migrated FLAC entries that's
+                                // the legacy TagLib-region sha, so look up both forms.
+                                (TrackEntry Entry, string OldKey) xs = default;
+                                bool crossHit = !string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out xs);
+                                bool crossLegacyHit = !crossHit && !string.IsNullOrEmpty(crossHashes.leg)
+                                    && moodShaIndex.TryGetValue(crossHashes.leg!, out xs);
+                                if (crossHit || crossLegacyHit)
                                 {
-                                    var xsf = xs.Entry.Features;
+                                    var xsf = xs.Entry!.Features;
                                     if (!xsf.DynamicRange.HasValue || !xsf.LoudnessMomentary.HasValue)
                                     {
                                         if (_audit) Console.WriteLine($"  DEBUG cache-sha: re-extracting (DR / extended missing)");
@@ -2776,16 +2840,18 @@ namespace Truedat
                                     {
                                         // Audio bytes match; fingerprint.v1 is tag-affected —
                                         // recompute it, reuse Essentia features.
-                                        var refreshedMd5 = EnsureBodyHashes().md5;
+                                        var refreshedMd5 = crossHashes.md5;
                                         var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
-                                        var crossShaEntry = RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        var crossShaEntry = crossLegacyHit
+                                            ? RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
+                                            : RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
                                         if (!_fileMd5Enabled) crossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
                                         var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
-                                        RemoveIfMoved(allTracks, xs.OldKey);
+                                        RemoveIfMoved(allTracks, xs.OldKey!);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
                                         trackClass = "cached\u00b7sha\u00b7x";
@@ -3762,7 +3828,7 @@ namespace Truedat
                     try
                     {
                         var fileSize = new FileInfo(path).Length;
-                        var (recomputed, _) = ComputeAudioStreamSha256FromFile(path, fileSize, out var err);
+                        var (recomputed, recomputedSource) = ComputeAudioStreamSha256FromFile(path, fileSize, out var err, out var legacySha);
                         if (string.IsNullOrEmpty(recomputed))
                         {
                             status = "ERROR";
@@ -3776,6 +3842,7 @@ namespace Truedat
                             if (backfill)
                             {
                                 entry.AudioStreamSha256 = recomputed;
+                                entry.AudioStreamSha256Source = recomputedSource;
                                 filled.Add("audioStreamSha256");
                                 ApplyBackfill(path, fileSize, entry, level, filled);
                                 status = "BACKFILLED";
@@ -3791,11 +3858,22 @@ namespace Truedat
                         else
                         {
                             var cached = entry.AudioStreamSha256!;
-                            if (string.Equals(recomputed, cached, StringComparison.OrdinalIgnoreCase))
+                            bool shaOk = string.Equals(recomputed, cached, StringComparison.OrdinalIgnoreCase);
+                            // Transition: a stored pre-flac-frames FLAC value matches the
+                            // legacy TagLib-region sha (computed in the same read) — audio
+                            // is equally proven unchanged; upgrade in place under backfill.
+                            bool legacyOk = !shaOk && !string.IsNullOrEmpty(legacySha)
+                                && string.Equals(legacySha, cached, StringComparison.OrdinalIgnoreCase);
+                            if (shaOk || legacyOk)
                             {
-                                // SHA matches: audio bytes unchanged. Safe to backfill cheap identity.
                                 if (backfill)
                                 {
+                                    if (legacyOk)
+                                    {
+                                        entry.AudioStreamSha256 = recomputed;
+                                        entry.AudioStreamSha256Source = recomputedSource;
+                                        filled.Add("audioStreamSha256-upgraded");
+                                    }
                                     ApplyBackfill(path, fileSize, entry, level, filled);
                                     if (filled.Count > 0)
                                     {
@@ -3813,6 +3891,39 @@ namespace Truedat
                                 {
                                     status = "OK";
                                     Interlocked.Increment(ref ok);
+                                }
+                            }
+                            else if (backfill && _acceptFlacTagDrift && recomputedSource == "flac-frames")
+                            {
+                                // --accept-flac-tag-drift: FLAC whose stored sha predates the
+                                // flac-frames algorithm AND whose tags were rewritten after the
+                                // scan — neither compare can succeed because the stored hash
+                                // covered metadata bytes that no longer exist. Operator-accepted
+                                // re-key: audio props must still match the stored fingerprint.
+                                var freshFp = ComputeFingerprintV1(path, fileSize, out _);
+                                var storedFp = entry.FingerprintV1;
+                                bool propsOk = freshFp != null && storedFp != null
+                                    && freshFp.Codec == storedFp.Codec
+                                    && freshFp.SampleRate == storedFp.SampleRate
+                                    && freshFp.Channels == storedFp.Channels
+                                    && freshFp.BitDepth == storedFp.BitDepth
+                                    && Math.Abs(freshFp.DurationMs - storedFp.DurationMs) <= 500;
+                                if (propsOk)
+                                {
+                                    entry.AudioStreamSha256 = recomputed;
+                                    entry.AudioStreamSha256Source = recomputedSource;
+                                    entry.FingerprintV1 = freshFp;
+                                    filled.Add("audioStreamSha256-accepted-tag-drift");
+                                    ApplyBackfill(path, fileSize, entry, level, filled);
+                                    status = "BACKFILLED";
+                                    detail = string.Join("|", filled);
+                                    Interlocked.Increment(ref backfilled);
+                                }
+                                else
+                                {
+                                    status = "REANALYZE_NEEDED";
+                                    detail = $"cached={cached.Substring(0, 12)}.. disk={recomputed!.Substring(0, 12)}.. (props changed — not accepted)";
+                                    Interlocked.Increment(ref drift);
                                 }
                             }
                             else
@@ -6653,6 +6764,53 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmp); } catch { } }
             }
 
+            // --- FLAC frame-offset walker (flac-frames hash anchor) ---
+            {
+                // Synthetic chain: "fLaC" + STREAMINFO (34 bytes, not last) +
+                // PADDING (10 bytes, last) → frames start at 4+4+34+4+10 = 56.
+                byte[] Flac(bool id3, bool footer = false)
+                {
+                    using var ms = new MemoryStream();
+                    if (id3)
+                    {
+                        // ID3v2 header: "ID3", v2.4, flags (footer bit optional), size=20 (syncsafe)
+                        ms.Write(new byte[] { (byte)'I', (byte)'D', (byte)'3', 4, 0, (byte)(footer ? 0x10 : 0), 0, 0, 0, 20 }, 0, 10);
+                        ms.Write(new byte[20 + (footer ? 10 : 0)], 0, 20 + (footer ? 10 : 0));
+                    }
+                    ms.Write(new byte[] { (byte)'f', (byte)'L', (byte)'a', (byte)'C' }, 0, 4);
+                    ms.Write(new byte[] { 0x00, 0, 0, 34 }, 0, 4);   // STREAMINFO, not last
+                    ms.Write(new byte[34], 0, 34);
+                    ms.Write(new byte[] { 0x81, 0, 0, 10 }, 0, 4);   // PADDING, last-flag set
+                    ms.Write(new byte[10], 0, 10);
+                    ms.Write(new byte[] { 0xFF, 0xF8, 1, 2, 3 }, 0, 5);  // fake frame bytes
+                    ms.Position = 0;
+                    return ms.ToArray();
+                }
+                Assert(GetFlacAudioStartCore(new MemoryStream(Flac(false))) == 56, "flac walker: plain chain frames at 56");
+                Assert(GetFlacAudioStartCore(new MemoryStream(Flac(true))) == 30 + 56, "flac walker: ID3v2 prefix skipped");
+                Assert(GetFlacAudioStartCore(new MemoryStream(Flac(true, footer: true))) == 40 + 56, "flac walker: ID3v2 footer flag adds 10");
+                Assert(GetFlacAudioStartCore(new MemoryStream(new byte[] { 1, 2, 3, 4, 5 })) == -1, "flac walker: non-flac returns -1");
+                var trunc = Flac(false);
+                Assert(GetFlacAudioStartCore(new MemoryStream(trunc, 0, 40)) == -1, "flac walker: truncated chain returns -1");
+
+                // Two-region single-pass: shaA/shaB match independent region hashes.
+                var tmp2 = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.bin");
+                try
+                {
+                    var data = new byte[200000];
+                    new Random(99).NextBytes(data);
+                    File.WriteAllBytes(tmp2, data);
+                    var expA = ComputeAudioStreamSha256(tmp2, 56, data.Length, out _);
+                    var expB = ComputeAudioStreamSha256(tmp2, 0, data.Length, out _);
+                    var (m2, a2, b2) = ComputeMd5AndTwoShas(tmp2, data.Length, true, 56, data.Length, 0, data.Length, out _);
+                    Assert(a2 == expA && b2 == expB, "two-region single pass matches independent hashes");
+                    Assert(m2 == ComputeFileMd5(tmp2), "two-region single pass md5 matches");
+                    var (_, a3, b3) = ComputeMd5AndTwoShas(tmp2, data.Length, false, 56, data.Length, -1, -1, out _);
+                    Assert(a3 == expA && b3 == null, "two-region: invalid region B yields null");
+                }
+                finally { try { File.Delete(tmp2); } catch { } }
+            }
+
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
             {
                 FingerprintV1 Mk() => new FingerprintV1
@@ -7436,10 +7594,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (!string.IsNullOrEmpty(entry.AudioStreamSha256))
             {
                 jw.WriteString("audioStreamSha256", entry.AudioStreamSha256);
-                // Emit the source signal only for the whole-file fallback path so
-                // consumers can detect the lower-trust hash.
-                if (entry.AudioStreamSha256Source == "whole-file")
-                    jw.WriteString("audioStreamSha256Source", "whole-file");
+                // Emit the source signal for the non-default regions: "whole-file"
+                // (lower-trust fallback) and "flac-frames" (frame-anchored FLAC hash,
+                // 2026-07 algorithm — distinguishes new-style from legacy TagLib-region
+                // values during the transition). "invariant" stays implicit.
+                if (entry.AudioStreamSha256Source == "whole-file" || entry.AudioStreamSha256Source == "flac-frames")
+                    jw.WriteString("audioStreamSha256Source", entry.AudioStreamSha256Source);
             }
             if (entry.FingerprintV1 != null)
                 WriteFingerprintV1(jw, entry.FingerprintV1);
@@ -8582,8 +8742,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (string.IsNullOrEmpty(fresh.AudioHead64kMd5) || string.IsNullOrEmpty(stored.AudioHead64kMd5))
                 return false;
-            if ((fresh.AudioHead64kMd5Source ?? "invariant") != "invariant") return false;
-            if ((stored.AudioHead64kMd5Source ?? "invariant") != "invariant") return false;
+            // Trusted sources: "invariant" (tag-resilient region) and "flac-frames"
+            // (frame-anchored FLAC region). "whole-file-start" is rejected — a tag
+            // write moves those bytes. Sources must MATCH: an old-style FLAC head
+            // ("invariant", pre-2026-07 build) measured different bytes than a
+            // frame-anchored one, so cross-source equality would be coincidence.
+            var freshSrc = fresh.AudioHead64kMd5Source ?? "invariant";
+            var storedSrc = stored.AudioHead64kMd5Source ?? "invariant";
+            if (freshSrc != storedSrc) return false;
+            if (freshSrc != "invariant" && freshSrc != "flac-frames") return false;
             if (!string.Equals(fresh.AudioHead64kMd5, stored.AudioHead64kMd5, StringComparison.OrdinalIgnoreCase))
                 return false;
             if (fresh.Codec != stored.Codec) return false;
@@ -8592,6 +8759,64 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (fresh.BitDepth != stored.BitDepth) return false;
             if (Math.Abs(fresh.DurationMs - stored.DurationMs) > 500) return false;
             return true;
+        }
+
+        /// <summary>
+        /// Offset of the first FLAC audio frame, or -1 when the file isn't FLAC or
+        /// the metadata chain is malformed. Header-only reads (a few KB + seeks).
+        ///
+        /// Why this exists: TagLibSharp's invariant region for FLAC INCLUDES the
+        /// metadata blocks, so a Vorbis-comment write (MBXHub's embedded mood field,
+        /// any MusicBee retag, Sony SMFM blocks) drifts the "invariant" hash even
+        /// when the audio frames are byte-identical (proven 2026-07-21). Anchoring
+        /// the hashed region at the frames makes FLAC identity genuinely
+        /// tag-edit-resilient, matching what MP3/WMA already had.
+        /// Handles an optional leading ID3v2 tag (seen in the wild on FLAC).
+        /// </summary>
+        static long GetFlacAudioStart(string filePath)
+        {
+            try
+            {
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+                return GetFlacAudioStartCore(fs);
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>Core of the FLAC frame-offset walk; stream-based so the
+        /// self-test can drive synthetic chains.</summary>
+        internal static long GetFlacAudioStartCore(Stream fs)
+        {
+            var hdr = new byte[10];
+            if (fs.Read(hdr, 0, 4) != 4) return -1;
+            long pos = 4;
+            // Optional ID3v2 prefix: "ID3" + ver(2) + flags(1) + syncsafe-28 size(4)
+            if (hdr[0] == (byte)'I' && hdr[1] == (byte)'D' && hdr[2] == (byte)'3')
+            {
+                if (fs.Read(hdr, 4, 6) != 6) return -1;
+                long tagSize = ((long)(hdr[6] & 0x7F) << 21) | ((long)(hdr[7] & 0x7F) << 14)
+                             | ((long)(hdr[8] & 0x7F) << 7) | (long)(hdr[9] & 0x7F);
+                if ((hdr[5] & 0x10) != 0) tagSize += 10;   // footer-present flag
+                pos = 10 + tagSize;
+                if (pos + 4 > fs.Length) return -1;
+                fs.Seek(pos, SeekOrigin.Begin);
+                if (fs.Read(hdr, 0, 4) != 4) return -1;
+                pos += 4;
+            }
+            if (hdr[0] != (byte)'f' || hdr[1] != (byte)'L' || hdr[2] != (byte)'a' || hdr[3] != (byte)'C') return -1;
+            // Metadata block headers: 1 byte (last-flag<<7 | type) + 3-byte BE length
+            var bh = new byte[4];
+            while (true)
+            {
+                if (fs.Read(bh, 0, 4) != 4) return -1;
+                pos += 4;
+                bool last = (bh[0] & 0x80) != 0;
+                long len = ((long)bh[1] << 16) | ((long)bh[2] << 8) | bh[3];
+                pos += len;
+                if (pos > fs.Length) return -1;
+                if (last) return pos;
+                fs.Seek(pos, SeekOrigin.Begin);
+            }
         }
 
         static FingerprintV1? ComputeFingerprintV1(string filePath, long fileSize, out string? error)
@@ -8616,6 +8841,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     invStart = 0;
                     invEnd = fileSize;
                     headSource = "whole-file-start";
+                }
+
+                // FLAC: anchor at the first audio frame — TagLib's region includes the
+                // metadata blocks, so a tag write would drift the head hash (see
+                // GetFlacAudioStart). Source "flac-frames" keeps old/new heads from
+                // being compared across algorithms in IsTagsOnlyChange.
+                long flacStart = GetFlacAudioStart(filePath);
+                if (flacStart >= 0 && flacStart < fileSize)
+                {
+                    invStart = flacStart;
+                    invEnd = fileSize;
+                    headSource = "flac-frames";
                 }
 
                 var tail = ComputePathTail(filePath);
@@ -8715,15 +8952,43 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Mirrors the existing fingerprint.v1.audioHead64kMd5Source pattern.
         /// </summary>
         static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error)
+            => ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out _);
+
+        /// <summary>Overload that also returns the LEGACY-region sha for FLAC files
+        /// (TagLib invariant region, which includes the metadata blocks — the value
+        /// pre-2026-07 builds stored). Callers use it to recognize stored old-style
+        /// hashes without re-analysis during the flac-frames transition; null for
+        /// non-FLAC or when the legacy region is unavailable.</summary>
+        static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error, out string? legacySha)
         {
             error = null;
+            legacySha = null;
             try
             {
-                long invStart, invEnd;
-                using (var tfile = TagLib.File.Create(filePath))
+                // FLAC: frame-anchored region (see GetFlacAudioStart). The legacy
+                // TagLib region is hashed in the same read for transition compares.
+                long flacStart = GetFlacAudioStart(filePath);
+                if (flacStart >= 0 && flacStart < fileSize)
                 {
-                    invStart = tfile.InvariantStartPosition;
-                    invEnd = tfile.InvariantEndPosition;
+                    long legStart = -1, legEnd = -1;
+                    try
+                    {
+                        using var tfile = TagLib.File.Create(filePath);
+                        legStart = tfile.InvariantStartPosition;
+                        legEnd = tfile.InvariantEndPosition;
+                    }
+                    catch { }
+                    var (_, shaA, shaB) = ComputeMd5AndTwoShas(filePath, fileSize, false,
+                        flacStart, fileSize, legStart, legEnd, out error);
+                    legacySha = shaB;
+                    return (shaA, shaA != null ? "flac-frames" : "");
+                }
+
+                long invStart, invEnd;
+                using (var tfile2 = TagLib.File.Create(filePath))
+                {
+                    invStart = tfile2.InvariantStartPosition;
+                    invEnd = tfile2.InvariantEndPosition;
                 }
                 string source = "invariant";
                 if (invEnd <= invStart || invStart < 0 || invEnd > fileSize)
@@ -8753,10 +9018,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// TagLib parse failure degrades to md5-only (sha null) — never loses the MD5.
         /// </summary>
         static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error)
+            => ComputeFileMd5AndAudioSha(filePath, fileSize, out error, out _);
+
+        /// <summary>Overload that also returns the LEGACY-region sha for FLAC (see the
+        /// ComputeAudioStreamSha256FromFile overload) — computed in the SAME read pass.</summary>
+        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error, out string? legacySha)
         {
             error = null;
-            long invStart = 0, invEnd = 0;   // stays invalid on TagLib failure → Core computes md5-only
+            legacySha = null;
+            long invStart = 0, invEnd = 0;   // stays invalid on TagLib failure → md5-only
             string source = "invariant";
+            long flacStart = GetFlacAudioStart(filePath);
             try
             {
                 using (var tfile = TagLib.File.Create(filePath))
@@ -8776,10 +9048,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // TagLib parse failure. Parity with the split helpers this replaced:
                 // ComputeAudioStreamSha256FromFile returned a null sha here, while
                 // ComputeFileMd5 (pure FileStream, no TagLib) still produced the MD5.
-                // Leave the bounds invalid so Core hashes md5-only.
+                // Leave the bounds invalid so Core hashes md5-only (non-FLAC).
                 error = ex.Message;
                 invStart = 0;
                 invEnd = 0;
+            }
+            if (flacStart >= 0 && flacStart < fileSize)
+            {
+                // FLAC: primary sha = frame-anchored; legacy TagLib-region sha rides
+                // the same pass so cache tiers can match stored old-style values.
+                var (md5F, shaF, shaLeg) = ComputeMd5AndTwoShas(filePath, fileSize, true,
+                    flacStart, fileSize, invStart, invEnd, out var flacErr);
+                if (flacErr != null) error = flacErr;
+                legacySha = shaLeg;
+                return (md5F, shaF, shaF != null ? "flac-frames" : "");
             }
             var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, invStart, invEnd, out var coreErr);
             if (coreErr != null) error = coreErr;
@@ -8828,6 +9110,72 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 error = ex.Message;
                 return (null, null);
+            }
+        }
+
+        /// <summary>
+        /// One read pass feeding up to three digests: optional whole-file MD5,
+        /// SHA-256 over region A (primary), SHA-256 over region B (legacy compare).
+        /// Used for FLAC during the flac-frames transition — region A is the
+        /// frame-anchored hash, region B the old TagLib-invariant hash, so a stored
+        /// old-style value is recognizable without a second full read. An invalid
+        /// region (end <= start etc.) yields a null sha for that slot.
+        /// </summary>
+        static (string? md5, string? shaA, string? shaB) ComputeMd5AndTwoShas(
+            string filePath, long fileSize, bool wantMd5,
+            long aStart, long aEnd, long bStart, long bEnd, out string? error)
+        {
+            error = null;
+            try
+            {
+                bool aValid = aEnd > aStart && aStart >= 0 && aEnd <= fileSize;
+                bool bValid = bEnd > bStart && bStart >= 0 && bEnd <= fileSize;
+                using var md5 = wantMd5 ? MD5.Create() : null;
+                using var shaA = aValid ? new SHA256Cng() : null;
+                using var shaB = bValid ? new SHA256Cng() : null;
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
+                var buf = new byte[81920];
+                long pos = 0;
+                int r;
+                while ((r = fs.Read(buf, 0, buf.Length)) > 0)
+                {
+                    md5?.TransformBlock(buf, 0, r, null, 0);
+                    if (shaA != null)
+                    {
+                        long s = Math.Max(pos, aStart), e = Math.Min(pos + r, aEnd);
+                        if (e > s) shaA.TransformBlock(buf, (int)(s - pos), (int)(e - s), null, 0);
+                    }
+                    if (shaB != null)
+                    {
+                        long s = Math.Max(pos, bStart), e = Math.Min(pos + r, bEnd);
+                        if (e > s) shaB.TransformBlock(buf, (int)(s - pos), (int)(e - s), null, 0);
+                    }
+                    pos += r;
+                }
+                string? md5Hex = null;
+                if (md5 != null)
+                {
+                    md5.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    md5Hex = HexLower(md5.Hash!);
+                }
+                string? aHex = null;
+                if (shaA != null)
+                {
+                    shaA.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    aHex = HexLower(shaA.Hash!);
+                }
+                string? bHex = null;
+                if (shaB != null)
+                {
+                    shaB.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    bHex = HexLower(shaB.Hash!);
+                }
+                return (md5Hex, aHex, bHex);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return (null, null, null);
             }
         }
 
