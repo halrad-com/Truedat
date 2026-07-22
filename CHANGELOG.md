@@ -5,6 +5,36 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added — scan traceability & self-healing (2026-07-21/22)
+
+- **Skip ledger covers every pre-scan drop.** `mbxmoods-skipped.csv` now records
+  podcast-labeled episodes (with what triggered the classification), video files,
+  playlist/redirector entries, **remote stream URLs** (un-downloaded podcast-feed
+  episodes — previously mangled into fake local paths and reported as missing
+  files every run), and missing files (path length called out past MAX_PATH).
+  `--audit` lists each dropped track on console.
+- **Podcast policy settled:** anything the XML *labels* podcast (`Podcast=true`
+  or `Genre=Podcast`) is skipped by default; **`--include-podcasts`** analyzes
+  them instead and keeps their entries under `--migrate`. The false-positive
+  `Episode Date` heuristic is gone (it classified plain music as podcasts).
+  Skipped podcasts with existing catalog entries get their stored genre
+  refreshed so `--migrate` can purge them.
+- **Over-MAX_PATH files now scan** via a per-track `\\?\` extended-length
+  fallback through the staging path (subprocess tools only ever see the short
+  staged copy). `--check-filenames` gains a Long paths tier.
+- **Honest progress reporting:** ETA prices remaining new tracks by **audio
+  duration at the measured analysis real-time-factor** (no more byte-rate
+  spikes from small files mispricing long episodes), stays silent until
+  something has actually been measured, and the progress line shows the
+  analyzed-class average plus live MB/s. End-of-scan summary breaks down count
+  and average cost per outcome class; catalog-summary hash rows appear only
+  when actionable.
+- **FLAC transition rescue in the default scan (tier 2.5):** transition-era
+  FLAC entries whose tags were rewritten before migrating are re-keyed in
+  place (audio-props gated) instead of falling through to a full re-analysis;
+  `--verify --backfill --accept-flac-tag-drift` applies the same rule in a
+  verify pass.
+
 ### Schema addition — tonal/rhythm extension wave (2026-07-22)
 
 **Additive, NOT breaking** — all new keys are omit-when-missing; tolerant readers
