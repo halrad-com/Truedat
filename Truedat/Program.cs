@@ -111,6 +111,31 @@ namespace Truedat
         public double? HpcpCrest { get; set; }                // tonal.hpcp_crest.mean
         public double? HpcpEntropy { get; set; }              // tonal.hpcp_entropy.mean
 
+        // 2026-07-22 tonal/rhythm extension wave — key confidence, tempo ambiguity,
+        // chord tonality, tuning, simple loudness. All nullable ride-alongs:
+        // populated on fresh analysis only, NOT in the re-extract canary, not
+        // backfillable (Essentia-derived) — legacy entries lack them until a
+        // deliberate re-analysis. Primary consumers: Camelot/harmonic-mixing
+        // confidence gating (key votes) and half/double-time disambiguation
+        // (bpm histogram peaks) in MBXHub's AutoQ.
+        public KeyVote? KeyVoteKrumhansl { get; set; }        // tonal.key_krumhansl
+        public KeyVote? KeyVoteTemperley { get; set; }        // tonal.key_temperley
+        public KeyVote? KeyVoteEdma { get; set; }             // tonal.key_edma (the profile Key/Mode come from)
+        public double? BpmFirstPeak { get; set; }             // rhythm.bpm_histogram_first_peak_bpm
+        public double? BpmFirstPeakWeight { get; set; }       // rhythm.bpm_histogram_first_peak_weight
+        public double? BpmSecondPeak { get; set; }            // rhythm.bpm_histogram_second_peak_bpm
+        public double? BpmSecondPeakWeight { get; set; }      // rhythm.bpm_histogram_second_peak_weight
+        public double? BpmSecondPeakSpread { get; set; }      // rhythm.bpm_histogram_second_peak_spread
+        public string? ChordsKey { get; set; }                // tonal.chords_key
+        public string? ChordsScale { get; set; }              // tonal.chords_scale
+        public double[]? ChordsHistogram { get; set; }        // tonal.chords_histogram[24]
+        public double? ChordsNumberRate { get; set; }         // tonal.chords_number_rate
+        public double? TuningFrequency { get; set; }          // tonal.tuning_frequency (Hz, ~440)
+        public double? TuningEqualTemperedDeviation { get; set; } // tonal.tuning_equal_tempered_deviation
+        public double? TuningDiatonicStrength { get; set; }   // tonal.tuning_diatonic_strength
+        public double? TuningNontemperedEnergyRatio { get; set; } // tonal.tuning_nontempered_energy_ratio
+        public double? AverageLoudness { get; set; }          // lowlevel.average_loudness (0..1)
+
         // Phase 2.5 — bottom-bit analysis. Populated during fresh analysis via ffmpeg
         // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
         // Detects bit-depth fakery (16-bit content padded to 24-bit container).
@@ -149,6 +174,16 @@ namespace Truedat
     /// <summary>--backfill-level scope. Identity = TagLib + cheap file IO; Features =
     /// ffmpeg-driven bitUsage / hfEnergyRatio / hfSpectralStructure; All = both (default).</summary>
     public enum BackfillLevel { Identity, Features, All }
+
+    /// <summary>One tonal key-profile vote (krumhansl / temperley / edma):
+    /// detected key + scale + confidence 0..1. Persisted in the keyVotes block;
+    /// consumers gate harmonic-mixing on strength and cross-profile agreement.</summary>
+    public class KeyVote
+    {
+        public string Key = "";
+        public string Scale = "";
+        public double Strength;
+    }
 
     /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
     /// LowestNonZeroBit >= 8 is 16-bit content padded with zeros — the canonical
@@ -7662,6 +7697,46 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             WriteOpt(jw, "chordsStrength", f.ChordsStrength);
             WriteOpt(jw, "hpcpCrest", f.HpcpCrest);
             WriteOpt(jw, "hpcpEntropy", f.HpcpEntropy);
+            // 2026-07-22 tonal/rhythm wave — all omit-when-null.
+            static void WriteKeyVote(Utf8JsonWriter w, string name, KeyVote? v)
+            {
+                if (v == null) return;
+                w.WritePropertyName(name);
+                w.WriteStartObject();
+                w.WriteString("key", v.Key);
+                w.WriteString("scale", v.Scale);
+                w.WriteNumber("strength", Math.Round(v.Strength, 4));
+                w.WriteEndObject();
+            }
+            if (f.KeyVoteKrumhansl != null || f.KeyVoteTemperley != null || f.KeyVoteEdma != null)
+            {
+                jw.WritePropertyName("keyVotes");
+                jw.WriteStartObject();
+                WriteKeyVote(jw, "krumhansl", f.KeyVoteKrumhansl);
+                WriteKeyVote(jw, "temperley", f.KeyVoteTemperley);
+                WriteKeyVote(jw, "edma", f.KeyVoteEdma);
+                jw.WriteEndObject();
+            }
+            WriteOpt(jw, "bpmFirstPeak", f.BpmFirstPeak);
+            WriteOpt(jw, "bpmFirstPeakWeight", f.BpmFirstPeakWeight);
+            WriteOpt(jw, "bpmSecondPeak", f.BpmSecondPeak);
+            WriteOpt(jw, "bpmSecondPeakWeight", f.BpmSecondPeakWeight);
+            WriteOpt(jw, "bpmSecondPeakSpread", f.BpmSecondPeakSpread);
+            if (!string.IsNullOrEmpty(f.ChordsKey)) jw.WriteString("chordsKey", f.ChordsKey);
+            if (!string.IsNullOrEmpty(f.ChordsScale)) jw.WriteString("chordsScale", f.ChordsScale);
+            if (f.ChordsHistogram != null)
+            {
+                jw.WritePropertyName("chordsHistogram");
+                jw.WriteStartArray();
+                foreach (var v in f.ChordsHistogram) jw.WriteNumberValue(Math.Round(v, 4));
+                jw.WriteEndArray();
+            }
+            WriteOpt(jw, "chordsNumberRate", f.ChordsNumberRate);
+            WriteOpt(jw, "tuningFrequency", f.TuningFrequency);
+            WriteOpt(jw, "tuningEqualTemperedDeviation", f.TuningEqualTemperedDeviation);
+            WriteOpt(jw, "tuningDiatonicStrength", f.TuningDiatonicStrength);
+            WriteOpt(jw, "tuningNontemperedEnergyRatio", f.TuningNontemperedEnergyRatio);
+            WriteOpt(jw, "averageLoudness", f.AverageLoudness);
             // Phase 2.5 — bottom-bit analysis; omit-when-null.
             if (f.BitUsage != null)
             {
@@ -7932,6 +8007,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 ChordsStrength = GetNullableDbl(track, "chordsStrength"),
                 HpcpCrest = GetNullableDbl(track, "hpcpCrest"),
                 HpcpEntropy = GetNullableDbl(track, "hpcpEntropy"),
+                // 2026-07-22 tonal/rhythm wave — nullable, absent on legacy entries.
+                KeyVoteKrumhansl = ParseKeyVoteFromJson(track, "krumhansl"),
+                KeyVoteTemperley = ParseKeyVoteFromJson(track, "temperley"),
+                KeyVoteEdma = ParseKeyVoteFromJson(track, "edma"),
+                BpmFirstPeak = GetNullableDbl(track, "bpmFirstPeak"),
+                BpmFirstPeakWeight = GetNullableDbl(track, "bpmFirstPeakWeight"),
+                BpmSecondPeak = GetNullableDbl(track, "bpmSecondPeak"),
+                BpmSecondPeakWeight = GetNullableDbl(track, "bpmSecondPeakWeight"),
+                BpmSecondPeakSpread = GetNullableDbl(track, "bpmSecondPeakSpread"),
+                ChordsKey = GetStr(track, "chordsKey") is var chk && chk.Length > 0 ? chk : null,
+                ChordsScale = GetStr(track, "chordsScale") is var chs && chs.Length > 0 ? chs : null,
+                ChordsHistogram = track.TryGetProperty("chordsHistogram", out var chArr) && chArr.ValueKind == JsonValueKind.Array
+                    ? chArr.EnumerateArray().Select(e => e.GetDouble()).ToArray()
+                    : null,
+                ChordsNumberRate = GetNullableDbl(track, "chordsNumberRate"),
+                TuningFrequency = GetNullableDbl(track, "tuningFrequency"),
+                TuningEqualTemperedDeviation = GetNullableDbl(track, "tuningEqualTemperedDeviation"),
+                TuningDiatonicStrength = GetNullableDbl(track, "tuningDiatonicStrength"),
+                TuningNontemperedEnergyRatio = GetNullableDbl(track, "tuningNontemperedEnergyRatio"),
+                AverageLoudness = GetNullableDbl(track, "averageLoudness"),
                 BitUsage = ParseBitUsageFromJson(track),
                 HfEnergyRatio = GetNullableDbl(track, "hfEnergyRatio"),
                 HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
@@ -7945,6 +8040,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                                   : (GetStr(track, "sensmeChannelName") is var scnOld && scnOld.Length > 0 ? scnOld : null),
                 SmfmBpm           = GetNullableDbl(track, "smfmBpm"),
             };
+        }
+
+        /// <summary>Read one profile's vote from the nested keyVotes block.
+        /// Returns null when the block or profile is absent (legacy entries).</summary>
+        static KeyVote? ParseKeyVoteFromJson(JsonElement track, string profile)
+        {
+            if (!track.TryGetProperty("keyVotes", out var kv) || kv.ValueKind != JsonValueKind.Object) return null;
+            if (!kv.TryGetProperty(profile, out var v) || v.ValueKind != JsonValueKind.Object) return null;
+            try
+            {
+                return new KeyVote { Key = GetStr(v, "key"), Scale = GetStr(v, "scale"), Strength = GetDbl(v, "strength") };
+            }
+            catch { return null; }
         }
 
         /// <summary>Phase 5 — read the nested hfSpectralStructure block back from
@@ -8299,6 +8407,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", 2);
                 var hpcpEntropy = OptN(root, "tonal.hpcp_entropy.mean");
 
+                // 2026-07-22 wave — key votes (all three tonal profiles), bpm-histogram
+                // peaks (half/double-time evidence), chord tonality, tuning, simple
+                // loudness. All optional; omitted when the extractor didn't emit them.
+                KeyVote? Vote(string profile)
+                {
+                    var vk = NavStr(root, $"tonal.{profile}.key");
+                    var vs = NavStr(root, $"tonal.{profile}.scale");
+                    var vst = NavDbl(root, $"tonal.{profile}.strength", double.NaN);
+                    if (vk == "" || vs == "" || double.IsNaN(vst)) return null;
+                    return new KeyVote { Key = vk, Scale = vs, Strength = Math.Round(vst, 4) };
+                }
+                var keyVoteKrumhansl = Vote("key_krumhansl");
+                var keyVoteTemperley = Vote("key_temperley");
+                var keyVoteEdma = Vote("key_edma");
+                var bpmFirstPeak = OptN(root, "rhythm.bpm_histogram_first_peak_bpm", 1);
+                var bpmFirstPeakWeight = OptN(root, "rhythm.bpm_histogram_first_peak_weight");
+                var bpmSecondPeak = OptN(root, "rhythm.bpm_histogram_second_peak_bpm", 1);
+                var bpmSecondPeakWeight = OptN(root, "rhythm.bpm_histogram_second_peak_weight");
+                var bpmSecondPeakSpread = OptN(root, "rhythm.bpm_histogram_second_peak_spread");
+                var chordsKeyStr = NavStr(root, "tonal.chords_key") is var ckv && ckv.Length > 0 ? ckv : null;
+                var chordsScaleStr = NavStr(root, "tonal.chords_scale") is var csv && csv.Length > 0 ? csv : null;
+                double[]? chordsHistogram = null;
+                var chEl = NavigatePath(root, "tonal.chords_histogram");
+                if (chEl.HasValue && chEl.Value.ValueKind == JsonValueKind.Array)
+                {
+                    chordsHistogram = chEl.Value.EnumerateArray().Select(v => Math.Round(v.GetDouble(), 4)).ToArray();
+                    if (chordsHistogram.Length == 0) chordsHistogram = null;
+                }
+                var chordsNumberRate = OptN(root, "tonal.chords_number_rate");
+                var tuningFrequency = OptN(root, "tonal.tuning_frequency", 2);
+                var tuningEqualTemperedDeviation = OptN(root, "tonal.tuning_equal_tempered_deviation");
+                var tuningDiatonicStrength = OptN(root, "tonal.tuning_diatonic_strength");
+                var tuningNontemperedEnergyRatio = OptN(root, "tonal.tuning_nontempered_energy_ratio");
+                var averageLoudness = OptN(root, "lowlevel.average_loudness");
+
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
                 if (mfccEl.HasValue && mfccEl.Value.ValueKind == JsonValueKind.Array)
@@ -8378,7 +8521,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     BeatsLoudness = beatsLoudness,
                     ChordsStrength = chordsStrength,
                     HpcpCrest = hpcpCrest,
-                    HpcpEntropy = hpcpEntropy
+                    HpcpEntropy = hpcpEntropy,
+                    KeyVoteKrumhansl = keyVoteKrumhansl,
+                    KeyVoteTemperley = keyVoteTemperley,
+                    KeyVoteEdma = keyVoteEdma,
+                    BpmFirstPeak = bpmFirstPeak,
+                    BpmFirstPeakWeight = bpmFirstPeakWeight,
+                    BpmSecondPeak = bpmSecondPeak,
+                    BpmSecondPeakWeight = bpmSecondPeakWeight,
+                    BpmSecondPeakSpread = bpmSecondPeakSpread,
+                    ChordsKey = chordsKeyStr,
+                    ChordsScale = chordsScaleStr,
+                    ChordsHistogram = chordsHistogram,
+                    ChordsNumberRate = chordsNumberRate,
+                    TuningFrequency = tuningFrequency,
+                    TuningEqualTemperedDeviation = tuningEqualTemperedDeviation,
+                    TuningDiatonicStrength = tuningDiatonicStrength,
+                    TuningNontemperedEnergyRatio = tuningNontemperedEnergyRatio,
+                    AverageLoudness = averageLoudness
                 };
             }
             catch (Exception ex)
@@ -9641,6 +9801,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ChordsStrength = sf.ChordsStrength,
                     HpcpCrest = sf.HpcpCrest,
                     HpcpEntropy = sf.HpcpEntropy,
+                    // 2026-07-22 tonal/rhythm wave — preserve across cache hits
+                    KeyVoteKrumhansl = sf.KeyVoteKrumhansl,
+                    KeyVoteTemperley = sf.KeyVoteTemperley,
+                    KeyVoteEdma = sf.KeyVoteEdma,
+                    BpmFirstPeak = sf.BpmFirstPeak,
+                    BpmFirstPeakWeight = sf.BpmFirstPeakWeight,
+                    BpmSecondPeak = sf.BpmSecondPeak,
+                    BpmSecondPeakWeight = sf.BpmSecondPeakWeight,
+                    BpmSecondPeakSpread = sf.BpmSecondPeakSpread,
+                    ChordsKey = sf.ChordsKey,
+                    ChordsScale = sf.ChordsScale,
+                    ChordsHistogram = sf.ChordsHistogram,
+                    ChordsNumberRate = sf.ChordsNumberRate,
+                    TuningFrequency = sf.TuningFrequency,
+                    TuningEqualTemperedDeviation = sf.TuningEqualTemperedDeviation,
+                    TuningDiatonicStrength = sf.TuningDiatonicStrength,
+                    TuningNontemperedEnergyRatio = sf.TuningNontemperedEnergyRatio,
+                    AverageLoudness = sf.AverageLoudness,
                     BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
                     HfEnergyMethod = sf.HfEnergyMethod,

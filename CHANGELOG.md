@@ -3,6 +3,37 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Schema addition — tonal/rhythm extension wave (2026-07-22)
+
+**Additive, NOT breaking** — all new keys are omit-when-missing; tolerant readers
+(MBXHub) are unaffected. New per-track fields, populated on fresh analysis only
+(Essentia-derived → not backfillable; legacy entries lack them until re-analyzed;
+NOT part of the re-extract canary, so existing caches stay valid):
+
+- **`keyVotes`** — nested block with all three tonal key profiles
+  (`krumhansl` / `temperley` / `edma`), each `{key, scale, strength}`.
+  Confidence + cross-profile agreement for Camelot/harmonic mixing.
+- **`bpmFirstPeak` / `bpmFirstPeakWeight` / `bpmSecondPeak` /
+  `bpmSecondPeakWeight` / `bpmSecondPeakSpread`** — tempo-histogram peaks;
+  half/double-time disambiguation.
+- **`chordsKey` / `chordsScale` / `chordsHistogram[24]` / `chordsNumberRate`** —
+  chord-level tonality.
+- **`tuningFrequency` / `tuningEqualTemperedDeviation` / `tuningDiatonicStrength` /
+  `tuningNontemperedEnergyRatio`** — tuning reference (~440 Hz) and temperament.
+- **`averageLoudness`** — simple 0..1 loudness (distinct from the LUFS envelope).
+
+### Schema change — FLAC identity is frame-anchored (2026-07-21)
+
+`audioStreamSha256` / `audioHead64kMd5` for FLAC now cover the audio frames only
+(`*Source: "flac-frames"`), because TagLib's invariant region includes FLAC
+metadata blocks — embedded tag writes (e.g. MBXHub's mood field) drifted the old
+hashes with byte-identical audio. Stored old-style values migrate automatically:
+scans and `--verify --backfill` recognize and upgrade them in place (no
+re-analysis); tag-drifted transition entries are rescued in the default scan
+via an audio-props gate (tier 2.5, `FLAC re-key` summary line).
+
 ## [5.4.0] — 2026-07-11
 
 ### Removed — legacy fingerprint pipeline

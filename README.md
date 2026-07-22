@@ -399,6 +399,22 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
 | `hpcpCrest`      | `tonal.hpcp_crest.mean`        | Crest of 12-bin harmonic pitch class profile — tonal focus (dB)     |
 | `hpcpEntropy`    | `tonal.hpcp_entropy.mean`      | Entropy of HPCP — high ⇒ atonal/chromatic, low ⇒ diatonic           |
 
+### Extended — Tonal/rhythm wave (2026-07-22)
+
+All nullable, populated on fresh analysis only (legacy entries lack them until re-analyzed).
+
+| field | Essentia source | meaning |
+|-------|-----------------|---------|
+| `keyVotes` | `tonal.key_{krumhansl,temperley,edma}` | Nested block: all three key-profile votes, each `{key, scale, strength}` — confidence + agreement for harmonic mixing (flat `key`/`mode` come from edma) |
+| `bpmFirstPeak` / `bpmFirstPeakWeight` | `rhythm.bpm_histogram_first_peak_*` | Dominant tempo-histogram peak + its weight |
+| `bpmSecondPeak` / `bpmSecondPeakWeight` / `bpmSecondPeakSpread` | `rhythm.bpm_histogram_second_peak_*` | Secondary peak — half/double-time ambiguity evidence |
+| `chordsKey` / `chordsScale` | `tonal.chords_key` / `chords_scale` | Chord-level tonality (vs the key-profile view) |
+| `chordsHistogram` | `tonal.chords_histogram` | 24-bin chord distribution |
+| `chordsNumberRate` | `tonal.chords_number_rate` | Chord vocabulary richness |
+| `tuningFrequency` | `tonal.tuning_frequency` | Reference tuning in Hz (~440) |
+| `tuningEqualTemperedDeviation` / `tuningDiatonicStrength` / `tuningNontemperedEnergyRatio` | `tonal.tuning_*` | Temperament deviation / diatonic strength / non-tempered energy |
+| `averageLoudness` | `lowlevel.average_loudness` | Simple 0..1 loudness (distinct from the LUFS envelope) |
+
 ## Output Format
 
 `mbxmoods.json`:
