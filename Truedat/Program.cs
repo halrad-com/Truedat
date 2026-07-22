@@ -1268,8 +1268,9 @@ namespace Truedat
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
                 Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
-                Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
-                Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
+                Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
+                Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
+                Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
@@ -1633,6 +1634,22 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
+                    if (!_includePodcasts)
+                    {
+                        var afPodcastMarker = PodcastTagSniffer.TryDetect(analyzeFilePath!);
+                        if (afPodcastMarker != null)
+                        {
+                            var afPodcastSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                                ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
+                                : Environment.CurrentDirectory;
+                            var afPodcastSkippedPath = Path.Combine(afPodcastSkippedDir, "mbxmoods-skipped.csv");
+                            AppendSkipped(afPodcastSkippedPath, analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), $"podcast (file marker: {afPodcastMarker})");
+                            Console.Error.WriteLine($"[skipped podcast] {analyzeFilePath} (file marker: {afPodcastMarker})");
+                            Environment.ExitCode = 0;
+                            return;
+                        }
+                    }
+
                     EnsureStagedSrc();  // open if a no-moods scan skipped the cache hierarchy
                     var afResults = RunSourceWorkers(
                         afEssentiaExe, afStagedSrc!, afFileSize, analyzeFilePath!, knownDurationSec: 0,
@@ -2196,6 +2213,18 @@ namespace Truedat
                             }
                         }
 
+                        if (!_includePodcasts)
+                        {
+                            var flPodcastMarker = PodcastTagSniffer.TryDetect(filePath);
+                            if (flPodcastMarker != null)
+                            {
+                                AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"podcast (file marker: {flPodcastMarker})");
+                                Console.Error.WriteLine($"[skipped podcast] {Path.GetFileName(filePath)} (file marker: {flPodcastMarker})");
+                                Interlocked.Increment(ref flDsdSkipped);   // reuse the skip counter fl already reports
+                                return;
+                            }
+                        }
+
                         // Cache miss — full Essentia + identity ride-along on the staged copy.
                         EnsureStagedSrc();
                         var flResults = RunSourceWorkers(
@@ -2393,8 +2422,9 @@ namespace Truedat
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
                 Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
-                Console.WriteLine("                      labels podcast — Podcast=true or Genre=Podcast — listed in");
-                Console.WriteLine("                      mbxmoods-skipped.csv). Also keeps podcast entries under --migrate.");
+                Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
+                Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
+                Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
@@ -2658,6 +2688,7 @@ namespace Truedat
             int skipped = 0;
             int dsdSkipped = 0;
             int missingSkipped = 0;
+            int podcastFileSkipped = 0;
             int failed = 0;
             int timedOut = 0;
             int processed = 0;
@@ -3065,6 +3096,25 @@ namespace Truedat
                             return;
                         }
 
+                        // A1 — file podcast-marker sniff (spec 2026-07-22): explicit
+                        // embedded markers catch podcast downloads the XML never
+                        // labeled. Cache-misses only — this file was about to eat
+                        // minutes of Essentia; a 128 KB header read is free by
+                        // comparison. --include-podcasts bypasses.
+                        if (!_includePodcasts)
+                        {
+                            var podcastMarker = PodcastTagSniffer.TryDetect(scanPath);
+                            if (podcastMarker != null)
+                            {
+                                AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), $"podcast (file marker: {podcastMarker})");
+                                Console.WriteLine($"[skipped podcast] {t.Artist} - {t.Name} (file marker: {podcastMarker})");
+                                Interlocked.Increment(ref podcastFileSkipped);
+                                EtaDrainNewPool();
+                                trackClass = "skip·podcast";
+                                return;
+                            }
+                        }
+
                         // Cache miss — full Essentia + ride-along, all reads through the
                         // staged copy (FIX 4 / FIX 7). Wall-clock per track ≈ max(analysis,
                         // slowest-task).
@@ -3218,9 +3268,11 @@ namespace Truedat
                 Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
             if (missingSkipped > 0)
                 Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
+            if (podcastFileSkipped > 0)
+                Console.WriteLine($"  Podcast:    {podcastFileSkipped}  (file markers — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + failed}");
+            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + podcastFileSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
