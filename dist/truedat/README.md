@@ -121,7 +121,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           genre, codec, confidence, method) next to the moods file and prints
                           a count + preview. The speech verdict is still -untuned, so real
                           music with talk-like shape (ambient, field recordings, spoken
-                          intros) can appear here; review before purging.
+                          intros) can appear here; review before pruning.
+  --list-missing-smfm [path]
+                          Read-only: list catalog entries carrying no Sony SMFM (12-TONE)
+                          data, with overall coverage (present / total / %). Writes
+                          mbxmoods-smfm-missing.csv (path, artist, title, album, codec).
+                          SMFM is embedded in the file by Sony tooling and only READ by
+                          truedat — a rescan will not add it, so this is a "which files
+                          still need Sony tagging" report, not a truedat gap. For that
+                          reason it is deliberately absent from the --stats Recommended
+                          block, which only ever names gaps a truedat command can close.
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended
@@ -556,6 +565,8 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 ```
 
 When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Music Center — truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant raw slot index), and `smfmBpm` (Sony's tempo estimate). These are nullable and omitted when absent. The per-slot *channel names* are deliberately **not** emitted: a 2026-06-27 live device test refuted the old slot→name mapping (the device's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so any interpreted mood label is derived downstream by MBXHub, not by truedat. These keys were renamed from `sensme*` on 2026-06-28 — `--migrate` converts existing libraries (with backup), and the reader still accepts the old keys for un-migrated files.
+
+`--list-missing-smfm [path]` reports which catalog entries carry no SMFM block, with overall coverage, to `mbxmoods-smfm-missing.csv`. Because truedat only *reads* SMFM and never writes it, a missing block means the file has not been through Sony's tagger — a rescan cannot close that gap, which is why this report is a standalone mode rather than an entry in the `--stats` **Recommended** block.
 
 The SMFM format itself is documented in [`smfm-tools/`](smfm-tools/) — an unofficial wire-format spec, a confidence-tiered state of knowledge (including the claims device testing refuted), an SMFM-vs-Essentia comparison, and standalone Python tooling for extracting SMFM data outside truedat.
 
