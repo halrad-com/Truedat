@@ -1162,7 +1162,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -1227,7 +1227,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -4692,6 +4692,44 @@ namespace Truedat
             return (node as JsonValue)?.TryGetValue<string>(out var s) == true ? s : null;
         }
 
+        static double? SafeDbl(JsonNode? node, params string[] path)
+        {
+            foreach (var seg in path)
+            {
+                node = (node as JsonObject)?[seg];
+                if (node == null) return null;
+            }
+            return (node as JsonValue)?.TryGetValue<double>(out var d) == true ? d : null;
+        }
+
+        /// <summary>Recompute speechLikely for a raw JSON track node, so --migrate prunes
+        /// on the CURRENT thresholds rather than on whatever verdict happened to be
+        /// persisted. See the call site for why trusting the stored block is unsafe.
+        ///
+        /// Reads exactly the inputs ComputeTruedatVerdict's speech block consumes. If that
+        /// signal list changes, this must change with it — the self-test
+        /// "migrate speech recompute matches the TrackEntry path" is the drift guard.</summary>
+        static string RecomputeSpeechLikely(JsonNode? track)
+        {
+            var f = new TrackFeatures
+            {
+                Danceability       = SafeDbl(track, "danceability") ?? 0,
+                ChordsStrength     = SafeDbl(track, "chordsStrength"),
+                SilenceRate30dB    = SafeDbl(track, "silenceRate30dB"),
+                ZeroCrossingRate   = SafeDbl(track, "zeroCrossingRate") ?? 0,
+                BpmFirstPeakWeight = SafeDbl(track, "bpmFirstPeakWeight"),
+            };
+            var edmaStrength = SafeDbl(track, "keyVotes", "edma", "strength");
+            if (edmaStrength.HasValue)
+                f.KeyVoteEdma = new KeyVote
+                {
+                    Key = SafeStr(track, "keyVotes", "edma", "key") ?? "",
+                    Scale = SafeStr(track, "keyVotes", "edma", "scale") ?? "",
+                    Strength = edmaStrength.Value,
+                };
+            return ComputeTruedatVerdict("", new TrackEntry { Features = f }).SpeechLikely;
+        }
+
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
@@ -4748,18 +4786,36 @@ namespace Truedat
                     .ToList();
             foreach (var key in podcastKeys) tracks.Remove(key);
 
-            // Speech-likely purge (spec 2026-07-22): entries whose stored verdict
-            // is confident talk. Same gate as the genre purge; the verdict was
-            // written by the scan, so this acts on evidence, not heuristics.
-            var speechKeys = _includePodcasts
-                ? new List<string>()
-                : tracks
-                    .Where(kv => string.Equals(SafeStr(kv.Value, "truedat", "speechLikely"), "yes", StringComparison.OrdinalIgnoreCase))
-                    .Select(kv => kv.Key)
-                    .ToList();
+            // Speech-likely prune (spec 2026-07-22): entries whose verdict is confident
+            // talk. The verdict is RECOMPUTED here from each entry's stored features —
+            // it is deliberately NOT read from the persisted truedat.speechLikely block.
+            //
+            // That block was written by whichever build last saved the catalog, so it
+            // goes stale the moment the thresholds change. --list-speech and the --stats
+            // advisor both recompute live (ComputeTruedatVerdict). If migrate trusted the
+            // stored value instead, the reviewer and the pruner would consult different
+            // sources of truth: the operator could review a clean --list-speech and still
+            // have migrate prune the very tracks it had just cleared. That is exactly the
+            // failure the review workflow exists to prevent (2026-07-23 review, C1).
+            // Single source of truth = the features.
+            var speechKeys = new List<string>();
+            int staleSpeech = 0;
+            if (!_includePodcasts)
+            {
+                foreach (var kv in tracks)
+                {
+                    bool live = string.Equals(RecomputeSpeechLikely(kv.Value), "yes", StringComparison.OrdinalIgnoreCase);
+                    if (live) { speechKeys.Add(kv.Key); continue; }
+                    // Stored said talk, the current thresholds say otherwise — this entry
+                    // is only surviving because migrate recomputes. Worth reporting: it is
+                    // the operator's proof that a threshold fix actually reached them.
+                    if (string.Equals(SafeStr(kv.Value, "truedat", "speechLikely"), "yes", StringComparison.OrdinalIgnoreCase))
+                        staleSpeech++;
+                }
+            }
             foreach (var key in speechKeys) tracks.Remove(key);
             if (_audit)
-                foreach (var key in speechKeys) Console.WriteLine($"  [removed speech-likely] {key}");
+                foreach (var key in speechKeys) Console.WriteLine($"  [pruned speech-likely] {key}");
 
             Console.WriteLine($"Tracks: {total}");
             if (stripped > 0)
@@ -4773,7 +4829,9 @@ namespace Truedat
             if (podcastKeys.Count > 0)
                 Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
             if (speechKeys.Count > 0)
-                Console.WriteLine($"Removed speech-likely entries: {speechKeys.Count}");
+                Console.WriteLine($"Pruned speech-likely entries: {speechKeys.Count}");
+            if (staleSpeech > 0)
+                Console.WriteLine($"Kept {staleSpeech} entries whose stored speech verdict was stale (recomputed: not talk)");
 
             if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0 && podcastKeys.Count == 0 && speechKeys.Count == 0)
             {
@@ -7487,15 +7545,54 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // tightening added: Beatles "Sgt. Pepper Effects Tape 2" (0.657),
                 // Southern Culture "For Lovers Only (Reprise)" (0.698).
                 // All must demote to "unknown", not "yes".
+                //
+                // The panel below reproduces the REAL incident shape (Hot House measured
+                // chords 0.447, silence 0.997, zcr 0.129, bpmFirstPeakWeight 0, edma
+                // strength ~0.49 -> score 0.95 / maxWeight 1.25 = 0.76 -> "yes"). The
+                // earlier 4-signal panel scored only 0.60/0.90 = 0.667, which returns
+                // "unknown" BEFORE the veto is ever consulted — so for the >=0.7 cases it
+                // asserted nothing and would have passed with the veto deleted
+                // (2026-07-23 review, I1). All six signals are supplied here so every
+                // parametrized value genuinely exercises the demotion path.
+                TrackEntry MkInstrumental(double dance) => new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        Danceability = dance, ChordsStrength = 0.44,
+                        SilenceRate30dB = 0.99, ZeroCrossingRate = 0.13,
+                        BpmFirstPeakWeight = 0.0,
+                        KeyVoteEdma = new KeyVote { Key = "A", Scale = "minor", Strength = 0.49 },
+                    },
+                };
                 foreach (var dance in new[] { 0.657, 0.698, 0.78, 1.09, 1.10 })
                 {
-                    var instr = ComputeTruedatVerdict("i", Mk(dance, 0.44, 0.99, 0.13));
+                    var instr = ComputeTruedatVerdict("i", MkInstrumental(dance));
                     Assert(instr.SpeechLikely != "yes", $"speech: instrumental music (danceability={dance:F2}) must not reach yes");
                 }
-                // ...but genuine speech (danceability at/near 0) still must reach "yes",
+                // The load-bearing half of that pair: the SAME panel with danceability at
+                // 0 must still reach "yes". Identical inputs but for danceability proves
+                // the veto is what demotes the cases above — without this, tightening the
+                // gate into uselessness would still pass every assertion.
+                Assert(ComputeTruedatVerdict("p0", MkInstrumental(0.0)).SpeechLikely == "yes",
+                    "speech: same panel at danceability 0 DOES reach yes (proves the veto is load-bearing)");
+                // ...and genuine speech on the plain 4-signal panel still reaches "yes",
                 // otherwise the gate has neutered the signal entirely.
                 var spoken = ComputeTruedatVerdict("p", Mk(0.0, 0.43, 1.0, 0.27));
                 Assert(spoken.SpeechLikely == "yes", "speech: genuine spoken word (danceability 0) still -> yes");
+
+                // --- C1 drift guard: --migrate recomputes from raw JSON -------------
+                // RecomputeSpeechLikely must agree with the TrackEntry path, or migrate
+                // prunes on a different verdict than --list-speech displays.
+                {
+                    var spokenJson = JsonNode.Parse("{\"danceability\":0.0,\"chordsStrength\":0.43,\"silenceRate30dB\":1.0,\"zeroCrossingRate\":0.27}");
+                    Assert(RecomputeSpeechLikely(spokenJson) == spoken.SpeechLikely,
+                        "migrate speech recompute matches the TrackEntry path");
+                    // The actual C1 regression: a stale stored "yes" must NOT prune an
+                    // entry whose features say otherwise under current thresholds.
+                    var staleJson = JsonNode.Parse("{\"danceability\":1.09,\"chordsStrength\":0.44,\"silenceRate30dB\":0.99,\"zeroCrossingRate\":0.13,\"bpmFirstPeakWeight\":0.0,\"keyVotes\":{\"edma\":{\"key\":\"A\",\"scale\":\"minor\",\"strength\":0.49}},\"truedat\":{\"speechLikely\":\"yes\"}}");
+                    Assert(RecomputeSpeechLikely(staleJson) != "yes",
+                        "migrate ignores a stale stored 'yes' when current thresholds disagree");
+                }
             }
 
             // --- IsTagsOnlyChange acceptance envelope --------------------------------

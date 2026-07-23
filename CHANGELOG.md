@@ -35,6 +35,26 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   `truedat-speech-v1.2-untuned-2026-07-22`. Verdict is computed at write time,
   so this applies catalog-wide on the next save with **no rescan**.
 
+### Fixed — `--migrate` pruned on a stale verdict (2026-07-23)
+
+- `--migrate` read the **persisted** `truedat.speechLikely` when deciding what to
+  prune, while `--list-speech` and the `--stats` advisor **recompute** the verdict
+  live from stored features. On any catalog last saved by an older build the two
+  disagreed: `--list-speech` would correctly clear an instrumental track while
+  `--migrate` still pruned it from the frozen `"yes"` — silently defeating the
+  review-before-prune workflow on exactly the catalogs that needed it. `--migrate`
+  now recomputes from features (single source of truth) and reports
+  `Kept N entries whose stored speech verdict was stale`. Verified against a real
+  72,123-track catalog: prunes 2, keeps 4 that the previous build would have taken.
+- `--list-speech` / `--list-missing-smfm` added to the `--chunk` and `--transcode`
+  mutual-exclusion guards, matching every other read-only mode.
+- Speech regression tests reworked: the instrumental cases now supply the full
+  six-signal panel that reproduces the real incident, so all five danceability
+  values genuinely exercise the veto (three of them previously returned
+  `"unknown"` before the veto was consulted and would have passed with the gate
+  deleted). Added a paired assertion that the *same* panel at danceability 0 still
+  reaches `"yes"`, proving the veto is what demotes the others.
+
 ### Changed — terminology (2026-07-22)
 
 - Documentation and console output now say `--migrate` **prunes catalog
