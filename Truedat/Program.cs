@@ -214,7 +214,7 @@ namespace Truedat
         public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
-        public string SpeechMethod = "truedat-speech-v1.1-untuned-2026-07-22";  // rev-1.1: adds the danceability music veto (spares instrumental music); still untuned — calibrate against a labeled talk corpus before tightening further
+        public string SpeechMethod = "truedat-speech-v1.2-untuned-2026-07-22";  // rev-1.2: danceability music veto tightened to < 0.50 (spares instrumental music); still untuned — calibrate against a labeled talk corpus before tightening further
     }
 
     class TrackEntry
@@ -1260,7 +1260,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
-                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (what --migrate purges) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -2445,7 +2445,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
-                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (what --migrate purges) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -5132,7 +5132,8 @@ namespace Truedat
         }
 
         /// <summary>Read-only: list the entries whose stored features recompute to a
-        /// confident speechLikely=="yes" verdict — the set --migrate purges. Writes
+        /// confident speechLikely=="yes" verdict — the set --migrate prunes from the
+        /// catalog (mbxmoods.json entries only; audio files are never touched). Writes
         /// mbxmoods-speech.csv (path,artist,title,album,genre,codec,speechConfidence,method)
         /// next to the moods file and prints a count + first-20 preview. The verdict is
         /// recomputed via ComputeTruedatVerdict so it matches the --stats advisor exactly
@@ -5167,7 +5168,8 @@ namespace Truedat
                     Console.WriteLine($"  ... {hits.Count - preview:N0} more (see CSV)");
                 Console.WriteLine();
                 Console.WriteLine($"CSV:    {csvPath}");
-                Console.WriteLine("Review, then purge with: truedat --migrate   (or keep them all with --include-podcasts)");
+                Console.WriteLine("Review, then prune these entries with: truedat --migrate   (or keep them all with --include-podcasts)");
+                Console.WriteLine("Pruning removes the mbxmoods.json entries only — your audio files are never touched.");
             }
         }
 
@@ -5328,14 +5330,16 @@ namespace Truedat
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
-            // Speech-likely is the one recommendation that DELETES, and the verdict is
-            // still untuned — so the advisor sends the operator to the read-only lister
-            // first, never straight at the destructive command. (2026-07-22: a bare
-            // "-> --migrate" here led to 3 real instrumental tracks being purged.)
+            // Speech-likely is the one recommendation that PRUNES catalog entries, and
+            // the verdict is still untuned — so the advisor sends the operator to the
+            // read-only lister first, never straight at the pruning command.
+            // (2026-07-22: a bare "-> --migrate" here cost 3 real instrumental tracks
+            // their catalog entries.) Note this prunes ENTRIES from mbxmoods.json only —
+            // truedat never touches the audio files themselves.
             if (!_includePodcasts && s.SpeechYes > 0)
             {
-                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --list-speech    (review FIRST — deletes on --migrate)");
-                rec.Add($"{"",-8} then purge with --migrate, or keep all with --include-podcasts");
+                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --list-speech    (review FIRST — --migrate prunes these entries)");
+                rec.Add($"{"",-8} then prune with --migrate, or keep all with --include-podcasts");
             }
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
@@ -7398,15 +7402,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(sparse.SpeechLikely == "n/a" || sparse.SpeechLikely == "unknown", "speech: sparse features -> n/a or unknown");
                 // Rev-1 safety gate: a sine-tone/ambient bed shares talk's shape on
                 // danceability/chords/silence but sits LOW on zcr — must NOT reach
-                // "yes" (--migrate deletes on "yes").
+                // "yes" (--migrate prunes the catalog entry on "yes").
                 var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.35, 0.05));
                 Assert(tone.SpeechLikely == "unknown", "speech: tone-shaped features (low zcr) -> unknown, not yes");
-                // Rev-1.1 music veto: sparse/live INSTRUMENTAL music matches talk on
+                // Rev-1.2 music veto: sparse/live INSTRUMENTAL music matches talk on
                 // chords/silence/zcr but is unmistakably musical on danceability.
-                // Real cases that --migrate wrongly deleted before this gate existed:
+                // Real cases that --migrate wrongly pruned before this gate existed:
                 // Charlie Parker "Hot House" (1.09), NIN "Burn" live (1.10),
-                // Travis "Outro" (0.78). All must demote to "unknown", not "yes".
-                foreach (var dance in new[] { 0.78, 1.09, 1.10 })
+                // Travis "Outro" (0.78) — plus the 0.50-0.70 band the rev-1.2
+                // tightening added: Beatles "Sgt. Pepper Effects Tape 2" (0.657),
+                // Southern Culture "For Lovers Only (Reprise)" (0.698).
+                // All must demote to "unknown", not "yes".
+                foreach (var dance in new[] { 0.657, 0.698, 0.78, 1.09, 1.10 })
                 {
                     var instr = ComputeTruedatVerdict("i", Mk(dance, 0.44, 0.99, 0.13));
                     Assert(instr.SpeechLikely != "yes", $"speech: instrumental music (danceability={dance:F2}) must not reach yes");
@@ -8130,23 +8137,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // signal to have voted speech. Tones/drones/ambient share talk's
                 // no-rhythm/no-chords/high-silence shape but sit LOW on zcr, while
                 // real speech sits high — without this gate a sine tone reaches
-                // "yes", and --migrate deletes on "yes". Demote to "unknown", never
+                // "yes", and --migrate prunes the catalog entry on "yes". Demote to "unknown", never
                 // to "no" (the content is genuinely not-music-shaped).
                 if (v.SpeechLikely == "yes" && zcrVote != 1)
                     v.SpeechLikely = "unknown";
-                // Rev-1.1 music veto: "yes" additionally requires the danceability
-                // signal to itself indicate talk (< 0.7, its own talk-vote threshold).
+                // Rev-1.2 music veto: "yes" additionally requires danceability < 0.50.
                 // Sparse / live / free-form INSTRUMENTAL music craters on the rest of
                 // the panel exactly like speech does — no stable tempo peak, weak
                 // chords, weak key, high silence, high zcr — so those signals alone
                 // can't tell a bebop sax solo from a spoken word. Danceability can:
-                // measured against 6 confirmed cases on the live library 2026-07-22,
-                // genuine speech sits at 0.00 (Wiggles "Food Poem" 0.00, alert tone
-                // 0.00) while every real-music false positive sat well above the talk
-                // threshold (Charlie Parker "Hot House" 1.09, NIN "Burn" live 1.10,
-                // Travis "Outro" 0.78). Without this gate --migrate deleted all three.
+                // measured against confirmed cases 2026-07-22, genuine speech sits at
+                // 0.00 (Wiggles "Food Poem", alert tone) while real-music false
+                // positives ran 0.66-1.10 (Beatles "Sgt. Pepper Effects Tape 2" 0.66,
+                // Southern Culture "For Lovers Only (Reprise)" 0.70, Travis "Outro"
+                // 0.78, Charlie Parker "Hot House" 1.09, NIN "Burn" live 1.10).
+                // Without this gate --migrate pruned the last three from the catalog.
+                //
+                // 0.50 is deliberately TIGHTER than the danceability signal's own
+                // talk-vote threshold (0.70): the 0.50-0.70 band held real music, and
+                // this gate guards a pruning action, so the margin belongs on the side
+                // of keeping music. Genuine speech sits at 0.00, nowhere near 0.50, so
+                // the tightening costs no real recall.
                 // Demote to "unknown", never "no" — same reasoning as the zcr gate.
-                if (v.SpeechLikely == "yes" && f.Danceability >= 0.7)
+                if (v.SpeechLikely == "yes" && f.Danceability >= 0.50)
                     v.SpeechLikely = "unknown";
                 if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} danceability={f.Danceability:F2} -> verdict={v.SpeechLikely}");
             }
