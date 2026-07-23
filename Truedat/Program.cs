@@ -214,7 +214,7 @@ namespace Truedat
         public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
-        public string SpeechMethod = "truedat-speech-v1-untuned-2026-07-22";  // rev-1: conservative thresholds, calibrate against the P: catalog before tightening
+        public string SpeechMethod = "truedat-speech-v1.1-untuned-2026-07-22";  // rev-1.1: adds the danceability music veto (spares instrumental music); still untuned — calibrate against a labeled talk corpus before tightening further
     }
 
     class TrackEntry
@@ -5328,8 +5328,15 @@ namespace Truedat
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
+            // Speech-likely is the one recommendation that DELETES, and the verdict is
+            // still untuned — so the advisor sends the operator to the read-only lister
+            // first, never straight at the destructive command. (2026-07-22: a bare
+            // "-> --migrate" here led to 3 real instrumental tracks being purged.)
             if (!_includePodcasts && s.SpeechYes > 0)
-                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --migrate");
+            {
+                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --list-speech    (review FIRST — deletes on --migrate)");
+                rec.Add($"{"",-8} then purge with --migrate, or keep all with --include-podcasts");
+            }
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
             {
@@ -7394,6 +7401,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // "yes" (--migrate deletes on "yes").
                 var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.35, 0.05));
                 Assert(tone.SpeechLikely == "unknown", "speech: tone-shaped features (low zcr) -> unknown, not yes");
+                // Rev-1.1 music veto: sparse/live INSTRUMENTAL music matches talk on
+                // chords/silence/zcr but is unmistakably musical on danceability.
+                // Real cases that --migrate wrongly deleted before this gate existed:
+                // Charlie Parker "Hot House" (1.09), NIN "Burn" live (1.10),
+                // Travis "Outro" (0.78). All must demote to "unknown", not "yes".
+                foreach (var dance in new[] { 0.78, 1.09, 1.10 })
+                {
+                    var instr = ComputeTruedatVerdict("i", Mk(dance, 0.44, 0.99, 0.13));
+                    Assert(instr.SpeechLikely != "yes", $"speech: instrumental music (danceability={dance:F2}) must not reach yes");
+                }
+                // ...but genuine speech (danceability at/near 0) still must reach "yes",
+                // otherwise the gate has neutered the signal entirely.
+                var spoken = ComputeTruedatVerdict("p", Mk(0.0, 0.43, 1.0, 0.27));
+                Assert(spoken.SpeechLikely == "yes", "speech: genuine spoken word (danceability 0) still -> yes");
             }
 
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
@@ -8113,7 +8134,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // to "no" (the content is genuinely not-music-shaped).
                 if (v.SpeechLikely == "yes" && zcrVote != 1)
                     v.SpeechLikely = "unknown";
-                if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.SpeechLikely}");
+                // Rev-1.1 music veto: "yes" additionally requires the danceability
+                // signal to itself indicate talk (< 0.7, its own talk-vote threshold).
+                // Sparse / live / free-form INSTRUMENTAL music craters on the rest of
+                // the panel exactly like speech does — no stable tempo peak, weak
+                // chords, weak key, high silence, high zcr — so those signals alone
+                // can't tell a bebop sax solo from a spoken word. Danceability can:
+                // measured against 6 confirmed cases on the live library 2026-07-22,
+                // genuine speech sits at 0.00 (Wiggles "Food Poem" 0.00, alert tone
+                // 0.00) while every real-music false positive sat well above the talk
+                // threshold (Charlie Parker "Hot House" 1.09, NIN "Burn" live 1.10,
+                // Travis "Outro" 0.78). Without this gate --migrate deleted all three.
+                // Demote to "unknown", never "no" — same reasoning as the zcr gate.
+                if (v.SpeechLikely == "yes" && f.Danceability >= 0.7)
+                    v.SpeechLikely = "unknown";
+                if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} danceability={f.Danceability:F2} -> verdict={v.SpeechLikely}");
             }
 
             return v;
