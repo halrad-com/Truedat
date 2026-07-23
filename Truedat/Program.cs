@@ -934,7 +934,8 @@ namespace Truedat
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
-            bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate purges them)
+            bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate prunes them)
+            bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
@@ -1026,6 +1027,7 @@ namespace Truedat
                 else if (canonical == "stats") statsMode = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
+                else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -1261,6 +1263,7 @@ namespace Truedat
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data + coverage -> mbxmoods-smfm-missing.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -1473,6 +1476,31 @@ namespace Truedat
                 var speechTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 LoadExistingMoods(speechPath!, speechTracks);
                 RunListSpeech(speechPath!, speechTracks.Values);
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --list-missing-smfm: read-only. Lists catalog entries carrying no Sony
+            // SMFM (12-TONE) data, so the operator can see which files still need Sony
+            // tagging. Path resolution mirrors --stats / --list-speech. Writes only its
+            // CSV; the moods file is untouched.
+            if (listSmfmMissingMode)
+            {
+                string? smfmPath = analyzeFileMoods ?? xmlPath;
+                if (string.IsNullOrEmpty(smfmPath))
+                    smfmPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
+                else if (Directory.Exists(smfmPath))
+                    smfmPath = Path.Combine(smfmPath, "mbxmoods.json");
+                if (!File.Exists(smfmPath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {smfmPath}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var smfmTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(smfmPath!, smfmTracks);
+                RunListMissingSmfm(smfmPath!, smfmTracks.Values);
                 Environment.ExitCode = 0;
                 return;
             }
@@ -2446,6 +2474,7 @@ namespace Truedat
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
                 Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data + coverage -> mbxmoods-smfm-missing.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
                 Console.WriteLine("                      Default fills BOTH tiers: identity (audioStreamSha256, fileMd5 with --file-md5,");
@@ -5170,6 +5199,51 @@ namespace Truedat
                 Console.WriteLine($"CSV:    {csvPath}");
                 Console.WriteLine("Review, then prune these entries with: truedat --migrate   (or keep them all with --include-podcasts)");
                 Console.WriteLine("Pruning removes the mbxmoods.json entries only — your audio files are never touched.");
+            }
+        }
+
+        /// <summary>Read-only: list catalog entries with no Sony SMFM (12-TONE) data.
+        /// Writes mbxmoods-smfm-missing.csv (path,artist,title,album,codec) next to the
+        /// moods file and prints coverage + a first-20 preview.
+        ///
+        /// NOTE this is deliberately NOT wired into the --stats Recommended block. SMFM
+        /// is embedded in the file by Sony tooling and only READ by truedat (fresh every
+        /// scan, never cached) — there is no truedat command that adds it, so a rescan
+        /// cannot close this gap. The advisor only ever points at gaps a command fixes;
+        /// listing this one there would be the same defect fixed in d146a04.</summary>
+        static void RunListMissingSmfm(string moodsPath, IEnumerable<TrackEntry> entries)
+        {
+            var missing = new List<(string Path, string Artist, string Title, string Album, string Codec)>();
+            int total = 0, present = 0;
+            foreach (var e in entries)
+            {
+                if (e?.Features == null) continue;
+                total++;
+                if (e.Features.HasSmfm) { present++; continue; }
+                missing.Add((e.Features.FilePath ?? "", e.Features.Artist, e.Features.Title,
+                    e.Features.Album, e.FingerprintV1?.Codec ?? ""));
+            }
+            missing.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
+
+            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm-missing.csv");
+            var sb = new StringBuilder();
+            sb.AppendLine("path,artist,title,album,codec");
+            foreach (var m in missing)
+                sb.AppendLine($"{CsvEscape(m.Path)},{CsvEscape(m.Artist)},{CsvEscape(m.Title)},{CsvEscape(m.Album)},{CsvEscape(m.Codec)}");
+            File.WriteAllText(csvPath, sb.ToString());
+
+            int pct = total > 0 ? (int)(100.0 * present / total) : 0;
+            Console.WriteLine($"Sony SMFM (12-TONE): {present:N0} of {total:N0} tracks ({pct}%) — {missing.Count:N0} missing");
+            if (missing.Count > 0)
+            {
+                int preview = Math.Min(20, missing.Count);
+                foreach (var m in missing.Take(preview))
+                    Console.WriteLine($"  {m.Path}");
+                if (missing.Count > preview)
+                    Console.WriteLine($"  ... {missing.Count - preview:N0} more (see CSV)");
+                Console.WriteLine();
+                Console.WriteLine($"CSV:    {csvPath}");
+                Console.WriteLine("SMFM is embedded by Sony tooling and only read by truedat — rescanning will NOT add it.");
             }
         }
 

@@ -5,6 +5,45 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added — read-only review surfaces (2026-07-22)
+
+- **`--list-speech [path]`** — lists the entries whose verdict is
+  `speechLikely=yes`, i.e. exactly the set `--migrate` prunes, so they can be
+  reviewed *before* pruning. Writes `mbxmoods-speech.csv` (path, artist, title,
+  album, genre, codec, confidence, method) plus a console count and preview.
+  Read-only: writes the CSV and nothing else. The `--stats` **Recommended**
+  block now routes through this instead of naming `--migrate` directly — the
+  bare recommendation cost three real tracks their catalog entries.
+- **`--list-missing-smfm [path]`** — lists catalog entries carrying no Sony
+  SMFM (12-TONE) block, with coverage (present / total / %), to
+  `mbxmoods-smfm-missing.csv`. truedat only *reads* SMFM, so a missing block
+  means the file never went through Sony's tagger and no rescan can add it;
+  for that reason this is a standalone mode and deliberately absent from the
+  **Recommended** block, which only names gaps a truedat command can close.
+
+### Fixed — speech verdict false positives on instrumental music (2026-07-22)
+
+- `speechLikely` now also requires **`danceability < 0.50`** before returning
+  `"yes"`. Sparse, live and free-form *instrumental* music craters on every
+  other signal in the panel exactly like speech does — no stable tempo peak,
+  weak chords, weak key strength, high silence, high zero-crossing rate — so
+  those signals alone cannot separate a bebop sax solo from a spoken word.
+  Danceability can: genuine speech measures 0.00, while real-music false
+  positives measured 0.66–1.10. Without this gate `--migrate` pruned Charlie
+  Parker "Hot House", Nine Inch Nails "Burn" (live) and Travis "Outro" from a
+  live catalog. Demotes to `"unknown"`, never `"no"`. Method tag →
+  `truedat-speech-v1.2-untuned-2026-07-22`. Verdict is computed at write time,
+  so this applies catalog-wide on the next save with **no rescan**.
+
+### Changed — terminology (2026-07-22)
+
+- Documentation and console output now say `--migrate` **prunes catalog
+  entries**, not "deletes". `--migrate` removes entries from `mbxmoods.json`
+  and never touches audio files; the old wording was both alarming and
+  inaccurate. Genuine file-deletion references (staging cleanup, temp files,
+  removing duplicates inside MusicBee) are unchanged, as is the standing
+  guarantee that truedat never deletes or modifies audio files.
+
 ### Added — scan traceability & self-healing (2026-07-21/22)
 
 - **Skip ledger covers every pre-scan drop.** `mbxmoods-skipped.csv` now records
