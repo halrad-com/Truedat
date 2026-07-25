@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 
 namespace Truedat
 {
@@ -18,6 +17,9 @@ namespace Truedat
         public string MaxDurationSource = "default";
         public int LongTrackSecs = 1800;
         public int ReviewCap = 500;
+        /// <summary>Existence check for a track's local file; null disables the check (which is
+        /// what keeps the existing self-tests filesystem-free).</summary>
+        public Func<string, bool>? FileExists;
         /// <summary>Bounded header read for embedded podcast markers; null disables sniffing.</summary>
         public Func<string, string?>? SniffMarkers;
         /// <summary>Measured analysis thread-seconds per audio-second. 0 = nothing measured.</summary>
@@ -92,6 +94,9 @@ namespace Truedat
 
                 // --- structural: cannot analyze, not reviewable ---
                 if (t.IsRemote) { Bump("streamUrl"); continue; }
+                // A remote stream URL has no local file, so this check must come after the
+                // IsRemote check above — otherwise every stream would misclassify as "missing".
+                if (input.FileExists != null && !input.FileExists(loc)) { Bump("missing"); continue; }
                 var ext = Program.GetExtensionSafe(loc);
                 if (Program.VideoExtensions.Contains(ext)) { Bump("video"); continue; }
                 if (Program.NonAudioExtensions.Contains(ext)) { Bump("nonAudio"); continue; }

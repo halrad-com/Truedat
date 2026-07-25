@@ -7911,7 +7911,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(longCand != null, "preview: a 40-minute track is a review candidate");
                 Assert(longCand!.Reasons.Contains("long"), "preview: long duration is recorded as a reason");
                 Assert(longCand.Reasons.Contains("marker:PCST"), "preview: a sniffed marker is recorded as a reason");
-                Assert(plan.SniffedCount > 0, "preview: sniffed count is reported, not silent");
+                // exactly 3: every review candidate is sniffed (marker or not, via the else
+                // branch) — long.flac, huge.flac, ep1.mp3. A regression that skipped sniffing
+                // whenever the marker came back null would leave this at 1.
+                Assert(plan.SniffedCount == 3, $"preview: sniffed count is the true count, not just markers found (got {plan.SniffedCount})");
                 var shortCand = plan.Review.Find(c => c.Path.EndsWith("short.flac", StringComparison.OrdinalIgnoreCase));
                 Assert(shortCand == null, "preview: an ordinary short track is not a candidate");
 
@@ -7927,7 +7930,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // estimate: new vs cached, and a measured basis
                 Assert(plan.Estimate.CachedTracks == 1, $"preview: cached count (got {plan.Estimate.CachedTracks})");
-                Assert(plan.Estimate.NewTracks > 0, "preview: new-track count is populated");
+                // exactly 3: short.flac, long.flac, ep1.mp3 are new work; huge.flac is
+                // correctly excluded as over-limit and analyzed.flac as already cached. A
+                // regression letting the over-limit track leak into new work would make it 4.
+                Assert(plan.Estimate.NewTracks == 3, $"preview: new-track count excludes cached and over-limit tracks (got {plan.Estimate.NewTracks})");
                 Assert(plan.Estimate.EtaBasis == "measured-rtf", $"preview: measured RTF is preferred (got {plan.Estimate.EtaBasis})");
                 Assert(plan.Estimate.EtaSecs > 0, "preview: ETA is estimated when RTF is known");
 
@@ -7939,7 +7945,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // genre histogram
                 var gPod = plan.Genres.Find(g => g.Name == "Podcast");
-                Assert(gPod != null && gPod.Tracks >= 1, "preview: genre histogram counts tracks per genre");
+                // exactly 2: D:\Podcasts\ep1.mp3 plus the remote ep2.mp3, both genre
+                // "Podcast". A regression that computed the histogram after the IsRemote
+                // continue (the whole-library-histogram rule exists to prevent exactly that)
+                // would drop this to 1.
+                Assert(gPod != null && gPod.Tracks == 2, $"preview: genre histogram counts every track incl. remote (got {gPod?.Tracks})");
                 Assert(plan.Genres.TrueForAll(g => g.TotalSecs >= 0), "preview: genre durations are non-negative");
 
                 // limits are echoed, never invented
@@ -7959,6 +7969,89 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 for (int i = 1; i < plan.Review.Count; i++)
                     Assert(plan.Review[i - 1].DurationSecs >= plan.Review[i].DurationSecs,
                         "preview: candidates are sorted by duration descending");
+
+                // structural: a dead catalog entry (file gone from disk) is "missing", not
+                // "new work". FileExists is injected so this stays filesystem-free; null
+                // disables the check entirely, which is what the assertions above rely on.
+                var missingInput = new PreviewPlannerInput
+                {
+                    Tracks = tracks,
+                    Catalog = catalog,
+                    Exclusions = exclSet,
+                    XmlPath = input.XmlPath,
+                    MoodsPath = input.MoodsPath,
+                    ExclusionsPath = input.ExclusionsPath,
+                    MaxDurationSecs = 12000,
+                    MaxDurationSource = "default",
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    MeasuredRtf = 0.10,
+                    Parallelism = 2,
+                    SniffMarkers = input.SniffMarkers,
+                    SpeechVerdict = null,
+                    FileExists = null,
+                };
+                var planNoMissingCheck = PreviewPlanner.Build(missingInput);
+
+                missingInput.FileExists = p => !p.EndsWith("short.flac", StringComparison.OrdinalIgnoreCase);
+                var planWithMissing = PreviewPlanner.Build(missingInput);
+
+                int MissingBucket(PreviewPlan p)
+                {
+                    var b = p.AutoSkip.Find(x => x.Class == "missing");
+                    return b == null ? 0 : b.Count;
+                }
+                Assert(MissingBucket(planWithMissing) == 1, $"preview: missing file counted structurally (got {MissingBucket(planWithMissing)})");
+                Assert(!planWithMissing.Review.Exists(c => c.Path.EndsWith("short.flac", StringComparison.OrdinalIgnoreCase)),
+                    "preview: a missing file is not a review candidate");
+                // the load-bearing assertion: without this, a dead catalog entry silently
+                // inflates NewTracks (and the ETA built from it) as phantom new work.
+                Assert(planWithMissing.Estimate.NewTracks == planNoMissingCheck.Estimate.NewTracks - 1,
+                    $"preview: a missing file drops out of new-work count (got {planWithMissing.Estimate.NewTracks} vs {planNoMissingCheck.Estimate.NewTracks} with no existence check)");
+
+                // composite: a track that is BOTH over-limit AND rule-excluded must still
+                // appear exactly once, carry both reasons, respect the exclusion decision,
+                // and never be counted as new work — isolated fixture so it doesn't disturb
+                // the exact counts pinned above.
+                {
+                    var compositeTracks = new List<ITunesTrack>
+                    {
+                        Trk(@"D:\Podcasts\hugecast.mp3", "Podcast", 13000000, 90_000_000),
+                    };
+                    var compositeExcl = ExclusionSet.FromJson(
+                        "{\"schemaVersion\":1,\"rules\":[" +
+                        "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}]}",
+                        out var compositeExclErr);
+                    Assert(compositeExclErr == null, "preview: composite exclusion set parses");
+
+                    var compositeInput = new PreviewPlannerInput
+                    {
+                        Tracks = compositeTracks,
+                        Catalog = new Dictionary<string, TrackEntry>(PathComparer.Instance),
+                        Exclusions = compositeExcl,
+                        XmlPath = input.XmlPath,
+                        MoodsPath = input.MoodsPath,
+                        ExclusionsPath = input.ExclusionsPath,
+                        MaxDurationSecs = 12000,
+                        MaxDurationSource = "default",
+                        LongTrackSecs = 1800,
+                        ReviewCap = 500,
+                        MeasuredRtf = 0.10,
+                        Parallelism = 2,
+                        SniffMarkers = null,
+                        SpeechVerdict = null,
+                        FileExists = null,
+                    };
+                    var compositePlan = PreviewPlanner.Build(compositeInput);
+                    var compositeMatches = compositePlan.Review.FindAll(
+                        c => c.Path.EndsWith("hugecast.mp3", StringComparison.OrdinalIgnoreCase));
+                    Assert(compositeMatches.Count == 1, $"preview: over-limit+excluded track appears exactly once (got {compositeMatches.Count})");
+                    var compositeCand = compositeMatches[0];
+                    Assert(compositeCand.Reasons.Contains("over-limit"), "preview: composite candidate carries the over-limit reason");
+                    Assert(compositeCand.Reasons.Contains("excluded"), "preview: composite candidate carries the excluded reason");
+                    Assert(compositeCand.CurrentDecision == "excluded", $"preview: composite candidate's decision is excluded (got {compositeCand.CurrentDecision})");
+                    Assert(compositePlan.Estimate.NewTracks == 0, $"preview: over-limit+excluded track is not counted as new work (got {compositePlan.Estimate.NewTracks})");
+                }
             }
 
             // --- ExclusionSet: rule parsing + matching (spec 2026-07-24) ---
