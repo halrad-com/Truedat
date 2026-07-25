@@ -207,6 +207,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           previous version and reports added / removed / already-set /
                           not-present counts. Exits 1 without writing if the document or
                           the existing file cannot be parsed.
+  --preview [path]        Read-only. Writes the scan work plan and the review-candidate list
+                          to preview.json (the MBXHub review folder by default, or the path
+                          you name). Auto-discovers the iTunes XML the same way a normal scan
+                          does (exe dir, its parent, then the cwd), so it needs no positional
+                          argument when run from inside the library folder. Analyzes nothing,
+                          writes no mbxmoods.json, and never touches the exclusion file.
+  --long-track-mins N     Duration that flags a track for review in --preview (default 30).
+                          A review *prompt* only: it decides what a human is asked to look
+                          at and never excludes anything by itself.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
@@ -362,6 +371,54 @@ whole-file write would discard whichever one went second. The previous version i
 before any change. If the file can't be parsed, truedat **refuses to scan** rather than
 quietly analyzing everything you thought was excluded — pass `--no-exclusions` if you want to
 bypass it on purpose.
+
+### Previewing a scan
+
+`truedat --preview` answers "what would a scan do?" without doing it. Like a normal scan, it
+finds the iTunes library XML on its own — the exe's directory, its parent, then the current
+directory — so running it bare from inside the library folder works with no positional
+argument:
+
+```
+Scan preview (nothing was analyzed):
+  Library:    71,520 tracks
+  Analyzed:   62,187   New: 503
+  Estimate:   11h27m (catalog-rtf)
+  Skipped:     8,516  streamUrl  (structural — cannot be analyzed)
+  Skipped:       789  video      (structural — cannot be analyzed)
+  Skipped:        42  missing    (structural — cannot be analyzed)
+  Excluded:      374  by rule
+    genre=Podcast: 374 matched
+    folder=\Old Shows\**: 0 matched   (stale rule?)
+  To review:  1,204  (listing the first 500)
+  Ceiling:    200 min (default)   long-track prompt: 30 min
+```
+
+(Illustrative numbers, not a measurement — a real run reports your own library's counts, and
+the estimate is derived from your own catalog, never a canned figure.)
+
+It also writes `preview.json` — the same data as a machine-readable manifest, which is what
+MBXHub's review surface renders.
+
+Two distinctions worth internalising:
+
+- **Structural skips versus rules.** A missing file, a video, a stream URL, a playlist file or
+  a track over the duration ceiling *cannot* be analyzed, so they are counted and never offered
+  for review — no decision changes them. Everything else is policy, and policy is reviewable.
+- **The long-track threshold is a prompt, not a rule.** It surfaces long files so you can judge
+  them; it excludes nothing. That matters because *long* is not the same class as *bad to
+  analyze*: an hours-long ambient piece or a DJ set is one coherent thing and analyzes fine,
+  while a radio show or a setlist rip is many different pieces of music that would collapse into
+  one meaningless average. Only a human can tell those apart from the metadata, which is the
+  whole reason this surface exists.
+
+The estimate comes from your own catalog: stored per-track analysis times against known track
+lengths, median-averaged (reported as `catalog-rtf`). With nothing analyzed yet there is nothing
+to learn from, so the estimate is omitted rather than guessed.
+
+`--apply-exclusions` additionally writes `apply-result.json` beside the exclusion file, carrying
+the same counts as the console output plus any error — on failure as well as success — so a tool
+driving truedat reads a file instead of parsing console text.
 
 ## Test Tooling
 

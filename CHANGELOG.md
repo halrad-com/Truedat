@@ -5,6 +5,29 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added — `--preview`, the read-only scan work plan (2026-07-25)
+
+- **`truedat --preview [path]`** answers "what would a scan do?" without analyzing
+  anything: library/analyzed/new counts, a time estimate, structural skip buckets,
+  per-rule exclusion hit counts (a rule matching zero tracks is called out as
+  possibly stale), a genre histogram, and the list of tracks worth a human
+  decision. Writes `preview.json` — which doubles as the review-surface manifest
+  MBXHub renders — and never writes `mbxmoods.json` or touches the exclusion file.
+  Auto-discovers the iTunes XML the same way a normal scan does (exe dir, its
+  parent, then the cwd), so it needs no positional argument from inside the
+  library directory.
+- **`--long-track-mins N`** (default 30) sets the duration that flags a track for
+  review. It is a review *prompt*, not a rule: *long* is not the same class as
+  *bad to analyze*. An hours-long ambient piece or a DJ set is one coherent thing;
+  a radio show or a setlist rip is many pieces that collapse into one meaningless
+  average. Only a human separates those from metadata.
+- The estimate is derived from the catalog's own stored analysis times against
+  known track lengths (median, reported as `catalog-rtf`). With nothing analyzed
+  yet it is omitted rather than guessed.
+- **`--apply-exclusions` now writes `apply-result.json`** beside the exclusion
+  file, on failure as well as success, so a tool driving truedat reads a file
+  instead of parsing console output.
+
 ### Fixed — structural skips (video/DSD/playlist) now agree across every scan mode (2026-07-25)
 
 - Video containers, DSD streams, and playlist/redirector files are structurally

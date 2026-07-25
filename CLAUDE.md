@@ -112,6 +112,19 @@ surfacing whether or not a track is excluded from analysis ("check is check, not
 exclude"); it calls `FilterPodcasts` without ever calling `FilterExclusions` first, so
 don't "fix" that by wiring exclusions in without a deliberate decision to do so.
 
+`--preview` (read-only) builds the same picture without scanning: `PreviewPlanner` computes a
+`PreviewPlan` from the parsed XML + existing catalog + `ExclusionSet`, and `PreviewWriter` emits
+`preview.json` into the MBXHub review folder (`ResolveReviewDir`, shared with the duplicates
+manifest). **`preview.json` IS the review-surface manifest** — MBXHub's asset route serves only
+`.html` and no route serves an arbitrary sibling JSON, so the payload rides inside the envelope;
+`source.reviewHtml` stays absent until the Phase 2b page exists. Preview touches audio in exactly
+one place — a bounded header sniff over review *candidates* only — and reports `sniffedCount` so
+that is visible rather than implied. The ETA comes from the catalog's stored `analysisDuration`
+against known track lengths (median), reported as `catalog-rtf`; with no history it is omitted,
+never guessed. `--long-track-mins` (default 30) is a review **prompt**, not a rule.
+`--apply-exclusions` writes `apply-result.json` beside the exclusion file on both success and
+failure, because MBXHub's stdout capture is a bounded async tail and must not be parsed.
+
 ## Chunked scanning across machines
 
 `--chunk M/N` uses hash-mod assignment: `(PathComparer.GetHashCode(path) & 0x7FFFFFFF) % N == M-1`. `PathComparer`'s hash is FNV-1a, deterministic across processes and machines, separator-normalized, case-folded. Same path → same bucket on every box, **regardless of XML differences**. Asymmetric libraries are tolerated. Output filenames auto-suffix with hostname to prevent shard collisions when machines write to a shared library directory. Combine with `--merge-moods`.
