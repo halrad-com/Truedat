@@ -1635,7 +1635,10 @@ namespace Truedat
 
                 if (!File.Exists(applyExclusionsPath))
                 {
-                    Console.Error.WriteLine($"Error: decisions file not found: {applyExclusionsPath}");
+                    var notFoundError = $"decisions file not found: {applyExclusionsPath}";
+                    var notFoundResultPath = ExclusionStore.WriteApplyResult(canonicalExcl, new MergeReport(), notFoundError);
+                    Console.Error.WriteLine($"Error: {notFoundError}");
+                    Console.Error.WriteLine($"  Result:     {notFoundResultPath}");
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -1643,7 +1646,10 @@ namespace Truedat
                 try { decisionsJson = File.ReadAllText(applyExclusionsPath!); }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Error: cannot read {applyExclusionsPath}: {ex.Message}");
+                    var unreadableError = $"cannot read {applyExclusionsPath}: {ex.Message}";
+                    var unreadableResultPath = ExclusionStore.WriteApplyResult(canonicalExcl, new MergeReport(), unreadableError);
+                    Console.Error.WriteLine($"Error: {unreadableError}");
+                    Console.Error.WriteLine($"  Result:     {unreadableResultPath}");
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -8671,12 +8677,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         Assert(r["added"]!.GetValue<int>() == 2 && r["removed"]!.GetValue<int>() == 1, "applyresult: carries the counts");
                         Assert(r["alreadyPresent"]!.GetValue<int>() == 3, "applyresult: carries alreadyPresent");
                         Assert(r["changed"]!.GetValue<bool>(), "applyresult: carries changed");
-                        Assert(r["backupPath"] != null, "applyresult: names the backup");
+                        Assert(r["backupPath"]!.GetValue<string>() == okReport.BackupPath, "applyresult: names the backup");
                         Assert(r["exclusionsPath"]!.GetValue<string>() == canonical, "applyresult: names the file it applied to");
                         Assert(r["error"] == null, "applyresult: no error key on success");
 
                         // failure must ALSO produce a result file — that is when the hub needs it most
                         var failPath = ExclusionStore.WriteApplyResult(canonical, new MergeReport(), "refusing: 1 existing rule(s) failed to parse");
+                        Assert(File.Exists(failPath), "applyresult: file written on failure");
                         var f = JsonNode.Parse(File.ReadAllText(failPath))!;
                         Assert(!f["ok"]!.GetValue<bool>(), "applyresult: ok false on failure");
                         Assert(f["error"]!.GetValue<string>().Contains("refusing"), "applyresult: failure carries the reason");
