@@ -524,10 +524,11 @@ namespace Truedat
         // (PCST/WFED/TGID/TCON, pcst/purl — read from the audio bytes themselves) are
         // both EVIDENCE now, not filters — labeled/marked tracks are analyzed
         // regardless of this flag; IsPodcast/PodcastReason and the sniffer's marker
-        // survive only for the --preview review surface. What this flag still gates:
-        // --migrate's prune of podcast-genre + speech-likely catalog entries. The
-        // only authority over what a scan skips for POLICY reasons is
-        // mbxmoods-exclude.json.
+        // survive only for the --preview review surface. --migrate's podcast-genre
+        // and speech-likely catalog purges (the last things this flag gated) are gone
+        // too (2026-07-25) — the flag now gates nothing. Kept as a parsed no-op until
+        // a later task retires it. The only authority over what a scan skips for
+        // POLICY reasons is mbxmoods-exclude.json.
         internal static bool _includePodcasts;
 
         // Explicit scan-exclusion file. Default location is beside the moods file;
@@ -986,7 +987,7 @@ namespace Truedat
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
-            bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate prunes them)
+            bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool previewMode = false;          // --preview: read-only work plan + review candidates
             string? previewOutPath = null;     // optional explicit destination for preview.json
@@ -1351,7 +1352,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
-                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (candidates for an exclusion rule via a decisions delta + --apply-exclusions; audio files untouched) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data + coverage -> mbxmoods-smfm-missing.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
@@ -1372,7 +1373,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (kept with --include-podcasts), remove speech-likely entries (kept with --include-podcasts) (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*) (creates backup; never removes entries)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -1388,10 +1389,10 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Keep podcast-genre and speech-likely entries when --migrate runs");
-                Console.WriteLine("                      (default: --migrate prunes them). XML-labeled podcasts (Genre=Podcast)");
-                Console.WriteLine("                      and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl) are");
-                Console.WriteLine("                      analyzed either way — both are --preview evidence only, never a scan filter.");
+                Console.WriteLine("  --include-podcasts  No-op (2026-07-25): --migrate no longer purges podcast-genre or");
+                Console.WriteLine("                      speech-likely entries, so this flag gates nothing. XML-labeled podcasts");
+                Console.WriteLine("                      (Genre=Podcast) and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl)");
+                Console.WriteLine("                      are analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -1549,12 +1550,13 @@ namespace Truedat
             }
 
             // --list-speech: read-only. Lists the entries whose talk-vs-music verdict is a
-            // confident "yes" — the exact set --migrate would purge — so the operator can
-            // review them first (the verdict is -untuned; high-zcr real music such as
-            // ambient / field recordings can reach "yes"). Recomputes the verdict from
-            // stored features per entry, same as the --stats advisor count. Path resolution
-            // mirrors --stats. Writes mbxmoods-speech.csv next to the moods file; console
-            // gets a count + first-N preview. Writes no changes to the moods file itself.
+            // confident "yes" — candidates for an exclusion rule, not a --migrate prune
+            // (--migrate never removes entries) — so the operator can review them first
+            // (the verdict is -untuned; high-zcr real music such as ambient / field
+            // recordings can reach "yes"). Recomputes the verdict from stored features per
+            // entry, same as the --stats class-stat count. Path resolution mirrors --stats.
+            // Writes mbxmoods-speech.csv next to the moods file; console gets a count +
+            // first-N preview. Writes no changes to the moods file itself.
             if (listSpeechMode)
             {
                 string? speechPath = analyzeFileMoods ?? xmlPath;
@@ -2803,7 +2805,7 @@ namespace Truedat
                 Console.WriteLine("                      per kind, and SMFM track count. Path defaults to ./mbxmoods.json.");
                 Console.WriteLine("                      Also printed at end of every scan. With --audit, written to the log.");
                 Console.WriteLine("  --stats-detail N    List per-file status when a catalog has < N tracks (default 5).");
-                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (the entries --migrate prunes; audio files untouched) -> mbxmoods-speech.csv");
+                Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes (candidates for an exclusion rule via a decisions delta + --apply-exclusions; audio files untouched) -> mbxmoods-speech.csv");
                 Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data + coverage -> mbxmoods-smfm-missing.csv");
                 Console.WriteLine("  --backfill          With --verify: fill in missing fields for entries whose audio bytes are");
                 Console.WriteLine("                      unchanged. Drifted entries are flagged, not modified. No Essentia re-run.");
@@ -2824,7 +2826,7 @@ namespace Truedat
                 Console.WriteLine("  --losers-m3u [path] With --duplicates: write non-keeper members to an .m3u8 playlist for review/removal inside MusicBee (path must end in .m3u/.m3u8, default mbxmoods-duplicate-losers.m3u8)");
                 Console.WriteLine("  --manifest [path]  With --duplicates: emit the kind:dupes review-surface manifest MBXHub's review.html renders directly. No path = auto-locate the running MusicBee instance and write to its <root>\\AppData\\MBXHub\\review\\dupes.json; pass a path to override");
                 Console.WriteLine("  --html [path]      --duplicates always writes a self-contained interactive review page (offline; printed as a clickable link) — include groups in chunks, pick keepers, Build losers playlist. --html <path> overrides where it lands (default mbxmoods-duplicates.html next to the moods file)");
-                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*), remove podcast entries (kept with --include-podcasts), remove speech-likely entries (kept with --include-podcasts) (creates backup)");
+                Console.WriteLine("  --migrate           Clean up mbxmoods.json: strip legacy fields (valence/arousal, audioMd5, chromaprint) + fileMd5 (kept with --file-md5), rename SMFM keys (sensme*->smfm*) (creates backup; never removes entries)");
                 Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
                 Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
                 Console.WriteLine("  --self-test         Run inline FFT sanity checks and exit (no library scan)");
@@ -2840,10 +2842,10 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Keep podcast-genre and speech-likely entries when --migrate runs");
-                Console.WriteLine("                      (default: --migrate prunes them). XML-labeled podcasts (Genre=Podcast)");
-                Console.WriteLine("                      and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl) are");
-                Console.WriteLine("                      analyzed either way — both are --preview evidence only, never a scan filter.");
+                Console.WriteLine("  --include-podcasts  No-op (2026-07-25): --migrate no longer purges podcast-genre or");
+                Console.WriteLine("                      speech-likely entries, so this flag gates nothing. XML-labeled podcasts");
+                Console.WriteLine("                      (Genre=Podcast) and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl)");
+                Console.WriteLine("                      are analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -5069,13 +5071,17 @@ namespace Truedat
             return (node as JsonValue)?.TryGetValue<double>(out var d) == true ? d : null;
         }
 
-        /// <summary>Recompute speechLikely for a raw JSON track node, so --migrate prunes
-        /// on the CURRENT thresholds rather than on whatever verdict happened to be
-        /// persisted. See the call site for why trusting the stored block is unsafe.
+        /// <summary>Recompute speechLikely for a raw JSON track node from the CURRENT
+        /// thresholds rather than from whatever verdict happened to be persisted. Not
+        /// called by any production path as of 2026-07-25 — RunMigrate's speech purge
+        /// was its only caller, and that purge is gone. Kept as the JSON-facing twin of
+        /// ComputeTruedatVerdict (which --list-speech and the --stats class-stat count
+        /// use on the TrackEntry side) for any future JSON-only caller, and to pin that
+        /// the two computations agree.
         ///
         /// Reads exactly the inputs ComputeTruedatVerdict's speech block consumes. If that
         /// signal list changes, this must change with it — the self-test
-        /// "migrate speech recompute matches the TrackEntry path" is the drift guard.</summary>
+        /// "list-speech recompute matches the TrackEntry path" is the drift guard.</summary>
         static string RecomputeSpeechLikely(JsonNode? track)
         {
             var f = new TrackFeatures
@@ -5100,7 +5106,7 @@ namespace Truedat
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*), removes podcast entries, removes speech-likely entries");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*)");
             if (!_fileMd5Enabled)
                 Console.WriteLine("Also strips fileMd5 (nothing consumes it; pass --file-md5 to keep it)");
             Console.WriteLine();
@@ -5143,47 +5149,6 @@ namespace Truedat
                 if (tr) renamed++;
             }
 
-            // Remove podcast entries (identified by genre — the only label stored
-            // entries carry). --include-podcasts keeps them, matching scan behavior.
-            var podcastKeys = _includePodcasts
-                ? new List<string>()
-                : tracks
-                    .Where(kv => string.Equals(SafeStr(kv.Value, "genre"), "Podcast", StringComparison.OrdinalIgnoreCase))
-                    .Select(kv => kv.Key)
-                    .ToList();
-            foreach (var key in podcastKeys) tracks.Remove(key);
-
-            // Speech-likely prune (spec 2026-07-22): entries whose verdict is confident
-            // talk. The verdict is RECOMPUTED here from each entry's stored features —
-            // it is deliberately NOT read from the persisted truedat.speechLikely block.
-            //
-            // That block was written by whichever build last saved the catalog, so it
-            // goes stale the moment the thresholds change. --list-speech and the --stats
-            // advisor both recompute live (ComputeTruedatVerdict). If migrate trusted the
-            // stored value instead, the reviewer and the pruner would consult different
-            // sources of truth: the operator could review a clean --list-speech and still
-            // have migrate prune the very tracks it had just cleared. That is exactly the
-            // failure the review workflow exists to prevent (2026-07-23 review, C1).
-            // Single source of truth = the features.
-            var speechKeys = new List<string>();
-            int staleSpeech = 0;
-            if (!_includePodcasts)
-            {
-                foreach (var kv in tracks)
-                {
-                    bool live = string.Equals(RecomputeSpeechLikely(kv.Value), "yes", StringComparison.OrdinalIgnoreCase);
-                    if (live) { speechKeys.Add(kv.Key); continue; }
-                    // Stored said talk, the current thresholds say otherwise — this entry
-                    // is only surviving because migrate recomputes. Worth reporting: it is
-                    // the operator's proof that a threshold fix actually reached them.
-                    if (string.Equals(SafeStr(kv.Value, "truedat", "speechLikely"), "yes", StringComparison.OrdinalIgnoreCase))
-                        staleSpeech++;
-                }
-            }
-            foreach (var key in speechKeys) tracks.Remove(key);
-            if (_audit)
-                foreach (var key in speechKeys) Console.WriteLine($"  [pruned speech-likely] {key}");
-
             Console.WriteLine($"Tracks: {total}");
             if (stripped > 0)
                 Console.WriteLine($"Stripped valence/arousal from: {stripped}");
@@ -5193,14 +5158,8 @@ namespace Truedat
                 Console.WriteLine($"Stripped fileMd5 from: {md5Stripped}");
             if (legacyStripped > 0)
                 Console.WriteLine($"Stripped audioMd5/chromaprint from: {legacyStripped}");
-            if (podcastKeys.Count > 0)
-                Console.WriteLine($"Removed podcast entries: {podcastKeys.Count}");
-            if (speechKeys.Count > 0)
-                Console.WriteLine($"Pruned speech-likely entries: {speechKeys.Count}");
-            if (staleSpeech > 0)
-                Console.WriteLine($"Kept {staleSpeech} entries whose stored speech verdict was stale (recomputed: not talk)");
 
-            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0 && podcastKeys.Count == 0 && speechKeys.Count == 0)
+            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
@@ -5605,17 +5564,21 @@ namespace Truedat
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
             public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
-            public int SpeechYes;         // ComputeTruedatVerdict.SpeechLikely == "yes"
+            public int PodcastGenre;      // stored genre == "Podcast" (the only podcast label the JSON itself carries)
+            public int SpeechYes;         // ComputeTruedatVerdict.SpeechLikely == "yes" AND NOT already counted as PodcastGenre
             public int MissingFingerprint; // entries with no fingerprint.v1 block
         }
 
         /// <summary>Read-only: list the entries whose stored features recompute to a
-        /// confident speechLikely=="yes" verdict — the set --migrate prunes from the
-        /// catalog (mbxmoods.json entries only; audio files are never touched). Writes
-        /// mbxmoods-speech.csv (path,artist,title,album,genre,codec,speechConfidence,method)
-        /// next to the moods file and prints a count + first-20 preview. The verdict is
-        /// recomputed via ComputeTruedatVerdict so it matches the --stats advisor exactly
-        /// (write-time verdict, not persisted in the entry).</summary>
+        /// confident speechLikely=="yes" verdict — candidates for an exclusion rule, not
+        /// a --migrate prune (--migrate never removes entries; audio files are never
+        /// touched either way). Writes mbxmoods-speech.csv
+        /// (path,artist,title,album,genre,codec,speechConfidence,method) next to the
+        /// moods file and prints a count + first-20 preview. The verdict is recomputed
+        /// via ComputeTruedatVerdict so it matches the --stats class-stat count exactly
+        /// (write-time verdict, not persisted in the entry). This is the only speech
+        /// surface that works on the moods JSON alone — --preview needs the iTunes XML
+        /// and can't run on a metadata-mirror box.</summary>
         static void RunListSpeech(string moodsPath, IEnumerable<TrackEntry> entries)
         {
             var hits = new List<(string Path, string Artist, string Title, string Album, string Genre, string Codec, double? Conf, string Method)>();
@@ -5646,8 +5609,8 @@ namespace Truedat
                     Console.WriteLine($"  ... {hits.Count - preview:N0} more (see CSV)");
                 Console.WriteLine();
                 Console.WriteLine($"CSV:    {csvPath}");
-                Console.WriteLine("Review, then prune these entries with: truedat --migrate   (or keep them all with --include-podcasts)");
-                Console.WriteLine("Pruning removes the mbxmoods.json entries only — your audio files are never touched.");
+                Console.WriteLine("These are candidates for an exclusion rule, not a --migrate prune (--migrate never removes entries).");
+                Console.WriteLine("Review, then add a rule to a decisions delta and run: truedat --apply-exclusions <delta>");
             }
         }
 
@@ -5722,8 +5685,24 @@ namespace Truedat
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
                 if (e.Features != null)
                 {
-                    var vrd = ComputeTruedatVerdict(e.Features.FilePath ?? "", e);
-                    if (vrd.SpeechLikely == "yes") s.SpeechYes++;
+                    // Podcast and speech are reported as mutually exclusive classes so the
+                    // two counts read as a partition, not an overlapping double-count.
+                    // Podcast wins: it is an explicit assertion carried in the file/library
+                    // (stored genre label) while speechLikely is an acoustic inference —
+                    // the specific, author-supplied claim outranks the derived one. Speech
+                    // then only counts entries the label didn't already claim, which makes
+                    // it answer "how much talk did the acoustic signal find that no label
+                    // had already told us about" instead of double-counting labelled ones.
+                    bool isPodcastGenre = string.Equals(e.Features.Genre, "Podcast", StringComparison.OrdinalIgnoreCase);
+                    if (isPodcastGenre)
+                    {
+                        s.PodcastGenre++;
+                    }
+                    else
+                    {
+                        var vrd = ComputeTruedatVerdict(e.Features.FilePath ?? "", e);
+                        if (vrd.SpeechLikely == "yes") s.SpeechYes++;
+                    }
                 }
             }
             foreach (var c in shaCount.Values)
@@ -5803,6 +5782,19 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
             }
+            // Podcast (explicit stored-genre label) and speech-likely (acoustic verdict)
+            // are reported as plain class stats, same as Duplicate audio above — a fact
+            // about the catalog, not a nag. Neither is a --migrate recommendation: the
+            // purge that used to sit behind them is gone, so the only real action left is
+            // review + an exclusion rule (decisions delta + --apply-exclusions).
+            if (s.PodcastGenre > 0 || s.SpeechYes > 0)
+            {
+                Console.WriteLine();
+                if (s.PodcastGenre > 0)
+                    Console.WriteLine($"  {"Podcast (genre label)",-20} {s.PodcastGenre,9:N0} tracks   (exclude: a genre rule in a decisions delta + truedat --apply-exclusions)");
+                if (s.SpeechYes > 0)
+                    Console.WriteLine($"  {"Speech-likely (acoustic)",-20} {s.SpeechYes,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
+            }
 
             // Recommended next steps — detected state -> exact command. Advisory
             // only: truedat NEVER prompts; it prints what to run and moves on.
@@ -5853,17 +5845,6 @@ namespace Truedat
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
-            // Speech-likely is the one recommendation that PRUNES catalog entries, and
-            // the verdict is still untuned — so the advisor sends the operator to the
-            // read-only lister first, never straight at the pruning command.
-            // (2026-07-22: a bare "-> --migrate" here cost 3 real instrumental tracks
-            // their catalog entries.) Note this prunes ENTRIES from mbxmoods.json only —
-            // truedat never touches the audio files themselves.
-            if (!_includePodcasts && s.SpeechYes > 0)
-            {
-                rec.Add($"{s.SpeechYes:N0} speech-likely entries               ->  truedat --list-speech    (review FIRST — --migrate prunes these entries)");
-                rec.Add($"{"",-8} then prune with --migrate, or keep all with --include-podcasts");
-            }
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
             {
@@ -8838,7 +8819,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(sparse.SpeechLikely == "n/a" || sparse.SpeechLikely == "unknown", "speech: sparse features -> n/a or unknown");
                 // Rev-1 safety gate: a sine-tone/ambient bed shares talk's shape on
                 // danceability/chords/silence but sits LOW on zcr — must NOT reach
-                // "yes" (--migrate prunes the catalog entry on "yes").
+                // "yes" (a verdict AutoQ and the exclusion workflow both treat as
+                // confident talk).
                 var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.35, 0.05));
                 Assert(tone.SpeechLikely == "unknown", "speech: tone-shaped features (low zcr) -> unknown, not yes");
                 // Rev-1.2 music veto: sparse/live INSTRUMENTAL music matches talk on
@@ -8884,18 +8866,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var spoken = ComputeTruedatVerdict("p", Mk(0.0, 0.43, 1.0, 0.27));
                 Assert(spoken.SpeechLikely == "yes", "speech: genuine spoken word (danceability 0) still -> yes");
 
-                // --- C1 drift guard: --migrate recomputes from raw JSON -------------
-                // RecomputeSpeechLikely must agree with the TrackEntry path, or migrate
-                // prunes on a different verdict than --list-speech displays.
+                // --- Recompute-path drift guard -------------------------------------
+                // RecomputeSpeechLikely (raw JSON) must agree with ComputeTruedatVerdict
+                // (TrackEntry) for equivalent inputs, and must not trust a stale persisted
+                // verdict over the current features. This is a computation guard, not a
+                // purge guard — RunMigrate no longer prunes on this verdict (2026-07-25),
+                // but --list-speech and the --stats class-stat count both depend on the
+                // TrackEntry path, and RecomputeSpeechLikely is the JSON-facing twin any
+                // future JSON-only caller would reach for; the two must never disagree.
                 {
                     var spokenJson = JsonNode.Parse("{\"danceability\":0.0,\"chordsStrength\":0.43,\"silenceRate30dB\":1.0,\"zeroCrossingRate\":0.27}");
                     Assert(RecomputeSpeechLikely(spokenJson) == spoken.SpeechLikely,
-                        "migrate speech recompute matches the TrackEntry path");
-                    // The actual C1 regression: a stale stored "yes" must NOT prune an
-                    // entry whose features say otherwise under current thresholds.
+                        "list-speech recompute matches the TrackEntry path");
+                    // A stale persisted "yes" must not leak through: the recompute is
+                    // honest about the CURRENT features/thresholds, not whatever verdict
+                    // an earlier build happened to write to truedat.speechLikely.
                     var staleJson = JsonNode.Parse("{\"danceability\":1.09,\"chordsStrength\":0.44,\"silenceRate30dB\":0.99,\"zeroCrossingRate\":0.13,\"bpmFirstPeakWeight\":0.0,\"keyVotes\":{\"edma\":{\"key\":\"A\",\"scale\":\"minor\",\"strength\":0.49}},\"truedat\":{\"speechLikely\":\"yes\"}}");
                     Assert(RecomputeSpeechLikely(staleJson) != "yes",
-                        "migrate ignores a stale stored 'yes' when current thresholds disagree");
+                        "speech recompute ignores a stale stored 'yes' and trusts current features");
                 }
             }
 
@@ -9594,15 +9582,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // stores — write-time like the hi-res verdict, so the whole catalog
             // gains it on the next save and thresholds retune without rescan.
             // Rev-1 thresholds are UNTUNED and conservative: borderline lands on
-            // "unknown"; only confident talk returns "yes" (--migrate acts on
-            // "yes" alone). Calibrate against known talk entries before tightening.
+            // "unknown"; only confident talk returns "yes" (downstream consumers —
+            // AutoQ's own candidate-pool filter, and the operator's exclusion workflow
+            // via --list-speech — act on "yes" alone). Calibrate against known talk
+            // entries before tightening.
             //
             // Denominator rule: maxWeight counts every APPLICABLE signal, not just
             // ones that fired a vote — abstains still dilute confidence. A minority
             // of weak agreeing signals must not normalize to a high-confidence
             // "yes" just because the rest of the panel abstained (e.g. a sine-tone
-            // WAV where only danceability+zcr fire). This is what keeps --migrate's
-            // "yes"-only purge safe.
+            // WAV where only danceability+zcr fire). This is what keeps a confident
+            // "yes" trustworthy for those downstream consumers.
             {
                 double score = 0, maxWeight = 0;
 
@@ -9666,8 +9656,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // signal to have voted speech. Tones/drones/ambient share talk's
                 // no-rhythm/no-chords/high-silence shape but sit LOW on zcr, while
                 // real speech sits high — without this gate a sine tone reaches
-                // "yes", and --migrate prunes the catalog entry on "yes". Demote to "unknown", never
-                // to "no" (the content is genuinely not-music-shaped).
+                // "yes", a verdict AutoQ and the exclusion workflow both treat as
+                // confident talk. Demote to "unknown", never to "no" (the content is
+                // genuinely not-music-shaped).
                 if (v.SpeechLikely == "yes" && zcrVote != 1)
                     v.SpeechLikely = "unknown";
                 // Rev-1.2 music veto: "yes" additionally requires danceability < 0.50.
