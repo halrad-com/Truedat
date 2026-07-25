@@ -832,7 +832,7 @@ namespace Truedat
         }
 
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
-        static string GetExtensionSafe(string path)
+        internal static string GetExtensionSafe(string path)
         {
             try { return Path.GetExtension(path) ?? ""; } catch { return ""; }
         }
@@ -7826,6 +7826,139 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(parsed.First(p => p.Name == "ITunesFlagged").PodcastReason == "Podcast=true", "label: Podcast=true reason recorded");
                 }
                 finally { try { File.Delete(tmpXml); } catch { } }
+            }
+
+            // --- PreviewPlanner (Phase 2a) ---
+            {
+                ITunesTrack Trk(string loc, string genre, int ms, long size)
+                    => new ITunesTrack { Location = loc, Name = Path.GetFileName(loc), Artist = "A",
+                                         Album = "Alb", Genre = genre, TotalTimeMs = ms, SizeBytes = size };
+
+                var tracks = new List<ITunesTrack>
+                {
+                    Trk(@"D:\M\short.flac",           "Rock",    180000,  5_000_000),
+                    Trk(@"D:\M\long.flac",            "Rock",   2400000, 60_000_000),  // 40 min -> long
+                    Trk(@"D:\M\huge.flac",            "Rock",  13000000, 90_000_000),  // over a 12000s ceiling
+                    Trk(@"D:\M\clip.mp4",             "Rock",    180000,  5_000_000),  // structural: video
+                    Trk(@"D:\M\list.m3u",             "Rock",    180000,       1_000),  // structural: non-audio
+                    Trk(@"D:\Podcasts\ep1.mp3",       "Podcast",3000000, 30_000_000),
+                    Trk(@"D:\M\analyzed.flac",        "Rock",    180000,  5_000_000),
+                };
+                tracks[6].Location = @"D:\M\analyzed.flac";
+                var remote = Trk("https://feed.example/ep2.mp3", "Podcast", 3000000, 0);
+                remote.IsRemote = true;
+                tracks.Add(remote);
+
+                var catalog = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                catalog[@"D:\M\analyzed.flac"] = new TrackEntry
+                {
+                    Features = new TrackFeatures { FilePath = @"D:\M\analyzed.flac", Genre = "Rock" }
+                };
+
+                var exclSet = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":[" +
+                    "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}," +
+                    "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\NoSuchDir\\\\**\"}]}",
+                    out var exclErr);
+                Assert(exclErr == null, "preview: test exclusion set parses");
+
+                var input = new PreviewPlannerInput
+                {
+                    Tracks = tracks,
+                    Catalog = catalog,
+                    Exclusions = exclSet,
+                    XmlPath = @"D:\M\iTunes Music Library.xml",
+                    MoodsPath = @"D:\M\mbxmoods.json",
+                    ExclusionsPath = @"D:\M\mbxmoods-exclude.json",
+                    MaxDurationSecs = 12000,
+                    MaxDurationSource = "default",
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    MeasuredRtf = 0.10,
+                    Parallelism = 2,
+                    SniffMarkers = p => p.EndsWith("long.flac", StringComparison.OrdinalIgnoreCase) ? "PCST" : null,
+                    SpeechVerdict = null,
+                };
+                var plan = PreviewPlanner.Build(input);
+
+                // structural skips are counted by class and never treated as review candidates
+                int Bucket(string cls)
+                {
+                    var b = plan.AutoSkip.Find(x => x.Class == cls);
+                    return b == null ? 0 : b.Count;
+                }
+                Assert(Bucket("video") == 1, $"preview: video counted structurally (got {Bucket("video")})");
+                Assert(Bucket("nonAudio") == 1, $"preview: non-audio counted structurally (got {Bucket("nonAudio")})");
+                Assert(Bucket("streamUrl") == 1, $"preview: remote URL counted structurally (got {Bucket("streamUrl")})");
+                Assert(Bucket("overLimit") == 1, $"preview: over-ceiling counted structurally (got {Bucket("overLimit")})");
+                Assert(!plan.Review.Exists(c => c.Path.EndsWith("clip.mp4", StringComparison.OrdinalIgnoreCase)),
+                    "preview: a structural skip is not a review candidate");
+
+                // counts
+                Assert(plan.Counts.LibraryTotal == tracks.Count, $"preview: libraryTotal is every parsed track (got {plan.Counts.LibraryTotal})");
+                Assert(plan.Counts.Analyzed == 1, $"preview: analyzed counts catalog hits (got {plan.Counts.Analyzed})");
+                Assert(plan.Counts.Excluded == 1, $"preview: excluded counts rule hits (got {plan.Counts.Excluded})");
+                Assert(plan.Counts.AwaitingReview == plan.ReviewTotal, "preview: awaitingReview matches reviewTotal");
+
+                // rule stats surface a stale rule
+                var live = plan.Rules.Find(r => r.Rule == @"folder=\Podcasts\**");
+                var stale = plan.Rules.Find(r => r.Rule == @"folder=\NoSuchDir\**");
+                Assert(live != null && live.MatchCount == 1, "preview: matched rule reports its hits");
+                Assert(stale != null && stale.MatchCount == 0, "preview: unmatched rule reports zero (stale-rule signal)");
+
+                // review candidates and their evidence
+                var longCand = plan.Review.Find(c => c.Path.EndsWith("long.flac", StringComparison.OrdinalIgnoreCase));
+                Assert(longCand != null, "preview: a 40-minute track is a review candidate");
+                Assert(longCand!.Reasons.Contains("long"), "preview: long duration is recorded as a reason");
+                Assert(longCand.Reasons.Contains("marker:PCST"), "preview: a sniffed marker is recorded as a reason");
+                Assert(plan.SniffedCount > 0, "preview: sniffed count is reported, not silent");
+                var shortCand = plan.Review.Find(c => c.Path.EndsWith("short.flac", StringComparison.OrdinalIgnoreCase));
+                Assert(shortCand == null, "preview: an ordinary short track is not a candidate");
+
+                // an excluded track is a candidate so the decision is reversible
+                var exCand = plan.Review.Find(c => c.Path.EndsWith("ep1.mp3", StringComparison.OrdinalIgnoreCase));
+                Assert(exCand != null, "preview: an excluded track is still listed for review");
+                Assert(exCand!.CurrentDecision == "excluded", $"preview: current decision is reported (got {exCand.CurrentDecision})");
+                Assert(exCand.Reasons.Contains("excluded"), "preview: exclusion is recorded as a reason");
+
+                // over-limit candidate carries the flag AND the structural count
+                var overCand = plan.Review.Find(c => c.Path.EndsWith("huge.flac", StringComparison.OrdinalIgnoreCase));
+                Assert(overCand != null && overCand.OverLimit, "preview: over-ceiling track is flagged for review");
+
+                // estimate: new vs cached, and a measured basis
+                Assert(plan.Estimate.CachedTracks == 1, $"preview: cached count (got {plan.Estimate.CachedTracks})");
+                Assert(plan.Estimate.NewTracks > 0, "preview: new-track count is populated");
+                Assert(plan.Estimate.EtaBasis == "measured-rtf", $"preview: measured RTF is preferred (got {plan.Estimate.EtaBasis})");
+                Assert(plan.Estimate.EtaSecs > 0, "preview: ETA is estimated when RTF is known");
+
+                // no measured RTF -> ETA omitted rather than guessed
+                input.MeasuredRtf = 0;
+                var plan2 = PreviewPlanner.Build(input);
+                Assert(plan2.Estimate.EtaSecs < 0, "preview: ETA omitted (negative) when nothing was measured");
+                Assert(plan2.Estimate.EtaBasis == "unavailable", "preview: basis says unavailable rather than implying a measurement");
+
+                // genre histogram
+                var gPod = plan.Genres.Find(g => g.Name == "Podcast");
+                Assert(gPod != null && gPod.Tracks >= 1, "preview: genre histogram counts tracks per genre");
+                Assert(plan.Genres.TrueForAll(g => g.TotalSecs >= 0), "preview: genre durations are non-negative");
+
+                // limits are echoed, never invented
+                Assert(plan.Limits.MaxDurationSecs == 12000 && plan.Limits.LongTrackSecs == 1800,
+                    "preview: limits echo the configured values");
+
+                // the cap is honoured and reported honestly
+                input.MeasuredRtf = 0.10;
+                input.ReviewCap = 1;
+                var plan3 = PreviewPlanner.Build(input);
+                Assert(plan3.Review.Count == 1, $"preview: review list honours the cap (got {plan3.Review.Count})");
+                Assert(plan3.ReviewTruncated, "preview: truncation is flagged");
+                Assert(plan3.ReviewTotal > 1, "preview: reviewTotal reports the true count, not the capped one");
+                Assert(plan3.Counts.AwaitingReview == plan3.ReviewTotal, "preview: awaitingReview is the true count even when truncated");
+
+                // sort order: longest first, so triage starts with the worst offenders
+                for (int i = 1; i < plan.Review.Count; i++)
+                    Assert(plan.Review[i - 1].DurationSecs >= plan.Review[i].DurationSecs,
+                        "preview: candidates are sorted by duration descending");
             }
 
             // --- ExclusionSet: rule parsing + matching (spec 2026-07-24) ---
