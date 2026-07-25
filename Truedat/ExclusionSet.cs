@@ -251,7 +251,10 @@ namespace Truedat
         /// <summary>
         /// True when an <c>include</c> rule matched. Distinct from !IsExcluded, which is
         /// also true for a track no rule mentions at all — only a deliberate include
-        /// overrides the legacy podcast heuristics (interim, until Phase 3 demotes them).
+        /// overrides an exclude rule (include always wins, see IsExcluded). The former
+        /// "overrides the legacy podcast heuristics" framing is gone with the heuristics
+        /// themselves (Phase 3/4, 2026-07-25) — the sole production caller is now
+        /// PreviewPlanner.cs (feeding CurrentDecision), not FilterExclusions (deleted).
         /// Does not touch MatchCount: this is a second look at rules IsExcluded already counted.
         /// </summary>
         public bool IsIncluded(string path, string? genre)

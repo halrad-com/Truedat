@@ -339,7 +339,9 @@ namespace Truedat
 
             // MusicBee's iTunes XML export has no Podcast boolean, no podcast Kind,
             // and no Track Type marker — actual podcast episodes are identified by
-            // Genre=Podcast (the same rule --migrate uses on stored entries).
+            // Genre=Podcast (the same rule ReportCatalog's PodcastGenre class stat
+            // applies to stored entries, Program.cs — --migrate uses no such rule,
+            // it only strips legacy fields, see CLAUDE.md's Scan exclusions section).
             // Checked after the dict so key order doesn't matter.
             if (!track.IsPodcast && string.Equals(track.Genre, "Podcast", StringComparison.OrdinalIgnoreCase))
             {

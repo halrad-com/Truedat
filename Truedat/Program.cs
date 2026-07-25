@@ -2996,11 +2996,11 @@ namespace Truedat
             if (_audit && xmlIssues != null)
                 foreach (var issue in xmlIssues) Console.WriteLine(issue);
             Console.WriteLine($"Found {tracks.Count} tracks");
-            // True library membership, captured BEFORE the podcast/video/remote/non-audio
+            // True library membership, captured BEFORE the video/remote/non-audio/exclusion
             // filters run. An mbxmoods.json entry whose path isn't in here is genuinely gone
             // from the library (→ --fixup); a still-present entry that a filter excluded
-            // (e.g. a labeled podcast) must NOT read as an orphan. Feeds the wave-missing
-            // breakdown in ReportCatalog.
+            // (e.g. a video file, or a track matching an exclusion rule) must NOT read as
+            // an orphan. Feeds the wave-missing breakdown in ReportCatalog.
             var libraryKeys = new HashSet<string>(
                 tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
                 PathComparer.Instance);
@@ -3138,7 +3138,6 @@ namespace Truedat
             int skipped = 0;
             int dsdSkipped = 0;
             int missingSkipped = 0;
-            int podcastFileSkipped = 0;
             int failed = 0;
             int timedOut = 0;
             int processed = 0;
@@ -3707,11 +3706,9 @@ namespace Truedat
                 Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
             if (missingSkipped > 0)
                 Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
-            if (podcastFileSkipped > 0)
-                Console.WriteLine($"  Podcast:    {podcastFileSkipped}  (file markers — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + podcastFileSkipped + failed}");
+            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
@@ -3771,8 +3768,8 @@ namespace Truedat
             catch { }
             EmitStagingSummary();
             // The FILTERED work list = exactly what a rescan re-analyzes. Wave-missing
-            // entries outside it (podcast/video/URL filtered) can't be reached by
-            // --refresh-features, so the advisor must not point there for them.
+            // entries outside it (video/URL/non-audio/exclusion-rule filtered) can't be
+            // reached by --refresh-features, so the advisor must not point there for them.
             var workListKeys = new HashSet<string>(
                 tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
                 PathComparer.Instance);
@@ -5563,10 +5560,16 @@ namespace Truedat
         /// touched either way). Writes mbxmoods-speech.csv
         /// (path,artist,title,album,genre,codec,speechConfidence,method) next to the
         /// moods file and prints a count + first-20 preview. The verdict is recomputed
-        /// via ComputeTruedatVerdict so it matches the --stats class-stat count exactly
-        /// (write-time verdict, not persisted in the entry). This is the only speech
-        /// surface that works on the moods JSON alone — --preview needs the iTunes XML
-        /// and can't run on a metadata-mirror box.</summary>
+        /// via ComputeTruedatVerdict (write-time verdict, not persisted in the entry) —
+        /// but this lister is NOT count-equal with the --stats class-stat count: --stats
+        /// partitions podcast-genre vs. acoustic-speech (an entry with stored
+        /// genre=="Podcast" counts under PodcastGenre and is excluded from its speech
+        /// count, see ComputeCatalogStats), while this method lists every speechLikely
+        /// =="yes" entry regardless of genre label. So this CSV can be a strict superset
+        /// of the --stats "Speech-likely" number — that is intentional, not a bug: this
+        /// is the full review surface, --stats is a non-overlapping-class summary. This
+        /// is the only speech surface that works on the moods JSON alone — --preview
+        /// needs the iTunes XML and can't run on a metadata-mirror box.</summary>
         static void RunListSpeech(string moodsPath, IEnumerable<TrackEntry> entries)
         {
             var hits = new List<(string Path, string Artist, string Title, string Album, string Genre, string Codec, double? Conf, string Method)>();
@@ -5779,9 +5782,9 @@ namespace Truedat
             {
                 Console.WriteLine();
                 if (s.PodcastGenre > 0)
-                    Console.WriteLine($"  {"Podcast (genre label)",-20} {s.PodcastGenre,9:N0} tracks   (exclude: a genre rule in a decisions delta + truedat --apply-exclusions)");
+                    Console.WriteLine($"  {"Podcast (genre)",-20} {s.PodcastGenre,9:N0} tracks   (exclude: a genre rule in a decisions delta + truedat --apply-exclusions)");
                 if (s.SpeechYes > 0)
-                    Console.WriteLine($"  {"Speech-likely (acoustic)",-20} {s.SpeechYes,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
+                    Console.WriteLine($"  {"Speech-likely",-20} {s.SpeechYes,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
             }
 
             // Recommended next steps — detected state -> exact command. Advisory
@@ -7867,7 +7870,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(Detect(Id3("TCON", Text("Comedy Podcast"))) == null, "sniffer: TCON 'Comedy Podcast' no longer matches (exact-equals now)");
                 Assert(Detect(Id3("TCON", Text("Podcasts"))) == null, "sniffer: TCON 'Podcasts' no longer matches");
                 Assert(Detect(Id3("TCON", Text("Rock"))) == null, "sniffer: TCON 'Rock' is not a podcast");
-                Assert(Detect(Id3("TCON", Text("  podcast  "))) != null, "sniffer: TCON match is trimmed and case-insensitive");
+                var trimmedGenre = Detect(Id3("TCON", Text("  podcast  ")));
+                Assert(trimmedGenre != null && trimmedGenre.GenreText, "sniffer: TCON match is trimmed and case-insensitive");
 
                 Assert(Detect(new byte[] { 1, 2, 3 }) == null, "sniffer: junk stream returns null");
                 var truncated = Id3("PCST", new byte[] { 0, 0, 0, 0 });
