@@ -5,6 +5,47 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Changed — podcasts are analyzed by default now (2026-07-25)
+
+**Breaking behaviour change.** Nothing in truedat guesses at podcasts any more. Older builds
+in this same Unreleased window skipped anything the XML labelled podcast, plus files carrying
+embedded podcast markers, and `--migrate` pruned podcast and speech-likely catalog entries.
+All of that is gone: **the only thing that keeps a file out of analysis is a rule you write**
+into `mbxmoods-exclude.json`. If you relied on the old auto-skip, upgrading without adding a
+rule first means those files get analyzed — for a large podcast folder, that can mean hours of
+unplanned scan time.
+
+Migrate before your next scan:
+
+1. `truedat --preview` — lists what a scan would do, including every track worth a look.
+2. Write a decisions delta, e.g.
+   `{"schemaVersion":1,"kind":"exclusion-decisions","add":[{"kind":"folder","action":"exclude","pattern":"\\Podcasts\\**"}],"remove":[]}`
+   (a `genre` rule for `Podcast` works too — pick whichever matches how your library is organised).
+3. `truedat --apply-exclusions decisions.json`
+4. Scan.
+
+- **`--include-podcasts` is removed.** It was all-or-nothing; the exclusion file (with its
+  per-rule `include` override) is the replacement and was already the recommended path for a
+  mislabelled album.
+- **`--migrate` no longer prunes anything.** Its two purges (podcast-genre entries, and
+  `truedat.speechLikely == "yes"` entries) are both gone — pruning an entry for a file still in
+  your library was self-undoing anyway, since the next scan just re-analyzed and re-added it.
+  `--migrate` now only strips legacy fields and renames SMFM keys, same as it always did for
+  those.
+- **The podcast signals still exist, purely as evidence.** The XML labels (`Podcast=true`,
+  `Genre=Podcast`) and the embedded file-marker sniff both survive, but only to populate
+  `reasons` on `--preview`'s review candidates — a human decides, then writes a rule.
+- **The file-marker evidence is now graded** instead of first-match-wins: **strong** (ID3
+  `PCST` / MP4 `pcst` — an app asserting "this IS a podcast") outranks **provenance** (ID3
+  `WFED`/`TGID`, MP4 `purl` — "this came from a feed", which says nothing about content, since
+  music gets distributed by RSS too), which outranks **genre text** (ID3 `TCON`). `TCON` is
+  now **exact-equals** (trimmed, case-insensitive) instead of a substring match — the old
+  substring test made the file rule strictly looser than the library-side genre rule, so
+  `"Comedy Podcast"`, `"Podcasts"`, and `"Podcast Rock"` all tripped it.
+- **`--stats` reports podcast and speech-likely as two mutually-exclusive class counts**
+  (an entry counts once — under the stored genre label if it has one, else under the acoustic
+  `speechLikely` verdict), each pointing at review + an exclusion rule, never `--migrate`.
+
 ### Added — `--preview`, the read-only scan work plan (2026-07-25)
 
 - **`truedat --preview [path]`** answers "what would a scan do?" without analyzing

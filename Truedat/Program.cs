@@ -1379,7 +1379,10 @@ namespace Truedat
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
                 Console.WriteLine("  --preview [path]    Read-only: write the scan work plan + review candidates to preview.json");
-                Console.WriteLine("                      (MBXHub review folder by default). Analyzes nothing.");
+                Console.WriteLine("                      (MBXHub review folder by default; falls back to mbxmoods-preview.json");
+                Console.WriteLine("                      beside the moods file when no MBXHub instance is found). Analyzes nothing.");
+                Console.WriteLine("                      Refuses (exit 1, writes nothing) to overwrite a destination that is an .xml");
+                Console.WriteLine("                      file or an existing mood catalog (JSON with a top-level \"tracks\" property).");
                 Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
                 Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
@@ -2832,7 +2835,10 @@ namespace Truedat
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
                 Console.WriteLine("  --preview [path]    Read-only: write the scan work plan + review candidates to preview.json");
-                Console.WriteLine("                      (MBXHub review folder by default). Analyzes nothing.");
+                Console.WriteLine("                      (MBXHub review folder by default; falls back to mbxmoods-preview.json");
+                Console.WriteLine("                      beside the moods file when no MBXHub instance is found). Analyzes nothing.");
+                Console.WriteLine("                      Refuses (exit 1, writes nothing) to overwrite a destination that is an .xml");
+                Console.WriteLine("                      file or an existing mood catalog (JSON with a top-level \"tracks\" property).");
                 Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
                 Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
@@ -5796,7 +5802,7 @@ namespace Truedat
                 //   errored (on the error list)          -> --retry-errors   (bad file)
                 //   orphan  (not in the library at all)  -> --fixup          (drop it)
                 //   filtered (in library, excluded from  -> unreachable by a rescan; a
-                //             the scan work list)            podcast/video/URL entry
+                //             the scan work list)            rule-excluded/video/URL entry
                 //   stale   (in the work list, no error) -> --refresh-features (the ONLY
                 //                                            bucket a rescan fixes)
                 int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveStale = 0;
@@ -5819,7 +5825,7 @@ namespace Truedat
                 if (waveOrphan > 0)
                     waveBreakdown.Add($"{waveOrphan,6:N0}  no longer in library    ->  truedat --fixup          (drops orphaned entries)");
                 if (waveFiltered > 0)
-                    waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: podcast/video/URL/non-audio)");
+                    waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: exclusion-rule/video/URL/non-audio)");
                 if (waveStale > 0)
                     waveBreakdown.Add($"{waveStale,6:N0}  analyzable, just stale  ->  truedat --refresh-features");
             }

@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), podcast-labeled episodes — three independent classifiers, all bypassed by `--include-podcasts`: the iTunes-native `Podcast=true` boolean or `Genre=Podcast` (explicit label, single-signal sufficient), a 2-of-3 XML signal vote across Episode Date key / Publisher key / duration ≥30 min at parse time (reason format `podcast (signals: Episode Date + 52min)`), and an embedded file-marker sniff on cache-miss files — ID3v2 `PCST`/`WFED`/`TGID`/`TCON` containing "podcast", or MP4 `pcst`/`purl` atoms (reason format `podcast (file marker: PCST)`; MoodsMode's end-of-scan summary reports these separately as `Podcast: N (file markers — see mbxmoods-skipped.csv)`) — video files, playlist/redirector entries, and missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH). Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), video files, playlist/redirector entries, missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH), and any track matched by an `exclude` rule in `mbxmoods-exclude.json` (reason `excluded (rule: …)` — see [Excluding files from analysis](#excluding-files-from-analysis)). Podcast labels and embedded file markers are **not** a skip reason any more — they are review evidence on `--preview`'s output, not an analysis filter; see the upgrade note below if you relied on the old auto-skip. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -110,18 +110,22 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --stats [path]          Read-only catalog summary: Essentia-analyzed count, hash coverage
                           per kind, and SMFM track count. Path defaults to ./mbxmoods.json.
                           Also printed at end of every scan. With --audit, written to the log.
-                          The summary ends with a Recommended section mapping detected catalog
-                          state (missing tonal/rhythm wave, missing fingerprint.v1, stray
-                          fileMd5, speech-likely entries) to the exact command that fixes it —
-                          truedat never prompts interactively.
+                          Reports podcast (stored genre == "Podcast") and speech-likely
+                          (acoustic verdict) as two MUTUALLY EXCLUSIVE class counts — an entry
+                          counts once, under the genre label if it has one, else under the
+                          acoustic verdict — each pointing at review + an exclusion rule
+                          (never --migrate, which doesn't touch entries either way). Separately,
+                          a Recommended section maps detected gaps (missing tonal/rhythm wave,
+                          missing fingerprint.v1, stray fileMd5) to the exact command that
+                          closes each — truedat never prompts interactively.
   --stats-detail N        List per-file status when a catalog has < N tracks (default 5).
-  --list-speech [path]    Read-only: list the entries whose verdict is speechLikely=yes
-                          — the exact set --migrate purges — so you can review them before
-                          pruning. Writes mbxmoods-speech.csv (path, artist, title, album,
-                          genre, codec, confidence, method) next to the moods file and prints
-                          a count + preview. The speech verdict is still -untuned, so real
-                          music with talk-like shape (ambient, field recordings, spoken
-                          intros) can appear here; review before pruning.
+  --list-speech [path]    Read-only: list the entries whose verdict is speechLikely=yes —
+                          candidates for an exclusion rule, not a --migrate prune (--migrate
+                          never removes entries). Writes mbxmoods-speech.csv (path, artist,
+                          title, album, genre, codec, confidence, method) next to the moods
+                          file and prints a count + preview. The speech verdict is still
+                          -untuned, so real music with talk-like shape (ambient, field
+                          recordings, spoken intros) can appear here; review before excluding.
   --list-missing-smfm [path]
                           Read-only: list catalog entries carrying no Sony SMFM (12-TONE)
                           data, with overall coverage (present / total / %). Writes
@@ -151,11 +155,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
-                          audioMd5, chromaprint) and fileMd5 (kept with --file-md5),
-                          rename SMFM keys (sensme*->smfm*), remove podcast entries
-                          (kept with --include-podcasts), remove speech-likely entries
-                          — stored truedat.speechLikely == "yes" (kept with
-                          --include-podcasts) (creates backup)
+                          audioMd5, chromaprint) and fileMd5 (kept with --file-md5), rename
+                          SMFM keys (sensme*->smfm*) (creates backup). Field cleanup only —
+                          never removes a catalog entry, on any verdict.
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
@@ -189,15 +191,6 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           enable this only if you compare whole-file MD5s with external tools.
   --pause                 Hold the console open at exit (press any key). For double-click
                           launches; no effect on redirected/scheduled runs.
-  --include-podcasts      Analyze podcast-labeled tracks too. Default: skip anything the XML
-                          explicitly labels podcast (iTunes-native Podcast=true, or
-                          Genre=Podcast) and files carrying embedded podcast markers
-                          (ID3v2 PCST/WFED/TGID/TCON, or MP4 pcst/purl atoms) sniffed on
-                          cache-miss — all listed in mbxmoods-skipped.csv with their reason.
-                          No label is perfect (podcast feeds can deliver music), so mis-labeled
-                          tracks are a retag — or this flag — away. Also keeps podcast entries
-                          and stored speech-likely entries (truedat.speechLikely == "yes")
-                          under --migrate.
   --exclusions <path>     Use this exclusion file instead of mbxmoods-exclude.json beside
                           the moods file.
   --no-exclusions         Ignore the exclusion file for this run. Prints a warning; for
@@ -312,6 +305,23 @@ Truedat decides what to skip from one file: `mbxmoods-exclude.json`, beside `mbx
 Nothing else excludes a track for policy reasons — metadata signals like genre are evidence
 you can act on, never an instruction the scanner infers on its own.
 
+### Upgrading: podcasts are no longer skipped automatically
+
+Older builds guessed which files were podcasts and skipped them. Nothing guesses now —
+the only thing that keeps a file out of analysis is a rule you wrote. If you relied on the
+old behaviour, add a rule **before** your next scan:
+
+1. `truedat --preview` — lists what a scan would do, including every track worth a look.
+2. Write a decisions delta, e.g.
+   `{"schemaVersion":1,"kind":"exclusion-decisions","add":[{"kind":"folder","action":"exclude","pattern":"\\Podcasts\\**"}],"remove":[]}`
+   (a `genre` rule for `Podcast` works too — pick whichever matches how your library is organised).
+3. `truedat --apply-exclusions decisions.json`
+4. Scan.
+
+`--include-podcasts` is gone; it was all-or-nothing, which is the problem the rule file solves.
+`--migrate` no longer removes podcast or speech-likely entries either — pruning an entry for a
+file that is still in your library is self-undoing, because the next scan re-analyzes it.
+
 ```jsonc
 {
   "schemaVersion": 1,
@@ -338,15 +348,31 @@ Three rule kinds, each `exclude` or `include`:
   a moved file can be re-resolved later; optional `note` records why you decided.
 
 **`include` always wins.** If any include rule matches, the track is analyzed — regardless of
-rule order, and regardless of what a podcast heuristic thought. That is the escape hatch for
-music a label misclassifies.
+rule order. That is the escape hatch for music a label or an embedded marker misclassifies.
 
 `include` does **not** override structural skips — a missing file, a video, a stream URL, a
 DSD file or a track over `--max-duration` still can't be analyzed, and a rule can't change that.
 
-`--no-exclusions` bypasses the whole exclusion file, not just the exclude rules — an include
-rule that was rescuing a track from the podcast heuristic stops rescuing it too, so that track
-is filtered (and its catalog entry pruned) again for the duration of that run.
+`--no-exclusions` bypasses the whole exclusion file for this run, include rules and all — a
+track an include rule was rescuing reverts to whatever the remaining rules say (or nothing, if
+none apply) for the duration of that run. Either way, no existing `mbxmoods.json` entry is
+ever pruned by this — exclusion is purely a future-analysis switch (see below).
+
+### Podcast signals are evidence, not a filter
+
+Nothing in truedat decides a track is a podcast any more. The iTunes-XML labels
+(`Podcast=true`, `Genre=Podcast`) and an embedded file-marker sniff still run, but only to
+populate `reasons` on `--preview`'s review candidates — a human reads them and, if warranted,
+writes an exclusion rule. The file-marker evidence is **graded**, because the markers don't
+all assert the same thing:
+
+- **strong** — ID3v2 `PCST` / MP4 `pcst`: an app asserting "this IS a podcast".
+- **provenance** — ID3v2 `WFED` / `TGID`, MP4 `purl`: "this came from a feed", which says
+  nothing about content — music gets distributed by RSS too.
+- **genre text** — ID3v2 `TCON` exactly `Podcast` (trimmed, case-insensitive; **not** a
+  substring match, so `Comedy Podcast` / `Podcasts` / `Podcast Rock` don't count).
+
+An explicit `PCST` flag is stronger evidence than a `WFED` feed URL for exactly that reason.
 
 Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused it, on every
 scan mode (`--analyze-file`, `--file-list`/`--folder`, and the iTunes-XML library scan alike).
@@ -408,10 +434,12 @@ MBXHub's review surface renders. It goes to the MBXHub review folder, or beside 
 as `mbxmoods-preview.json` when no MusicBee/MBXHub instance is found.
 
 `New` counts only the tracks a scan would actually hand to the analyser, and the estimate is
-built from those tracks alone — so the structural skips, the rule-excluded tracks and the
-podcast-labelled ones are all *outside* it. That is the point of the mode: the `Excluded` line
-shows what your rules save you, and it would be meaningless if the saving were still sitting
-inside the cost.
+built from those tracks alone — so the structural skips and the rule-excluded tracks are
+*outside* it. A podcast label alone does **not** move a track out of `New` any more — only a
+matching exclusion rule does — so a podcast-labelled track with no rule against it shows up
+inside `New` (and in `--preview`'s review list, flagged `podcast-labelled`, for you to judge).
+That is the point of the mode: the `Excluded` line shows what your rules save you, and it
+would be meaningless if the saving were still sitting inside the cost.
 
 Two distinctions worth internalising:
 
@@ -757,7 +785,7 @@ The block is **omitted entirely** when none of the three verdicts reached a deci
 
 Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — corpus-1 tuning showed this discipline avoided false flips on peaky-but-genuine cymbal content.
 
-`speechLikely` classifies talk content (podcast/audiobook/spoken-word survivors of the podcast filters above, or any music-library track that's actually speech) vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight`, and tonal `keyVotes` strength. `"yes"` additionally requires the zero-crossing signal to fire on its own — a sine-tone or ambient bed can share talk's shape on the other signals but sits low on zcr, and without this gate it would wrongly reach `"yes"` (which `--migrate` treats as prune-eligible, removing the entry from `mbxmoods.json` — truedat never touches the audio file); tone/ambient content demotes to `"unknown"` instead. A second gate requires `danceability < 0.50`: sparse, live and free-form *instrumental* music craters on every other signal exactly like speech does, and danceability is the one that separates them (genuine speech measures 0.00; real-music false positives ran 0.66–1.10). Review the `"yes"` set with `--list-speech` before running `--migrate`. `speechMethod` carries its own tag (`truedat-speech-v1.2-untuned-2026-07-22`), independent of the authenticity `method` tag, since the two verdict families tune on separate schedules.
+`speechLikely` classifies talk content (podcasts, audiobooks, spoken-word — all analyzed by default like anything else now, or any music-library track that's actually speech) vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight`, and tonal `keyVotes` strength. `"yes"` additionally requires the zero-crossing signal to fire on its own — a sine-tone or ambient bed can share talk's shape on the other signals but sits low on zcr, and without this gate it would wrongly reach `"yes"`; tone/ambient content demotes to `"unknown"` instead. A second gate requires `danceability < 0.50`: sparse, live and free-form *instrumental* music craters on every other signal exactly like speech does, and danceability is the one that separates them (genuine speech measures 0.00; real-music false positives ran 0.66–1.10). `"yes"` is a candidate for an exclusion rule, never a `--migrate` prune — `--migrate` never removes entries. Review the `"yes"` set with `--list-speech`, then write a rule via a decisions delta + `--apply-exclusions` if warranted. `speechMethod` carries its own tag (`truedat-speech-v1.2-untuned-2026-07-22`), independent of the authenticity `method` tag, since the two verdict families tune on separate schedules.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 

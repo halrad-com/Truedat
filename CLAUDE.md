@@ -84,11 +84,12 @@ fragment matches under any root, which is what makes rules portable across mirro
 libraries), `genre` (exact, case-insensitive, trimmed — deliberately **not** substring) and
 `file` — each `exclude` or `include`, with **`include` always winning** regardless of order.
 
-Layering is two-tier and the policy tier can never override the structural one: structural
-skips (missing / video / stream URL / non-audio / DSD / over `--max-duration`) are
-"cannot analyze" and ignore `include`; policy is `include` > `exclude` > the legacy podcast
-heuristics > keep. That last term is interim — an `include` rule is how a mislabelled album
-is rescued without `--include-podcasts`, and it retires when the heuristics are demoted.
+Layering is two-tier, and no heuristic sits in it any more: structural skips (missing /
+video / stream URL / non-audio / DSD / over `--max-duration`) are "cannot analyze" and ignore
+`include`; everything else is policy, decided solely by `ExclusionSet.IsExcluded` —
+`include` > `exclude` > keep. A podcast label, a genre string, an embedded file marker: none
+of it filters anything by itself any more. The only way a track is kept out of analysis for
+a policy reason is a rule the operator wrote into `mbxmoods-exclude.json`.
 
 A **missing** file excludes nothing (not an error). A **present but unparseable** file makes
 truedat exit 1 rather than scan — analyzing everything while the operator believes rules are
@@ -104,13 +105,40 @@ expected to invoke it rather than write the file itself.
 
 The `Episode Date` podcast heuristic is **deleted** (2026-07-24) and must not return:
 MusicBee maps ID3v2.4 `TDRL` (a *release* date) into that key, so it rides on ordinary music.
-Explicit labels only — `Podcast=true` or `Genre=Podcast`.
+Explicit labels only — `Podcast=true` or `Genre=Podcast` — and even those are evidence now,
+not a filter (see below).
+
+**Podcast heuristics do not decide anything, and must not be reinstated as a filter.**
+`ITunesParser` still sets `IsPodcast`/`PodcastReason` on parse (from the explicit XML labels
+only — the `Episode Date`/Publisher/duration vote is gone too, see above), and
+`PodcastTagSniffer` still sniffs embedded file markers, but both are purely evidence for the
+`--preview` review surface (`reasons` on a review candidate; graded `PodcastMarkers.Strong`
+/ `.Provenance` / `.GenreText` — strong = ID3 `PCST`/MP4 `pcst` asserting "this IS a
+podcast", provenance = ID3 `WFED`/`TGID`/MP4 `purl` asserting only "this came from a feed",
+genre-text = ID3 `TCON` exactly `Podcast` trimmed/case-insensitive, **not** substring).
+Nothing reads either signal to skip
+a file or prune a catalog entry — `FilterPodcasts` and the MoodsMode/`--seed-moods` prunes
+that used to consume it are deleted, and the cache-miss embedded-marker skip in the three
+per-file scan paths is deleted too (the sniffer now runs only inside `--preview`). `--migrate`
+strips legacy fields only (`valence`/`arousal`, `audioMd5`, `chromaprint`; `fileMd5` unless
+`--file-md5`; renames `sensme*`→`smfm*`) and never removes an entry on any verdict — podcast,
+speech-likely, or otherwise. `speechLikely` is advisory only; **AutoQ (MBXHub) is its
+downstream consumer**, via the read side of `mbxmoods.json`. Inside truedat, only the
+read-only review surfaces (`--list-speech`, the `--stats` class-stat count) recompute and
+report it — neither one skips a file or removes an entry. `--include-podcasts` and
+`ITunesTrack.ExclusionIncluded` are retired outright (hard cut, 2026-07-25) — the file
+`mbxmoods-exclude.json` is the only override, via its own `include` rules.
+This has been walked back **twice** now (the `Episode Date` vote in 2026-07-24, then the
+label/marker skip + the two `--migrate` purges + `--include-podcasts` in this phase) —
+a third heuristic-decides-something attempt should have to argue against this paragraph in
+writing, not rediscover why the first two didn't work.
 
 `--check-filenames` (`RunCheckFilenames`) deliberately does **not** apply `_exclusions` —
 it reports filesystem problems (over-length paths, zero-byte files) that are worth
 surfacing whether or not a track is excluded from analysis ("check is check, not
-exclude"); it calls `FilterPodcasts` without ever calling `FilterExclusions` first, so
-don't "fix" that by wiring exclusions in without a deliberate decision to do so.
+exclude"); it filters only `FilterRemoteUrls` / `FilterVideoFiles` / `FilterNonAudio`
+(structural) and never calls `FilterExclusions`, so don't "fix" that by wiring exclusions
+in without a deliberate decision to do so.
 
 `--preview` (read-only) builds the same picture without scanning: `PreviewPlanner` computes a
 `PreviewPlan` from the parsed XML + existing catalog + `ExclusionSet`, and `PreviewWriter` emits
