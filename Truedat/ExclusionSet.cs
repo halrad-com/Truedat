@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Nodes;
+using System.Threading;
 
 namespace Truedat
 {
@@ -236,7 +237,7 @@ namespace Truedat
             foreach (var rule in _rules)
             {
                 if (!Matches(rule, normPath, normGenre)) continue;
-                rule.MatchCount++;
+                Interlocked.Increment(ref rule.MatchCount);
                 if (rule.Action == ExclusionAction.Include) included = true;
                 else if (firstExclude == null) firstExclude = rule;
             }

@@ -1677,6 +1677,16 @@ namespace Truedat
                     }
                 }
 
+                // Exclusion check runs before any cache tier — an excluded file never
+                // enters the catalog, so it can never hit tier 1, and letting it fall
+                // through to tier 4 would stage + hash it over the network for nothing.
+                if (!_noExclusions && _exclusions.IsExcluded(analyzeFilePath!, null, out var afExclReason))
+                {
+                    Console.Error.WriteLine($"[skipped excluded: {afExclReason}] {analyzeFilePath}");
+                    Environment.ExitCode = 0;
+                    return;
+                }
+
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
@@ -1849,12 +1859,6 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
-                    if (!_noExclusions && _exclusions.IsExcluded(analyzeFilePath!, null, out var afExclReason))
-                    {
-                        Console.Error.WriteLine($"[skipped excluded: {afExclReason}] {analyzeFilePath}");
-                        Environment.ExitCode = 0;
-                        return;
-                    }
                     if (!_includePodcasts)
                     {
                         var afPodcastMarker = PodcastTagSniffer.TryDetect(analyzeFilePath!);
@@ -2294,6 +2298,20 @@ namespace Truedat
                         var fullPath = Path.GetFullPath(filePath);
                         var hasMoods = !string.IsNullOrEmpty(analyzeFileMoods);
 
+                        // Exclusion check runs before any cache tier — an excluded file
+                        // never enters the catalog, so it can never hit tier 1, and
+                        // falling through to tier 4 would stage + hash it (a full network
+                        // copy on UNC) every single run for nothing. Matched on fullPath
+                        // (not the raw filePath) so a relative file-list entry can't dodge
+                        // an absolute file rule or a folder fragment.
+                        if (!_noExclusions && _exclusions.IsExcluded(fullPath, null, out var flExclReason))
+                        {
+                            AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"excluded (rule: {flExclReason})");
+                            Console.Error.WriteLine($"[skipped excluded: {flExclReason}] {Path.GetFileName(filePath)}");
+                            Interlocked.Increment(ref flDsdSkipped);   // reuse the skip counter fl already reports
+                            return;
+                        }
+
                         // Capture mtime ONCE at entry; threaded through every tier so the
                         // recorded mtime matches the bytes any tier-2/3/4 body read or
                         // worker block analyzes. (FIX 5 — pairs with the source-handle
@@ -2446,13 +2464,6 @@ namespace Truedat
                                     return;
                                 }
                             }
-                        }
-
-                        if (!_noExclusions && _exclusions.IsExcluded(filePath, null, out var flExclReason))
-                        {
-                            AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"excluded (rule: {flExclReason})");
-                            Console.Error.WriteLine($"[skipped excluded: {flExclReason}] {Path.GetFileName(filePath)}");
-                            return;
                         }
 
                         if (!_includePodcasts)
@@ -7957,9 +7968,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", Name = "Show",
                                           IsPodcast = true, PodcastReason = "Genre=Podcast" },
                     };
-                    var afterPodcast = FilterPodcasts(labelled, null);
+                    var removedPodcasts = new List<ITunesTrack>();
+                    var afterPodcast = FilterPodcasts(labelled, null, removedPodcasts);
                     Assert(afterPodcast.Count == 1, $"layering: unrescued podcast still filtered (kept {afterPodcast.Count})");
                     Assert(afterPodcast[0].Name == "KEXP", "layering: include rule rescues a labelled podcast");
+                    Assert(!removedPodcasts.Exists(t => t.Name == "KEXP"), "layering: rescued track is not ledgered as a removed podcast");
                 }
                 finally { _exclusions = saveSet; }
             }
