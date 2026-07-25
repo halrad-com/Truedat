@@ -190,15 +190,23 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --pause                 Hold the console open at exit (press any key). For double-click
                           launches; no effect on redirected/scheduled runs.
   --include-podcasts      Analyze podcast-labeled tracks too. Default: skip anything the XML
-                          labels podcast (iTunes-native Podcast=true, or Genre=Podcast), anything
-                          that trips the 2-of-3 XML signal vote (Episode Date key / Publisher key
-                          / duration >=30 min), and files carrying embedded podcast markers
+                          explicitly labels podcast (iTunes-native Podcast=true, or
+                          Genre=Podcast) and files carrying embedded podcast markers
                           (ID3v2 PCST/WFED/TGID/TCON, or MP4 pcst/purl atoms) sniffed on
                           cache-miss — all listed in mbxmoods-skipped.csv with their reason.
                           No label is perfect (podcast feeds can deliver music), so mis-labeled
                           tracks are a retag — or this flag — away. Also keeps podcast entries
                           and stored speech-likely entries (truedat.speechLikely == "yes")
                           under --migrate.
+  --exclusions <path>     Use this exclusion file instead of mbxmoods-exclude.json beside
+                          the moods file.
+  --no-exclusions         Ignore the exclusion file for this run. Prints a warning; for
+                          diagnosing whether a rule is what kept a file out.
+  --apply-exclusions <path>
+                          Merge a decisions delta into the exclusion file. Backs up the
+                          previous version and reports added / removed / already-set /
+                          not-present counts. Exits 1 without writing if the document or
+                          the existing file cannot be parsed.
 ```
 
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
@@ -283,6 +291,74 @@ truedat.exe "iTunes Music Library.xml" --chunk 1/2     REM machine A
 truedat.exe "iTunes Music Library.xml" --chunk 2/2     REM machine B
 truedat.exe --merge-moods --merge-source mbxmoods.machineA.json --merge-source mbxmoods.machineB.json --merge-output mbxmoods.json
 ```
+
+## Excluding files from analysis
+
+Truedat decides what to skip from one file: `mbxmoods-exclude.json`, beside `mbxmoods.json`.
+Nothing else excludes a track for policy reasons — metadata signals like genre are evidence
+you can act on, never an instruction the scanner infers on its own.
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "rules": [
+    { "kind": "folder", "action": "exclude", "pattern": "\\Podcasts\\**" },
+    { "kind": "folder", "action": "include", "pattern": "\\Podcasts\\KEXP Song of the Day\\**" },
+    { "kind": "genre",  "action": "exclude", "value": "Podcast" },
+    { "kind": "file",   "action": "exclude", "path": "D:\\Music\\setlist-2019.mp3",
+      "note": "many songs in one file, so one average describes nothing" }
+  ]
+}
+```
+
+Three rule kinds, each `exclude` or `include`:
+
+- **`folder`** — `pattern` must end in `**` (the subtree). Write it as a *fragment* starting
+  with a separator (`\Podcasts\**`) and it matches under any root, which is what you want
+  when the same library is mounted on more than one drive. An absolute pattern
+  (`D:\Music\Podcasts\**`) matches that root only. Fragments are boundary-aligned, so
+  `\Podcasts\**` does not match `\MyPodcastsBackup\`.
+- **`genre`** — exact match, case-insensitive, trimmed. Not a substring match: `Podcast`
+  does not match `Comedy Podcast`.
+- **`file`** — one exact path. Optional `audioStreamSha256` records the durable identity so
+  a moved file can be re-resolved later; optional `note` records why you decided.
+
+**`include` always wins.** If any include rule matches, the track is analyzed — regardless of
+rule order, and regardless of what a podcast heuristic thought. That is the escape hatch for
+music a label misclassifies.
+
+`include` does **not** override structural skips — a missing file, a video, a stream URL, a
+DSD file or a track over `--max-duration` still can't be analyzed, and a rule can't change that.
+
+`--no-exclusions` bypasses the whole exclusion file, not just the exclude rules — an include
+rule that was rescuing a track from the podcast heuristic stops rescuing it too, so that track
+is filtered (and its catalog entry pruned) again for the duration of that run.
+
+Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused it, and each
+scan reports per-rule hit counts, so a rule matching zero tracks is visible rather than silent:
+
+```
+  Exclusions: 2 rule(s) from D:\MusicBee\Library\mbxmoods-exclude.json
+  Excluded 374 track(s) by rule — listed in mbxmoods-skipped.csv (--audit lists each)
+    genre=Podcast: 374 matched
+    folder=\Old Shows\**: 0 matched   (stale rule?)
+```
+
+Excluding a file does not remove an existing `mbxmoods.json` entry — it only stops future
+analysis, so the decision is reversible.
+
+Edit the file by hand, or merge changes into it:
+
+```
+truedat --apply-exclusions decisions.json
+```
+
+where `decisions.json` is a delta — `{"schemaVersion":1,"kind":"exclusion-decisions","add":[…],"remove":[…]}`.
+Merging rather than overwriting is deliberate: the file has several legitimate authors, and a
+whole-file write would discard whichever one went second. The previous version is backed up
+before any change. If the file can't be parsed, truedat **refuses to scan** rather than
+quietly analyzing everything you thought was excluded — pass `--no-exclusions` if you want to
+bypass it on purpose.
 
 ## Test Tooling
 

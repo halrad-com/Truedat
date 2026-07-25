@@ -19,6 +19,31 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   iTunes-native `Podcast=true`, or `Genre=Podcast`. Ten self-test assertions pin
   the whole TDRL class as *not* a podcast so it cannot come back a third time.
 
+### Added — explicit scan exclusions (2026-07-24)
+
+- **`mbxmoods-exclude.json`** — a per-library decision file, beside `mbxmoods.json`,
+  that is now the only thing which keeps a track out of analysis for policy
+  reasons. Three rule kinds (`folder` subtree pattern, `genre`, single `file`),
+  each `exclude` or `include`, with `include` always winning. Folder patterns
+  can be written as root-independent fragments (`\Podcasts\**`) so one rule
+  works across a library mirrored on several drives. Genre matching is exact and
+  case-insensitive, never substring.
+- **`--apply-exclusions <path>`** merges a decisions delta into that file, backing
+  up the previous version and reporting added / removed / already-set /
+  not-present counts. Merging rather than overwriting is deliberate — the file
+  has several legitimate authors and a whole-file write would discard whichever
+  went second. **`--exclusions <path>`** overrides the location;
+  **`--no-exclusions`** bypasses it for one run with a warning.
+- Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused
+  it, and each scan prints per-rule hit counts, so a rule that matches nothing is
+  visible instead of silently doing nothing.
+- A missing exclusion file excludes nothing. A file that cannot be parsed makes
+  truedat **exit 1 rather than scan** — analyzing everything while you believe
+  your rules are in force is the silent failure this replaces. Invalid individual
+  rules are skipped, counted and reported.
+- Exclusions do **not** remove existing `mbxmoods.json` entries; they only stop
+  future analysis, so the decision is reversible.
+
 ### Added — average track length in the scan summary (2026-07-24)
 
 - The end-of-scan summary now reports **`Avg length`** — the mean audio duration

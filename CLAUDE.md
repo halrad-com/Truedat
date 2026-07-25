@@ -75,6 +75,34 @@ Re-extract (cache miss → full Essentia) when any of these are missing:
 
 When adding a new always-extracted field, decide whether to add it to the canary. Avoid canary conditions that depend on optional external tools — those caused infinite re-extraction loops on installs without the tool, which is why the old `audioMd5`-presence canary was removed when the binary left the default codepath.
 
+## Scan exclusions
+
+`mbxmoods-exclude.json` beside the moods file is the **only** authority over what a scan
+skips for policy reasons (`ExclusionSet` parses and matches; `ExclusionStore` reads, writes
+and merges). Three rule kinds — `folder` (pattern must end `**`; a leading-separator
+fragment matches under any root, which is what makes rules portable across mirrored
+libraries), `genre` (exact, case-insensitive, trimmed — deliberately **not** substring) and
+`file` — each `exclude` or `include`, with **`include` always winning** regardless of order.
+
+Layering is two-tier and the policy tier can never override the structural one: structural
+skips (missing / video / stream URL / non-audio / DSD / over `--max-duration`) are
+"cannot analyze" and ignore `include`; policy is `include` > `exclude` > the legacy podcast
+heuristics > keep. That last term is interim — an `include` rule is how a mislabelled album
+is rescued without `--include-podcasts`, and it retires when the heuristics are demoted.
+
+A **missing** file excludes nothing (not an error). A **present but unparseable** file makes
+truedat exit 1 rather than scan — analyzing everything while the operator believes rules are
+in force is the silent failure the whole design exists to remove. Invalid individual rules are
+skipped, counted and diagnosed (tolerant-reader convention). Exclusions never prune existing
+catalog entries. Per-rule hit counts print every scan so stale rules surface. `--exclusions`
+overrides the location, `--no-exclusions` bypasses for one run, `--apply-exclusions <delta>`
+merges (with backup) and is the **single** implementation of the merge semantics — MBXHub is
+expected to invoke it rather than write the file itself.
+
+The `Episode Date` podcast heuristic is **deleted** (2026-07-24) and must not return:
+MusicBee maps ID3v2.4 `TDRL` (a *release* date) into that key, so it rides on ordinary music.
+Explicit labels only — `Podcast=true` or `Genre=Podcast`.
+
 ## Chunked scanning across machines
 
 `--chunk M/N` uses hash-mod assignment: `(PathComparer.GetHashCode(path) & 0x7FFFFFFF) % N == M-1`. `PathComparer`'s hash is FNV-1a, deterministic across processes and machines, separator-normalized, case-folded. Same path → same bucket on every box, **regardless of XML differences**. Asymmetric libraries are tolerated. Output filenames auto-suffix with hostname to prevent shard collisions when machines write to a shared library directory. Combine with `--merge-moods`.
