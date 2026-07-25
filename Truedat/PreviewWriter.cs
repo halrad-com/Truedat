@@ -329,6 +329,10 @@ namespace Truedat
   .banner.warn{background:#2e2418;border-color:#7a5a2a;color:#f2c48a}
   .banner code{background:#0d0d0d;padding:1px 6px;border-radius:4px;color:#9cf}
   .trunc{color:#e0a04a;font-size:13px;margin:10px 0}
+  .bulkbar{display:flex;gap:10px;align-items:center;font-size:13px;color:#cfcfcf;margin:8px 0}
+  .bulkbar button{padding:4px 10px;font-size:12px}
+  tr.olimit td{background:#181818;color:#7a7a7a}
+  .skiptag{background:#3a2e2e;color:#c99;border-radius:4px;padding:2px 7px;font-size:11px;cursor:help}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{padding:6px 10px;text-align:left;border-top:1px solid #232323;vertical-align:top}
   th{color:#888;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
@@ -456,19 +460,36 @@ function renderBulk(){
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 function rsnClass(r){if(r.indexOf('marker:')===0)return 'mark';return RSN[r]||'';}
 function decState(c){const x=desiredHas({kind:'file',action:'exclude',path:c.path});const i=desiredHas({kind:'file',action:'include',path:c.path});if(x)return 'x';if(i)return 'i';return c.currentDecision==='excluded'?'x0':c.currentDecision==='included'?'i0':'';}
+// The paths of the currently-shown DECIDABLE rows (over-limit excluded — see below), so the
+// bulk buttons act on exactly what the filter is showing.
+let shownDecidable=[];
+// Set every given path to one decision in a single pass, then one refresh (not N).
+function bulkDecide(paths,action){
+  paths.forEach(p=>{const id=idOf({kind:'file',action,path:p});const anti=idOf({kind:'file',action:action==='exclude'?'include':'exclude',path:p});desired.delete(anti);desired.add(id);byId.set(id,{kind:'file',action,path:p});});
+  persist();refresh();
+}
 function renderTable(){
   const body=document.getElementById('body');
-  if(!(D.review||[]).length){body.innerHTML=`<div class='empty'>Nothing awaiting review.</div>`;return;}
+  if(!(D.review||[]).length){body.innerHTML=`<div class='empty'>Nothing awaiting review.</div>`;shownDecidable=[];return;}
   const rows=(D.review||[]).filter(c=>c.durationSecs>=LONG||c.overLimit||(c.reasons||[]).some(r=>r!=='long'&&r!=='over-limit'));
   const trunc=D.reviewTruncated?`<div class='trunc'>showing ${num(D.review.length)} of ${num(D.reviewTotal)} — narrow with the chips or the slider</div>`:'';
-  if(!rows.length){body.innerHTML=trunc+`<div class='empty'>No candidates at the current long-track filter.</div>`;return;}
+  if(!rows.length){body.innerHTML=trunc+`<div class='empty'>No candidates at the current long-track filter.</div>`;shownDecidable=[];return;}
+  // Over-limit is a STRUCTURAL skip (Essentia can't analyze past the ceiling), not a policy
+  // decision — it is shown for awareness only and never counts toward a bulk action.
+  shownDecidable=rows.filter(c=>!c.overLimit).map(c=>c.path);
+  const bulkbar=shownDecidable.length?`<div class='bulkbar'><b>${num(shownDecidable.length)}</b> decidable shown · <button class='sec' id='exclshown'>exclude all shown</button> <button class='sec' id='inclshown'>include all shown</button></div>`:'';
   const tr=rows.map(c=>{
-    const st=decState(c);const cls=st==='x'||st==='x0'?'excl':st==='i'||st==='i0'?'incl':'';
     const badges=(c.reasons||[]).map(r=>`<span class='rsn ${rsnClass(r)}'>${esc(r)}</span>`).join('');
+    if(c.overLimit){
+      // No decision buttons: excluding it is redundant (already skipped) and including it
+      // does nothing (structural beats include). Informational row only.
+      return `<tr class='olimit' data-p='${esc(c.path)}'><td class='dec'><span class='skiptag' title='exceeds the analysis ceiling — Essentia cannot analyze it. Split/transcode it, or raise --max-duration.'>can&#39;t analyze</span></td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
+    }
+    const st=decState(c);const cls=st==='x'||st==='x0'?'excl':st==='i'||st==='i0'?'incl':'';
     const anc=ancestors(c.path);const opts=anc.map(a=>`<option value='${esc(a)}'>${esc(a)}</option>`).join('');
     return `<tr class='${cls}' data-p='${esc(c.path)}'><td class='dec'><button class='sec dx ${st==='x'?'on-x':''}'>excl</button><button class='sec di ${st==='i'?'on-i':''}'>incl</button>${anc.length?`<div class='fexcl'>folder: <select class='fsel'><option value=''>—</option>${opts}</select></div>`:''}</td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
   }).join('');
-  body.innerHTML=trunc+`<table><thead><tr><th>decision</th><th>path</th><th class='num'>len</th><th>genre</th><th>codec</th><th>state</th><th>reasons</th></tr></thead><tbody>${tr}</tbody></table>`;
+  body.innerHTML=trunc+bulkbar+`<table><thead><tr><th>decision</th><th>path</th><th class='num'>len</th><th>genre</th><th>codec</th><th>state</th><th>reasons</th></tr></thead><tbody>${tr}</tbody></table>`;
 }
 function updateSave(){document.getElementById('save').disabled=!dirty();}
 // The genre picker dialog: browse the full genre list (searchable), toggle exclusions. Only
@@ -487,6 +508,8 @@ function refresh(){renderCounts();renderSummary();renderBulk();renderTable();upd
 document.addEventListener('click',ev=>{
   if(ev.target.closest('#gpick')){openGenres();return;}
   if(ev.target.closest('#gclose')||ev.target.id==='gmodal'){closeGenres();return;}
+  if(ev.target.id==='exclshown'){bulkDecide(shownDecidable,'exclude');return;}
+  if(ev.target.id==='inclshown'){bulkDecide(shownDecidable,'include');return;}
   const gp=ev.target.closest('[data-gpick]');if(gp){toggleRule({kind:'genre',action:'exclude',value:gp.getAttribute('data-gpick')});renderGenreList();return;}
   const g=ev.target.closest('[data-genre]');if(g){toggleRule({kind:'genre',action:'exclude',value:g.getAttribute('data-genre')});return;}
   const rr=ev.target.closest('[data-rmrule]');if(rr){toggleRule(parseRuleStr(rr.getAttribute('data-rmrule'),rr.getAttribute('data-rmact')));return;}
