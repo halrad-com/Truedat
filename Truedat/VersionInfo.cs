@@ -36,6 +36,7 @@ namespace Truedat
 
         public static string Branch => BuildInfo.Branch;
         public static string Commit => BuildInfo.Commit;
+        public static string Describe => BuildInfo.Describe;
         public static bool Dirty => BuildInfo.Dirty;
 
         private static string ComputeDisplay()
@@ -48,7 +49,11 @@ namespace Truedat
                         || lower == "head"
                         || lower == "unknown";
 
-            var commit = (BuildInfo.Commit?.Trim() ?? "");
+            // git describe carries the release line - nearest tag, distance past it, and the
+            // commit - so the stamp says which RELEASE a binary belongs to, not just which
+            // commit. Falls back to the bare SHA when describe is unavailable.
+            var commit = (BuildInfo.Describe?.Trim() ?? "");
+            if (commit.Length == 0) commit = (BuildInfo.Commit?.Trim() ?? "");
             if (commit.Length == 0) commit = "unknown";
             if (BuildInfo.Dirty) commit += "+dirty";
 

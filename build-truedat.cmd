@@ -32,6 +32,19 @@ if errorlevel 1 (
 copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\
 echo Done: truedat.exe
 
+REM Report what this build actually IS, the way MBXHub's build script does. The version
+REM suffix is the git commit, so this line answers "what source is in this binary?" - the
+REM question that previously required counting self-test assertions to answer.
+for /f "delims=" %%v in ('dist\truedat\truedat.exe --version') do set TRUEDAT_VER=%%v
+echo Version: %TRUEDAT_VER%
+echo %TRUEDAT_VER% | findstr /C:"+dirty" >nul
+if not errorlevel 1 (
+    echo.
+    echo WARNING: built from a DIRTY tree - this binary contains uncommitted changes under
+    echo          Truedat\ and is NOT described by commit %TRUEDAT_VER%. Do not ship or
+    echo          commit it as a build of that commit; commit the source first, then rebuild.
+)
+
 REM Ship README.md alongside the binary so the distributed bundle is self-documenting.
 echo Copying README.md...
 copy /Y README.md "dist\truedat\" >nul

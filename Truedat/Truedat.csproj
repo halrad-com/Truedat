@@ -44,6 +44,17 @@
           WorkingDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="ConsoleOutput" PropertyName="_GitCommitRaw" />
     </Exec>
+    <!-- `git describe` carries the release line in one token: nearest tag, how many commits
+         past it, and the commit itself (v5.4.1-RC0-25-g5c37817). That says which RELEASE a
+         binary belongs to, which a bare SHA cannot. The always flag degrades to the SHA on a
+         repo with no tags rather than failing the build. -->
+    <Exec Command="git describe --tags --always"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitDescribeRaw" />
+    </Exec>
     <!-- Scoped to `.` — this Exec runs in the project directory, so it only sees changes
          under Truedat/, i.e. the sources actually compiled into this binary. Deliberately
          excludes dist/: dist/truedat/truedat.exe is a TRACKED file, so an already-rebuilt
@@ -63,11 +74,13 @@
       <_GitBranch Condition="'$(_GitBranchRaw)' == ''">unknown</_GitBranch>
       <_GitCommit Condition="'$(_GitCommitRaw)' != ''">$(_GitCommitRaw)</_GitCommit>
       <_GitCommit Condition="'$(_GitCommitRaw)' == ''">unknown</_GitCommit>
+      <_GitDescribe Condition="'$(_GitDescribeRaw)' != ''">$(_GitDescribeRaw)</_GitDescribe>
+      <_GitDescribe Condition="'$(_GitDescribeRaw)' == ''">$(_GitCommit)</_GitDescribe>
       <_GitDirty Condition="'$(_GitDirtyRaw)' != ''">true</_GitDirty>
       <_GitDirty Condition="'$(_GitDirtyRaw)' == ''">false</_GitDirty>
       <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
       <_BuildInfoContent>// &lt;auto-generated/&gt; — written by Truedat.csproj GenerateBuildInfo target.
-namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const string Commit = "$(_GitCommit)"%3B internal const bool Dirty = $(_GitDirty)%3B } }</_BuildInfoContent>
+namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const string Commit = "$(_GitCommit)"%3B internal const string Describe = "$(_GitDescribe)"%3B internal static readonly bool Dirty = $(_GitDirty)%3B } }</_BuildInfoContent>
     </PropertyGroup>
     <WriteLinesToFile File="$(_BuildInfoFile)"
                       Lines="$(_BuildInfoContent)"
