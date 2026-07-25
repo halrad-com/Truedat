@@ -5,6 +5,20 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Removed — the Episode Date podcast vote (2026-07-24)
+
+- **Deleted the `Episode Date` + corroborator podcast vote.** MusicBee maps
+  ID3v2.4 **`TDRL`** into the iTunes XML `Episode Date` key, and `TDRL` is a
+  **release date** per the ID3v2.4 spec — Apple repurposed it for podcast
+  episode dates and the ecosystem followed. So the vote's anchor is present on
+  ordinary music at scale, and "release date + a publisher" or "release date +
+  30 minutes" describes a large slice of legitimate music (live albums, label
+  releases, classical works, full-album rips). This is an invalid anchor rather
+  than a mistuned threshold, which is why three rounds of tuning each traded one
+  false-positive class for another. Podcast labelling is now **explicit only**:
+  iTunes-native `Podcast=true`, or `Genre=Podcast`. Ten self-test assertions pin
+  the whole TDRL class as *not* a podcast so it cannot come back a third time.
+
 ### Added — average track length in the scan summary (2026-07-24)
 
 - The end-of-scan summary now reports **`Avg length`** — the mean audio duration

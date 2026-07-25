@@ -30,13 +30,6 @@ namespace Truedat
         /// iTunes-native boolean — or "Genre=Podcast" — MusicBee exports) —
         /// traceability for skip logs.</summary>
         public string PodcastReason { get; set; } = "";
-        /// <summary>Signal: the XML carried an Episode Date key. NEVER a verdict on
-        /// its own (the removed single-signal heuristic misclassified YouTube-rip
-        /// music) — feeds the 2-of-3 podcast vote.</summary>
-        public bool HasEpisodeDate { get; set; }
-        /// <summary>Signal: the XML carried a Publisher key (podcast feeds set it;
-        /// music rarely does in MusicBee exports).</summary>
-        public bool HasPublisher { get; set; }
     }
 
     /// <summary>
@@ -142,9 +135,6 @@ namespace Truedat
 
     public static class ITunesParser
     {
-        /// <summary>Duration signal threshold for the 2-of-3 podcast vote (30 min).</summary>
-        internal const int PodcastVoteMinDurationMs = 30 * 60 * 1000;
-
         public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues)
         {
             // Stream the XML through a sanitizing reader — never loads the full file into memory.
@@ -316,21 +306,14 @@ namespace Truedat
                             if (long.TryParse(sizeVal, out var sizeBytes))
                                 track.SizeBytes = sizeBytes;
                             break;
-                        case "Episode Date":
-                            track.HasEpisodeDate = true;
-                            SkipElement(reader);
-                            break;
-                        case "Publisher":
-                            track.HasPublisher = true;
-                            SkipElement(reader);
-                            break;
                         case "Podcast":
                             // iTunes/Apple Music writes <key>Podcast</key><true/>.
                             // Sticky: only set on <true/> so key order can't un-flag.
-                            // (The former "Episode Date implies podcast" heuristic was
-                            // removed 2026-07-21: real MusicBee exports stamp Episode Date
-                            // on plain music — e.g. YouTube-sourced covers — while actual
-                            // podcast episodes carry Genre=Podcast and no Episode Date.)
+                            // Episode Date is deliberately NOT consulted: MusicBee maps
+                            // ID3v2.4 TDRL (a RELEASE date per spec, repurposed by Apple
+                            // for podcast episodes) into that key, so it rides on ordinary
+                            // music. Removed 050868f, briefly returned as a vote anchor,
+                            // deleted for good 2026-07-24. Do not reinstate.
                             if (reader.Name == "true")
                             {
                                 track.IsPodcast = true;
@@ -362,27 +345,6 @@ namespace Truedat
             {
                 track.IsPodcast = true;
                 track.PodcastReason = "Genre=Podcast";
-            }
-
-            // A2 — multi-signal podcast vote (spec 2026-07-22): an Episode Date
-            // (podcast-feed date stamp) corroborated by Publisher OR duration >= 30 min.
-            // Episode Date is REQUIRED, not merely one of three interchangeable votes:
-            // live/long music (KEXP full performances, festival sets, full-album streams)
-            // carries a Publisher tag AND runs 30-100 min, so "Publisher + duration" alone
-            // false-flagged real music as podcasts (2026-07-22 — Portugal The Man, Viagra
-            // Boys, Billy Strings, etc.). It's also never enough on its own — Episode Date
-            // rides on 3-minute YouTube-rip music too, so a corroborating signal (a
-            // publisher, or 30+ min of runtime) is what makes it decisive.
-            if (!track.IsPodcast && track.HasEpisodeDate)
-            {
-                var evidence = new List<string> { "Episode Date" };
-                if (track.HasPublisher) evidence.Add("Publisher");
-                if (track.TotalTimeMs >= PodcastVoteMinDurationMs) evidence.Add($"{track.TotalTimeMs / 60000}min");
-                if (evidence.Count >= 2)
-                {
-                    track.IsPodcast = true;
-                    track.PodcastReason = "signals: " + string.Join(" + ", evidence);
-                }
             }
 
             return track;

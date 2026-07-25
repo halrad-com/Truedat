@@ -7506,7 +7506,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("cprt"))) == null, "sniffer: mp4 without podcast atoms returns null");
             }
 
-            // --- podcast 2-of-3 signal vote (spec 2026-07-22 A2) ---
+            // --- podcast labelling: explicit labels only (2026-07-24) ---
+            // The former "Episode Date + corroborator" vote is deleted: MusicBee maps
+            // ID3v2.4 TDRL (release date) into the Episode Date key, so the anchor rides
+            // on ordinary music. These assertions are the regression guard against it
+            // coming back a third time (it was already removed once, 050868f).
             {
                 string Entry(int id, string name, string extra, int totalTimeMs) => $@"
         <key>{id}</key>
@@ -7520,20 +7524,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         </dict>";
                 var xml = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Tracks</key><dict>"
                     + Entry(1, "YtRipMusic", "<key>Episode Date</key><string>1/1/2020</string>", 180000)
-                    + Entry(2, "LongEpisode", "<key>Episode Date</key><string>1/1/2020</string>", 3120000)
-                    + Entry(3, "PublishedEpisode", "<key>Episode Date</key><string>1/1/2020</string><key>Publisher</key><string>Show</string>", 180000)
+                    + Entry(2, "LongDatedAlbum", "<key>Episode Date</key><string>1/1/2020</string>", 3120000)
+                    + Entry(3, "PublishedDatedTrack", "<key>Episode Date</key><string>1/1/2020</string><key>Publisher</key><string>Label</string>", 180000)
                     + Entry(4, "LongClassical", "", 3120000)
+                    + Entry(5, "LongPublishedLiveSet", "<key>Publisher</key><string>Label</string>", 3120000)
+                    + Entry(6, "GenrePodcast", "<key>Genre</key><string>Podcast</string>", 180000)
+                    + Entry(7, "GenrePodcastLowerCase", "<key>Genre</key><string>podcast</string>", 180000)
+                    + Entry(8, "ITunesFlagged", "<key>Podcast</key><true/>", 180000)
                     + "</dict></dict></plist>";
                 var tmpXml = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.xml");
                 try
                 {
                     File.WriteAllText(tmpXml, xml);
                     var parsed = ITunesParser.Parse(tmpXml, out _);
-                    Assert(!parsed.First(p => p.Name == "YtRipMusic").IsPodcast, "vote: Episode Date alone is NOT a podcast");
-                    Assert(parsed.First(p => p.Name == "LongEpisode").IsPodcast, "vote: Episode Date + 52min IS a podcast");
-                    Assert(parsed.First(p => p.Name == "LongEpisode").PodcastReason.StartsWith("signals: Episode Date"), "vote: reason records the evidence");
-                    Assert(parsed.First(p => p.Name == "PublishedEpisode").IsPodcast, "vote: Episode Date + Publisher IS a podcast");
-                    Assert(!parsed.First(p => p.Name == "LongClassical").IsPodcast, "vote: duration alone is NOT a podcast");
+                    // The whole TDRL class must now pass through untouched.
+                    Assert(!parsed.First(p => p.Name == "YtRipMusic").IsPodcast, "label: Episode Date alone is not a podcast");
+                    Assert(!parsed.First(p => p.Name == "LongDatedAlbum").IsPodcast, "label: Episode Date + 52min is not a podcast");
+                    Assert(!parsed.First(p => p.Name == "PublishedDatedTrack").IsPodcast, "label: Episode Date + Publisher is not a podcast");
+                    Assert(!parsed.First(p => p.Name == "LongClassical").IsPodcast, "label: duration alone is not a podcast");
+                    Assert(!parsed.First(p => p.Name == "LongPublishedLiveSet").IsPodcast, "label: Publisher + 52min is not a podcast");
+                    // Explicit labels still decide, and still name themselves.
+                    Assert(parsed.First(p => p.Name == "GenrePodcast").IsPodcast, "label: Genre=Podcast is a podcast");
+                    Assert(parsed.First(p => p.Name == "GenrePodcast").PodcastReason == "Genre=Podcast", "label: Genre reason recorded");
+                    Assert(parsed.First(p => p.Name == "GenrePodcastLowerCase").IsPodcast, "label: genre match is case-insensitive");
+                    Assert(parsed.First(p => p.Name == "ITunesFlagged").IsPodcast, "label: iTunes Podcast=true is a podcast");
+                    Assert(parsed.First(p => p.Name == "ITunesFlagged").PodcastReason == "Podcast=true", "label: Podcast=true reason recorded");
                 }
                 finally { try { File.Delete(tmpXml); } catch { } }
             }
