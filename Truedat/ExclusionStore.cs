@@ -67,7 +67,9 @@ namespace Truedat
             };
             if (report.BackupPath != null) root["backupPath"] = report.BackupPath;
             if (error != null) root["error"] = error;
-            if (report.Diagnostics != null && report.Diagnostics.Count > 0)
+            // Diagnostics is inline-initialised and never assigned null, so only the count
+            // matters here — a null check would read as if it could be.
+            if (report.Diagnostics.Count > 0)
             {
                 var arr = new JsonArray();
                 foreach (var d in report.Diagnostics) arr.Add(d);

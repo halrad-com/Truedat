@@ -27,6 +27,15 @@ namespace Truedat
         public int Parallelism = 1;
         /// <summary>Recomputed speech verdict for an already-analyzed entry; null disables.</summary>
         public Func<TrackEntry, string?>? SpeechVerdict;
+        /// <summary>What to call the ETA's model when <see cref="MeasuredRtf"/> is usable.
+        /// Injected rather than relabelled afterwards: --preview's RTF is derived from the
+        /// catalog's stored analysis times ("catalog-rtf"), not from a fresh measurement, and
+        /// a caller that had to post-edit the field would duplicate this file's string
+        /// literal across files — which is exactly the coupling this replaces.</summary>
+        public string EtaBasisLabel = "measured-rtf";
+        /// <summary>Mirrors --include-podcasts: when true a scan analyzes podcast-labelled
+        /// tracks, so the new-work accounting must count them.</summary>
+        public bool IncludePodcasts = false;
     }
 
     /// <summary>
@@ -37,12 +46,30 @@ namespace Truedat
     /// say "marker:PCST"; the count of files sniffed is reported rather than hidden.
     ///
     /// The classification split matters and mirrors the scan's own layering: STRUCTURAL
-    /// skips (missing, video, stream URL, non-audio, over the duration ceiling) are things
-    /// a scan *cannot* analyze, so they are counted and never offered for review — no human
-    /// decision can change them. Everything else is policy, and policy is reviewable.
+    /// skips (missing, video, stream URL, non-audio, DSD, over the duration ceiling) are
+    /// things a scan *cannot* analyze, so they are counted and never offered for review — no
+    /// human decision can change them. Everything else is policy, and policy is reviewable.
+    ///
+    /// The new-work accounting (newTracks / newBytes / the ETA) counts only tracks a scan
+    /// would actually hand to Essentia — so every filter a scan applies has to be applied
+    /// here first, which is why the exclusion and podcast determinations sit ABOVE the
+    /// catalog-state block rather than after it.
     /// </summary>
     internal static class PreviewPlanner
     {
+        /// <summary>
+        /// Maps <see cref="Program.StructuralSkipReason"/>'s reason text onto the
+        /// preview.json <c>autoSkip[].class</c> names. The classifier is shared with the
+        /// scan entry points so preview cannot drift from what a scan actually refuses
+        /// (open-coding the extension sets here is what silently omitted DSD), but the
+        /// class names are consumer-visible contract, so they are mapped rather than
+        /// inheriting the human-readable reason strings verbatim.
+        /// </summary>
+        static string StructuralBucketClass(string reason) =>
+            reason == "unsupported codec: DSD" ? "dsd"
+            : reason == "video file extension" ? "video"
+            : "nonAudio";
+
         public static PreviewPlan Build(PreviewPlannerInput input)
         {
             var plan = new PreviewPlan
@@ -97,31 +124,47 @@ namespace Truedat
                 // A remote stream URL has no local file, so this check must come after the
                 // IsRemote check above — otherwise every stream would misclassify as "missing".
                 if (input.FileExists != null && !input.FileExists(loc)) { Bump("missing"); continue; }
-                var ext = Program.GetExtensionSafe(loc);
-                if (Program.VideoExtensions.Contains(ext)) { Bump("video"); continue; }
-                if (Program.NonAudioExtensions.Contains(ext)) { Bump("nonAudio"); continue; }
+                // Extension-based structural classes come from the ONE shared classifier the
+                // scan entry points use, so a class can never be handled in one mode and
+                // missed in another (DSD was missed here while every scan mode refused it).
+                var structReason = Program.StructuralSkipReason(loc);
+                if (structReason != null) { Bump(StructuralBucketClass(structReason)); continue; }
 
                 int durSecs = t.TotalTimeMs > 0 ? t.TotalTimeMs / 1000 : 0;
                 bool overLimit = durSecs > input.MaxDurationSecs;
                 if (overLimit) Bump("overLimit");
 
+                // --- policy: exclusion rules. IsExcluded increments per-rule hit counts,
+                // which is what makes a stale rule visible below. Determined BEFORE the
+                // catalog-state block on purpose: the new-work accounting has to agree with
+                // the scan's own filters, and a rule-excluded track never reaches Essentia
+                // and never gets an mbxmoods.json entry (spec §10a Layering). Counting it as
+                // new work reported the saving on one line while leaving it in the cost on
+                // another — inverting the point of the mode.
+                string exclReason;
+                bool excluded = input.Exclusions.IsExcluded(loc, t.Genre, out exclReason);
+                bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
+                if (excluded) plan.Counts.Excluded++;
+
+                // The podcast-label policy is DERIVED, not restated: Program.FilterPodcasts
+                // (the scan) and this line both call the one predicate, so the two cannot
+                // disagree and the phase that retires the heuristic deletes the predicate —
+                // which breaks this call site at compile time rather than leaving a stale
+                // gate that silently under-reports real work. `included` is this planner's
+                // equivalent of ITunesTrack.ExclusionIncluded (FilterExclusions sets that
+                // flag during a scan; preview never mutates the track list).
+                bool podcastDropped = Program.PodcastPolicyWouldDrop(t, included, input.IncludePodcasts);
+
                 // --- catalog state ---
                 TrackEntry? entry;
                 bool analyzed = input.Catalog.TryGetValue(loc, out entry) && entry?.Features != null;
                 if (analyzed) { cachedTracks++; plan.Counts.Analyzed++; }
-                else if (!overLimit)
+                else if (!overLimit && !excluded && !podcastDropped)
                 {
                     newTracks++;
                     newBytes += Math.Max(0, t.SizeBytes);
                     newAudioMs += Math.Max(0, t.TotalTimeMs);
                 }
-
-                // --- policy: exclusion rules. IsExcluded increments per-rule hit counts,
-                // which is what makes a stale rule visible below.
-                string exclReason;
-                bool excluded = input.Exclusions.IsExcluded(loc, t.Genre, out exclReason);
-                bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
-                if (excluded) plan.Counts.Excluded++;
 
                 // --- review candidacy ---
                 var reasons = new List<string>();
@@ -204,7 +247,7 @@ namespace Truedat
             if (input.MeasuredRtf > 0 && newAudioMs > 0)
             {
                 plan.Estimate.EtaSecs = newAudioMs / 1000.0 * input.MeasuredRtf / par;
-                plan.Estimate.EtaBasis = "measured-rtf";
+                plan.Estimate.EtaBasis = input.EtaBasisLabel;
             }
             else
             {

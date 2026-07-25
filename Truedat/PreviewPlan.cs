@@ -61,7 +61,10 @@ namespace Truedat
         public int CachedTracks = 0;
         /// <summary>Negative means "not estimable" — omitted rather than guessed.</summary>
         public double EtaSecs = -1;
-        /// <summary>"measured-rtf" | "default-rtf" | "unavailable".</summary>
+        /// <summary>"catalog-rtf" (what --preview emits: derived from the catalog's stored
+        /// per-track analysis times) | "measured-rtf" (the planner's default label, for a
+        /// caller that genuinely measured) | "unavailable". Set from
+        /// PreviewPlannerInput.EtaBasisLabel, never post-edited by the caller.</summary>
         public string EtaBasis = "unavailable";
     }
 

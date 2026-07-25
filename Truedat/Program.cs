@@ -806,21 +806,43 @@ namespace Truedat
             return kept;
         }
 
+        /// <summary>
+        /// The podcast-label POLICY decision, stated exactly once. An exclusion-file
+        /// `include` rule outranks the label — that is the interim escape hatch for a
+        /// mislabelled album (KEXP Song of the Day is genuinely Genre=Podcast and genuinely
+        /// music) without --include-podcasts switching the whole mechanism off.
+        ///
+        /// <see cref="FilterPodcasts"/> (the scan) and <see cref="PreviewPlanner"/> (the
+        /// --preview estimate) both derive from this rather than each restating the
+        /// condition: preview's new-work count has to agree with what a scan actually
+        /// analyzes or the estimate lies about the cost. Pure and fully parameterised (no
+        /// reach for <see cref="_includePodcasts"/>) so the planner stays injection-testable.
+        ///
+        /// The queued phase that retires the podcast heuristic deletes this predicate along
+        /// with FilterPodcasts — which breaks the planner's call site at COMPILE time. That
+        /// is deliberate: it is the reminder that podcast-labelled tracks then become real
+        /// new work again, and it cannot be missed the way a comment can.
+        /// </summary>
+        internal static bool PodcastPolicyWouldDrop(ITunesTrack t, bool exclusionIncluded, bool includePodcasts)
+            => t.IsPodcast && !exclusionIncluded && !includePodcasts;
+
         /// <summary>Remove podcast-labeled episodes from a parsed track list (default;
         /// --include-podcasts overrides and analyzes them). Every dropped track lands
         /// in mbxmoods-skipped.csv (when a path is supplied) with what triggered the
         /// classification; --audit also lists each on console.</summary>
         static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null, List<ITunesTrack>? removedOut = null)
         {
-            // An exclusion-file `include` rule outranks these heuristics — that is the
-            // interim escape hatch for a mislabelled album (KEXP Song of the Day is
-            // genuinely Genre=Podcast and genuinely music) without --include-podcasts
-            // switching the whole mechanism off. Phase 3 removes the need entirely.
-            var removed = tracks.Where(t => t.IsPodcast && !t.ExclusionIncluded).ToList();
-            if (removed.Count == 0) return tracks;
-            if (_includePodcasts)
+            var removed = tracks.Where(t => PodcastPolicyWouldDrop(t, t.ExclusionIncluded, _includePodcasts)).ToList();
+            if (removed.Count == 0)
             {
-                Console.WriteLine($"  Including {removed.Count} podcast-labeled track(s) (--include-podcasts)");
+                // --include-podcasts makes the predicate keep everything, so the "nothing to
+                // remove" branch is also where the override reports what it kept.
+                if (_includePodcasts)
+                {
+                    int labelled = tracks.Count(t => t.IsPodcast && !t.ExclusionIncluded);
+                    if (labelled > 0)
+                        Console.WriteLine($"  Including {labelled} podcast-labeled track(s) (--include-podcasts)");
+                }
                 return tracks;
             }
             removedOut?.AddRange(removed);
@@ -835,7 +857,7 @@ namespace Truedat
             Console.WriteLine($"  Skipped {removed.Count} podcast episode(s)"
                 + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
                 + (_audit ? "" : " (--audit lists each)"));
-            return tracks.Where(t => !t.IsPodcast || t.ExclusionIncluded).ToList();
+            return tracks.Where(t => !PodcastPolicyWouldDrop(t, t.ExclusionIncluded, _includePodcasts)).ToList();
         }
 
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
@@ -1204,10 +1226,21 @@ namespace Truedat
                 else if (canonical == "preview")
                 {
                     previewMode = true;
-                    // Optional path argument, same shape as --manifest: only consume the next
-                    // token when it is not another flag.
-                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
-                        previewOutPath = args[++i];
+                    // Optional OUTPUT path, claimed with exactly the same restraint as
+                    // --manifest / --losers-m3u: only when the token looks like a path of the
+                    // right kind (directory separator, or a .json suffix). Consuming the next
+                    // non-flag token unconditionally was data loss waiting to happen —
+                    // every adjacent read-only mode (--stats, --duplicates, --list-speech,
+                    // --list-missing-smfm) takes its moods file POSITIONALLY, so
+                    // `--preview mbxmoods.json` reads naturally as "preview this catalog"
+                    // while the writer would truncate it. PreviewWriter.IsProtectedTarget is
+                    // the second line of defence for the case that still binds here.
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/")
+                        && args[i + 1].IndexOf(Path.DirectorySeparatorChar) >= 0)
+                    { previewOutPath = args[i + 1]; i++; }
+                    else if (i + 1 < args.Length && !args[i + 1].StartsWith("-")
+                        && args[i + 1].EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                    { previewOutPath = args[i + 1]; i++; }
                 }
                 else if (canonical == "long-track-mins" && i + 1 < args.Length)
                 {
@@ -1750,19 +1783,22 @@ namespace Truedat
                     LongTrackSecs = longTrackMins * 60,
                     ReviewCap = PreviewReviewCap,
                     MeasuredRtf = pvRtf,
+                    EtaBasisLabel = "catalog-rtf",
                     Parallelism = Math.Max(1, parallelism),
+                    IncludePodcasts = _includePodcasts,
                     FileExists = File.Exists,
                     SniffMarkers = PodcastTagSniffer.TryDetect,
                     SpeechVerdict = e => e?.Features == null
                         ? null
                         : ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely,
                 });
-                // The planner labels a measured RTF "measured-rtf"; ours came from the
-                // catalog, so say so rather than implying a fresh measurement.
-                if (pvPlan.Estimate.EtaBasis == "measured-rtf") pvPlan.Estimate.EtaBasis = "catalog-rtf";
 
                 var pvDest = previewOutPath ?? PreviewWriter.ResolveDest(pvOutputDir);
-                PreviewWriter.WritePreviewJson(pvDest, pvPlan);
+                if (!PreviewWriter.TryWritePreviewJson(pvDest, pvPlan))
+                {
+                    Environment.ExitCode = 1;
+                    return;
+                }
 
                 Console.WriteLine();
                 Console.WriteLine("Scan preview (nothing was analyzed):");
@@ -8115,9 +8151,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // an excluded track is a candidate so the decision is reversible
                 var exCand = plan.Review.Find(c => c.Path.EndsWith("ep1.mp3", StringComparison.OrdinalIgnoreCase));
+                // Null-safe on purpose: a regression that drops the excluded track from the
+                // review list must FAIL these assertions by name, not crash the whole
+                // self-test run on a null deref before the later blocks get to speak.
                 Assert(exCand != null, "preview: an excluded track is still listed for review");
-                Assert(exCand!.CurrentDecision == "excluded", $"preview: current decision is reported (got {exCand.CurrentDecision})");
-                Assert(exCand.Reasons.Contains("excluded"), "preview: exclusion is recorded as a reason");
+                Assert(exCand != null && exCand.CurrentDecision == "excluded", $"preview: current decision is reported (got {exCand?.CurrentDecision})");
+                Assert(exCand != null && exCand.Reasons.Contains("excluded"), "preview: exclusion is recorded as a reason");
 
                 // over-limit candidate carries the flag AND the structural count
                 var overCand = plan.Review.Find(c => c.Path.EndsWith("huge.flac", StringComparison.OrdinalIgnoreCase));
@@ -8125,10 +8164,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // estimate: new vs cached, and a measured basis
                 Assert(plan.Estimate.CachedTracks == 1, $"preview: cached count (got {plan.Estimate.CachedTracks})");
-                // exactly 3: short.flac, long.flac, ep1.mp3 are new work; huge.flac is
-                // correctly excluded as over-limit and analyzed.flac as already cached. A
-                // regression letting the over-limit track leak into new work would make it 4.
-                Assert(plan.Estimate.NewTracks == 3, $"preview: new-track count excludes cached and over-limit tracks (got {plan.Estimate.NewTracks})");
+                // exactly 2: short.flac and long.flac are the only new work. huge.flac is
+                // over-limit, ep1.mp3 is rule-excluded, analyzed.flac is already cached — a
+                // scan analyzes none of the three, so none of them may inflate the estimate.
+                // A regression letting the over-limit or the excluded track leak into new
+                // work would make this 3 or 4.
+                Assert(plan.Estimate.NewTracks == 2, $"preview: new-track count excludes cached, over-limit and rule-excluded tracks (got {plan.Estimate.NewTracks})");
                 Assert(plan.Estimate.EtaBasis == "measured-rtf", $"preview: measured RTF is preferred (got {plan.Estimate.EtaBasis})");
                 Assert(plan.Estimate.EtaSecs > 0, "preview: ETA is estimated when RTF is known");
 
@@ -8200,9 +8241,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!planWithMissing.Review.Exists(c => c.Path.EndsWith("short.flac", StringComparison.OrdinalIgnoreCase)),
                     "preview: a missing file is not a review candidate");
                 // the load-bearing assertion: without this, a dead catalog entry silently
-                // inflates NewTracks (and the ETA built from it) as phantom new work.
-                Assert(planWithMissing.Estimate.NewTracks == planNoMissingCheck.Estimate.NewTracks - 1,
-                    $"preview: a missing file drops out of new-work count (got {planWithMissing.Estimate.NewTracks} vs {planNoMissingCheck.Estimate.NewTracks} with no existence check)");
+                // inflates NewTracks (and the ETA built from it) as phantom new work. Both
+                // sides are pinned to exact values — a relative assertion would still pass if
+                // some other filter regression moved both counts together.
+                Assert(planNoMissingCheck.Estimate.NewTracks == 2,
+                    $"preview: with no existence check, short.flac + long.flac are the new work (got {planNoMissingCheck.Estimate.NewTracks})");
+                Assert(planWithMissing.Estimate.NewTracks == 1,
+                    $"preview: a missing file drops out of new-work count (got {planWithMissing.Estimate.NewTracks})");
 
                 // composite: a track that is BOTH over-limit AND rule-excluded must still
                 // appear exactly once, carry both reasons, respect the exclusion decision,
@@ -8247,6 +8292,142 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(compositeCand.CurrentDecision == "excluded", $"preview: composite candidate's decision is excluded (got {compositeCand.CurrentDecision})");
                     Assert(compositePlan.Estimate.NewTracks == 0, $"preview: over-limit+excluded track is not counted as new work (got {compositePlan.Estimate.NewTracks})");
                 }
+            }
+
+            // --- --preview's new-work accounting must agree with the scan's own filters
+            // (whole-branch fix wave). Every one of these classes is dropped before Essentia
+            // sees it, so counting it as new work inflates newTracks, newBytes AND the ETA
+            // derived from them — and for the exclusion case it inverts the mode's purpose,
+            // reporting the saving on one line while leaving it inside the cost on another.
+            // One single-track fixture per class so every count is exact.
+            {
+                ITunesTrack One(string loc, int ms, long size)
+                    => new ITunesTrack { Location = loc, Name = Path.GetFileName(loc), Artist = "A",
+                                         Album = "Alb", Genre = "Rock", TotalTimeMs = ms, SizeBytes = size };
+
+                PreviewPlannerInput In(ITunesTrack t, ExclusionSet excl) => new PreviewPlannerInput
+                {
+                    Tracks = new List<ITunesTrack> { t },
+                    Catalog = new Dictionary<string, TrackEntry>(PathComparer.Instance),
+                    Exclusions = excl,
+                    MaxDurationSecs = 12000,
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    MeasuredRtf = 0.10,
+                    Parallelism = 1,
+                };
+                int Bkt(PreviewPlan p, string cls)
+                {
+                    var b = p.AutoSkip.Find(x => x.Class == cls);
+                    return b == null ? 0 : b.Count;
+                }
+
+                // baseline: an ordinary new track IS new work, so a gate that over-fires is
+                // caught by the same fixture family rather than passing silently.
+                var okPlan = PreviewPlanner.Build(In(One(@"D:\M\ordinary.flac", 180000, 5_000_000), ExclusionSet.Empty));
+                Assert(okPlan.Estimate.NewTracks == 1, $"preview accounting: an ordinary new track counts as new work (got {okPlan.Estimate.NewTracks})");
+                Assert(okPlan.Estimate.NewBytes == 5_000_000, $"preview accounting: an ordinary new track contributes its bytes (got {okPlan.Estimate.NewBytes})");
+
+                // rule-excluded: FilterExclusions drops it, so it is never analyzed and never
+                // gets an mbxmoods.json entry (spec §10a Layering).
+                var accExcl = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}]}",
+                    out var accExclErr);
+                Assert(accExclErr == null, "preview accounting: exclusion fixture parses");
+                var exPlan = PreviewPlanner.Build(In(One(@"D:\Podcasts\ep.mp3", 3000000, 30_000_000), accExcl));
+                Assert(exPlan.Estimate.NewTracks == 0, $"preview accounting: a rule-excluded new track contributes nothing to new work (got {exPlan.Estimate.NewTracks})");
+                Assert(exPlan.Estimate.NewBytes == 0, $"preview accounting: a rule-excluded new track contributes no bytes (got {exPlan.Estimate.NewBytes})");
+                Assert(exPlan.Estimate.EtaBasis == "unavailable", "preview accounting: with only excluded work there is no audio to estimate, so the ETA is unavailable");
+                // ...and it must STILL be reviewable, which is what makes the decision reversible.
+                Assert(exPlan.Review.Count == 1 && exPlan.Review[0].CurrentDecision == "excluded",
+                    $"preview accounting: an excluded track is still listed for review with its decision (got {exPlan.Review.Count} row(s))");
+
+                // DSD: structurally unanalyzable in every scan mode, and never checked here at
+                // all before the shared StructuralSkipReason classifier was wired in.
+                var dsdPlan = PreviewPlanner.Build(In(One(@"D:\M\hires.dsf", 300000, 200_000_000), ExclusionSet.Empty));
+                Assert(Bkt(dsdPlan, "dsd") == 1, $"preview accounting: a DSD track lands in the dsd autoSkip bucket (got {Bkt(dsdPlan, "dsd")})");
+                Assert(dsdPlan.Estimate.NewTracks == 0, $"preview accounting: a DSD track contributes nothing to new work (got {dsdPlan.Estimate.NewTracks})");
+                Assert(dsdPlan.Review.Count == 0, $"preview accounting: a structural DSD skip is not a review candidate (got {dsdPlan.Review.Count})");
+                // the classifier is shared, so video/playlist keep their existing class names
+                var vidPlan = PreviewPlanner.Build(In(One(@"D:\M\clip.mkv", 180000, 5_000_000), ExclusionSet.Empty));
+                Assert(Bkt(vidPlan, "video") == 1, $"preview accounting: video keeps its autoSkip class name through the shared classifier (got {Bkt(vidPlan, "video")})");
+                var plsPlan = PreviewPlanner.Build(In(One(@"D:\M\set.wpl", 180000, 1_000), ExclusionSet.Empty));
+                Assert(Bkt(plsPlan, "nonAudio") == 1, $"preview accounting: playlists keep the nonAudio autoSkip class name (got {Bkt(plsPlan, "nonAudio")})");
+
+                // podcast-labelled: mirrors FilterPodcasts, which drops these today.
+                var pod = One(@"D:\M\show.mp3", 3000000, 30_000_000);
+                pod.IsPodcast = true;
+                pod.PodcastReason = "Genre=Podcast";
+                var podPlan = PreviewPlanner.Build(In(pod, ExclusionSet.Empty));
+                Assert(podPlan.Estimate.NewTracks == 0, $"preview accounting: a podcast-labelled new track contributes nothing to new work (got {podPlan.Estimate.NewTracks})");
+                Assert(podPlan.Review.Count == 1 && podPlan.Review[0].Reasons.Contains("podcast-labelled"),
+                    "preview accounting: a podcast-labelled track is still surfaced for review");
+                // ...but --include-podcasts makes a scan analyze them, so then they ARE new work.
+                var podIncl = In(pod, ExclusionSet.Empty);
+                podIncl.IncludePodcasts = true;
+                Assert(PreviewPlanner.Build(podIncl).Estimate.NewTracks == 1,
+                    "preview accounting: --include-podcasts puts podcast-labelled tracks back into new work");
+            }
+
+            // --- --preview must never truncate a file that isn't a preview (whole-branch fix
+            // wave). Proven live before the fix: `--preview <path-to>/mbxmoods.json` replaced
+            // the mood catalog with preview JSON and exited 0. The arg parser now only claims
+            // a JSON-looking token, and this guard is the second line of defence for the case
+            // that still binds. Expect two stderr lines from the refusal below — they are the
+            // guard working, not a failure.
+            {
+                var gdir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-pvguard-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(gdir);
+                try
+                {
+                    string why;
+
+                    var xmlTarget = Path.Combine(gdir, "iTunes Music Library.xml");
+                    File.WriteAllText(xmlTarget, "<?xml version=\"1.0\"?><plist></plist>");
+                    Assert(PreviewWriter.IsProtectedTarget(xmlTarget, out why),
+                        "previewguard: an .xml target is refused (the library is the input)");
+
+                    var catalogTarget = Path.Combine(gdir, "mbxmoods.json");
+                    File.WriteAllText(catalogTarget, "{\"tracks\":{}}");
+                    Assert(PreviewWriter.IsProtectedTarget(catalogTarget, out why),
+                        "previewguard: a mood catalog target is refused");
+
+                    // realistic shape: "tracks" is the fourth top-level property
+                    var realisticTarget = Path.Combine(gdir, "real-moods.json");
+                    File.WriteAllText(realisticTarget,
+                        "{\"version\":\"1.0\",\"generatedAt\":\"x\",\"trackCount\":1,\"tracks\":{\"D:\\\\a.flac\":{}}}");
+                    Assert(PreviewWriter.IsProtectedTarget(realisticTarget, out why),
+                        "previewguard: a catalog whose tracks property is not first is still recognised");
+
+                    var previewTarget = Path.Combine(gdir, "preview.json");
+                    File.WriteAllText(previewTarget, "{\"kind\":\"preview\",\"review\":[]}");
+                    Assert(!PreviewWriter.IsProtectedTarget(previewTarget, out why),
+                        "previewguard: an existing preview.json target is allowed");
+
+                    var absentTarget = Path.Combine(gdir, "does-not-exist.json");
+                    Assert(!PreviewWriter.IsProtectedTarget(absentTarget, out why),
+                        "previewguard: a nonexistent target is allowed");
+
+                    // tolerant read: a file that is not JSON at all is not a catalog
+                    var junkTarget = Path.Combine(gdir, "junk.json");
+                    File.WriteAllText(junkTarget, "not json at all {{{");
+                    Assert(!PreviewWriter.IsProtectedTarget(junkTarget, out why),
+                        "previewguard: an unparseable file is not a catalog and may be overwritten");
+
+                    // the invariant that actually matters: the refusal writes NOTHING.
+                    var before = File.ReadAllBytes(catalogTarget);
+                    Assert(!PreviewWriter.TryWritePreviewJson(catalogTarget, new PreviewPlan()),
+                        "previewguard: the guarded write refuses a mood catalog");
+                    var after = File.ReadAllBytes(catalogTarget);
+                    Assert(Convert.ToBase64String(before) == Convert.ToBase64String(after),
+                        "previewguard: the refused target is byte-identical afterwards");
+                    // and a legitimate target still gets written
+                    var okTarget = Path.Combine(gdir, "out.json");
+                    Assert(PreviewWriter.TryWritePreviewJson(okTarget, new PreviewPlan()),
+                        "previewguard: the guarded write still writes an ordinary preview target");
+                    Assert(File.Exists(okTarget), "previewguard: the allowed target actually receives the preview");
+                }
+                finally { try { Directory.Delete(gdir, true); } catch { } }
             }
 
             // --- MedianCatalogRtf (Phase 2a Task 4 fix round 1): --preview's ETA
@@ -8316,14 +8497,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(noHistoryPlan.Estimate.EtaBasis == "unavailable", $"preview: zero RTF reports basis unavailable (got {noHistoryPlan.Estimate.EtaBasis})");
             }
 
-            // --- --preview's "measured-rtf" -> "catalog-rtf" relabel (Phase 2a Task 4 fix
-            // round 1): pins the bare string-literal coupling between PreviewPlanner's
-            // basis name and the dispatch's relabel across the two files. Renaming the
-            // planner's literal without updating both this test and the dispatch would
-            // silently start claiming a fresh measurement instead of a catalog-derived
-            // approximation — exactly the dishonesty --preview's design forbids.
+            // --- the ETA basis label is INJECTED, not relabelled after the fact (whole-branch
+            // fix wave). The old shape had the dispatch overwrite "measured-rtf" with
+            // "catalog-rtf" afterwards, duplicating the planner's string literal in a second
+            // file and needing a test that copied the relabel rather than invoking it. Now the
+            // caller states its basis up front and the planner honours it, so there is one
+            // literal per basis and nothing to keep in sync.
             {
-                var relabelInput = new PreviewPlannerInput
+                var labelInput = new PreviewPlannerInput
                 {
                     Tracks = new List<ITunesTrack> { new ITunesTrack { Location = @"D:\M\a.flac", TotalTimeMs = 40000 } },
                     Catalog = new Dictionary<string, TrackEntry>(PathComparer.Instance),
@@ -8332,12 +8513,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     LongTrackSecs = 1800,
                     ReviewCap = 500,
                     Parallelism = 2,
+                    EtaBasisLabel = "catalog-rtf",
                 };
-                var relabelPlan = PreviewPlanner.Build(relabelInput);
-                Assert(relabelPlan.Estimate.EtaBasis == "measured-rtf", $"preview: planner's own basis name is measured-rtf before the dispatch relabels it (got {relabelPlan.Estimate.EtaBasis})");
-                // The same relabel the --preview dispatch performs.
-                if (relabelPlan.Estimate.EtaBasis == "measured-rtf") relabelPlan.Estimate.EtaBasis = "catalog-rtf";
-                Assert(relabelPlan.Estimate.EtaBasis == "catalog-rtf", $"preview: relabelled basis is catalog-rtf, never measured-rtf (got {relabelPlan.Estimate.EtaBasis})");
+                var labelPlan = PreviewPlanner.Build(labelInput);
+                Assert(labelPlan.Estimate.EtaBasis == "catalog-rtf", $"preview: the planner emits the caller's ETA basis label verbatim (got {labelPlan.Estimate.EtaBasis})");
+                // An unestimable ETA overrides the label — a basis name for an estimate that
+                // does not exist would be worse than no name at all.
+                labelInput.MeasuredRtf = 0;
+                Assert(PreviewPlanner.Build(labelInput).Estimate.EtaBasis == "unavailable",
+                    "preview: an unestimable ETA reports 'unavailable', never the caller's label");
             }
 
             // --- PreviewWriter: preview.json shape (Phase 2a) ---
@@ -8754,8 +8938,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var removedPodcasts = new List<ITunesTrack>();
                     var afterPodcast = FilterPodcasts(labelled, null, removedPodcasts);
                     Assert(afterPodcast.Count == 1, $"layering: unrescued podcast still filtered (kept {afterPodcast.Count})");
-                    Assert(afterPodcast[0].Name == "KEXP", "layering: include rule rescues a labelled podcast");
+                    // Index-guarded so a regression FAILS by name instead of throwing an
+                    // index-out-of-range that aborts the rest of the self-test run.
+                    Assert(afterPodcast.Count == 1 && afterPodcast[0].Name == "KEXP", "layering: include rule rescues a labelled podcast");
                     Assert(!removedPodcasts.Exists(t => t.Name == "KEXP"), "layering: rescued track is not ledgered as a removed podcast");
+
+                    // The podcast policy predicate itself — the single expression both
+                    // FilterPodcasts (above) and PreviewPlanner's new-work accounting derive
+                    // from, so preview's estimate cannot disagree with what a scan analyzes.
+                    var podLabelled = new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", IsPodcast = true };
+                    var podMusic = new ITunesTrack { Location = @"D:\Music\Rock\song.flac", IsPodcast = false };
+                    Assert(PodcastPolicyWouldDrop(podLabelled, false, false),
+                        "podcast policy: a labelled track with no override is dropped");
+                    Assert(!PodcastPolicyWouldDrop(podLabelled, true, false),
+                        "podcast policy: an include rule rescues a labelled track");
+                    Assert(!PodcastPolicyWouldDrop(podLabelled, false, true),
+                        "podcast policy: --include-podcasts rescues a labelled track");
+                    Assert(!PodcastPolicyWouldDrop(podMusic, false, false),
+                        "podcast policy: an unlabelled track is never dropped by it");
                 }
                 finally { _exclusions = saveSet; }
             }
@@ -9223,9 +9423,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// --folder, MoodsMode) — a structural skip must be structural in every mode,
         /// not just the XML path, or a file the XML filters would have dropped can
         /// slip through --file-list (e.g. the MBXHub autoscan plugin) into a wasted
-        /// Essentia subprocess and a misleading errors-CSV row.
+        /// Essentia subprocess and a misleading errors-CSV row. <see cref="PreviewPlanner"/>
+        /// is the fourth caller: it open-coded two of these three checks and omitted
+        /// DSD entirely, which is precisely the drift this helper exists to make
+        /// impossible — do not re-inline the extension sets anywhere.
         /// </summary>
-        static string? StructuralSkipReason(string? filePath)
+        internal static string? StructuralSkipReason(string? filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return null;
             var ext = GetExtensionSafe(filePath!);

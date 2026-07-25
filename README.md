@@ -208,11 +208,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           not-present counts. Exits 1 without writing if the document or
                           the existing file cannot be parsed.
   --preview [path]        Read-only. Writes the scan work plan and the review-candidate list
-                          to preview.json (the MBXHub review folder by default, or the path
-                          you name). Auto-discovers the iTunes XML the same way a normal scan
-                          does (exe dir, its parent, then the cwd), so it needs no positional
-                          argument when run from inside the library folder. Analyzes nothing,
-                          writes no mbxmoods.json, and never touches the exclusion file.
+                          to preview.json in the MBXHub review folder; when no MusicBee/MBXHub
+                          instance is found it lands beside the moods file as
+                          mbxmoods-preview.json instead. Auto-discovers the iTunes XML the same
+                          way a normal scan does (exe dir, its parent, then the cwd), so it
+                          needs no positional argument when run from inside the library folder.
+                          Analyzes nothing, writes no mbxmoods.json, and never touches the
+                          exclusion file. [path] is an OUTPUT and is only claimed when it looks
+                          like one (a directory separator or a .json suffix), so the library
+                          path can still be positional; and it refuses, with exit 1 and nothing
+                          written, to overwrite an .xml or an existing mood catalog.
   --long-track-mins N     Duration that flags a track for review in --preview (default 30).
                           A review *prompt* only: it decides what a human is asked to look
                           at and never excludes anything by itself.
@@ -387,6 +392,7 @@ Scan preview (nothing was analyzed):
   Skipped:     8,516  streamUrl  (structural — cannot be analyzed)
   Skipped:       789  video      (structural — cannot be analyzed)
   Skipped:        42  missing    (structural — cannot be analyzed)
+  Skipped:        11  dsd        (structural — cannot be analyzed)
   Excluded:      374  by rule
     genre=Podcast: 374 matched
     folder=\Old Shows\**: 0 matched   (stale rule?)
@@ -398,13 +404,21 @@ Scan preview (nothing was analyzed):
 the estimate is derived from your own catalog, never a canned figure.)
 
 It also writes `preview.json` — the same data as a machine-readable manifest, which is what
-MBXHub's review surface renders.
+MBXHub's review surface renders. It goes to the MBXHub review folder, or beside the moods file
+as `mbxmoods-preview.json` when no MusicBee/MBXHub instance is found.
+
+`New` counts only the tracks a scan would actually hand to the analyser, and the estimate is
+built from those tracks alone — so the structural skips, the rule-excluded tracks and the
+podcast-labelled ones are all *outside* it. That is the point of the mode: the `Excluded` line
+shows what your rules save you, and it would be meaningless if the saving were still sitting
+inside the cost.
 
 Two distinctions worth internalising:
 
-- **Structural skips versus rules.** A missing file, a video, a stream URL, a playlist file or
-  a track over the duration ceiling *cannot* be analyzed, so they are counted and never offered
-  for review — no decision changes them. Everything else is policy, and policy is reviewable.
+- **Structural skips versus rules.** A missing file, a video, a stream URL, a playlist file, a
+  DSD file or a track over the duration ceiling *cannot* be analyzed, so they are counted and
+  never offered for review — no decision changes them. Everything else is policy, and policy is
+  reviewable.
 - **The long-track threshold is a prompt, not a rule.** It surfaces long files so you can judge
   them; it excludes nothing. That matters because *long* is not the same class as *bad to
   analyze*: an hours-long ambient piece or a DJ set is one coherent thing and analyzes fine,
