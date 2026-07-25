@@ -19,6 +19,26 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Report what we are ABOUT to build, up front like MBXHub's script. Read straight from git
+REM rather than from the exe, because the exe does not exist yet - and this is the same state
+REM the csproj stamps into the binary, so what you see here is what --version will report.
+REM Up front matters for the dirty warning especially: knowing the tree is modified is worth
+REM more before you spend the build than after it has scrolled past.
+set TD_DESC=unknown
+set TD_BRANCH=unknown
+set TD_DIRTY=
+for /f "delims=" %%d in ('git describe --tags --always 2^>nul') do set TD_DESC=%%d
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set TD_BRANCH=%%b
+for /f "delims=" %%s in ('git status --porcelain --untracked-files=no -- Truedat 2^>nul') do set TD_DIRTY=1
+echo Source:  %TD_DESC%  (branch %TD_BRANCH%)
+if defined TD_DIRTY (
+    echo.
+    echo *** DIRTY TREE - uncommitted changes under Truedat\ ***
+    echo     This binary will NOT be described by commit %TD_DESC%; --version will say +dirty.
+    echo     Commit the source first if you intend to ship or commit this build.
+    echo.
+)
+
 REM Build C# console app (ILRepack merges System.Text.Json)
 echo Building C# scanner...
 if not exist dist\truedat mkdir dist\truedat
@@ -31,19 +51,6 @@ if errorlevel 1 (
 )
 copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\
 echo Done: truedat.exe
-
-REM Report what this build actually IS, the way MBXHub's build script does. The version
-REM suffix is the git commit, so this line answers "what source is in this binary?" - the
-REM question that previously required counting self-test assertions to answer.
-for /f "delims=" %%v in ('dist\truedat\truedat.exe --version') do set TRUEDAT_VER=%%v
-echo Version: %TRUEDAT_VER%
-echo %TRUEDAT_VER% | findstr /C:"+dirty" >nul
-if not errorlevel 1 (
-    echo.
-    echo WARNING: built from a DIRTY tree - this binary contains uncommitted changes under
-    echo          Truedat\ and is NOT described by commit %TRUEDAT_VER%. Do not ship or
-    echo          commit it as a build of that commit; commit the source first, then rebuild.
-)
 
 REM Ship README.md alongside the binary so the distributed bundle is self-documenting.
 echo Copying README.md...
