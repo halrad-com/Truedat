@@ -26,7 +26,7 @@ namespace Truedat
         public List<PreviewCandidate> Review = new List<PreviewCandidate>();
         public int ReviewTotal = 0;
         public bool ReviewTruncated = false;
-        /// <summary>How many files had their headers read for podcast markers. The only
+        /// <summary>How many files had their headers read for speech markers. The only
         /// place preview touches audio, so it is reported rather than silent.</summary>
         public int SniffedCount = 0;
     }

@@ -24,12 +24,15 @@ namespace Truedat
         /// with the stream URL as their location. Not scannable; Location keeps the
         /// original URL for skip-ledger display.</summary>
         public bool IsRemote { get; set; }
-        /// <summary>True if the iTunes XML marks this track as a podcast episode.</summary>
-        public bool IsPodcast { get; set; }
-        /// <summary>What triggered the podcast classification ("Podcast=true" —
-        /// iTunes-native boolean — or "Genre=Podcast" — MusicBee exports) —
-        /// traceability for skip logs.</summary>
-        public string PodcastReason { get; set; } = "";
+        /// <summary>True if the iTunes XML carries an explicit speech label (a podcast
+        /// flag or podcast genre) — one kind of evidence that this track is talk, not
+        /// music.</summary>
+        public bool IsSpeech { get; set; }
+        /// <summary>What triggered the speech label ("Podcast=true" — iTunes-native
+        /// boolean — or "Genre=Podcast" — MusicBee exports) — traceability for skip
+        /// logs. These literals are the external identifiers we matched, not our class
+        /// name.</summary>
+        public string SpeechReason { get; set; } = "";
     }
 
     /// <summary>
@@ -316,8 +319,8 @@ namespace Truedat
                             // deleted for good 2026-07-24. Do not reinstate.
                             if (reader.Name == "true")
                             {
-                                track.IsPodcast = true;
-                                track.PodcastReason = "Podcast=true";
+                                track.IsSpeech = true;
+                                track.SpeechReason = "Podcast=true";
                             }
                             SkipElement(reader);
                             break;
@@ -338,15 +341,15 @@ namespace Truedat
                 reader.Read();
 
             // MusicBee's iTunes XML export has no Podcast boolean, no podcast Kind,
-            // and no Track Type marker — actual podcast episodes are identified by
-            // Genre=Podcast (the same rule ReportCatalog's PodcastGenre class stat
-            // applies to stored entries, Program.cs — --migrate uses no such rule,
-            // it only strips legacy fields, see CLAUDE.md's Scan exclusions section).
+            // and no Track Type marker — a Genre=Podcast tag is the speech label it
+            // does carry (the same rule ReportCatalog's speech class stat applies to
+            // stored entries, Program.cs — --migrate uses no such rule, it only strips
+            // legacy fields, see CLAUDE.md's Scan exclusions section).
             // Checked after the dict so key order doesn't matter.
-            if (!track.IsPodcast && string.Equals(track.Genre, "Podcast", StringComparison.OrdinalIgnoreCase))
+            if (!track.IsSpeech && string.Equals(track.Genre, "Podcast", StringComparison.OrdinalIgnoreCase))
             {
-                track.IsPodcast = true;
-                track.PodcastReason = "Genre=Podcast";
+                track.IsSpeech = true;
+                track.SpeechReason = "Genre=Podcast";
             }
 
             return track;

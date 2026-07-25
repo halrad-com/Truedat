@@ -423,7 +423,7 @@ function renderBulk(){
   const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));const stale=r.matchCount===0?` <span class='stale'>(0 — stale?)</span>`:` <span class='n'>(${num(r.matchCount)})</span>`;return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${stale}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
   document.getElementById('bulk').innerHTML=(chips?`<div class='sec-h'>Genres — click to exclude</div><div class='chips'>${chips}</div>`:'')+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='7200' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
-const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','podcast-labelled':'mark'};
+const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 function rsnClass(r){if(r.indexOf('marker:')===0)return 'mark';return RSN[r]||'';}
 function decState(c){const x=desiredHas({kind:'file',action:'exclude',path:c.path});const i=desiredHas({kind:'file',action:'include',path:c.path});if(x)return 'x';if(i)return 'i';return c.currentDecision==='excluded'?'x0':c.currentDecision==='included'?'i0':'';}
 function renderTable(){

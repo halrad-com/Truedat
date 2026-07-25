@@ -1724,7 +1724,7 @@ namespace Truedat
                     FileExists = File.Exists,
                     SniffMarkers = p =>
                     {
-                        var m = PodcastTagSniffer.TryDetectAll(p);
+                        var m = SpeechTagSniffer.TryDetectAll(p);
                         return m == null ? null : m.Describe();
                     },
                     SpeechVerdict = e => e?.Features == null
@@ -5557,8 +5557,7 @@ namespace Truedat
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
             public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
-            public int PodcastGenre;      // stored genre == "Podcast" (the only podcast label the JSON itself carries)
-            public int SpeechYes;         // ComputeTruedatVerdict.SpeechLikely == "yes" AND NOT already counted as PodcastGenre
+            public int Speech;            // one speech class: genre=="Podcast" label OR ComputeTruedatVerdict.SpeechLikely=="yes" (union, each entry once)
             public int MissingFingerprint; // entries with no fingerprint.v1 block
         }
 
@@ -5569,15 +5568,16 @@ namespace Truedat
         /// (path,artist,title,album,genre,codec,speechConfidence,method) next to the
         /// moods file and prints a count + first-20 preview. The verdict is recomputed
         /// via ComputeTruedatVerdict (write-time verdict, not persisted in the entry) —
-        /// but this lister is NOT count-equal with the --stats class-stat count: --stats
-        /// partitions podcast-genre vs. acoustic-speech (an entry with stored
-        /// genre=="Podcast" counts under PodcastGenre and is excluded from its speech
-        /// count, see ComputeCatalogStats), while this method lists every speechLikely
-        /// =="yes" entry regardless of genre label. So this CSV can be a strict superset
-        /// of the --stats "Speech-likely" number — that is intentional, not a bug: this
-        /// is the full review surface, --stats is a non-overlapping-class summary. This
-        /// is the only speech surface that works on the moods JSON alone — --preview
-        /// needs the iTunes XML and can't run on a metadata-mirror box.</summary>
+        /// but this lister is NOT count-equal with the --stats speech count. --stats
+        /// counts the UNION of the label and the acoustic verdict (an entry with stored
+        /// genre=="Podcast" counts as speech even if it recomputes to acoustic "no", see
+        /// ComputeCatalogStats), while this method lists only entries whose acoustic
+        /// verdict is speechLikely=="yes", regardless of genre label. So the two sets
+        /// overlap but neither contains the other — that is intentional, not a bug:
+        /// --stats answers "how much speech is in my catalog", this answers "which tracks
+        /// did the acoustic signal flag". This is the only speech surface that works on
+        /// the moods JSON alone — --preview needs the iTunes XML and can't run on a
+        /// metadata-mirror box.</summary>
         static void RunListSpeech(string moodsPath, IEnumerable<TrackEntry> entries)
         {
             var hits = new List<(string Path, string Artist, string Title, string Album, string Genre, string Codec, double? Conf, string Method)>();
@@ -5684,23 +5684,20 @@ namespace Truedat
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
                 if (e.Features != null)
                 {
-                    // Podcast and speech are reported as mutually exclusive classes so the
-                    // two counts read as a partition, not an overlapping double-count.
-                    // Podcast wins: it is an explicit assertion carried in the file/library
-                    // (stored genre label) while speechLikely is an acoustic inference —
-                    // the specific, author-supplied claim outranks the derived one. Speech
-                    // then only counts entries the label didn't already claim, which makes
-                    // it answer "how much talk did the acoustic signal find that no label
-                    // had already told us about" instead of double-counting labelled ones.
-                    bool isPodcastGenre = string.Equals(e.Features.Genre, "Podcast", StringComparison.OrdinalIgnoreCase);
-                    if (isPodcastGenre)
+                    // ONE speech class, not two. Speech is a single genus (audiobook,
+                    // comedy, lecture, news, interview, talk-dominant); "podcast" is one
+                    // kind of EVIDENCE about a speech track, not a class of its own. An
+                    // entry is speech if EITHER the label says so (stored genre "Podcast" —
+                    // an explicit author claim) OR the acoustic verdict says so
+                    // (speechLikely=="yes"). Counted once: the label short-circuits the
+                    // acoustic recompute, so an entry carrying both kinds of evidence still
+                    // adds one. Per-track evidence (which kind) stays visible in
+                    // --list-speech and --preview reasons; this is only the summary count.
+                    bool isSpeechGenre = string.Equals(e.Features.Genre, "Podcast", StringComparison.OrdinalIgnoreCase);
+                    if (isSpeechGenre
+                        || ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely == "yes")
                     {
-                        s.PodcastGenre++;
-                    }
-                    else
-                    {
-                        var vrd = ComputeTruedatVerdict(e.Features.FilePath ?? "", e);
-                        if (vrd.SpeechLikely == "yes") s.SpeechYes++;
+                        s.Speech++;
                     }
                 }
             }
@@ -5781,18 +5778,15 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
             }
-            // Podcast (explicit stored-genre label) and speech-likely (acoustic verdict)
-            // are reported as plain class stats, same as Duplicate audio above — a fact
-            // about the catalog, not a nag. Neither is a --migrate recommendation: the
-            // purge that used to sit behind them is gone, so the only real action left is
-            // review + an exclusion rule (decisions delta + --apply-exclusions).
-            if (s.PodcastGenre > 0 || s.SpeechYes > 0)
+            // Speech (label OR acoustic verdict) is one class stat, same as Duplicate
+            // audio above — a fact about the catalog, not a nag. Not a --migrate
+            // recommendation: the purge that used to sit behind it is gone, so the only
+            // real action left is review + an exclusion rule (decisions delta +
+            // --apply-exclusions).
+            if (s.Speech > 0)
             {
                 Console.WriteLine();
-                if (s.PodcastGenre > 0)
-                    Console.WriteLine($"  {"Podcast (genre)",-20} {s.PodcastGenre,9:N0} tracks   (exclude: a genre rule in a decisions delta + truedat --apply-exclusions)");
-                if (s.SpeechYes > 0)
-                    Console.WriteLine($"  {"Speech-likely",-20} {s.SpeechYes,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
+                Console.WriteLine($"  {"Speech",-20} {s.Speech,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
             }
 
             // Recommended next steps — detected state -> exact command. Advisory
@@ -7811,7 +7805,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmp2); } catch { } }
             }
 
-            // --- PodcastTagSniffer (spec 2026-07-22 A1) ---
+            // --- SpeechTagSniffer (spec 2026-07-22 A1) ---
             {
                 // Synthetic ID3v2.3 tag: header + one frame, no padding.
                 byte[] Id3(string frameId, byte[] payload)
@@ -7856,7 +7850,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return head.ToArray();
                 }
 
-                PodcastMarkers? Detect(byte[] bytes) => PodcastTagSniffer.TryDetectAllCore(new MemoryStream(bytes));
+                SpeechMarkers? Detect(byte[] bytes) => SpeechTagSniffer.TryDetectAllCore(new MemoryStream(bytes));
 
                 var strong = Detect(Id3("PCST", new byte[] { 0, 0, 0, 0 }));
                 Assert(strong != null && strong.Strong.Contains("PCST"), "sniffer: PCST is a strong marker");
@@ -7877,13 +7871,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // rule is exact-equals; the file-side check must not be looser than it.
                 Assert(Detect(Id3("TCON", Text("Comedy Podcast"))) == null, "sniffer: TCON 'Comedy Podcast' no longer matches (exact-equals now)");
                 Assert(Detect(Id3("TCON", Text("Podcasts"))) == null, "sniffer: TCON 'Podcasts' no longer matches");
-                Assert(Detect(Id3("TCON", Text("Rock"))) == null, "sniffer: TCON 'Rock' is not a podcast");
+                Assert(Detect(Id3("TCON", Text("Rock"))) == null, "sniffer: TCON 'Rock' is not speech");
                 var trimmedGenre = Detect(Id3("TCON", Text("  podcast  ")));
                 Assert(trimmedGenre != null && trimmedGenre.GenreText, "sniffer: TCON match is trimmed and case-insensitive");
 
                 Assert(Detect(new byte[] { 1, 2, 3 }) == null, "sniffer: junk stream returns null");
                 var truncated = Id3("PCST", new byte[] { 0, 0, 0, 0 });
-                Assert(PodcastTagSniffer.TryDetectAllCore(new MemoryStream(truncated, 0, 8)) == null, "sniffer: truncated header returns null");
+                Assert(SpeechTagSniffer.TryDetectAllCore(new MemoryStream(truncated, 0, 8)) == null, "sniffer: truncated header returns null");
 
                 // Synthetic MP4: ftyp + moov>udta>meta(v/f)>ilst>pcst
                 byte[] Mp4WithAtom(string leaf)
@@ -7925,7 +7919,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(both != null && both.Describe().Contains("PCST"), "sniffer: Describe names the strong marker");
             }
 
-            // --- podcast labelling: explicit labels only (2026-07-24) ---
+            // --- speech labelling: explicit labels only (2026-07-24) ---
             // The former "Episode Date + corroborator" vote is deleted: MusicBee maps
             // ID3v2.4 TDRL (release date) into the Episode Date key, so the anchor rides
             // on ordinary music. These assertions are the regression guard against it
@@ -7957,17 +7951,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.WriteAllText(tmpXml, xml);
                     var parsed = ITunesParser.Parse(tmpXml, out _);
                     // The whole TDRL class must now pass through untouched.
-                    Assert(!parsed.First(p => p.Name == "YtRipMusic").IsPodcast, "label: Episode Date alone is not a podcast");
-                    Assert(!parsed.First(p => p.Name == "LongDatedAlbum").IsPodcast, "label: Episode Date + 52min is not a podcast");
-                    Assert(!parsed.First(p => p.Name == "PublishedDatedTrack").IsPodcast, "label: Episode Date + Publisher is not a podcast");
-                    Assert(!parsed.First(p => p.Name == "LongClassical").IsPodcast, "label: duration alone is not a podcast");
-                    Assert(!parsed.First(p => p.Name == "LongPublishedLiveSet").IsPodcast, "label: Publisher + 52min is not a podcast");
+                    Assert(!parsed.First(p => p.Name == "YtRipMusic").IsSpeech, "label: Episode Date alone is not speech");
+                    Assert(!parsed.First(p => p.Name == "LongDatedAlbum").IsSpeech, "label: Episode Date + 52min is not speech");
+                    Assert(!parsed.First(p => p.Name == "PublishedDatedTrack").IsSpeech, "label: Episode Date + Publisher is not speech");
+                    Assert(!parsed.First(p => p.Name == "LongClassical").IsSpeech, "label: duration alone is not speech");
+                    Assert(!parsed.First(p => p.Name == "LongPublishedLiveSet").IsSpeech, "label: Publisher + 52min is not speech");
                     // Explicit labels still decide, and still name themselves.
-                    Assert(parsed.First(p => p.Name == "GenrePodcast").IsPodcast, "label: Genre=Podcast is a podcast");
-                    Assert(parsed.First(p => p.Name == "GenrePodcast").PodcastReason == "Genre=Podcast", "label: Genre reason recorded");
-                    Assert(parsed.First(p => p.Name == "GenrePodcastLowerCase").IsPodcast, "label: genre match is case-insensitive");
-                    Assert(parsed.First(p => p.Name == "ITunesFlagged").IsPodcast, "label: iTunes Podcast=true is a podcast");
-                    Assert(parsed.First(p => p.Name == "ITunesFlagged").PodcastReason == "Podcast=true", "label: Podcast=true reason recorded");
+                    Assert(parsed.First(p => p.Name == "GenrePodcast").IsSpeech, "label: Genre=Podcast makes it speech");
+                    Assert(parsed.First(p => p.Name == "GenrePodcast").SpeechReason == "Genre=Podcast", "label: Genre reason recorded");
+                    Assert(parsed.First(p => p.Name == "GenrePodcastLowerCase").IsSpeech, "label: genre match is case-insensitive");
+                    Assert(parsed.First(p => p.Name == "ITunesFlagged").IsSpeech, "label: iTunes Podcast=true makes it speech");
+                    Assert(parsed.First(p => p.Name == "ITunesFlagged").SpeechReason == "Podcast=true", "label: Podcast=true reason recorded");
                 }
                 finally { try { File.Delete(tmpXml); } catch { } }
             }
@@ -8267,15 +8261,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var plsPlan = PreviewPlanner.Build(In(One(@"D:\M\set.wpl", 180000, 1_000), ExclusionSet.Empty));
                 Assert(Bkt(plsPlan, "nonAudio") == 1, $"preview accounting: playlists keep the nonAudio autoSkip class name (got {Bkt(plsPlan, "nonAudio")})");
 
-                // podcast-labelled: Phase 3 — a label is evidence, not a filter, so a scan
+                // speech-labelled: Phase 3 — a label is evidence, not a filter, so a scan
                 // analyzes it and the estimate must count it as new work like any other track.
                 var pod = One(@"D:\M\show.mp3", 3000000, 30_000_000);
-                pod.IsPodcast = true;
-                pod.PodcastReason = "Genre=Podcast";
+                pod.IsSpeech = true;
+                pod.SpeechReason = "Genre=Podcast";
                 var podPlan = PreviewPlanner.Build(In(pod, ExclusionSet.Empty));
-                Assert(podPlan.Estimate.NewTracks == 1, $"preview accounting: a podcast-labelled new track now contributes to new work (got {podPlan.Estimate.NewTracks})");
-                Assert(podPlan.Review.Count == 1 && podPlan.Review[0].Reasons.Contains("podcast-labelled"),
-                    "preview accounting: a podcast-labelled track is still surfaced for review");
+                Assert(podPlan.Estimate.NewTracks == 1, $"preview accounting: a speech-labelled new track now contributes to new work (got {podPlan.Estimate.NewTracks})");
+                Assert(podPlan.Review.Count == 1 && podPlan.Review[0].Reasons.Contains("speech-labelled"),
+                    "preview accounting: a speech-labelled track is still surfaced for review");
             }
 
             // --- --preview must never truncate a file that isn't a preview (whole-branch fix
@@ -8857,20 +8851,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var afterVideo = FilterVideoFiles(kept, null);
                     Assert(!afterVideo.Exists(t => t.Name == "KexpVideo"), "layering: include does NOT resurrect a video file");
 
-                    // Phase 3: a podcast label is EVIDENCE now, not a verdict — the filter
+                    // Phase 3: a speech label is EVIDENCE now, not a verdict — the filter
                     // chain must let it through so the operator can decide with a rule.
                     var labelledNow = new List<ITunesTrack>
                     {
                         new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", Name = "Show",
-                                          IsPodcast = true, PodcastReason = "Genre=Podcast" },
+                                          IsSpeech = true, SpeechReason = "Genre=Podcast" },
                         new ITunesTrack { Location = @"D:\Music\Rock\song.flac", Name = "Rock" },
                     };
                     var afterChain = FilterVideoFiles(FilterNonAudio(labelledNow, null), null);
                     var showAfterChain = afterChain.Find(t => t.Name == "Show");
-                    Assert(afterChain.Count == 2, $"phase3: a podcast-labelled track is no longer filtered (kept {afterChain.Count})");
+                    Assert(afterChain.Count == 2, $"phase3: a speech-labelled track is no longer filtered (kept {afterChain.Count})");
                     Assert(afterChain.Exists(t => t.Name == "Show"), "phase3: the labelled track specifically survives");
-                    Assert(showAfterChain != null && showAfterChain.IsPodcast, "phase3: IsPodcast survives as evidence for the preview surface");
-                    Assert(showAfterChain != null && showAfterChain.PodcastReason == "Genre=Podcast", "phase3: PodcastReason survives as evidence");
+                    Assert(showAfterChain != null && showAfterChain.IsSpeech, "phase3: IsSpeech survives as evidence for the preview surface");
+                    Assert(showAfterChain != null && showAfterChain.SpeechReason == "Genre=Podcast", "phase3: SpeechReason survives as evidence");
                 }
                 finally { _exclusions = saveSet; }
             }

@@ -50,8 +50,8 @@ namespace Truedat
     /// The new-work accounting (newTracks / newBytes / the ETA) counts only tracks a scan
     /// would actually hand to Essentia — so every filter a scan applies has to be applied
     /// here first, which is why the exclusion determination sits ABOVE the catalog-state
-    /// block rather than after it. A podcast label is no longer a filter (see the
-    /// "podcast-labelled" review reason below) — it is evidence only, so it never removes
+    /// block rather than after it. A speech label is no longer a filter (see the
+    /// "speech-labelled" review reason below) — it is evidence only, so it never removes
     /// a track from new-work accounting.
     /// </summary>
     internal static class PreviewPlanner
@@ -166,7 +166,7 @@ namespace Truedat
                 if (durSecs >= input.LongTrackSecs) reasons.Add("long");
                 if (overLimit) reasons.Add("over-limit");
                 if (excluded) reasons.Add("excluded");
-                if (t.IsPodcast) reasons.Add("podcast-labelled");
+                if (t.IsSpeech) reasons.Add("speech-labelled");
 
                 string? speech = null;
                 if (analyzed && input.SpeechVerdict != null)
