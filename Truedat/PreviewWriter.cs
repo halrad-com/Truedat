@@ -313,6 +313,18 @@ namespace Truedat
   .rule button{padding:2px 8px;font-size:12px}
   .slider{display:flex;gap:10px;align-items:center;font-size:13px;color:#cfcfcf}
   .slider input[type=range]{width:220px}
+  .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:20;align-items:flex-start;justify-content:center}
+  .modal.open{display:flex}
+  .mpanel{background:#1c1c1c;border:1px solid #3a3a3a;border-radius:10px;margin-top:8vh;width:min(460px,92vw);max-height:78vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .mhead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #333;font-size:14px}
+  .gfilter{margin:10px 14px 6px;background:#242424;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;padding:8px 10px;font-size:13px}
+  .mlist{overflow-y:auto;padding:4px 8px 10px}
+  .grow{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:transparent;color:#ddd;border:0;border-radius:6px;padding:7px 8px;font-size:13px;cursor:pointer}
+  .grow:hover{background:#262626}
+  .grow.on{color:#f2a0a0}
+  .grow .gck{width:14px;color:#f2a0a0}
+  .grow .gnm{flex:1}
+  .grow .n{color:#888;font-size:12px}
   .banner{background:#1e2230;border:1px solid #33507a;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#cfe;display:flex;gap:10px;align-items:center}
   .banner.warn{background:#2e2418;border-color:#7a5a2a;color:#f2c48a}
   .banner code{background:#0d0d0d;padding:1px 6px;border-radius:4px;color:#9cf}
@@ -353,6 +365,13 @@ namespace Truedat
   <div id='bulk'></div>
   <div id='body'></div>
 </main>
+<div class='modal' id='gmodal'>
+  <div class='mpanel'>
+    <div class='mhead'><b>Exclude genres from scanning</b><button class='sec' id='gclose'>close</button></div>
+    <input id='gfilter' class='gfilter' placeholder='filter genres…' autocomplete='off'>
+    <div class='mlist' id='glist'></div>
+  </div>
+</div>
 <script id='data' type='application/json'>__DATA__</script>
 <script>
 const D=JSON.parse(document.getElementById('data').textContent);
@@ -419,13 +438,20 @@ let host=OFFLINE?offlineHost:servedHost;
 
 // ---- rendering -------------------------------------------------------------
 let LONG=(D.limits&&D.limits.longTrackSecs)||1800;
+let genreFilter='';
 function renderCounts(){const c=D.counts||{};document.getElementById('counts').innerHTML=num(c.libraryTotal)+' tracks · '+num(c.analyzed)+' analyzed · '+num(c.excluded)+' excluded · '+`<span class='badge'>${num(c.awaitingReview)} awaiting</span>`;document.getElementById('host').textContent='host: '+(OFFLINE?'offline':'served');}
 function renderSummary(){const e=D.estimate||{},l=D.limits||{},sk=D.autoSkip||[];const skips=sk.length?sk.map(b=>num(b.count)+' '+esc(b.class)).join(' · '):'none';document.getElementById('summary').innerHTML=`<div><span class='k'>Estimate</span><b>${num(e.newTracks)}</b> new · <b>${bytes(e.newBytes)}</b> · ETA <b>${hms(e.etaSecs)}</b> <span class='ci'>(${esc(e.etaBasis||'unavailable')})</span></div>`+`<div><span class='k'>Limits</span>ceiling <b>${num(l.maxDurationSecs)}s</b> (${esc(l.maxDurationSource)}) · long ≥ <b>${Math.round((l.longTrackSecs||0)/60)} min</b> <span class='ci' title='${esc(l.extractorNote)}'>ⓘ</span></div>`+`<div><span class='k'>Auto-skipped</span><span class='ci' title='structural — a scan cannot analyze these; not reviewable'>can&#39;t analyze:</span> ${skips}</div>`;}
 function renderBulk(){
+  // The actionable genres are the excluded few — a short always-visible removable list.
+  // Adding one is a deliberate pick from a searchable dialog (the full list can run to
+  // hundreds on a granular library), not a wall of inline chips.
   const genres=(D.genres||[]).filter(g=>g.name&&g.name!=='(none)');
-  const chips=genres.length?genres.map(g=>{const on=desiredHas({kind:'genre',action:'exclude',value:g.name});return `<button class='chip${on?' excl':''}' data-genre='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span></button>`;}).join(''):'';
+  const isExcl=g=>desiredHas({kind:'genre',action:'exclude',value:g.name});
+  const excl=genres.filter(isExcl);
+  const exclBlock=excl.length?`<div class='sec-h'>Excluded genres — click to un-exclude</div><div class='chips'>${excl.map(g=>`<button class='chip excl' data-genre='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span> ✕</button>`).join('')}</div>`:'';
+  const adderBlock=genres.length?`<div class='sec-h'>Genres</div><button class='sec' id='gpick'>＋ exclude genres… <span class='n'>(${genres.length})</span></button>`:'';
   const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));const stale=r.matchCount===0?` <span class='stale'>(0 — stale?)</span>`:` <span class='n'>(${num(r.matchCount)})</span>`;return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${stale}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
-  document.getElementById('bulk').innerHTML=(chips?`<div class='sec-h'>Genres — click to exclude</div><div class='chips'>${chips}</div>`:'')+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='7200' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
+  document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='7200' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 function rsnClass(r){if(r.indexOf('marker:')===0)return 'mark';return RSN[r]||'';}
@@ -445,15 +471,31 @@ function renderTable(){
   body.innerHTML=trunc+`<table><thead><tr><th>decision</th><th>path</th><th class='num'>len</th><th>genre</th><th>codec</th><th>state</th><th>reasons</th></tr></thead><tbody>${tr}</tbody></table>`;
 }
 function updateSave(){document.getElementById('save').disabled=!dirty();}
+// The genre picker dialog: browse the full genre list (searchable), toggle exclusions. Only
+// #glist is re-rendered on filter/toggle, so the search box keeps focus while you type.
+function renderGenreList(){
+  const glist=document.getElementById('glist');if(!glist)return;
+  const q=genreFilter.toLowerCase();
+  const genres=(D.genres||[]).filter(g=>g.name&&g.name!=='(none)'&&g.name.toLowerCase().indexOf(q)>=0);
+  glist.innerHTML=genres.length?genres.map(g=>{const on=desiredHas({kind:'genre',action:'exclude',value:g.name});return `<button class='grow${on?' on':''}' data-gpick='${esc(g.name)}'><span class='gck'>${on?'✓':''}</span><span class='gnm'>${esc(g.name)}</span><span class='n'>×${num(g.tracks)}</span></button>`;}).join(''):`<div class='empty'>no genres match</div>`;
+}
+function openGenres(){genreFilter='';document.getElementById('gmodal').classList.add('open');renderGenreList();const f=document.getElementById('gfilter');if(f){f.value='';f.focus();}}
+function closeGenres(){document.getElementById('gmodal').classList.remove('open');}
 function refresh(){renderCounts();renderSummary();renderBulk();renderTable();updateSave();}
 
 // ---- events ----------------------------------------------------------------
 document.addEventListener('click',ev=>{
+  if(ev.target.closest('#gpick')){openGenres();return;}
+  if(ev.target.closest('#gclose')||ev.target.id==='gmodal'){closeGenres();return;}
+  const gp=ev.target.closest('[data-gpick]');if(gp){toggleRule({kind:'genre',action:'exclude',value:gp.getAttribute('data-gpick')});renderGenreList();return;}
   const g=ev.target.closest('[data-genre]');if(g){toggleRule({kind:'genre',action:'exclude',value:g.getAttribute('data-genre')});return;}
   const rr=ev.target.closest('[data-rmrule]');if(rr){toggleRule(parseRuleStr(rr.getAttribute('data-rmrule'),rr.getAttribute('data-rmact')));return;}
   const row=ev.target.closest('tr[data-p]');if(row){const p=row.getAttribute('data-p');if(ev.target.classList.contains('dx')){setExclusive({kind:'file',action:'exclude',path:p});return;}if(ev.target.classList.contains('di')){setExclusive({kind:'file',action:'include',path:p});return;}}
 });
-document.addEventListener('input',ev=>{if(ev.target.id==='longr'){LONG=+ev.target.value;const v=document.getElementById('longv');if(v)v.textContent=Math.round(LONG/60);renderTable();}});
+document.addEventListener('keydown',ev=>{if(ev.key==='Escape')closeGenres();});
+document.addEventListener('input',ev=>{
+  if(ev.target.id==='gfilter'){genreFilter=ev.target.value;renderGenreList();return;}
+  if(ev.target.id==='longr'){LONG=+ev.target.value;const v=document.getElementById('longv');if(v)v.textContent=Math.round(LONG/60);renderTable();}});
 document.addEventListener('change',ev=>{if(ev.target.classList.contains('fsel')&&ev.target.value){toggleRule({kind:'folder',action:'exclude',pattern:ev.target.value});ev.target.value='';}});
 document.getElementById('save').addEventListener('click',()=>{if(dirty())host.save(buildDelta());});
 document.getElementById('rescan').addEventListener('click',()=>host.rescan());
