@@ -6137,6 +6137,24 @@ namespace Truedat
         /// to next-to-moods. An explicit --manifest &lt;path&gt; always wins over all of this.</summary>
         static string ResolveManifestDest(string moodsDir)
         {
+            var rd = ResolveReviewDir(moodsDir);
+            if (rd != null) return Path.Combine(rd, "dupes.json");
+            Console.WriteLine("  (no MusicBee/MBXHub instance found — writing manifest next to moods; pass --manifest <path> to override)");
+            return Path.Combine(moodsDir, "mbxmoods-duplicates.manifest.json");
+        }
+
+        /// <summary>Resolve (and create) the MBXHub review directory for the instance that
+        /// OWNS the library being scanned, not "some running MusicBee": MusicBee's layout
+        /// puts the moods file in &lt;root&gt;\Library\, so &lt;root&gt; is the parent of the
+        /// moods dir, and MBXHub's data folder is &lt;root&gt;\AppData\MBXHub (per MBXHub.Shell
+        /// PluginLocator). This is correct even with several MusicBee instances running —
+        /// the manifest follows the library truedat actually scanned, not whichever process
+        /// the OS happens to list first. Falls back to matching a running MusicBee by its
+        /// exe folder (MusicBeeDetector's pure-Win32 lookup). Returns null (silently — the
+        /// filename-specific give-up line is the caller's concern) when no instance is
+        /// found.</summary>
+        internal static string? ResolveReviewDir(string moodsDir)
+        {
             // 1. Library-anchored: <moodsDir>\..\AppData\MBXHub\review — the instance that owns this library.
             try
             {
@@ -6149,7 +6167,7 @@ namespace Truedat
                         var reviewDir = Path.Combine(mbxhub, "review");
                         Directory.CreateDirectory(reviewDir);
                         Console.WriteLine($"  (targeting the scanned library's instance: {root})");
-                        return Path.Combine(reviewDir, "dupes.json");
+                        return reviewDir;
                     }
                 }
             }
@@ -6177,7 +6195,7 @@ namespace Truedat
                             var rd = Path.Combine(mbxhub, "review");
                             Directory.CreateDirectory(rd);
                             Console.WriteLine($"  (matched running MusicBee to the scanned library: {root})");
-                            return Path.Combine(rd, "dupes.json");
+                            return rd;
                         }
                         firstMatch ??= mbxhub;
                     }
@@ -6188,13 +6206,12 @@ namespace Truedat
                     var rd = Path.Combine(firstMatch, "review");
                     Directory.CreateDirectory(rd);
                     Console.WriteLine($"  (no instance owns this library directly; using the one running MusicBee with an MBXHub folder: {Path.GetDirectoryName(firstMatch)})");
-                    return Path.Combine(rd, "dupes.json");
+                    return rd;
                 }
             }
             catch { /* Process enumeration blocked — fall through */ }
 
-            Console.WriteLine("  (no MusicBee/MBXHub instance found — writing manifest next to moods; pass --manifest <path> to override)");
-            return Path.Combine(moodsDir, "mbxmoods-duplicates.manifest.json");
+            return null;
         }
 
         /// <summary>Emit the kind:dupes review-surface manifest that MBXHub's review.html
@@ -8052,6 +8069,91 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(compositeCand.CurrentDecision == "excluded", $"preview: composite candidate's decision is excluded (got {compositeCand.CurrentDecision})");
                     Assert(compositePlan.Estimate.NewTracks == 0, $"preview: over-limit+excluded track is not counted as new work (got {compositePlan.Estimate.NewTracks})");
                 }
+            }
+
+            // --- PreviewWriter: preview.json shape (Phase 2a) ---
+            {
+                var dir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-prev-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    var plan = new PreviewPlan
+                    {
+                        XmlPath = @"D:\M\iTunes Music Library.xml",
+                        MoodsPath = @"D:\M\mbxmoods.json",
+                        ExclusionsPath = @"D:\M\mbxmoods-exclude.json",
+                        ReviewTotal = 3,
+                        ReviewTruncated = true,
+                        SniffedCount = 2,
+                    };
+                    plan.Limits.MaxDurationSecs = 12000;
+                    plan.Limits.MaxDurationSource = "--max-duration";
+                    plan.Limits.LongTrackSecs = 1800;
+                    plan.Limits.ExtractorNote = "note";
+                    plan.Counts.LibraryTotal = 100;
+                    plan.Counts.Analyzed = 60;
+                    plan.Counts.Excluded = 5;
+                    plan.Counts.AwaitingReview = 3;
+                    plan.Estimate.NewTracks = 40;
+                    plan.Estimate.NewBytes = 1234567;
+                    plan.Estimate.CachedTracks = 60;
+                    plan.Estimate.EtaSecs = 987.5;
+                    plan.Estimate.EtaBasis = "catalog-rtf";
+                    plan.AutoSkip.Add(new PreviewBucket { Class = "video", Count = 7 });
+                    plan.Rules.Add(new PreviewRuleStat { Rule = @"folder=\Podcasts\**", Action = "exclude", MatchCount = 5 });
+                    plan.Genres.Add(new PreviewGenre { Name = "Rock", Tracks = 80, TotalSecs = 20000 });
+                    plan.Review.Add(new PreviewCandidate
+                    {
+                        Path = @"D:\M\long.flac", Artist = "A", Title = "T", Album = "Alb", Genre = "Rock",
+                        Codec = "flac", DurationSecs = 2400, State = "analyzed",
+                        Reasons = new List<string> { "long", "marker:PCST" },
+                        SpeechLikely = "no", OverLimit = false, CurrentDecision = "undecided",
+                    });
+
+                    var outPath = Path.Combine(dir, "preview.json");
+                    PreviewWriter.WritePreviewJson(outPath, plan);
+                    Assert(File.Exists(outPath), "previewjson: file written");
+
+                    var root = JsonNode.Parse(File.ReadAllText(outPath))!;
+                    // review-surface envelope — preview.json IS the manifest the hub serves
+                    Assert(root["kind"]!.GetValue<string>() == "preview", "previewjson: kind is preview");
+                    Assert(root["id"] != null && root["id"]!.GetValue<string>().Length > 0, "previewjson: carries an id");
+                    Assert(root["schemaVersion"]!.GetValue<int>() == 1, "previewjson: schemaVersion 1");
+                    Assert(root["generated"] != null, "previewjson: carries a generated timestamp");
+                    Assert(root["source"]!["moodsPath"]!.GetValue<string>() == @"D:\M\mbxmoods.json", "previewjson: source names the moods file");
+                    Assert(root["source"]!["exclusionsPath"] != null, "previewjson: source names the exclusion file");
+                    // Phase 2b adds the page; 2a must NOT point at a file that does not exist
+                    Assert(root["source"]!["reviewHtml"] == null, "previewjson: no reviewHtml pointer until the page exists");
+
+                    Assert(root["limits"]!["maxDurationSecs"]!.GetValue<int>() == 12000, "previewjson: limits echo the ceiling");
+                    Assert(root["limits"]!["maxDurationSource"]!.GetValue<string>() == "--max-duration", "previewjson: limits name where the ceiling came from");
+                    Assert(root["limits"]!["longTrackSecs"]!.GetValue<int>() == 1800, "previewjson: limits carry the review threshold");
+                    Assert(root["counts"]!["awaitingReview"]!.GetValue<int>() == 3, "previewjson: counts block for the hub badge");
+                    Assert(root["estimate"]!["etaBasis"]!.GetValue<string>() == "catalog-rtf", "previewjson: estimate names its basis");
+                    Assert(root["reviewTotal"]!.GetValue<int>() == 3, "previewjson: reviewTotal is the true count");
+                    Assert(root["reviewTruncated"]!.GetValue<bool>(), "previewjson: truncation is declared");
+                    Assert(root["reviewSort"]!.GetValue<string>() == "durationSecs-desc", "previewjson: sort order is declared, not guessed");
+                    Assert(root["sniffedCount"]!.GetValue<int>() == 2, "previewjson: sniff count is surfaced");
+
+                    var row = root["review"]!.AsArray()[0]!;
+                    Assert(row["path"]!.GetValue<string>() == @"D:\M\long.flac", "previewjson: candidate path");
+                    Assert(row["durationSecs"]!.GetValue<int>() == 2400, "previewjson: candidate duration (client-side re-filtering needs it)");
+                    Assert(row["reasons"]!.AsArray().Count == 2, "previewjson: candidate reasons are a list");
+                    Assert(row["currentDecision"]!.GetValue<string>() == "undecided", "previewjson: candidate carries its current decision");
+                    Assert(root["autoSkip"]!.AsArray()[0]!["class"]!.GetValue<string>() == "video", "previewjson: autoSkip buckets");
+                    Assert(root["rules"]!.AsArray()[0]!["matchCount"]!.GetValue<int>() == 5, "previewjson: rule hit counts");
+                    Assert(root["genres"]!.AsArray()[0]!["name"]!.GetValue<string>() == "Rock", "previewjson: genre histogram");
+
+                    // a negative ETA means "not estimable" and must be OMITTED, never serialised as -1
+                    plan.Estimate.EtaSecs = -1;
+                    plan.Estimate.EtaBasis = "unavailable";
+                    var outPath2 = Path.Combine(dir, "preview2.json");
+                    PreviewWriter.WritePreviewJson(outPath2, plan);
+                    var root2 = JsonNode.Parse(File.ReadAllText(outPath2))!;
+                    Assert(root2["estimate"]!["etaSecs"] == null, "previewjson: unestimable ETA is omitted, not written as -1");
+                    Assert(root2["estimate"]!["etaBasis"]!.GetValue<string>() == "unavailable", "previewjson: basis still says unavailable");
+                }
+                finally { try { Directory.Delete(dir, true); } catch { } }
             }
 
             // --- ExclusionSet: rule parsing + matching (spec 2026-07-24) ---
