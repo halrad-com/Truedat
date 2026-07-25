@@ -7553,6 +7553,111 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmpXml); } catch { } }
             }
 
+            // --- ExclusionSet: rule parsing + matching (spec 2026-07-24) ---
+            {
+                string Rules(string inner) => "{\"schemaVersion\":1,\"rules\":[" + inner + "]}";
+                string Folder(string action, string pattern) =>
+                    "{\"kind\":\"folder\",\"action\":\"" + action + "\",\"pattern\":\"" + pattern.Replace("\\", "\\\\") + "\"}";
+                string Genre(string action, string value) =>
+                    "{\"kind\":\"genre\",\"action\":\"" + action + "\",\"value\":\"" + value + "\"}";
+                string FileRule(string action, string path) =>
+                    "{\"kind\":\"file\",\"action\":\"" + action + "\",\"path\":\"" + path.Replace("\\", "\\\\") + "\"}";
+
+                ExclusionSet Set(string inner)
+                {
+                    var s = ExclusionSet.FromJson(Rules(inner), out var err);
+                    Assert(err == null, $"exclusion: parse without fatal error ({err})");
+                    return s;
+                }
+
+                // fragment folder rule: root-independent, boundary-aligned
+                var frag = Set(Folder("exclude", @"\Podcasts\**"));
+                Assert(frag.IsExcluded(@"D:\Music\Podcasts\JRE 2100.mp3", null, out var fragWhy), "exclusion: fragment folder rule matches");
+                Assert(fragWhy == @"folder=\Podcasts\**", $"exclusion: reason names the rule (got {fragWhy})");
+                Assert(frag.IsExcluded(@"P:\Library\Podcasts\JRE 2100.mp3", null, out _), "exclusion: fragment matches a different root (mirrored library)");
+                Assert(frag.IsExcluded(@"D:/Music/Podcasts/JRE 2100.mp3", null, out _), "exclusion: fragment matches forward slashes");
+                Assert(frag.IsExcluded(@"D:\Music\PODCASTS\x.mp3", null, out _), "exclusion: fragment match is case-insensitive");
+                Assert(!frag.IsExcluded(@"D:\Music\MyPodcastsBackup\x.mp3", null, out _), "exclusion: fragment is boundary-aligned, not substring");
+                Assert(!frag.IsExcluded(@"D:\Music\Rock\x.mp3", null, out _), "exclusion: unrelated path not excluded");
+
+                // absolute folder rule: root-specific
+                var abs = Set(Folder("exclude", @"D:\Music\Podcasts\**"));
+                Assert(abs.IsExcluded(@"D:\Music\Podcasts\a.mp3", null, out _), "exclusion: absolute folder rule matches its root");
+                Assert(!abs.IsExcluded(@"P:\Music\Podcasts\a.mp3", null, out _), "exclusion: absolute folder rule does not match another root");
+
+                // genre rule: exact, case-insensitive, trimmed, NEVER substring
+                var gen = Set(Genre("exclude", "Podcast"));
+                Assert(gen.IsExcluded(@"D:\a.mp3", "Podcast", out var genWhy), "exclusion: genre rule matches");
+                Assert(genWhy == "genre=Podcast", $"exclusion: genre reason names the rule (got {genWhy})");
+                Assert(gen.IsExcluded(@"D:\a.mp3", "podcast", out _), "exclusion: genre match is case-insensitive");
+                Assert(gen.IsExcluded(@"D:\a.mp3", "  Podcast  ", out _), "exclusion: genre match is trimmed");
+                Assert(!gen.IsExcluded(@"D:\a.mp3", "Comedy Podcast", out _), "exclusion: genre is exact, not substring");
+                Assert(!gen.IsExcluded(@"D:\a.mp3", null, out _), "exclusion: null genre never matches a genre rule");
+
+                // file rule
+                var fil = Set(FileRule("exclude", @"D:\Music\setlist.mp3"));
+                Assert(fil.IsExcluded(@"D:\Music\setlist.mp3", null, out _), "exclusion: file rule matches exact path");
+                Assert(fil.IsExcluded(@"d:/music/SETLIST.mp3", null, out _), "exclusion: file rule normalizes separators and case");
+                Assert(!fil.IsExcluded(@"D:\Music\setlist2.mp3", null, out _), "exclusion: file rule does not match a different path");
+
+                // include always wins, regardless of order in the file
+                var incAfter = Set(Folder("exclude", @"\Podcasts\**") + "," + Folder("include", @"\Podcasts\KEXP\**"));
+                Assert(!incAfter.IsExcluded(@"D:\Music\Podcasts\KEXP\session.flac", null, out _), "exclusion: include rule wins over exclude (include listed second)");
+                Assert(incAfter.IsExcluded(@"D:\Music\Podcasts\JRE.mp3", null, out _), "exclusion: sibling still excluded");
+                var incBefore = Set(Folder("include", @"\Podcasts\KEXP\**") + "," + Folder("exclude", @"\Podcasts\**"));
+                Assert(!incBefore.IsExcluded(@"D:\Music\Podcasts\KEXP\session.flac", null, out _), "exclusion: include rule wins over exclude (include listed first)");
+                var incFile = Set(Genre("exclude", "Podcast") + "," + FileRule("include", @"D:\Music\kexp.flac"));
+                Assert(!incFile.IsExcluded(@"D:\Music\kexp.flac", "Podcast", out _), "exclusion: file include rescues a genre exclude");
+                // IsIncluded must separate "deliberately included" from "never mentioned"
+                Assert(incAfter.IsIncluded(@"D:\Music\Podcasts\KEXP\session.flac", null), "exclusion: IsIncluded true for an include match");
+                Assert(!incAfter.IsIncluded(@"D:\Music\Podcasts\JRE.mp3", null), "exclusion: IsIncluded false for an excluded track");
+                Assert(!incAfter.IsIncluded(@"D:\Music\Rock\song.flac", null), "exclusion: IsIncluded false for an unmentioned track");
+
+                // match counting drives the stale-rule report
+                var counted = Set(Folder("exclude", @"\Podcasts\**") + "," + Folder("exclude", @"\Gone\**"));
+                counted.IsExcluded(@"D:\Music\Podcasts\a.mp3", null, out _);
+                counted.IsExcluded(@"D:\Music\Podcasts\b.mp3", null, out _);
+                Assert(counted.Rules[0].MatchCount == 2, $"exclusion: matched rule counts hits (got {counted.Rules[0].MatchCount})");
+                Assert(counted.Rules[1].MatchCount == 0, "exclusion: unmatched rule stays at zero (stale-rule signal)");
+
+                // validation: bad rules are skipped, counted, and diagnosed - not fatal
+                var partial = ExclusionSet.FromJson(Rules(
+                    Folder("exclude", @"\Podcasts\**") + ","
+                    + "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\\"}" + ","
+                    + "{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}" + ","
+                    + "{\"kind\":\"genre\",\"action\":\"maybe\",\"value\":\"x\"}" + ","
+                    + "{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"\"}"), out var partialErr);
+                Assert(partialErr == null, "exclusion: some-invalid-rules is not fatal");
+                Assert(partial.Rules.Count == 1, $"exclusion: only valid rules are kept (got {partial.Rules.Count})");
+                Assert(partial.InvalidRuleCount == 4, $"exclusion: invalid rules are counted (got {partial.InvalidRuleCount})");
+                Assert(partial.Diagnostics.Count == 4, "exclusion: every invalid rule gets a diagnostic");
+
+                // fatal: unparseable, and non-empty-but-nothing-valid
+                ExclusionSet.FromJson("{ this is not json", out var brokenErr);
+                Assert(brokenErr != null, "exclusion: unparseable JSON is fatal");
+                ExclusionSet.FromJson(Rules("{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}"), out var noneValidErr);
+                Assert(noneValidErr != null, "exclusion: non-empty rules with zero valid is fatal");
+
+                // empty is legitimate and excludes nothing
+                var emptySet = ExclusionSet.FromJson("{\"schemaVersion\":1,\"rules\":[]}", out var emptyErr);
+                Assert(emptyErr == null, "exclusion: empty rules array is not an error");
+                Assert(emptySet.IsEmpty, "exclusion: empty rules array yields IsEmpty");
+                Assert(!emptySet.IsExcluded(@"D:\Music\Podcasts\a.mp3", "Podcast", out _), "exclusion: empty set excludes nothing");
+                Assert(!ExclusionSet.Empty.IsExcluded(@"D:\a.mp3", "Podcast", out _), "exclusion: Empty excludes nothing");
+
+                // unknown fields are ignored (forward compatibility)
+                var futureSet = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":9,\"somethingNew\":true,\"rules\":[{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Podcast\",\"futureField\":42}]}",
+                    out var futureErr);
+                Assert(futureErr == null, "exclusion: unknown top-level and rule fields are tolerated");
+                Assert(futureSet.Rules.Count == 1, "exclusion: rule with an unknown field still parses");
+
+                // identity ignores note/sha so merges dedupe correctly (used in Task 3)
+                var idA = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"D:\\\\a.mp3\",\"note\":\"one\"}"), out _).Rules[0];
+                var idB = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"d:/A.MP3\",\"audioStreamSha256\":\"abc\"}"), out _).Rules[0];
+                Assert(idA.Identity() == idB.Identity(), "exclusion: identity ignores note/sha and normalizes the path");
+            }
+
             // --- speechLikely verdict (spec 2026-07-22 B1) ---
             {
                 TrackEntry Mk(double dance, double? chords, double? silence, double zcr) => new TrackEntry
