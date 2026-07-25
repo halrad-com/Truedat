@@ -519,15 +519,15 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
-        // Podcast handling (Phase 3, 2026-07-25): the XML label (iTunes-native
-        // Podcast=true boolean, or Genre=Podcast) is EVIDENCE now, not a filter —
-        // labeled tracks are analyzed regardless of this flag; IsPodcast/PodcastReason
+        // Podcast handling (Phase 3-4, 2026-07-25): the XML label (iTunes-native
+        // Podcast=true boolean, or Genre=Podcast) and the embedded-marker file sniff
+        // (PCST/WFED/TGID/TCON, pcst/purl — read from the audio bytes themselves) are
+        // both EVIDENCE now, not filters — labeled/marked tracks are analyzed
+        // regardless of this flag; IsPodcast/PodcastReason and the sniffer's marker
         // survive only for the --preview review surface. What this flag still gates:
-        // the embedded-marker file sniff (PCST/WFED/TGID/TCON, pcst/purl — read from
-        // the audio bytes themselves, a separate signal from the XML label) that
-        // skips a cache-miss file before it reaches Essentia, and --migrate's prune
-        // of podcast-genre + speech-likely catalog entries. The only authority over
-        // what a scan skips for POLICY reasons is mbxmoods-exclude.json.
+        // --migrate's prune of podcast-genre + speech-likely catalog entries. The
+        // only authority over what a scan skips for POLICY reasons is
+        // mbxmoods-exclude.json.
         internal static bool _includePodcasts;
 
         // Explicit scan-exclusion file. Default location is beside the moods file;
@@ -1388,12 +1388,10 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Bypass the embedded-marker file skip and the --migrate podcast/speech");
-                Console.WriteLine("                      prunes (default: skip cache-miss files carrying embedded podcast");
-                Console.WriteLine("                      markers (PCST/WFED/TGID/TCON, pcst/purl; listed in mbxmoods-skipped.csv),");
-                Console.WriteLine("                      and let --migrate prune podcast-genre and speech-likely entries).");
-                Console.WriteLine("                      XML-labeled podcasts (Genre=Podcast) are analyzed either way — the label");
-                Console.WriteLine("                      is --preview evidence only, not a scan filter.");
+                Console.WriteLine("  --include-podcasts  Keep podcast-genre and speech-likely entries when --migrate runs");
+                Console.WriteLine("                      (default: --migrate prunes them). XML-labeled podcasts (Genre=Podcast)");
+                Console.WriteLine("                      and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl) are");
+                Console.WriteLine("                      analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -2042,22 +2040,6 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
-                    if (!_includePodcasts)
-                    {
-                        var afPodcastMarker = PodcastTagSniffer.TryDetect(analyzeFilePath!);
-                        if (afPodcastMarker != null)
-                        {
-                            var afPodcastSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
-                                ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
-                                : Environment.CurrentDirectory;
-                            var afPodcastSkippedPath = Path.Combine(afPodcastSkippedDir, "mbxmoods-skipped.csv");
-                            AppendSkipped(afPodcastSkippedPath, analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), $"podcast (file marker: {afPodcastMarker})");
-                            Console.Error.WriteLine($"[skipped podcast] {analyzeFilePath} (file marker: {afPodcastMarker})");
-                            Environment.ExitCode = 0;
-                            return;
-                        }
-                    }
-
                     EnsureStagedSrc();  // open if a no-moods scan skipped the cache hierarchy
                     var afResults = RunSourceWorkers(
                         afEssentiaExe, afStagedSrc!, afFileSize, analyzeFilePath!, knownDurationSec: 0,
@@ -2660,18 +2642,6 @@ namespace Truedat
                             }
                         }
 
-                        if (!_includePodcasts)
-                        {
-                            var flPodcastMarker = PodcastTagSniffer.TryDetect(filePath);
-                            if (flPodcastMarker != null)
-                            {
-                                AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"podcast (file marker: {flPodcastMarker})");
-                                Console.Error.WriteLine($"[skipped podcast] {Path.GetFileName(filePath)} (file marker: {flPodcastMarker})");
-                                Interlocked.Increment(ref flDsdSkipped);   // reuse the skip counter fl already reports
-                                return;
-                            }
-                        }
-
                         // Cache miss — full Essentia + identity ride-along on the staged copy.
                         EnsureStagedSrc();
                         var flResults = RunSourceWorkers(
@@ -2870,12 +2840,10 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Bypass the embedded-marker file skip and the --migrate podcast/speech");
-                Console.WriteLine("                      prunes (default: skip cache-miss files carrying embedded podcast");
-                Console.WriteLine("                      markers (PCST/WFED/TGID/TCON, pcst/purl; listed in mbxmoods-skipped.csv),");
-                Console.WriteLine("                      and let --migrate prune podcast-genre and speech-likely entries).");
-                Console.WriteLine("                      XML-labeled podcasts (Genre=Podcast) are analyzed either way — the label");
-                Console.WriteLine("                      is --preview evidence only, not a scan filter.");
+                Console.WriteLine("  --include-podcasts  Keep podcast-genre and speech-likely entries when --migrate runs");
+                Console.WriteLine("                      (default: --migrate prunes them). XML-labeled podcasts (Genre=Podcast)");
+                Console.WriteLine("                      and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl) are");
+                Console.WriteLine("                      analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -3593,25 +3561,6 @@ namespace Truedat
                             Interlocked.Increment(ref failed);
                             EtaDrainNewPool();
                             return;
-                        }
-
-                        // A1 — file podcast-marker sniff (spec 2026-07-22): explicit
-                        // embedded markers catch podcast downloads the XML never
-                        // labeled. Cache-misses only — this file was about to eat
-                        // minutes of Essentia; a 128 KB header read is free by
-                        // comparison. --include-podcasts bypasses.
-                        if (!_includePodcasts)
-                        {
-                            var podcastMarker = PodcastTagSniffer.TryDetect(scanPath);
-                            if (podcastMarker != null)
-                            {
-                                AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), $"podcast (file marker: {podcastMarker})");
-                                Console.WriteLine($"[skipped podcast] {t.Artist} - {t.Name} (file marker: {podcastMarker})");
-                                Interlocked.Increment(ref podcastFileSkipped);
-                                EtaDrainNewPool();
-                                trackClass = "skip·podcast";
-                                return;
-                            }
                         }
 
                         // Cache miss — full Essentia + ride-along, all reads through the
