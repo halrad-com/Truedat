@@ -1675,7 +1675,13 @@ namespace Truedat
             // no mbxmoods.json, and never touches the exclusion file.
             if (previewMode)
             {
-                if (string.IsNullOrEmpty(xmlPath))
+                // Same auto-discovery the default scan path uses (exe-dir parent, exe-dir,
+                // cwd) — without this, --preview run from inside the library directory with
+                // no positional arg (the operator's habitual invocation) would reject a
+                // perfectly resolvable XML with a message that lies about "run from the
+                // library directory" already having been tried.
+                xmlPath = ResolveITunesXml(xmlPath);
+                if (!File.Exists(xmlPath))
                 {
                     Console.Error.WriteLine("Error: --preview needs the iTunes XML (pass it positionally, or run from the library directory).");
                     Environment.ExitCode = 1;
@@ -1707,7 +1713,7 @@ namespace Truedat
                 }
 
                 Console.WriteLine($"Loading iTunes library: {xmlPath}");
-                var pvTracks = ITunesParser.Parse(xmlPath!, out _);
+                var pvTracks = ITunesParser.Parse(xmlPath, out _);
                 Console.WriteLine($"Found {pvTracks.Count} tracks");
 
                 var pvCatalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -1719,22 +1725,7 @@ namespace Truedat
                 // length. It was recorded under whatever parallelism that scan used, so it is
                 // an approximation — which is exactly why the basis is reported as
                 // "catalog-rtf" rather than claiming a fresh measurement.
-                double pvRtf = 0;
-                {
-                    var samples = new List<double>();
-                    foreach (var t in pvTracks)
-                    {
-                        if (t.TotalTimeMs <= 0 || string.IsNullOrEmpty(t.Location)) continue;
-                        if (!pvCatalog.TryGetValue(t.Location!, out var e) || e == null) continue;
-                        if (!(e.AnalysisDurationSecs > 0)) continue;
-                        samples.Add(e.AnalysisDurationSecs!.Value / (t.TotalTimeMs / 1000.0));
-                    }
-                    if (samples.Count > 0)
-                    {
-                        samples.Sort();
-                        pvRtf = samples[samples.Count / 2];   // median: immune to a few outliers
-                    }
-                }
+                double pvRtf = MedianCatalogRtf(pvTracks, pvCatalog);
 
                 var pvPlan = PreviewPlanner.Build(new PreviewPlannerInput
                 {
@@ -5318,6 +5309,30 @@ namespace Truedat
             return null;
         }
 
+        // --preview measures nothing itself, so its ETA's real-time-factor comes from
+        // the catalog's own analysis history: stored analysisDuration against each
+        // track's known length. Median (upper median on a tie) rather than mean, so a
+        // handful of outliers cannot skew it — extracted as its own method so it is
+        // testable without a live catalog file or a full Main() run.
+        internal static double MedianCatalogRtf(IEnumerable<ITunesTrack> tracks, IDictionary<string, TrackEntry> catalog)
+        {
+            var samples = new List<double>();
+            foreach (var t in tracks)
+            {
+                if (t.TotalTimeMs <= 0 || string.IsNullOrEmpty(t.Location)) continue;
+                if (!catalog.TryGetValue(t.Location!, out var e) || e == null) continue;
+                // A missing AnalysisDurationSecs (null) or a non-positive one (0 or
+                // negative, which should not occur but must not be trusted blindly)
+                // is skipped rather than treated as 0 — a 0 sample would silently drag
+                // the whole median toward "instant", understating every ETA it feeds.
+                if (!(e.AnalysisDurationSecs > 0)) continue;
+                samples.Add(e.AnalysisDurationSecs!.Value / (t.TotalTimeMs / 1000.0));
+            }
+            if (samples.Count == 0) return 0;
+            samples.Sort();
+            return samples[samples.Count / 2];   // median: immune to a few outliers
+        }
+
         // Resolve the iTunes Music Library.xml location with a fallback probe order.
         // Supports the "drop the truedat folder into musicbee\library\ and run it"
         // install pattern: the exe-dir-parent probe picks up the XML that sits one
@@ -8222,6 +8237,97 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(compositeCand.CurrentDecision == "excluded", $"preview: composite candidate's decision is excluded (got {compositeCand.CurrentDecision})");
                     Assert(compositePlan.Estimate.NewTracks == 0, $"preview: over-limit+excluded track is not counted as new work (got {compositePlan.Estimate.NewTracks})");
                 }
+            }
+
+            // --- MedianCatalogRtf (Phase 2a Task 4 fix round 1): --preview's ETA
+            // real-time-factor input, pinned directly. Every preview live-check in the
+            // first pass ran against an empty catalog, so this logic — the median math,
+            // the null/zero skip, the zero-samples fallback — was never actually
+            // exercised by anything but a human eyeballing one manual run.
+            {
+                ITunesTrack RtfTrk(string loc, int ms) => new ITunesTrack { Location = loc, TotalTimeMs = ms };
+                var rtfTracks = new List<ITunesTrack>
+                {
+                    RtfTrk(@"D:\M\a.flac", 40000),
+                    RtfTrk(@"D:\M\b.flac", 40000),
+                };
+
+                // Two usable samples: 20s/40s = 0.5, 60s/40s = 1.5. Upper median is 1.5.
+                // A mean would give 1.0 and would still "look right" — asserting the exact
+                // value is what catches a median-to-mean regression that a loose sanity
+                // check (">0", "not NaN") would let straight through.
+                var catalogTwo = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                catalogTwo[@"D:\M\a.flac"] = new TrackEntry { AnalysisDurationSecs = 20 };
+                catalogTwo[@"D:\M\b.flac"] = new TrackEntry { AnalysisDurationSecs = 60 };
+                Assert(MedianCatalogRtf(rtfTracks, catalogTwo) == 1.5,
+                    $"preview: median RTF is the upper median of {{0.5, 1.5}}, not the mean (got {MedianCatalogRtf(rtfTracks, catalogTwo)})");
+
+                // A missing AnalysisDurationSecs (null) is skipped, not treated as 0.
+                var catalogNull = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                catalogNull[@"D:\M\a.flac"] = new TrackEntry { AnalysisDurationSecs = null };
+                catalogNull[@"D:\M\b.flac"] = new TrackEntry { AnalysisDurationSecs = 60 };
+                Assert(MedianCatalogRtf(rtfTracks, catalogNull) == 1.5,
+                    $"preview: an entry with no analysisDuration is skipped, not treated as 0 (got {MedianCatalogRtf(rtfTracks, catalogNull)})");
+
+                // A zero or negative AnalysisDurationSecs is skipped too, so it cannot
+                // poison the median toward "instant".
+                var rtfTracksThree = new List<ITunesTrack>
+                {
+                    RtfTrk(@"D:\M\a.flac", 40000),
+                    RtfTrk(@"D:\M\b.flac", 40000),
+                    RtfTrk(@"D:\M\c.flac", 40000),
+                };
+                var catalogZero = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                catalogZero[@"D:\M\a.flac"] = new TrackEntry { AnalysisDurationSecs = 0 };
+                catalogZero[@"D:\M\b.flac"] = new TrackEntry { AnalysisDurationSecs = -5 };
+                catalogZero[@"D:\M\c.flac"] = new TrackEntry { AnalysisDurationSecs = 60 };
+                Assert(MedianCatalogRtf(rtfTracksThree, catalogZero) == 1.5,
+                    $"preview: zero/negative analysisDuration cannot poison the median (got {MedianCatalogRtf(rtfTracksThree, catalogZero)})");
+
+                // No usable samples at all -> 0, not a guess.
+                var catalogEmpty = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                Assert(MedianCatalogRtf(rtfTracks, catalogEmpty) == 0,
+                    "preview: no usable samples in the catalog -> 0");
+
+                // And that 0 must make Build() honestly report the ETA as unavailable
+                // rather than a fabricated instant estimate.
+                var noHistoryInput = new PreviewPlannerInput
+                {
+                    Tracks = rtfTracks,
+                    Catalog = catalogEmpty,
+                    MeasuredRtf = MedianCatalogRtf(rtfTracks, catalogEmpty),
+                    MaxDurationSecs = 12000,
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    Parallelism = 2,
+                };
+                var noHistoryPlan = PreviewPlanner.Build(noHistoryInput);
+                Assert(noHistoryPlan.Estimate.EtaSecs < 0, "preview: zero RTF from an empty catalog leaves the ETA unestimable (negative sentinel)");
+                Assert(noHistoryPlan.Estimate.EtaBasis == "unavailable", $"preview: zero RTF reports basis unavailable (got {noHistoryPlan.Estimate.EtaBasis})");
+            }
+
+            // --- --preview's "measured-rtf" -> "catalog-rtf" relabel (Phase 2a Task 4 fix
+            // round 1): pins the bare string-literal coupling between PreviewPlanner's
+            // basis name and the dispatch's relabel across the two files. Renaming the
+            // planner's literal without updating both this test and the dispatch would
+            // silently start claiming a fresh measurement instead of a catalog-derived
+            // approximation — exactly the dishonesty --preview's design forbids.
+            {
+                var relabelInput = new PreviewPlannerInput
+                {
+                    Tracks = new List<ITunesTrack> { new ITunesTrack { Location = @"D:\M\a.flac", TotalTimeMs = 40000 } },
+                    Catalog = new Dictionary<string, TrackEntry>(PathComparer.Instance),
+                    MeasuredRtf = 0.5,
+                    MaxDurationSecs = 12000,
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    Parallelism = 2,
+                };
+                var relabelPlan = PreviewPlanner.Build(relabelInput);
+                Assert(relabelPlan.Estimate.EtaBasis == "measured-rtf", $"preview: planner's own basis name is measured-rtf before the dispatch relabels it (got {relabelPlan.Estimate.EtaBasis})");
+                // The same relabel the --preview dispatch performs.
+                if (relabelPlan.Estimate.EtaBasis == "measured-rtf") relabelPlan.Estimate.EtaBasis = "catalog-rtf";
+                Assert(relabelPlan.Estimate.EtaBasis == "catalog-rtf", $"preview: relabelled basis is catalog-rtf, never measured-rtf (got {relabelPlan.Estimate.EtaBasis})");
             }
 
             // --- PreviewWriter: preview.json shape (Phase 2a) ---

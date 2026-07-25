@@ -30,6 +30,14 @@ namespace Truedat
 
         public static void WritePreviewJson(string path, PreviewPlan plan)
         {
+            // ResolveDest's own targets (the MBXHub review folder, or beside the moods
+            // file) already exist by construction, but an explicit --preview <path> can
+            // name a directory that doesn't — mirror the tolerant-create-first pattern
+            // used elsewhere for an explicit output path rather than letting FileStream
+            // surface a raw DirectoryNotFoundException.
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
+
             var opts = new JsonWriterOptions { Indented = true };
             using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var w = new Utf8JsonWriter(fs, opts))
