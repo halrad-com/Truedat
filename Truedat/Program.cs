@@ -527,6 +527,17 @@ namespace Truedat
         // and every exclusion is visible in mbxmoods-skipped.csv with its reason.
         internal static bool _includePodcasts;
 
+        // Explicit scan-exclusion file. Default location is beside the moods file;
+        // --exclusions overrides it, --no-exclusions ignores it for one run.
+        // CS0649 (never assigned) is expected here: this task reads _exclusionsPath
+        // from the --apply-exclusions dispatch but does not yet parse --exclusions /
+        // --no-exclusions themselves — that lands in Task 4, which is what will
+        // assign both fields.
+#pragma warning disable CS0649
+        internal static string? _exclusionsPath;
+        internal static bool _noExclusions;
+#pragma warning restore CS0649
+
         // --refresh-features: widen the re-extract canary so entries missing the
         // 2026-07-22 tonal/rhythm wave (keyVotes / bpm peaks / chords / tuning /
         // averageLoudness) re-analyze during a normal cache-aware scan. Off by
@@ -937,6 +948,8 @@ namespace Truedat
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate prunes them)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
+            bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
+            string? applyExclusionsPath = null;
             bool verifyBackfill = false;
             // --backfill-level identity|features|all (default: all). Identity = TagLib-only
             // fields (fileMd5, fingerprint.v1 sub-fields, mp3LameTag). Features = ffmpeg-
@@ -1115,6 +1128,7 @@ namespace Truedat
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "include-podcasts") _includePodcasts = true;
+                else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "refresh-features") _refreshFeatures = true;
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
@@ -1163,7 +1177,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -1228,7 +1242,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -1304,6 +1318,9 @@ namespace Truedat
                 Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
                 Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
                 Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
+                Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
+                Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
+                Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
@@ -1502,6 +1519,55 @@ namespace Truedat
                 var smfmTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 LoadExistingMoods(smfmPath!, smfmTracks);
                 RunListMissingSmfm(smfmPath!, smfmTracks.Values);
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --apply-exclusions <decisions.json>: merge a decisions delta into the
+            // canonical mbxmoods-exclude.json. This is the offline CRUD path (a review
+            // page downloads the delta; MBXHub relays it by invoking this), and it is
+            // the single implementation of the merge semantics so no second author can
+            // drift from them. Backs up before rewriting; reports every outcome.
+            if (applyExclusionsMode)
+            {
+                string? moodsForExcl = analyzeFileMoods ?? xmlPath;
+                if (string.IsNullOrEmpty(moodsForExcl))
+                    moodsForExcl = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
+                else if (Directory.Exists(moodsForExcl))
+                    moodsForExcl = Path.Combine(moodsForExcl, "mbxmoods.json");
+                var canonicalExcl = _exclusionsPath ?? ExclusionStore.Resolve(moodsForExcl!);
+
+                if (!File.Exists(applyExclusionsPath))
+                {
+                    Console.Error.WriteLine($"Error: decisions file not found: {applyExclusionsPath}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                string decisionsJson;
+                try { decisionsJson = File.ReadAllText(applyExclusionsPath!); }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error: cannot read {applyExclusionsPath}: {ex.Message}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                var report = ExclusionStore.Merge(canonicalExcl, decisionsJson,
+                    $"truedat --apply-exclusions {VersionInfo.Display}", out var mergeError);
+                if (mergeError != null)
+                {
+                    Console.Error.WriteLine($"Error: {mergeError}");
+                    Console.Error.WriteLine("Nothing was written.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Console.WriteLine($"Exclusions: {canonicalExcl}");
+                Console.WriteLine($"  Added:      {report.Added}");
+                Console.WriteLine($"  Removed:    {report.Removed}");
+                if (report.AlreadyPresent > 0) Console.WriteLine($"  Already set: {report.AlreadyPresent}");
+                if (report.NotFound > 0) Console.WriteLine($"  Not present: {report.NotFound}  (nothing to remove)");
+                if (report.BackupPath != null) Console.WriteLine($"  Backup:     {report.BackupPath}");
+                if (!report.Changed) Console.WriteLine("  No changes.");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -2515,6 +2581,9 @@ namespace Truedat
                 Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
                 Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
                 Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
+                Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
+                Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
+                Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
@@ -7656,6 +7725,84 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var idA = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"D:\\\\a.mp3\",\"note\":\"one\"}"), out _).Rules[0];
                 var idB = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"d:/A.MP3\",\"audioStreamSha256\":\"abc\"}"), out _).Rules[0];
                 Assert(idA.Identity() == idB.Identity(), "exclusion: identity ignores note/sha and normalizes the path");
+            }
+
+            // --- ExclusionStore: merge semantics (spec 2026-07-24) ---
+            {
+                var dir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-excl-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    var canonical = Path.Combine(dir, "mbxmoods-exclude.json");
+                    Assert(ExclusionStore.Resolve(Path.Combine(dir, "mbxmoods.json")) == canonical,
+                        "store: resolves beside the moods file");
+
+                    // absent file is not an error and excludes nothing
+                    var absent = ExclusionStore.Load(canonical, out var absentErr);
+                    Assert(absentErr == null, "store: absent file is not an error");
+                    Assert(absent.IsEmpty, "store: absent file yields an empty set");
+
+                    string Delta(string add, string remove) =>
+                        "{\"schemaVersion\":1,\"kind\":\"exclusion-decisions\",\"add\":[" + add + "],\"remove\":[" + remove + "]}";
+                    const string genrePodcast = "{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Podcast\"}";
+                    const string genreAudiobook = "{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Audiobook\"}";
+
+                    // first apply creates the file
+                    var r1 = ExclusionStore.Merge(canonical, Delta(genrePodcast, ""), "self-test", out var e1);
+                    Assert(e1 == null, $"store: first merge succeeds ({e1})");
+                    Assert(r1.Added == 1 && r1.Changed, "store: first merge adds one rule");
+                    Assert(r1.BackupPath == null, "store: no backup when there was no file");
+                    Assert(File.Exists(canonical), "store: merge created the file");
+
+                    var loaded = ExclusionStore.Load(canonical, out var loadErr);
+                    Assert(loadErr == null && loaded.Rules.Count == 1, "store: written file round-trips");
+                    Assert(loaded.IsExcluded(@"D:\a.mp3", "Podcast", out _), "store: round-tripped rule still matches");
+
+                    // idempotent: same delta twice changes nothing
+                    var r2 = ExclusionStore.Merge(canonical, Delta(genrePodcast, ""), "self-test", out var e2);
+                    Assert(e2 == null, "store: repeat merge succeeds");
+                    Assert(r2.Added == 0 && r2.AlreadyPresent == 1 && !r2.Changed, "store: repeat merge is a no-op");
+
+                    // adding a second rule backs the old file up
+                    var r3 = ExclusionStore.Merge(canonical, Delta(genreAudiobook, ""), "self-test", out _);
+                    Assert(r3.Added == 1 && r3.Changed, "store: second rule added");
+                    Assert(r3.BackupPath != null && File.Exists(r3.BackupPath), "store: existing file is backed up before rewrite");
+                    Assert(ExclusionStore.Load(canonical, out _).Rules.Count == 2, "store: both rules present");
+
+                    // note/sha differences must UPDATE, not duplicate (identity ignores them)
+                    var r4 = ExclusionStore.Merge(canonical,
+                        Delta("{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Podcast\",\"note\":\"talk\"}", ""), "self-test", out _);
+                    Assert(r4.AlreadyPresent == 1 && r4.Added == 0, "store: same identity with a new note is not a duplicate");
+                    Assert(ExclusionStore.Load(canonical, out _).Rules.Count == 2, "store: rule count unchanged by the note");
+
+                    // remove
+                    var r5 = ExclusionStore.Merge(canonical, Delta("", genrePodcast), "self-test", out _);
+                    Assert(r5.Removed == 1 && r5.Changed, "store: remove drops the rule");
+                    Assert(ExclusionStore.Load(canonical, out _).Rules.Count == 1, "store: one rule left after remove");
+
+                    // removing something absent is reported, not an error
+                    var r6 = ExclusionStore.Merge(canonical, Delta("", genrePodcast), "self-test", out var e6);
+                    Assert(e6 == null && r6.NotFound == 1 && !r6.Changed, "store: removing an absent rule is a reported no-op");
+
+                    // invalid decisions document: error, file untouched
+                    var before = File.ReadAllText(canonical);
+                    ExclusionStore.Merge(canonical, "{ not json", "self-test", out var e7);
+                    Assert(e7 != null, "store: unparseable decisions document is an error");
+                    Assert(File.ReadAllText(canonical) == before, "store: failed merge leaves the file untouched");
+                    ExclusionStore.Merge(canonical, Delta("{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}", ""), "self-test", out var e8);
+                    Assert(e8 != null, "store: decisions document with no valid rules is an error");
+                    Assert(File.ReadAllText(canonical) == before, "store: second failed merge also leaves the file untouched");
+
+                    // a corrupt canonical file must not be silently overwritten
+                    var corruptDir = Path.Combine(dir, "corrupt");
+                    Directory.CreateDirectory(corruptDir);
+                    var corrupt = Path.Combine(corruptDir, "mbxmoods-exclude.json");
+                    File.WriteAllText(corrupt, "{ broken");
+                    ExclusionStore.Merge(corrupt, Delta(genrePodcast, ""), "self-test", out var e9);
+                    Assert(e9 != null, "store: refuses to merge into an unparseable canonical file");
+                    Assert(File.ReadAllText(corrupt) == "{ broken", "store: corrupt canonical file is left as-is");
+                }
+                finally { try { Directory.Delete(dir, true); } catch { } }
             }
 
             // --- speechLikely verdict (spec 2026-07-22 B1) ---
