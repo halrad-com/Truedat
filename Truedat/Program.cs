@@ -1652,11 +1652,14 @@ namespace Truedat
                     $"truedat --apply-exclusions {VersionInfo.Display}", out var mergeError);
                 if (mergeError != null)
                 {
+                    var errResultPath = ExclusionStore.WriteApplyResult(canonicalExcl, report, mergeError);
                     Console.Error.WriteLine($"Error: {mergeError}");
                     Console.Error.WriteLine("Nothing was written.");
+                    Console.Error.WriteLine($"  Result:     {errResultPath}");
                     Environment.ExitCode = 1;
                     return;
                 }
+                var resultPath = ExclusionStore.WriteApplyResult(canonicalExcl, report, null);
                 Console.WriteLine($"Exclusions: {canonicalExcl}");
                 Console.WriteLine($"  Added:      {report.Added}");
                 Console.WriteLine($"  Removed:    {report.Removed}");
@@ -1666,6 +1669,7 @@ namespace Truedat
                 if (!report.Changed) Console.WriteLine("  No changes.");
                 foreach (var diag in report.Diagnostics)
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
+                Console.WriteLine($"  Result:     {resultPath}");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -8654,6 +8658,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "CRITICAL: canonical file is byte-identical after the refused merge");
                     Assert(Directory.GetFiles(partialDir).Length == filesBeforeMerge,
                         "CRITICAL: no .bak file was created by the refused merge");
+
+                    // --- apply-result.json (Phase 2a) ---
+                    {
+                        var okReport = new MergeReport { Added = 2, Removed = 1, AlreadyPresent = 3, NotFound = 0, Changed = true, BackupPath = @"C:\x\mbxmoods-exclude.json.bak.20260725.010203" };
+                        var resPath = ExclusionStore.WriteApplyResult(canonical, okReport, null);
+                        Assert(File.Exists(resPath), "applyresult: file written on success");
+                        var r = JsonNode.Parse(File.ReadAllText(resPath))!;
+                        Assert(r["kind"]!.GetValue<string>() == "exclusion-apply-result", "applyresult: kind names itself");
+                        Assert(r["schemaVersion"]!.GetValue<int>() == 1, "applyresult: schemaVersion 1");
+                        Assert(r["ok"]!.GetValue<bool>(), "applyresult: ok true on success");
+                        Assert(r["added"]!.GetValue<int>() == 2 && r["removed"]!.GetValue<int>() == 1, "applyresult: carries the counts");
+                        Assert(r["alreadyPresent"]!.GetValue<int>() == 3, "applyresult: carries alreadyPresent");
+                        Assert(r["changed"]!.GetValue<bool>(), "applyresult: carries changed");
+                        Assert(r["backupPath"] != null, "applyresult: names the backup");
+                        Assert(r["exclusionsPath"]!.GetValue<string>() == canonical, "applyresult: names the file it applied to");
+                        Assert(r["error"] == null, "applyresult: no error key on success");
+
+                        // failure must ALSO produce a result file — that is when the hub needs it most
+                        var failPath = ExclusionStore.WriteApplyResult(canonical, new MergeReport(), "refusing: 1 existing rule(s) failed to parse");
+                        var f = JsonNode.Parse(File.ReadAllText(failPath))!;
+                        Assert(!f["ok"]!.GetValue<bool>(), "applyresult: ok false on failure");
+                        Assert(f["error"]!.GetValue<string>().Contains("refusing"), "applyresult: failure carries the reason");
+                        Assert(f["changed"]!.GetValue<bool>() == false, "applyresult: failure reports nothing changed");
+                        Assert(f["backupPath"] == null, "applyresult: no backup key when none was made");
+                    }
 
                     // Delta-side twin: an "add" array with one good rule and one typo'd
                     // one must apply the good one AND report the dropped one, not swallow

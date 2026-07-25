@@ -36,6 +36,46 @@ namespace Truedat
     internal static class ExclusionStore
     {
         public const string FileName = "mbxmoods-exclude.json";
+        public const string ApplyResultFileName = "apply-result.json";
+
+        /// <summary>
+        /// Write the outcome of an apply beside the exclusion file, so a caller reads the
+        /// result instead of parsing console output. MBXHub keeps only a bounded, async tail
+        /// of stdout, which would truncate intermittently rather than obviously.
+        ///
+        /// Written on FAILURE as well as success — a refusal is precisely when the caller
+        /// needs the reason, and `ok` plus `error` say so unambiguously.
+        /// </summary>
+        public static string WriteApplyResult(string exclusionsPath, MergeReport report, string? error)
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(exclusionsPath));
+            if (string.IsNullOrEmpty(dir)) dir = Environment.CurrentDirectory;
+            var path = Path.Combine(dir!, ApplyResultFileName);
+
+            var root = new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["kind"] = "exclusion-apply-result",
+                ["generated"] = DateTime.UtcNow.ToString("o"),
+                ["exclusionsPath"] = exclusionsPath,
+                ["ok"] = error == null,
+                ["added"] = report.Added,
+                ["removed"] = report.Removed,
+                ["alreadyPresent"] = report.AlreadyPresent,
+                ["notFound"] = report.NotFound,
+                ["changed"] = report.Changed,
+            };
+            if (report.BackupPath != null) root["backupPath"] = report.BackupPath;
+            if (error != null) root["error"] = error;
+            if (report.Diagnostics != null && report.Diagnostics.Count > 0)
+            {
+                var arr = new JsonArray();
+                foreach (var d in report.Diagnostics) arr.Add(d);
+                root["diagnostics"] = arr;
+            }
+            File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+            return path;
+        }
 
         /// <summary>Canonical exclusion path for a given moods file (same directory).</summary>
         public static string Resolve(string moodsPath)
