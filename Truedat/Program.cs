@@ -1719,7 +1719,11 @@ namespace Truedat
                     EtaBasisLabel = "catalog-rtf",
                     Parallelism = Math.Max(1, parallelism),
                     FileExists = File.Exists,
-                    SniffMarkers = PodcastTagSniffer.TryDetect,
+                    SniffMarkers = p =>
+                    {
+                        var m = PodcastTagSniffer.TryDetectAll(p);
+                        return m == null ? null : m.Describe();
+                    },
                     SpeechVerdict = e => e?.Features == null
                         ? null
                         : ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely,
@@ -7811,14 +7815,57 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 byte[] Text(string s) { var b = new byte[1 + s.Length]; b[0] = 0; Encoding.ASCII.GetBytes(s, 0, s.Length, b, 1); return b; }
 
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("PCST", new byte[] { 0, 0, 0, 0 }))) == "PCST", "sniffer: PCST frame detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("WFED", Text("https://feed.example/rss")))) == "WFED", "sniffer: WFED frame detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TGID", Text("guid-123")))) == "TGID", "sniffer: TGID frame detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TCON", Text("Podcast")))) == "TCON=Podcast", "sniffer: TCON=Podcast detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Id3("TCON", Text("Rock")))) == null, "sniffer: TCON=Rock is not a podcast");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(new byte[] { 1, 2, 3 })) == null, "sniffer: junk stream returns null");
-                var trunc = Id3("PCST", new byte[] { 0, 0, 0, 0 });
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(trunc, 0, 8)) == null, "sniffer: truncated header returns null");
+                // Multi-frame builder: ID3v2.4 header + N frames (v2.4 frame sizes are
+                // syncsafe, unlike the v2.3 single-frame Id3 helper above — both shapes
+                // are walked by ScanId3v2, so the two fixtures exercise both encodings).
+                byte[] Id3Multi((string Id, byte[] Body)[] frames)
+                {
+                    var body = new List<byte>();
+                    foreach (var f in frames)
+                    {
+                        body.AddRange(Encoding.ASCII.GetBytes(f.Id));
+                        body.Add((byte)((f.Body.Length >> 21) & 0x7F));
+                        body.Add((byte)((f.Body.Length >> 14) & 0x7F));
+                        body.Add((byte)((f.Body.Length >> 7) & 0x7F));
+                        body.Add((byte)(f.Body.Length & 0x7F));
+                        body.Add(0); body.Add(0);
+                        body.AddRange(f.Body);
+                    }
+                    var size = body.Count;
+                    var head = new List<byte> { 0x49, 0x44, 0x33, 4, 0, 0,
+                        (byte)((size >> 21) & 0x7F), (byte)((size >> 14) & 0x7F),
+                        (byte)((size >> 7) & 0x7F), (byte)(size & 0x7F) };
+                    head.AddRange(body);
+                    return head.ToArray();
+                }
+
+                PodcastMarkers? Detect(byte[] bytes) => PodcastTagSniffer.TryDetectAllCore(new MemoryStream(bytes));
+
+                var strong = Detect(Id3("PCST", new byte[] { 0, 0, 0, 0 }));
+                Assert(strong != null && strong.Strong.Contains("PCST"), "sniffer: PCST is a strong marker");
+                Assert(strong != null && strong.Provenance.Count == 0 && !strong.GenreText, "sniffer: PCST alone sets nothing else");
+
+                var feed = Detect(Id3("WFED", Text("https://feed.example/rss")));
+                Assert(feed != null && feed.Provenance.Contains("WFED"), "sniffer: WFED is provenance, not strong");
+                Assert(feed != null && feed.Strong.Count == 0, "sniffer: a feed URL does not assert 'is a podcast'");
+
+                var guid = Detect(Id3("TGID", Text("guid-123")));
+                Assert(guid != null && guid.Provenance.Contains("TGID"), "sniffer: TGID is provenance");
+
+                var genreExact = Detect(Id3("TCON", Text("Podcast")));
+                Assert(genreExact != null && genreExact.GenreText, "sniffer: TCON exactly 'Podcast' counts as genre-text evidence");
+                Assert(genreExact != null && genreExact.Strong.Count == 0 && genreExact.Provenance.Count == 0, "sniffer: genre text is neither strong nor provenance");
+
+                // The substring loosening this task exists to remove. The library-side genre
+                // rule is exact-equals; the file-side check must not be looser than it.
+                Assert(Detect(Id3("TCON", Text("Comedy Podcast"))) == null, "sniffer: TCON 'Comedy Podcast' no longer matches (exact-equals now)");
+                Assert(Detect(Id3("TCON", Text("Podcasts"))) == null, "sniffer: TCON 'Podcasts' no longer matches");
+                Assert(Detect(Id3("TCON", Text("Rock"))) == null, "sniffer: TCON 'Rock' is not a podcast");
+                Assert(Detect(Id3("TCON", Text("  podcast  "))) != null, "sniffer: TCON match is trimmed and case-insensitive");
+
+                Assert(Detect(new byte[] { 1, 2, 3 }) == null, "sniffer: junk stream returns null");
+                var truncated = Id3("PCST", new byte[] { 0, 0, 0, 0 });
+                Assert(PodcastTagSniffer.TryDetectAllCore(new MemoryStream(truncated, 0, 8)) == null, "sniffer: truncated header returns null");
 
                 // Synthetic MP4: ftyp + moov>udta>meta(v/f)>ilst>pcst
                 byte[] Mp4WithAtom(string leaf)
@@ -7846,9 +7893,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ms.Position = 0;
                     return ms.ToArray();
                 }
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("pcst"))) == "pcst atom", "sniffer: mp4 pcst atom detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("purl"))) == "purl atom", "sniffer: mp4 purl atom detected");
-                Assert(PodcastTagSniffer.TryDetectCore(new MemoryStream(Mp4WithAtom("cprt"))) == null, "sniffer: mp4 without podcast atoms returns null");
+                var mp4Strong = Detect(Mp4WithAtom("pcst"));
+                Assert(mp4Strong != null && mp4Strong.Strong.Contains("pcst"), "sniffer: mp4 pcst atom is strong");
+                var mp4Feed = Detect(Mp4WithAtom("purl"));
+                Assert(mp4Feed != null && mp4Feed.Provenance.Contains("purl"), "sniffer: mp4 purl atom is provenance");
+                Assert(Detect(Mp4WithAtom("cprt")) == null, "sniffer: mp4 without podcast atoms returns null");
+
+                // First-match-wins is what this task removes: a file carrying BOTH a strong
+                // flag and a feed URL must report both, whichever came first in the tag.
+                var both = Detect(Id3Multi(new[] { ("WFED", Text("https://feed.example/rss")), ("PCST", new byte[] { 0, 0, 0, 0 }) }));
+                Assert(both != null && both.Strong.Contains("PCST") && both.Provenance.Contains("WFED"),
+                    "sniffer: all markers are reported, not just the first");
+                Assert(both != null && both.Describe().Contains("PCST"), "sniffer: Describe names the strong marker");
             }
 
             // --- podcast labelling: explicit labels only (2026-07-24) ---
