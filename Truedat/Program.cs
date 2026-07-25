@@ -519,12 +519,15 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
-        // Podcast handling: anything LABELED podcast in the XML (iTunes-native
-        // Podcast=true boolean, or Genre=Podcast — the only marker MusicBee writes)
-        // is excluded from analysis by default. No label is perfect (podcast feeds
-        // can deliver music, e.g. KEXP Song of the Day), so --include-podcasts
-        // overrides and analyzes them; mis-labeled music is a retag away either way,
-        // and every exclusion is visible in mbxmoods-skipped.csv with its reason.
+        // Podcast handling (Phase 3, 2026-07-25): the XML label (iTunes-native
+        // Podcast=true boolean, or Genre=Podcast) is EVIDENCE now, not a filter —
+        // labeled tracks are analyzed regardless of this flag; IsPodcast/PodcastReason
+        // survive only for the --preview review surface. What this flag still gates:
+        // the embedded-marker file sniff (PCST/WFED/TGID/TCON, pcst/purl — read from
+        // the audio bytes themselves, a separate signal from the XML label) that
+        // skips a cache-miss file before it reaches Essentia, and --migrate's prune
+        // of podcast-genre + speech-likely catalog entries. The only authority over
+        // what a scan skips for POLICY reasons is mbxmoods-exclude.json.
         internal static bool _includePodcasts;
 
         // Explicit scan-exclusion file. Default location is beside the moods file;
@@ -1385,10 +1388,12 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
-                Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
-                Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
-                Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
+                Console.WriteLine("  --include-podcasts  Bypass the embedded-marker file skip and the --migrate podcast/speech");
+                Console.WriteLine("                      prunes (default: skip cache-miss files carrying embedded podcast");
+                Console.WriteLine("                      markers (PCST/WFED/TGID/TCON, pcst/purl; listed in mbxmoods-skipped.csv),");
+                Console.WriteLine("                      and let --migrate prune podcast-genre and speech-likely entries).");
+                Console.WriteLine("                      XML-labeled podcasts (Genre=Podcast) are analyzed either way — the label");
+                Console.WriteLine("                      is --preview evidence only, not a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -2865,10 +2870,12 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  Analyze podcast-labeled tracks too (default: skip anything the XML");
-                Console.WriteLine("                      labels podcast, anything with 2-of-3 podcast signals, and files");
-                Console.WriteLine("                      carrying embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl);");
-                Console.WriteLine("                      all listed in mbxmoods-skipped.csv). Also keeps entries under --migrate.");
+                Console.WriteLine("  --include-podcasts  Bypass the embedded-marker file skip and the --migrate podcast/speech");
+                Console.WriteLine("                      prunes (default: skip cache-miss files carrying embedded podcast");
+                Console.WriteLine("                      markers (PCST/WFED/TGID/TCON, pcst/purl; listed in mbxmoods-skipped.csv),");
+                Console.WriteLine("                      and let --migrate prune podcast-genre and speech-likely entries).");
+                Console.WriteLine("                      XML-labeled podcasts (Genre=Podcast) are analyzed either way — the label");
+                Console.WriteLine("                      is --preview evidence only, not a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -8855,10 +8862,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         new ITunesTrack { Location = @"D:\Music\Rock\song.flac", Name = "Rock" },
                     };
                     var afterChain = FilterVideoFiles(FilterNonAudio(labelledNow, null), null);
+                    var showAfterChain = afterChain.Find(t => t.Name == "Show");
                     Assert(afterChain.Count == 2, $"phase3: a podcast-labelled track is no longer filtered (kept {afterChain.Count})");
                     Assert(afterChain.Exists(t => t.Name == "Show"), "phase3: the labelled track specifically survives");
-                    Assert(afterChain.Find(t => t.Name == "Show")!.IsPodcast, "phase3: IsPodcast survives as evidence for the preview surface");
-                    Assert(afterChain.Find(t => t.Name == "Show")!.PodcastReason == "Genre=Podcast", "phase3: PodcastReason survives as evidence");
+                    Assert(showAfterChain != null && showAfterChain.IsPodcast, "phase3: IsPodcast survives as evidence for the preview surface");
+                    Assert(showAfterChain != null && showAfterChain.PodcastReason == "Genre=Podcast", "phase3: PodcastReason survives as evidence");
                 }
                 finally { _exclusions = saveSet; }
             }

@@ -68,12 +68,6 @@ namespace Truedat
             int remoteCount = library.RemoveAll(t => t.IsRemote);
             if (remoteCount > 0)
                 Console.WriteLine($"  Skipped {remoteCount} remote stream URL(s)");
-            if (!Program._includePodcasts)
-            {
-                int podcastCount = library.RemoveAll(t => t.IsPodcast);
-                if (podcastCount > 0)
-                    Console.WriteLine($"  Skipped {podcastCount} podcast episode(s)");
-            }
             int videoCount = library.RemoveAll(t =>
                 !string.IsNullOrEmpty(t.Location) &&
                 Program.VideoExtensions.Contains(Path.GetExtension(t.Location)));
