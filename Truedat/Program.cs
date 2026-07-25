@@ -595,6 +595,13 @@ namespace Truedat
         // ceiling ~48695s -> pass --max-duration 48000 (~13.3 h) when running against it.
         // See essentia-build/OUTPUT-BUILDS.md. Overridable via --max-duration <secs>.
         static int _maxEssentiaDurationSecs = 12000;
+        // True once --max-duration is passed explicitly, so --preview's manifest can report
+        // whether the ceiling came from a flag or the built-in default rather than guessing.
+        internal static bool _maxDurationExplicit;
+
+        // --preview's review-candidate cap. No flag for this deliberately — the review page
+        // (Phase 2b) pages client-side, so there's no operator-facing reason to raise it.
+        const int PreviewReviewCap = 500;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
@@ -1010,6 +1017,9 @@ namespace Truedat
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (review before --migrate prunes them)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
+            bool previewMode = false;          // --preview: read-only work plan + review candidates
+            string? previewOutPath = null;     // optional explicit destination for preview.json
+            int longTrackMins = 30;            // --long-track-mins: review prompt threshold, NOT a rule
             bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
             string? applyExclusionsPath = null;
             bool verifyBackfill = false;
@@ -1191,6 +1201,23 @@ namespace Truedat
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
+                else if (canonical == "preview")
+                {
+                    previewMode = true;
+                    // Optional path argument, same shape as --manifest: only consume the next
+                    // token when it is not another flag.
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
+                        previewOutPath = args[++i];
+                }
+                else if (canonical == "long-track-mins" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out longTrackMins) || longTrackMins <= 0)
+                    {
+                        Console.Error.WriteLine($"Error: --long-track-mins requires a positive integer (minutes), got '{args[i]}'");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                }
                 else if (canonical == "exclusions" && i + 1 < args.Length) _exclusionsPath = args[++i];
                 else if (canonical == "no-exclusions") _noExclusions = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
@@ -1205,6 +1232,7 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    _maxDurationExplicit = true;
                 }
                 else if (canonical == "no-bitusage") _noBitUsage = true;
                 else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
@@ -1241,7 +1269,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -1306,7 +1334,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -1385,6 +1413,10 @@ namespace Truedat
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
+                Console.WriteLine("  --preview [path]    Read-only: write the scan work plan + review candidates to preview.json");
+                Console.WriteLine("                      (MBXHub review folder by default). Analyzes nothing.");
+                Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
+                Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
@@ -1634,6 +1666,123 @@ namespace Truedat
                 if (!report.Changed) Console.WriteLine("  No changes.");
                 foreach (var diag in report.Diagnostics)
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --preview: read-only. Builds the scan work plan and the review-candidate list
+            // and writes preview.json into the MBXHub review folder. Analyzes nothing, writes
+            // no mbxmoods.json, and never touches the exclusion file.
+            if (previewMode)
+            {
+                if (string.IsNullOrEmpty(xmlPath))
+                {
+                    Console.Error.WriteLine("Error: --preview needs the iTunes XML (pass it positionally, or run from the library directory).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var pvOutputDir = Path.GetDirectoryName(Path.GetFullPath(xmlPath)) ?? ".";
+                var pvMoodsPath = analyzeFileMoods ?? Path.Combine(pvOutputDir, "mbxmoods.json");
+                var pvExclPath = _exclusionsPath ?? ExclusionStore.Resolve(pvMoodsPath);
+
+                var pvExclusions = ExclusionSet.Empty;
+                if (!_noExclusions)
+                {
+                    if (!ValidateExplicitExclusionsPath(out var pvPathErr))
+                    {
+                        Console.Error.WriteLine($"Error: {pvPathErr}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    pvExclusions = ExclusionStore.Load(pvExclPath, out var pvExclErr);
+                    if (pvExclErr != null)
+                    {
+                        Console.Error.WriteLine($"Error: {pvExclErr}");
+                        Console.Error.WriteLine("Refusing to preview: fix the exclusion file, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    foreach (var diag in pvExclusions.Diagnostics)
+                        Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
+                }
+
+                Console.WriteLine($"Loading iTunes library: {xmlPath}");
+                var pvTracks = ITunesParser.Parse(xmlPath!, out _);
+                Console.WriteLine($"Found {pvTracks.Count} tracks");
+
+                var pvCatalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                if (File.Exists(pvMoodsPath)) LoadExistingMoods(pvMoodsPath, pvCatalog);
+                Console.WriteLine($"Existing moods: {pvCatalog.Count}");
+
+                // A preview run measures nothing, so the real-time factor comes from the
+                // catalog's own history: stored analysisDuration against the track's known
+                // length. It was recorded under whatever parallelism that scan used, so it is
+                // an approximation — which is exactly why the basis is reported as
+                // "catalog-rtf" rather than claiming a fresh measurement.
+                double pvRtf = 0;
+                {
+                    var samples = new List<double>();
+                    foreach (var t in pvTracks)
+                    {
+                        if (t.TotalTimeMs <= 0 || string.IsNullOrEmpty(t.Location)) continue;
+                        if (!pvCatalog.TryGetValue(t.Location!, out var e) || e == null) continue;
+                        if (!(e.AnalysisDurationSecs > 0)) continue;
+                        samples.Add(e.AnalysisDurationSecs!.Value / (t.TotalTimeMs / 1000.0));
+                    }
+                    if (samples.Count > 0)
+                    {
+                        samples.Sort();
+                        pvRtf = samples[samples.Count / 2];   // median: immune to a few outliers
+                    }
+                }
+
+                var pvPlan = PreviewPlanner.Build(new PreviewPlannerInput
+                {
+                    Tracks = pvTracks,
+                    Catalog = pvCatalog,
+                    Exclusions = pvExclusions,
+                    XmlPath = Path.GetFullPath(xmlPath),
+                    MoodsPath = pvMoodsPath,
+                    ExclusionsPath = pvExclPath,
+                    MaxDurationSecs = _maxEssentiaDurationSecs,
+                    MaxDurationSource = _maxDurationExplicit ? "--max-duration" : "default",
+                    LongTrackSecs = longTrackMins * 60,
+                    ReviewCap = PreviewReviewCap,
+                    MeasuredRtf = pvRtf,
+                    Parallelism = Math.Max(1, parallelism),
+                    FileExists = File.Exists,
+                    SniffMarkers = PodcastTagSniffer.TryDetect,
+                    SpeechVerdict = e => e?.Features == null
+                        ? null
+                        : ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely,
+                });
+                // The planner labels a measured RTF "measured-rtf"; ours came from the
+                // catalog, so say so rather than implying a fresh measurement.
+                if (pvPlan.Estimate.EtaBasis == "measured-rtf") pvPlan.Estimate.EtaBasis = "catalog-rtf";
+
+                var pvDest = previewOutPath ?? PreviewWriter.ResolveDest(pvOutputDir);
+                PreviewWriter.WritePreviewJson(pvDest, pvPlan);
+
+                Console.WriteLine();
+                Console.WriteLine("Scan preview (nothing was analyzed):");
+                Console.WriteLine($"  Library:    {pvPlan.Counts.LibraryTotal} tracks");
+                Console.WriteLine($"  Analyzed:   {pvPlan.Counts.Analyzed}   New: {pvPlan.Estimate.NewTracks}");
+                if (pvPlan.Estimate.EtaSecs >= 0)
+                    Console.WriteLine($"  Estimate:   {FormatTimeSpan(TimeSpan.FromSeconds(pvPlan.Estimate.EtaSecs))} ({pvPlan.Estimate.EtaBasis})");
+                else
+                    Console.WriteLine("  Estimate:   not estimable (nothing analyzed yet to learn from)");
+                foreach (var b in pvPlan.AutoSkip)
+                    Console.WriteLine($"  Skipped:    {b.Count,6:N0}  {b.Class}  (structural — cannot be analyzed)");
+                if (pvPlan.Counts.Excluded > 0)
+                    Console.WriteLine($"  Excluded:   {pvPlan.Counts.Excluded,6:N0}  by rule");
+                foreach (var r in pvPlan.Rules)
+                    Console.WriteLine($"    {r.Rule}: {r.MatchCount} matched{(r.MatchCount == 0 ? "   (stale rule?)" : "")}");
+                Console.WriteLine($"  To review:  {pvPlan.ReviewTotal}"
+                    + (pvPlan.ReviewTruncated ? $"  (listing the first {pvPlan.Review.Count})" : ""));
+                Console.WriteLine($"  Ceiling:    {pvPlan.Limits.MaxDurationSecs / 60} min ({pvPlan.Limits.MaxDurationSource})"
+                    + $"   long-track prompt: {pvPlan.Limits.LongTrackSecs / 60} min");
+                Console.WriteLine();
+                Console.WriteLine($"Preview: {Linkify(pvDest)}");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -2741,6 +2890,10 @@ namespace Truedat
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
+                Console.WriteLine("  --preview [path]    Read-only: write the scan work plan + review candidates to preview.json");
+                Console.WriteLine("                      (MBXHub review folder by default). Analyzes nothing.");
+                Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
+                Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
                 Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
                 Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
                 Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
