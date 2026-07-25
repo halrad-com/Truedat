@@ -30,6 +30,11 @@ namespace Truedat
         /// iTunes-native boolean — or "Genre=Podcast" — MusicBee exports) —
         /// traceability for skip logs.</summary>
         public string PodcastReason { get; set; } = "";
+        /// <summary>Set when an exclusion-file `include` rule matched this track. Interim
+        /// override: it tells the legacy podcast filter to leave the track alone, which is
+        /// how one misclassified album gets rescued without --include-podcasts turning the
+        /// whole mechanism off. Retired when the heuristics are demoted (Phase 3).</summary>
+        public bool ExclusionIncluded { get; set; }
     }
 
     /// <summary>

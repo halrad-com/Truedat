@@ -529,14 +529,13 @@ namespace Truedat
 
         // Explicit scan-exclusion file. Default location is beside the moods file;
         // --exclusions overrides it, --no-exclusions ignores it for one run.
-        // CS0649 (never assigned) is expected here: this task reads _exclusionsPath
-        // from the --apply-exclusions dispatch but does not yet parse --exclusions /
-        // --no-exclusions themselves — that lands in Task 4, which is what will
-        // assign both fields.
-#pragma warning disable CS0649
         internal static string? _exclusionsPath;
         internal static bool _noExclusions;
-#pragma warning restore CS0649
+
+        /// <summary>The loaded exclusion rules — the ONLY authority over what a scan skips
+        /// for policy reasons. Empty until a scan mode loads it, so every other mode and
+        /// every self-test starts from "nothing excluded".</summary>
+        internal static ExclusionSet _exclusions = ExclusionSet.Empty;
 
         // --refresh-features: widen the re-extract canary so entries missing the
         // 2026-07-22 tonal/rhythm wave (keyVotes / bpm peaks / chords / tuning /
@@ -761,13 +760,56 @@ namespace Truedat
             catch { }
         }
 
+        /// <summary>Drop tracks an exclusion rule excludes, and mark the ones an include
+        /// rule deliberately keeps. Every drop is ledgered with the rule that caused it —
+        /// the whole point of the mechanism is that an absent track is explainable, so a
+        /// bare count is not enough. Runs before the podcast filter (so an include can
+        /// rescue a mislabelled track) but after the structural filters' concerns: an
+        /// include rule never resurrects a video, a stream URL or an over-length file.</summary>
+        static List<ITunesTrack> FilterExclusions(List<ITunesTrack> tracks, string? skippedPath = null)
+        {
+            if (_exclusions.IsEmpty) return tracks;
+            var kept = new List<ITunesTrack>(tracks.Count);
+            int removed = 0;
+            foreach (var t in tracks)
+            {
+                if (string.IsNullOrEmpty(t.Location)) { kept.Add(t); continue; }
+                if (_exclusions.IsExcluded(t.Location!, t.Genre, out var reason))
+                {
+                    removed++;
+                    if (skippedPath != null)
+                        AppendSkipped(skippedPath, t.Location!, GetExtensionSafe(t.Location!), $"excluded (rule: {reason})");
+                    if (_audit)
+                        Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
+                    continue;
+                }
+                if (_exclusions.IsIncluded(t.Location!, t.Genre)) t.ExclusionIncluded = true;
+                kept.Add(t);
+            }
+            if (removed > 0)
+                Console.WriteLine($"  Excluded {removed} track(s) by rule"
+                    + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
+                    + (_audit ? "" : " (--audit lists each)"));
+            // Per-rule hit counts, always when rules exist: a rule matching zero tracks is
+            // how a renamed folder or retagged genre announces itself instead of quietly
+            // doing nothing. This is the diagnostic the previous heuristics never had.
+            foreach (var rule in _exclusions.Rules)
+                Console.WriteLine($"    {rule.Describe()}: {rule.MatchCount} matched"
+                    + (rule.MatchCount == 0 ? "   (stale rule?)" : ""));
+            return kept;
+        }
+
         /// <summary>Remove podcast-labeled episodes from a parsed track list (default;
         /// --include-podcasts overrides and analyzes them). Every dropped track lands
         /// in mbxmoods-skipped.csv (when a path is supplied) with what triggered the
         /// classification; --audit also lists each on console.</summary>
         static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null, List<ITunesTrack>? removedOut = null)
         {
-            var removed = tracks.Where(t => t.IsPodcast).ToList();
+            // An exclusion-file `include` rule outranks these heuristics — that is the
+            // interim escape hatch for a mislabelled album (KEXP Song of the Day is
+            // genuinely Genre=Podcast and genuinely music) without --include-podcasts
+            // switching the whole mechanism off. Phase 3 removes the need entirely.
+            var removed = tracks.Where(t => t.IsPodcast && !t.ExclusionIncluded).ToList();
             if (removed.Count == 0) return tracks;
             if (_includePodcasts)
             {
@@ -786,7 +828,7 @@ namespace Truedat
             Console.WriteLine($"  Skipped {removed.Count} podcast episode(s)"
                 + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
                 + (_audit ? "" : " (--audit lists each)"));
-            return tracks.Where(t => !t.IsPodcast).ToList();
+            return tracks.Where(t => !t.IsPodcast || t.ExclusionIncluded).ToList();
         }
 
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
@@ -1129,6 +1171,8 @@ namespace Truedat
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
+                else if (canonical == "exclusions" && i + 1 < args.Length) _exclusionsPath = args[++i];
+                else if (canonical == "no-exclusions") _noExclusions = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "refresh-features") _refreshFeatures = true;
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
@@ -1616,6 +1660,23 @@ namespace Truedat
                     return;
                 }
 
+                // Explicit exclusions — same load-once-per-invocation semantics as
+                // MoodsMode. A missing file excludes nothing; a broken one refuses the scan.
+                var afExclDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                    ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
+                    : Environment.CurrentDirectory;
+                if (!_noExclusions)
+                {
+                    _exclusions = ExclusionStore.Load(_exclusionsPath ?? Path.Combine(afExclDir, ExclusionStore.FileName), out var afExclErr);
+                    if (afExclErr != null)
+                    {
+                        Console.Error.WriteLine($"Error: {afExclErr}");
+                        Console.Error.WriteLine("Refusing to scan: fix the exclusion file, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                }
+
                 var afBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var afFileDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFilePath)) ?? ".";
                 var afEssentiaExe = FindTool("essentia_streaming_extractor_music.exe", afBaseDir, afFileDir, Environment.CurrentDirectory);
@@ -1788,6 +1849,12 @@ namespace Truedat
                 // Cache miss (or no --moods): full Essentia + identity ride-along.
                 if (trackEntry == null)
                 {
+                    if (!_noExclusions && _exclusions.IsExcluded(analyzeFilePath!, null, out var afExclReason))
+                    {
+                        Console.Error.WriteLine($"[skipped excluded: {afExclReason}] {analyzeFilePath}");
+                        Environment.ExitCode = 0;
+                        return;
+                    }
                     if (!_includePodcasts)
                     {
                         var afPodcastMarker = PodcastTagSniffer.TryDetect(analyzeFilePath!);
@@ -2087,6 +2154,20 @@ namespace Truedat
                         : Environment.CurrentDirectory);
                 var flSkippedPath = Path.Combine(flSkippedDir, "mbxmoods-skipped.csv");
 
+                // Explicit exclusions — loaded once for the whole batch (walk + workers).
+                // A missing file excludes nothing; a broken one refuses the scan.
+                if (!_noExclusions)
+                {
+                    _exclusions = ExclusionStore.Load(_exclusionsPath ?? Path.Combine(flSkippedDir, ExclusionStore.FileName), out var flExclErr);
+                    if (flExclErr != null)
+                    {
+                        Console.Error.WriteLine($"Error: {flExclErr}");
+                        Console.Error.WriteLine("Refusing to scan: fix the exclusion file, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                }
+
                 if (folderMode)
                 {
                     Console.Error.WriteLine($"Walking folder: {folderPath}");
@@ -2365,6 +2446,13 @@ namespace Truedat
                                     return;
                                 }
                             }
+                        }
+
+                        if (!_noExclusions && _exclusions.IsExcluded(filePath, null, out var flExclReason))
+                        {
+                            AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"excluded (rule: {flExclReason})");
+                            Console.Error.WriteLine($"[skipped excluded: {flExclReason}] {Path.GetFileName(filePath)}");
+                            return;
                         }
 
                         if (!_includePodcasts)
@@ -2747,8 +2835,34 @@ namespace Truedat
             var libraryKeys = new HashSet<string>(
                 tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
                 PathComparer.Instance);
+            // Explicit exclusions. A missing file means nothing is excluded; a file we
+            // cannot parse is fatal, because continuing would analyze everything while
+            // the operator believes their rules are in force.
+            var exclusionsFile = _exclusionsPath ?? ExclusionStore.Resolve(moodsPath);
+            if (_noExclusions)
+            {
+                Console.WriteLine("  WARNING: --no-exclusions — the exclusion file is being ignored for this run");
+            }
+            else
+            {
+                _exclusions = ExclusionStore.Load(exclusionsFile, out var exclusionError);
+                if (exclusionError != null)
+                {
+                    Console.Error.WriteLine($"Error: {exclusionError}");
+                    Console.Error.WriteLine("Refusing to scan: fix the exclusion file, or pass --no-exclusions to ignore it deliberately.");
+                    Environment.ExitCode = 1;
+                    tee?.Dispose();
+                    return;
+                }
+                if (!_exclusions.IsEmpty)
+                    Console.WriteLine($"  Exclusions: {_exclusions.Rules.Count} rule(s) from {exclusionsFile}");
+                foreach (var diag in _exclusions.Diagnostics)
+                    Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
+            }
+
             var skippedPodcasts = new List<ITunesTrack>();
             tracks = FilterRemoteUrls(tracks, skippedPath);
+            tracks = FilterExclusions(tracks, skippedPath);
             tracks = FilterPodcasts(tracks, skippedPath, skippedPodcasts);
             tracks = FilterVideoFiles(tracks, skippedPath);
             tracks = FilterNonAudio(tracks, skippedPath);
@@ -7803,6 +7917,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(File.ReadAllText(corrupt) == "{ broken", "store: corrupt canonical file is left as-is");
                 }
                 finally { try { Directory.Delete(dir, true); } catch { } }
+            }
+
+            // --- exclusion layering: structural skips beat include (spec 2026-07-24) ---
+            {
+                var saveSet = _exclusions;
+                try
+                {
+                    _exclusions = ExclusionSet.FromJson(
+                        "{\"schemaVersion\":1,\"rules\":[" +
+                        "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}," +
+                        "{\"kind\":\"folder\",\"action\":\"include\",\"pattern\":\"\\\\Podcasts\\\\KEXP\\\\**\"}]}",
+                        out var setErr);
+                    Assert(setErr == null, "layering: test set parses");
+
+                    var tracks = new List<ITunesTrack>
+                    {
+                        new ITunesTrack { Location = @"D:\Music\Podcasts\JRE.mp3",         Name = "JRE" },
+                        new ITunesTrack { Location = @"D:\Music\Podcasts\KEXP\live.flac",  Name = "KEXP" },
+                        new ITunesTrack { Location = @"D:\Music\Rock\song.flac",           Name = "Rock" },
+                        new ITunesTrack { Location = @"D:\Music\Podcasts\KEXP\clip.mp4",   Name = "KexpVideo" },
+                    };
+                    var kept = FilterExclusions(tracks, null);
+                    Assert(kept.Count == 3, $"layering: excluded track dropped (kept {kept.Count})");
+                    Assert(!kept.Exists(t => t.Name == "JRE"), "layering: folder exclude drops the track");
+                    Assert(kept.Exists(t => t.Name == "KEXP"), "layering: include rule keeps the nested track");
+                    Assert(kept.Find(t => t.Name == "KEXP")!.ExclusionIncluded, "layering: include marks the track for the podcast override");
+                    Assert(!kept.Find(t => t.Name == "Rock")!.ExclusionIncluded, "layering: unmatched track is not marked");
+
+                    // structural filters ignore the include mark
+                    var afterVideo = FilterVideoFiles(kept, null);
+                    Assert(!afterVideo.Exists(t => t.Name == "KexpVideo"), "layering: include does NOT resurrect a video file");
+
+                    // the interim override: an include rule rescues a labelled podcast
+                    var labelled = new List<ITunesTrack>
+                    {
+                        new ITunesTrack { Location = @"D:\Music\Podcasts\KEXP\live.flac", Name = "KEXP",
+                                          IsPodcast = true, PodcastReason = "Genre=Podcast", ExclusionIncluded = true },
+                        new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", Name = "Show",
+                                          IsPodcast = true, PodcastReason = "Genre=Podcast" },
+                    };
+                    var afterPodcast = FilterPodcasts(labelled, null);
+                    Assert(afterPodcast.Count == 1, $"layering: unrescued podcast still filtered (kept {afterPodcast.Count})");
+                    Assert(afterPodcast[0].Name == "KEXP", "layering: include rule rescues a labelled podcast");
+                }
+                finally { _exclusions = saveSet; }
             }
 
             // --- speechLikely verdict (spec 2026-07-22 B1) ---
