@@ -13,10 +13,22 @@
     <Copyright>Copyright (c) 2026 Halrad LLC</Copyright>
   </PropertyGroup>
 
-  <!-- Stamp git branch + build epoch into a generated source file so VersionInfo.Display
-       can read them at runtime. Pattern mirrors MBXHub.Core's GenerateBranchInfo target.
+  <!-- Stamp git branch + COMMIT into a generated source file so VersionInfo.Display can
+       read them at runtime. Pattern mirrors MBXHub.Core's GenerateBranchInfo target.
        ContinueOnError keeps a missing-git / detached-HEAD build working (branch falls
-       back to "unknown" and VersionInfo treats that the same as main — branch omitted). -->
+       back to "unknown" and VersionInfo treats that the same as main — branch omitted).
+
+       This used to stamp a BUILD EPOCH (UtcNow). That was changed 2026-07-25 because a
+       build clock answers the wrong question and answered it unreliably: the dist binary
+       reported the same epoch across two builds with different code in them, so the stamp
+       could not be trusted to tell you what a binary contained — the only reliable check
+       was counting self-test assertions. A commit stamp answers the question that actually
+       matters ("what source is in this exe?") and cannot go stale, because it is read from
+       git rather than from the clock.
+
+       The +dirty suffix is load-bearing: a build from a modified tree is NOT identified by
+       its commit, and silently labelling one with a clean SHA is how a "verified" binary
+       ends up containing something nobody reviewed. -->
   <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
     <Exec Command="git rev-parse --abbrev-ref HEAD"
           ConsoleToMSBuild="true"
@@ -25,13 +37,30 @@
           WorkingDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="ConsoleOutput" PropertyName="_GitBranchRaw" />
     </Exec>
+    <Exec Command="git rev-parse --short=7 HEAD"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitCommitRaw" />
+    </Exec>
+    <Exec Command="git status --porcelain --untracked-files=no"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitDirtyRaw" />
+    </Exec>
     <PropertyGroup>
       <_GitBranch Condition="'$(_GitBranchRaw)' != ''">$(_GitBranchRaw)</_GitBranch>
       <_GitBranch Condition="'$(_GitBranchRaw)' == ''">unknown</_GitBranch>
-      <_BuildEpoch>$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds())</_BuildEpoch>
+      <_GitCommit Condition="'$(_GitCommitRaw)' != ''">$(_GitCommitRaw)</_GitCommit>
+      <_GitCommit Condition="'$(_GitCommitRaw)' == ''">unknown</_GitCommit>
+      <_GitDirty Condition="'$(_GitDirtyRaw)' != ''">true</_GitDirty>
+      <_GitDirty Condition="'$(_GitDirtyRaw)' == ''">false</_GitDirty>
       <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
       <_BuildInfoContent>// &lt;auto-generated/&gt; — written by Truedat.csproj GenerateBuildInfo target.
-namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const long Epoch = $(_BuildEpoch)%3B } }</_BuildInfoContent>
+namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const string Commit = "$(_GitCommit)"%3B internal const bool Dirty = $(_GitDirty)%3B } }</_BuildInfoContent>
     </PropertyGroup>
     <WriteLinesToFile File="$(_BuildInfoFile)"
                       Lines="$(_BuildInfoContent)"
