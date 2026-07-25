@@ -384,18 +384,18 @@ Analysis detail in the local (gitignored) plans tree:
 Convert DSD, multi-channel, and other non-PCM formats via ffmpeg before Essentia
 analysis. Design doc at `docs/dsd-conversion-plan.md`.
 
-## PodcastTagSniffer's MaxId3Walk evidence ceiling
+## SpeechTagSniffer's MaxId3Walk evidence ceiling
 
-`Truedat/PodcastTagSniffer.cs:63` caps the ID3v2 walk at `MaxId3Walk = 128 * 1024`
-(~128 KB); the bailout at `:121` means a marker frame (`PCST`/`WFED`/`TGID`/`TCON`)
+`Truedat/SpeechTagSniffer.cs:65` caps the ID3v2 walk at `MaxId3Walk = 128 * 1024`
+(~128 KB); the bailout at `:123` means a marker frame (`PCST`/`WFED`/`TGID`/`TCON`)
 positioned after that point in the tag is never reached. Since the 2026-07-25
-Heuristics → Evidence rewrite, `PodcastTagSniffer` no longer skips or prunes anything —
+Heuristics → Evidence rewrite, `SpeechTagSniffer` no longer skips or prunes anything —
 informing a human via `--preview` is its **only** job — so a cap that silently truncates
 evidence deserves a deliberate decision rather than the accident it currently is.
 
 Proven live: an XTC MP3 in the `D:` test corpus carries a 703 KB `APIC` (embedded
 artwork) frame that trips the malformed-frame bailout at ~132 KB; any marker placed
-after it is unreachable. That specific file is a clean negative (no podcast markers,
+after it is unreachable. That specific file is a clean negative (no speech markers,
 just `TCON="Rock"` past the artwork), so nothing is known to be silently missed today —
 but the ceiling is real and will bind on some future file with large artwork ahead of a
 genuine marker frame.

@@ -22,7 +22,7 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 
 - `mbxmoods.json` - mood coordinates and raw audio features for every track
 - `mbxmoods-errors.csv` - tracks that failed mood analysis (with error reason, file size, duration)
-- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), video files, playlist/redirector entries, missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH), and any track matched by an `exclude` rule in `mbxmoods-exclude.json` (reason `excluded (rule: …)` — see [Excluding files from analysis](#excluding-files-from-analysis)). Podcast labels and embedded file markers are **not** a skip reason any more — they are review evidence on `--preview`'s output, not an analysis filter; see the upgrade note below if you relied on the old auto-skip. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
+- `mbxmoods-skipped.csv` - every track dropped before analysis, with the reason: remote stream URLs (un-downloaded podcast-feed episodes whose XML location is an `http(s)://` URL — not files, never scannable), unsupported codec (`.dsf` / `.dff` / `.dsd` DSD streams), video files, playlist/redirector entries, missing files (`file not found`, with the length called out when the path exceeds the Windows 260-char MAX_PATH), and any track matched by an `exclude` rule in `mbxmoods-exclude.json` (reason `excluded (rule: …)` — see [Excluding files from analysis](#excluding-files-from-analysis)). Speech labels and embedded file markers are **not** a skip reason any more — they are review evidence on `--preview`'s output, not an analysis filter; see the upgrade note below if you relied on the old auto-skip. Columns: `path,extension,reason,timestamp` (rows append per run). `--audit` additionally lists each dropped track on the console. Over-MAX_PATH paths whose files *do* exist are not skipped — the scan falls back to `\\?\` extended-length IO and analyzes them through a staged copy.
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
@@ -110,10 +110,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --stats [path]          Read-only catalog summary: Essentia-analyzed count, hash coverage
                           per kind, and SMFM track count. Path defaults to ./mbxmoods.json.
                           Also printed at end of every scan. With --audit, written to the log.
-                          Reports podcast (stored genre == "Podcast") and speech-likely
-                          (acoustic verdict) as two MUTUALLY EXCLUSIVE class counts — an entry
-                          counts once, under the genre label if it has one, else under the
-                          acoustic verdict — each pointing at review + an exclusion rule
+                          Reports ONE speech count — the union of the label (stored genre
+                          == "Podcast") and the acoustic verdict (speechLikely == yes), each
+                          entry counted once — pointing at review + an exclusion rule
                           (never --migrate, which doesn't touch entries either way). Separately,
                           a Recommended section maps detected gaps (missing tonal/rhythm wave,
                           missing fingerprint.v1, stray fileMd5) to the exact command that
@@ -305,9 +304,9 @@ Truedat decides what to skip from one file: `mbxmoods-exclude.json`, beside `mbx
 Nothing else excludes a track for policy reasons — metadata signals like genre are evidence
 you can act on, never an instruction the scanner infers on its own.
 
-### Upgrading: podcasts are no longer skipped automatically
+### Upgrading: speech (podcasts, talk) is no longer skipped automatically
 
-Older builds guessed which files were podcasts and skipped them. Nothing guesses now —
+Older builds guessed which files were speech — podcasts, talk — and skipped them. Nothing guesses now —
 the only thing that keeps a file out of analysis is a rule you wrote. If you relied on the
 old behaviour, add a rule **before** your next scan:
 
@@ -319,8 +318,8 @@ old behaviour, add a rule **before** your next scan:
 4. Scan.
 
 `--include-podcasts` is gone; it was all-or-nothing, which is the problem the rule file solves.
-`--migrate` no longer removes podcast or speech-likely entries either — pruning an entry for a
-file that is still in your library is self-undoing, because the next scan re-analyzes it.
+`--migrate` no longer removes speech-labelled or speech-likely entries either — pruning an entry
+for a file that is still in your library is self-undoing, because the next scan re-analyzes it.
 
 ```jsonc
 {
@@ -358,9 +357,9 @@ track an include rule was rescuing reverts to whatever the remaining rules say (
 none apply) for the duration of that run. Either way, no existing `mbxmoods.json` entry is
 ever pruned by this — exclusion is purely a future-analysis switch (see below).
 
-### Podcast signals are evidence, not a filter
+### Speech signals are evidence, not a filter
 
-Nothing in truedat decides a track is a podcast any more. The iTunes-XML labels
+Nothing in truedat decides a track is speech any more. The iTunes-XML labels
 (`Podcast=true`, `Genre=Podcast`) and an embedded file-marker sniff still run, but only to
 populate `reasons` on `--preview`'s review candidates — a human reads them and, if warranted,
 writes an exclusion rule. The file-marker evidence is **graded**, because the markers don't
@@ -435,9 +434,9 @@ as `mbxmoods-preview.json` when no MusicBee/MBXHub instance is found.
 
 `New` counts only the tracks a scan would actually hand to the analyser, and the estimate is
 built from those tracks alone — so the structural skips and the rule-excluded tracks are
-*outside* it. A podcast label alone does **not** move a track out of `New` any more — only a
-matching exclusion rule does — so a podcast-labelled track with no rule against it shows up
-inside `New` (and in `--preview`'s review list, flagged `podcast-labelled`, for you to judge).
+*outside* it. A speech label alone does **not** move a track out of `New` any more — only a
+matching exclusion rule does — so a speech-labelled track with no rule against it shows up
+inside `New` (and in `--preview`'s review list, flagged `speech-labelled`, for you to judge).
 That is the point of the mode: the `Excluded` line shows what your rules save you, and it
 would be meaningless if the saving were still sitting inside the cost.
 

@@ -5,15 +5,15 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
-### Changed — podcasts are analyzed by default now (2026-07-25)
+### Changed — speech is analyzed by default; the class is "speech", not "podcast" (2026-07-25)
 
-**Breaking behaviour change.** Nothing in truedat guesses at podcasts any more. Older builds
-in this same Unreleased window skipped anything the XML labelled podcast, plus files carrying
-embedded podcast markers, and `--migrate` pruned podcast and speech-likely catalog entries.
-All of that is gone: **the only thing that keeps a file out of analysis is a rule you write**
-into `mbxmoods-exclude.json`. If you relied on the old auto-skip, upgrading without adding a
-rule first means those files get analyzed — for a large podcast folder, that can mean hours of
-unplanned scan time.
+**Breaking behaviour change.** Nothing in truedat guesses at speech any more. Older builds
+in this same Unreleased window skipped anything the XML labelled as speech (a podcast flag or
+genre), plus files carrying embedded speech markers, and `--migrate` pruned speech-labelled and
+speech-likely catalog entries. All of that is gone: **the only thing that keeps a file out of
+analysis is a rule you write** into `mbxmoods-exclude.json`. If you relied on the old auto-skip,
+upgrading without adding a rule first means those files get analyzed — for a large talk/podcast
+folder, that can mean hours of unplanned scan time.
 
 Migrate before your next scan:
 
@@ -24,15 +24,21 @@ Migrate before your next scan:
 3. `truedat --apply-exclusions decisions.json`
 4. Scan.
 
+- **The class is "speech", not "podcast".** Truedat's internal vocabulary was migrated
+  podcast→speech: audiobook, comedy, lecture, news, interview and talk-dominant are one genus —
+  speech. "Podcast" is one kind of *evidence* about a speech track, not a class of its own.
+  External identifiers owned by other systems keep their real names — `Podcast=true`,
+  `Genre=Podcast`, `PCST`, `WFED`, `TGID`, `pcst`, `purl` — renaming those would misdescribe
+  what was matched. The `--preview` review reason `podcast-labelled` is now `speech-labelled`.
 - **`--include-podcasts` is removed.** It was all-or-nothing; the exclusion file (with its
   per-rule `include` override) is the replacement and was already the recommended path for a
   mislabelled album.
-- **`--migrate` no longer prunes anything.** Its two purges (podcast-genre entries, and
+- **`--migrate` no longer prunes anything.** Its two purges (genre-labelled speech entries, and
   `truedat.speechLikely == "yes"` entries) are both gone — pruning an entry for a file still in
   your library was self-undoing anyway, since the next scan just re-analyzed and re-added it.
   `--migrate` now only strips legacy fields and renames SMFM keys, same as it always did for
   those.
-- **The podcast signals still exist, purely as evidence.** The XML labels (`Podcast=true`,
+- **The speech signals still exist, purely as evidence.** The XML labels (`Podcast=true`,
   `Genre=Podcast`) and the embedded file-marker sniff both survive, but only to populate
   `reasons` on `--preview`'s review candidates — a human decides, then writes a rule.
 - **The file-marker evidence is now graded** instead of first-match-wins: **strong** (ID3
@@ -42,9 +48,10 @@ Migrate before your next scan:
   now **exact-equals** (trimmed, case-insensitive) instead of a substring match — the old
   substring test made the file rule strictly looser than the library-side genre rule, so
   `"Comedy Podcast"`, `"Podcasts"`, and `"Podcast Rock"` all tripped it.
-- **`--stats` reports podcast and speech-likely as two mutually-exclusive class counts**
-  (an entry counts once — under the stored genre label if it has one, else under the acoustic
-  `speechLikely` verdict), each pointing at review + an exclusion rule, never `--migrate`.
+- **`--stats` reports ONE speech count** — the union of the label (stored genre `Podcast`) and
+  the acoustic `speechLikely` verdict, each entry counted once — pointing at review + an
+  exclusion rule, never `--migrate`. (Earlier in this Unreleased window it printed two
+  mutually-exclusive buckets; collapsed to a single count so no podcast-shaped number lingers.)
 
 ### Added — `--preview`, the read-only scan work plan (2026-07-25)
 
