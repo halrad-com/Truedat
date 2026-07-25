@@ -5,6 +5,26 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Fixed — structural skips (video/DSD/playlist) now agree across every scan mode (2026-07-25)
+
+- Video containers, DSD streams, and playlist/redirector files are structurally
+  unanalyzable — no rule, `include` exclusion, or retry can make Essentia decode
+  them. The iTunes-XML scan path already dropped all three categories up front
+  (`FilterVideoFiles` / `FilterNonAudio`, plus the DSD guard), but the three
+  **per-file** scan-entry guards (`--analyze-file`, `--file-list`/`--folder`,
+  MoodsMode's per-track guard) only checked the DSD set. A `.mp4` (or `.m3u`,
+  `.wpl`, …) piped through `--file-list` — the path the MBXHub autoscan plugin
+  drives — reached Essentia, failed, and landed as a real-looking row in
+  `mbxmoods-errors.csv` for a file that was never analyzable, unattended.
+- Added `StructuralSkipReason`, a shared helper next to the old DSD-only
+  `IsUnsupportedExtensionForAnalysis` (removed), that returns the drop reason
+  for any of the three buckets or `null` when the extension is fine to attempt.
+  Reason text matches the XML-path filters exactly (`"unsupported codec: DSD"`,
+  `"video file extension"`, `"playlist / redirector extension"`) so
+  `mbxmoods-skipped.csv` reads consistently no matter which mode wrote the row.
+  All three per-file guards now call it instead of the DSD-only check; DSD's
+  console output and ledger reason are unchanged.
+
 ### Removed — the Episode Date podcast vote (2026-07-24)
 
 - **Deleted the `Episode Date` + corroborator podcast vote.** MusicBee maps

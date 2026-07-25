@@ -1667,17 +1667,18 @@ namespace Truedat
                     return;
                 }
 
-                // Phase 5.1 — DSD/DSF skip: ffmpeg + this Essentia build can't decode DSD;
+                // Phase 5.1 — structural skip (DSD, video, playlist/redirector):
                 // bail before invoking TagLib / Essentia / fingerprint helpers.
-                if (IsUnsupportedExtensionForAnalysis(analyzeFilePath))
+                var afStructReason = StructuralSkipReason(analyzeFilePath);
+                if (afStructReason != null)
                 {
                     var afSkipExt = Path.GetExtension(analyzeFilePath);
                     var afSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
                         ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
                         : Environment.CurrentDirectory;
                     var afSkippedPath = Path.Combine(afSkippedDir, "mbxmoods-skipped.csv");
-                    AppendSkipped(afSkippedPath, analyzeFilePath!, afSkipExt ?? "", "unsupported codec: DSD");
-                    Console.Error.WriteLine($"[skipped DSD] {analyzeFilePath}");
+                    AppendSkipped(afSkippedPath, analyzeFilePath!, afSkipExt ?? "", afStructReason);
+                    Console.Error.WriteLine($"[skipped {StructuralSkipConsoleTag(afStructReason)}] {analyzeFilePath}");
                     Environment.ExitCode = 0;
                     return;
                 }
@@ -2334,14 +2335,17 @@ namespace Truedat
                         return;
                     }
 
-                    // Phase 5.1 — DSD/DSF skip: bail before any TagLib / Essentia /
-                    // fingerprint work. (--folder mode already filters at walk time;
-                    // this catches --file-list and stdin sources.)
-                    if (IsUnsupportedExtensionForAnalysis(filePath))
+                    // Phase 5.1 — structural skip (DSD, video, playlist/redirector):
+                    // bail before any TagLib / Essentia / fingerprint work. (--folder
+                    // mode already filters video/DSD/non-audio at walk time via its
+                    // AudioExtensions allowlist; this catches --file-list and stdin
+                    // sources, which have no such pre-filter.)
+                    var flStructReason = StructuralSkipReason(filePath);
+                    if (flStructReason != null)
                     {
                         var flSkipExt = Path.GetExtension(filePath);
-                        AppendSkipped(flSkippedPath, filePath, flSkipExt, "unsupported codec: DSD");
-                        Console.Error.WriteLine($"[skipped DSD] {Path.GetFileName(filePath)}");
+                        AppendSkipped(flSkippedPath, filePath, flSkipExt, flStructReason);
+                        Console.Error.WriteLine($"[skipped {StructuralSkipConsoleTag(flStructReason)}] {Path.GetFileName(filePath)}");
                         Interlocked.Increment(ref flDsdSkipped);
                         return;
                     }
@@ -3159,14 +3163,21 @@ namespace Truedat
                         var pct = (current * 100) / total;
                         var eta = FormatEta(sw.Elapsed, current, total);
 
-                        // Phase 5.1 — DSD/DSF skip: bail before any cache lookup,
-                        // TagLib, Essentia, or fingerprint helper. Existing entries
-                        // in allTracks (if any) pass through unchanged on save.
-                        if (IsUnsupportedExtensionForAnalysis(t.Location))
+                        // Phase 5.1 — structural skip (DSD, video, playlist/redirector):
+                        // bail before any cache lookup, TagLib, Essentia, or
+                        // fingerprint helper. Belt-and-braces here — MoodsMode's list
+                        // filters (FilterVideoFiles / FilterNonAudio) already remove
+                        // video and playlist/redirector tracks before the scan loop —
+                        // but this guard keeps every mode agreeing on the same
+                        // definition of "structurally unanalyzable" rather than only
+                        // the XML path. Existing entries in allTracks (if any) pass
+                        // through unchanged on save.
+                        var msStructReason = StructuralSkipReason(t.Location);
+                        if (msStructReason != null)
                         {
                             var skipExt = Path.GetExtension(t.Location);
-                            AppendSkipped(skippedPath, t.Location, skipExt, "unsupported codec: DSD");
-                            Console.WriteLine($"[skipped DSD] {t.Location}");
+                            AppendSkipped(skippedPath, t.Location, skipExt, msStructReason);
+                            Console.WriteLine($"[skipped {StructuralSkipConsoleTag(msStructReason)}] {t.Location}");
                             Interlocked.Increment(ref dsdSkipped);
                             EtaDrainNewPool();
                             trackClass = "skip·dsd";
@@ -8237,6 +8248,33 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!IsTagsOnlyChange(f0, s6), "tags-only: empty stored head rejected");
             }
 
+            // --- StructuralSkipReason: DSD/video/playlist all agree with the
+            // pre-scan XML-list filters (FilterVideoFiles / FilterNonAudio) so a
+            // structural skip reads the same whether it happened via the XML path
+            // or a per-file guard (--analyze-file / --file-list / MoodsMode). ---
+            {
+                Assert(StructuralSkipReason("C:\\music\\track.dsf") == "unsupported codec: DSD",
+                    "structural skip: .dsf reports the DSD reason");
+                Assert(StructuralSkipReason("C:\\music\\track.dff") == "unsupported codec: DSD",
+                    "structural skip: .dff reports the DSD reason");
+                Assert(StructuralSkipReason("C:\\music\\video.mp4") == "video file extension",
+                    "structural skip: .mp4 reports the video reason");
+                Assert(StructuralSkipReason("C:\\music\\clip.mkv") == "video file extension",
+                    "structural skip: .mkv reports the video reason");
+                Assert(StructuralSkipReason("C:\\music\\list.m3u") == "playlist / redirector extension",
+                    "structural skip: .m3u reports the playlist/redirector reason");
+                Assert(StructuralSkipReason("C:\\music\\list.wpl") == "playlist / redirector extension",
+                    "structural skip: .wpl reports the playlist/redirector reason");
+                Assert(StructuralSkipReason("C:\\music\\track.flac") == null,
+                    "structural skip: .flac (ordinary audio) is not flagged");
+                Assert(StructuralSkipReason("C:\\music\\track.mp3") == null,
+                    "structural skip: .mp3 (ordinary audio) is not flagged");
+                Assert(StructuralSkipReason(null) == null, "structural skip: null path is not flagged");
+                Assert(StructuralSkipReason("") == null, "structural skip: empty path is not flagged");
+                Assert(StructuralSkipReason("C:\\music\\VIDEO.MP4") == "video file extension",
+                    "structural skip: matching is case-insensitive (.MP4 behaves like .mp4)");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -8549,16 +8587,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static readonly object _skippedCsvLock = new object();
 
         /// <summary>
-        /// True when <paramref name="filePath"/>'s extension is in <see cref="UnsupportedExtensions"/>
-        /// (case-insensitive). Scan-entry helper for Phase 5.1 DSD/DSF skip — guards
-        /// Essentia/TagLib/fingerprint helpers in all three scan modes.
+        /// Returns the reason <paramref name="filePath"/> is structurally unanalyzable
+        /// (an extension no amount of retrying or `include` re-inclusion can fix), or
+        /// null when the extension is fine to attempt. Covers the same three buckets
+        /// the pre-scan XML-list filters (<see cref="FilterVideoFiles"/> /
+        /// <see cref="FilterNonAudio"/>) already drop before the scan loop —
+        /// <see cref="UnsupportedExtensions"/> (DSD), <see cref="VideoExtensions"/>,
+        /// and <see cref="NonAudioExtensions"/> — plus the reason text those filters
+        /// pass into <see cref="FilterByPredicate"/>, so mbxmoods-skipped.csv reads
+        /// consistently regardless of which mode wrote the row. Shared scan-entry
+        /// guard for the three per-file call sites (--analyze-file, --file-list /
+        /// --folder, MoodsMode) — a structural skip must be structural in every mode,
+        /// not just the XML path, or a file the XML filters would have dropped can
+        /// slip through --file-list (e.g. the MBXHub autoscan plugin) into a wasted
+        /// Essentia subprocess and a misleading errors-CSV row.
         /// </summary>
-        static bool IsUnsupportedExtensionForAnalysis(string? filePath)
+        static string? StructuralSkipReason(string? filePath)
         {
-            if (string.IsNullOrEmpty(filePath)) return false;
-            var ext = Path.GetExtension(filePath);
-            return !string.IsNullOrEmpty(ext) && UnsupportedExtensions.Contains(ext);
+            if (string.IsNullOrEmpty(filePath)) return null;
+            var ext = GetExtensionSafe(filePath!);
+            if (string.IsNullOrEmpty(ext)) return null;
+            if (UnsupportedExtensions.Contains(ext)) return "unsupported codec: DSD";
+            if (VideoExtensions.Contains(ext)) return "video file extension";
+            if (NonAudioExtensions.Contains(ext)) return "playlist / redirector extension";
+            return null;
         }
+
+        /// <summary>Short bracket tag for the per-file console skip lines
+        /// (<c>[skipped {tag}]</c>). Kept distinct from the full
+        /// <see cref="StructuralSkipReason"/> text — the DSD tag is the literal
+        /// "DSD" console output that shipped with Phase 5.1 and must not change.</summary>
+        static string StructuralSkipConsoleTag(string reason) =>
+            reason == "unsupported codec: DSD" ? "DSD"
+            : reason == "video file extension" ? "video"
+            : "playlist/redirector";
 
         /// <summary>
         /// Append a row to mbxmoods-skipped.csv (Phase 5.1). Mirrors AppendError's
