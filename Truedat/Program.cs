@@ -1733,11 +1733,18 @@ namespace Truedat
                 });
 
                 var pvDest = previewOutPath ?? PreviewWriter.ResolveDest(pvOutputDir);
-                if (!PreviewWriter.TryWritePreviewJson(pvDest, pvPlan))
+                if (!PreviewWriter.TryWritePreviewJson(pvDest, pvPlan, PreviewWriter.PreviewHtmlFileName))
                 {
                     Environment.ExitCode = 1;
                     return;
                 }
+                // Co-emit the review page beside the manifest. The manifest already names it;
+                // a page-write failure is a warning, not a mode failure — the JSON is the
+                // machine contract and stays valid.
+                var pvHtml = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pvDest)) ?? pvOutputDir,
+                                          PreviewWriter.PreviewHtmlFileName);
+                try { PreviewWriter.WritePreviewHtml(pvHtml, pvPlan); }
+                catch (Exception ex) { Console.Error.WriteLine($"  (warning: preview page not written: {ex.Message})"); }
 
                 Console.WriteLine();
                 Console.WriteLine("Scan preview (nothing was analyzed):");
@@ -1759,6 +1766,7 @@ namespace Truedat
                     + $"   long-track prompt: {pvPlan.Limits.LongTrackSecs / 60} min");
                 Console.WriteLine();
                 Console.WriteLine($"Preview: {Linkify(pvDest)}");
+                Console.WriteLine($"Review page: {Linkify(pvHtml)}");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -8476,8 +8484,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(root["generated"] != null, "previewjson: carries a generated timestamp");
                     Assert(root["source"]!["moodsPath"]!.GetValue<string>() == @"D:\M\mbxmoods.json", "previewjson: source names the moods file");
                     Assert(root["source"]!["exclusionsPath"] != null, "previewjson: source names the exclusion file");
-                    // Phase 2b adds the page; 2a must NOT point at a file that does not exist
-                    Assert(root["source"]!["reviewHtml"] == null, "previewjson: no reviewHtml pointer until the page exists");
+                    // Default (no page name): reviewHtml stays absent — never point at a file
+                    // that does not exist.
+                    Assert(root["source"]!["reviewHtml"] == null, "previewjson: no reviewHtml pointer when no page name given");
+
+                    // Phase 2b: with a page name, the manifest names the co-emitted page.
+                    var namedPath = Path.Combine(dir, "preview-named.json");
+                    PreviewWriter.WritePreviewJson(namedPath, plan, PreviewWriter.PreviewHtmlFileName);
+                    var namedRoot = JsonNode.Parse(File.ReadAllText(namedPath))!;
+                    Assert(namedRoot["source"]!["reviewHtml"]!.GetValue<string>() == "mbxmoods-preview.html",
+                        "previewjson: reviewHtml names the co-emitted page when a page name is passed");
+
+                    // The page embeds the SAME manifest and is a real self-contained document.
+                    var pagePath = Path.Combine(dir, PreviewWriter.PreviewHtmlFileName);
+                    PreviewWriter.WritePreviewHtml(pagePath, plan);
+                    var pageText = File.ReadAllText(pagePath);
+                    Assert(!pageText.Contains("__DATA__"), "previewhtml: data placeholder is substituted");
+                    Assert(pageText.Contains("<!doctype html>"), "previewhtml: is a full HTML document");
+                    Assert(pageText.Contains("\"kind\": \"preview\""), "previewhtml: embeds the preview manifest");
+                    Assert(!pageText.Contains("http://") && !pageText.Contains("https://"),
+                        "previewhtml: no external references (self-contained)");
 
                     Assert(root["limits"]!["maxDurationSecs"]!.GetValue<int>() == 12000, "previewjson: limits echo the ceiling");
                     Assert(root["limits"]!["maxDurationSource"]!.GetValue<string>() == "--max-duration", "previewjson: limits name where the ceiling came from");
