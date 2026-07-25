@@ -145,11 +145,10 @@ namespace Truedat
                 bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
                 if (excluded) plan.Counts.Excluded++;
 
-                // `included` is this planner's equivalent of ITunesTrack.ExclusionIncluded
-                // (FilterExclusions sets that flag during a scan; preview never mutates the
-                // track list). It still feeds CurrentDecision below even though the podcast
-                // override it used to gate is gone — a labelled-but-included track is still
-                // worth knowing about on the review surface.
+                // `included` mirrors what an include rule does inside IsExcluded itself
+                // (preview never mutates the track list, so there is no marker to set).
+                // It still feeds CurrentDecision below — a labelled-but-included track is
+                // still worth knowing about on the review surface.
 
                 // --- catalog state ---
                 TrackEntry? entry;

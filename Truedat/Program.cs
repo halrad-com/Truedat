@@ -519,18 +519,6 @@ namespace Truedat
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
 
-        // Podcast handling (Phase 3-4, 2026-07-25): the XML label (iTunes-native
-        // Podcast=true boolean, or Genre=Podcast) and the embedded-marker file sniff
-        // (PCST/WFED/TGID/TCON, pcst/purl — read from the audio bytes themselves) are
-        // both EVIDENCE now, not filters — labeled/marked tracks are analyzed
-        // regardless of this flag; IsPodcast/PodcastReason and the sniffer's marker
-        // survive only for the --preview review surface. --migrate's podcast-genre
-        // and speech-likely catalog purges (the last things this flag gated) are gone
-        // too (2026-07-25) — the flag now gates nothing. Kept as a parsed no-op until
-        // a later task retires it. The only authority over what a scan skips for
-        // POLICY reasons is mbxmoods-exclude.json.
-        internal static bool _includePodcasts;
-
         // Explicit scan-exclusion file. Default location is beside the moods file;
         // --exclusions overrides it, --no-exclusions ignores it for one run.
         internal static string? _exclusionsPath;
@@ -771,12 +759,12 @@ namespace Truedat
             catch { }
         }
 
-        /// <summary>Drop tracks an exclusion rule excludes, and mark the ones an include
-        /// rule deliberately keeps. Every drop is ledgered with the rule that caused it —
-        /// the whole point of the mechanism is that an absent track is explainable, so a
-        /// bare count is not enough. Runs before the podcast filter (so an include can
-        /// rescue a mislabelled track) but after the structural filters' concerns: an
-        /// include rule never resurrects a video, a stream URL or an over-length file.</summary>
+        /// <summary>Drop tracks an exclusion rule excludes. Every drop is ledgered with the
+        /// rule that caused it — the whole point of the mechanism is that an absent track is
+        /// explainable, so a bare count is not enough. An include rule's job is simply to
+        /// keep IsExcluded from matching for that track (handled internally by
+        /// ExclusionSet.IsExcluded) and it never resurrects a video, a stream URL or an
+        /// over-length file — those structural filters run independently.</summary>
         static List<ITunesTrack> FilterExclusions(List<ITunesTrack> tracks, string? skippedPath = null)
         {
             if (_exclusions.IsEmpty) return tracks;
@@ -794,7 +782,6 @@ namespace Truedat
                         Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
                     continue;
                 }
-                if (_exclusions.IsIncluded(t.Location!, t.Genre)) t.ExclusionIncluded = true;
                 kept.Add(t);
             }
             if (removed > 0)
@@ -1171,7 +1158,6 @@ namespace Truedat
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
-                else if (canonical == "include-podcasts") _includePodcasts = true;
                 else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
                 else if (canonical == "preview")
                 {
@@ -1389,10 +1375,6 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  No-op (2026-07-25): --migrate no longer purges podcast-genre or");
-                Console.WriteLine("                      speech-likely entries, so this flag gates nothing. XML-labeled podcasts");
-                Console.WriteLine("                      (Genre=Podcast) and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl)");
-                Console.WriteLine("                      are analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -2842,10 +2824,6 @@ namespace Truedat
                 Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
                 Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
                 Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
-                Console.WriteLine("  --include-podcasts  No-op (2026-07-25): --migrate no longer purges podcast-genre or");
-                Console.WriteLine("                      speech-likely entries, so this flag gates nothing. XML-labeled podcasts");
-                Console.WriteLine("                      (Genre=Podcast) and embedded podcast markers (PCST/WFED/TGID/TCON, pcst/purl)");
-                Console.WriteLine("                      are analyzed either way — both are --preview evidence only, never a scan filter.");
                 Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the moods file");
                 Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
                 Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up first, reports changes)");
@@ -8775,11 +8753,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     };
                     var kept = FilterExclusions(tracks, null);
                     Assert(kept.Count == 3, $"layering: excluded track dropped (kept {kept.Count})");
+                    // The marker is gone; the behaviour it supported is not. An include rule
+                    // still keeps a track that an exclude rule would otherwise drop — that
+                    // logic lives inside ExclusionSet.IsExcluded, not in a flag on the track.
+                    // (Proven by the two assertions immediately below, which already covered
+                    // this before ExclusionIncluded retired — no duplicate needed.)
                     Assert(!kept.Exists(t => t.Name == "JRE"), "layering: folder exclude drops the track");
                     Assert(kept.Exists(t => t.Name == "KEXP"), "layering: include rule keeps the nested track");
-                    Assert(!kept.Find(t => t.Name == "Rock")!.ExclusionIncluded, "layering: unmatched track is not marked");
 
-                    // structural filters ignore the include mark
+                    // structural filters run independently of exclusion-rule outcomes
                     var afterVideo = FilterVideoFiles(kept, null);
                     Assert(!afterVideo.Exists(t => t.Name == "KexpVideo"), "layering: include does NOT resurrect a video file");
 
