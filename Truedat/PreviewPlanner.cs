@@ -33,9 +33,6 @@ namespace Truedat
         /// a caller that had to post-edit the field would duplicate this file's string
         /// literal across files — which is exactly the coupling this replaces.</summary>
         public string EtaBasisLabel = "measured-rtf";
-        /// <summary>Mirrors --include-podcasts: when true a scan analyzes podcast-labelled
-        /// tracks, so the new-work accounting must count them.</summary>
-        public bool IncludePodcasts = false;
     }
 
     /// <summary>
@@ -52,8 +49,10 @@ namespace Truedat
     ///
     /// The new-work accounting (newTracks / newBytes / the ETA) counts only tracks a scan
     /// would actually hand to Essentia — so every filter a scan applies has to be applied
-    /// here first, which is why the exclusion and podcast determinations sit ABOVE the
-    /// catalog-state block rather than after it.
+    /// here first, which is why the exclusion determination sits ABOVE the catalog-state
+    /// block rather than after it. A podcast label is no longer a filter (see the
+    /// "podcast-labelled" review reason below) — it is evidence only, so it never removes
+    /// a track from new-work accounting.
     /// </summary>
     internal static class PreviewPlanner
     {
@@ -146,20 +145,17 @@ namespace Truedat
                 bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
                 if (excluded) plan.Counts.Excluded++;
 
-                // The podcast-label policy is DERIVED, not restated: Program.FilterPodcasts
-                // (the scan) and this line both call the one predicate, so the two cannot
-                // disagree and the phase that retires the heuristic deletes the predicate —
-                // which breaks this call site at compile time rather than leaving a stale
-                // gate that silently under-reports real work. `included` is this planner's
-                // equivalent of ITunesTrack.ExclusionIncluded (FilterExclusions sets that
-                // flag during a scan; preview never mutates the track list).
-                bool podcastDropped = Program.PodcastPolicyWouldDrop(t, included, input.IncludePodcasts);
+                // `included` is this planner's equivalent of ITunesTrack.ExclusionIncluded
+                // (FilterExclusions sets that flag during a scan; preview never mutates the
+                // track list). It still feeds CurrentDecision below even though the podcast
+                // override it used to gate is gone — a labelled-but-included track is still
+                // worth knowing about on the review surface.
 
                 // --- catalog state ---
                 TrackEntry? entry;
                 bool analyzed = input.Catalog.TryGetValue(loc, out entry) && entry?.Features != null;
                 if (analyzed) { cachedTracks++; plan.Counts.Analyzed++; }
-                else if (!overLimit && !excluded && !podcastDropped)
+                else if (!overLimit && !excluded)
                 {
                     newTracks++;
                     newBytes += Math.Max(0, t.SizeBytes);

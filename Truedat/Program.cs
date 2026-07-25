@@ -806,60 +806,6 @@ namespace Truedat
             return kept;
         }
 
-        /// <summary>
-        /// The podcast-label POLICY decision, stated exactly once. An exclusion-file
-        /// `include` rule outranks the label — that is the interim escape hatch for a
-        /// mislabelled album (KEXP Song of the Day is genuinely Genre=Podcast and genuinely
-        /// music) without --include-podcasts switching the whole mechanism off.
-        ///
-        /// <see cref="FilterPodcasts"/> (the scan) and <see cref="PreviewPlanner"/> (the
-        /// --preview estimate) both derive from this rather than each restating the
-        /// condition: preview's new-work count has to agree with what a scan actually
-        /// analyzes or the estimate lies about the cost. Pure and fully parameterised (no
-        /// reach for <see cref="_includePodcasts"/>) so the planner stays injection-testable.
-        ///
-        /// The queued phase that retires the podcast heuristic deletes this predicate along
-        /// with FilterPodcasts — which breaks the planner's call site at COMPILE time. That
-        /// is deliberate: it is the reminder that podcast-labelled tracks then become real
-        /// new work again, and it cannot be missed the way a comment can.
-        /// </summary>
-        internal static bool PodcastPolicyWouldDrop(ITunesTrack t, bool exclusionIncluded, bool includePodcasts)
-            => t.IsPodcast && !exclusionIncluded && !includePodcasts;
-
-        /// <summary>Remove podcast-labeled episodes from a parsed track list (default;
-        /// --include-podcasts overrides and analyzes them). Every dropped track lands
-        /// in mbxmoods-skipped.csv (when a path is supplied) with what triggered the
-        /// classification; --audit also lists each on console.</summary>
-        static List<ITunesTrack> FilterPodcasts(List<ITunesTrack> tracks, string? skippedPath = null, List<ITunesTrack>? removedOut = null)
-        {
-            var removed = tracks.Where(t => PodcastPolicyWouldDrop(t, t.ExclusionIncluded, _includePodcasts)).ToList();
-            if (removed.Count == 0)
-            {
-                // --include-podcasts makes the predicate keep everything, so the "nothing to
-                // remove" branch is also where the override reports what it kept.
-                if (_includePodcasts)
-                {
-                    int labelled = tracks.Count(t => t.IsPodcast && !t.ExclusionIncluded);
-                    if (labelled > 0)
-                        Console.WriteLine($"  Including {labelled} podcast-labeled track(s) (--include-podcasts)");
-                }
-                return tracks;
-            }
-            removedOut?.AddRange(removed);
-            foreach (var t in removed)
-            {
-                var reason = $"podcast ({(t.PodcastReason.Length > 0 ? t.PodcastReason : "unknown")})";
-                if (skippedPath != null)
-                    AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
-                if (_audit)
-                    Console.WriteLine($"  [skipped {reason}] {t.Artist} - {t.Name} :: {t.Location}");
-            }
-            Console.WriteLine($"  Skipped {removed.Count} podcast episode(s)"
-                + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
-                + (_audit ? "" : " (--audit lists each)"));
-            return tracks.Where(t => !PodcastPolicyWouldDrop(t, t.ExclusionIncluded, _includePodcasts)).ToList();
-        }
-
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
         internal static string GetExtensionSafe(string path)
         {
@@ -1785,7 +1731,6 @@ namespace Truedat
                     MeasuredRtf = pvRtf,
                     EtaBasisLabel = "catalog-rtf",
                     Parallelism = Math.Max(1, parallelism),
-                    IncludePodcasts = _includePodcasts,
                     FileExists = File.Exists,
                     SniffMarkers = PodcastTagSniffer.TryDetect,
                     SpeechVerdict = e => e?.Features == null
@@ -3126,10 +3071,8 @@ namespace Truedat
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
             }
 
-            var skippedPodcasts = new List<ITunesTrack>();
             tracks = FilterRemoteUrls(tracks, skippedPath);
             tracks = FilterExclusions(tracks, skippedPath);
-            tracks = FilterPodcasts(tracks, skippedPath, skippedPodcasts);
             tracks = FilterVideoFiles(tracks, skippedPath);
             tracks = FilterNonAudio(tracks, skippedPath);
 
@@ -3160,21 +3103,6 @@ namespace Truedat
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
             Console.WriteLine($"Existing moods: {existingCount}");
 
-            // A track the podcast filter excludes is never scanned again, so a stale
-            // mood entry left over from before it was labeled (or before the filter
-            // existed) can never be refreshed OR removed by --migrate: its stored genre
-            // is whatever the XML carries (often empty for downloaded episodes) and it
-            // lacks the wave features speechLikely needs to fire. The scan holds the
-            // authoritative podcast determination (from the XML signals), so drop the
-            // dead entry here. Nothing consumes a mood record for a file we won't analyze.
-            {
-                int podcastEntriesRemoved = 0;
-                foreach (var pt in skippedPodcasts)
-                    if (allTracks.TryRemove(pt.Location, out _))
-                        podcastEntriesRemoved++;
-                if (podcastEntriesRemoved > 0)
-                    Console.WriteLine($"  Removed {podcastEntriesRemoved} stale mood entr{(podcastEntriesRemoved == 1 ? "y" : "ies")} for podcast-filtered track(s)");
-            }
             // Cross-index keyed by audioStreamSha256 — invariant-region hash, stable
             // across tag edits. Catches "audio bytes unchanged but tags/path drifted",
             // including clean moves and cross-machine matching.
@@ -3969,14 +3897,10 @@ namespace Truedat
             // Deliberately does NOT consult _exclusions: --check-filenames reports
             // FILESYSTEM problems (over-length paths, zero-byte files), which are worth
             // knowing about whether or not a track is excluded from analysis — "check is
-            // check, not exclude." FilterPodcasts is the legacy heuristic filter, not the
-            // exclusion mechanism, but it's a latent coupling worth flagging: if a future
-            // change moves _exclusions loading earlier into arg-parse (so it's populated
-            // by the time this runs), FilterPodcasts would start silently honoring
-            // ExclusionIncluded/include rules here too. That's fine only if it stays a
-            // conscious choice, not an accident of load-order.
+            // check, not exclude." A 300-character path or a zero-byte file is a filesystem
+            // problem regardless of analysis policy, so this mode deliberately never applies
+            // exclusion rules (or any other analysis-policy filter) before reporting.
             tracks = FilterRemoteUrls(tracks);
-            tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
             tracks = FilterNonAudio(tracks);
             Console.WriteLine();
@@ -8354,19 +8278,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var plsPlan = PreviewPlanner.Build(In(One(@"D:\M\set.wpl", 180000, 1_000), ExclusionSet.Empty));
                 Assert(Bkt(plsPlan, "nonAudio") == 1, $"preview accounting: playlists keep the nonAudio autoSkip class name (got {Bkt(plsPlan, "nonAudio")})");
 
-                // podcast-labelled: mirrors FilterPodcasts, which drops these today.
+                // podcast-labelled: Phase 3 — a label is evidence, not a filter, so a scan
+                // analyzes it and the estimate must count it as new work like any other track.
                 var pod = One(@"D:\M\show.mp3", 3000000, 30_000_000);
                 pod.IsPodcast = true;
                 pod.PodcastReason = "Genre=Podcast";
                 var podPlan = PreviewPlanner.Build(In(pod, ExclusionSet.Empty));
-                Assert(podPlan.Estimate.NewTracks == 0, $"preview accounting: a podcast-labelled new track contributes nothing to new work (got {podPlan.Estimate.NewTracks})");
+                Assert(podPlan.Estimate.NewTracks == 1, $"preview accounting: a podcast-labelled new track now contributes to new work (got {podPlan.Estimate.NewTracks})");
                 Assert(podPlan.Review.Count == 1 && podPlan.Review[0].Reasons.Contains("podcast-labelled"),
                     "preview accounting: a podcast-labelled track is still surfaced for review");
-                // ...but --include-podcasts makes a scan analyze them, so then they ARE new work.
-                var podIncl = In(pod, ExclusionSet.Empty);
-                podIncl.IncludePodcasts = true;
-                Assert(PreviewPlanner.Build(podIncl).Estimate.NewTracks == 1,
-                    "preview accounting: --include-podcasts puts podcast-labelled tracks back into new work");
             }
 
             // --- --preview must never truncate a file that isn't a preview (whole-branch fix
@@ -8920,42 +8840,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(kept.Count == 3, $"layering: excluded track dropped (kept {kept.Count})");
                     Assert(!kept.Exists(t => t.Name == "JRE"), "layering: folder exclude drops the track");
                     Assert(kept.Exists(t => t.Name == "KEXP"), "layering: include rule keeps the nested track");
-                    Assert(kept.Find(t => t.Name == "KEXP")!.ExclusionIncluded, "layering: include marks the track for the podcast override");
                     Assert(!kept.Find(t => t.Name == "Rock")!.ExclusionIncluded, "layering: unmatched track is not marked");
 
                     // structural filters ignore the include mark
                     var afterVideo = FilterVideoFiles(kept, null);
                     Assert(!afterVideo.Exists(t => t.Name == "KexpVideo"), "layering: include does NOT resurrect a video file");
 
-                    // the interim override: an include rule rescues a labelled podcast
-                    var labelled = new List<ITunesTrack>
+                    // Phase 3: a podcast label is EVIDENCE now, not a verdict — the filter
+                    // chain must let it through so the operator can decide with a rule.
+                    var labelledNow = new List<ITunesTrack>
                     {
-                        new ITunesTrack { Location = @"D:\Music\Podcasts\KEXP\live.flac", Name = "KEXP",
-                                          IsPodcast = true, PodcastReason = "Genre=Podcast", ExclusionIncluded = true },
                         new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", Name = "Show",
                                           IsPodcast = true, PodcastReason = "Genre=Podcast" },
+                        new ITunesTrack { Location = @"D:\Music\Rock\song.flac", Name = "Rock" },
                     };
-                    var removedPodcasts = new List<ITunesTrack>();
-                    var afterPodcast = FilterPodcasts(labelled, null, removedPodcasts);
-                    Assert(afterPodcast.Count == 1, $"layering: unrescued podcast still filtered (kept {afterPodcast.Count})");
-                    // Index-guarded so a regression FAILS by name instead of throwing an
-                    // index-out-of-range that aborts the rest of the self-test run.
-                    Assert(afterPodcast.Count == 1 && afterPodcast[0].Name == "KEXP", "layering: include rule rescues a labelled podcast");
-                    Assert(!removedPodcasts.Exists(t => t.Name == "KEXP"), "layering: rescued track is not ledgered as a removed podcast");
-
-                    // The podcast policy predicate itself — the single expression both
-                    // FilterPodcasts (above) and PreviewPlanner's new-work accounting derive
-                    // from, so preview's estimate cannot disagree with what a scan analyzes.
-                    var podLabelled = new ITunesTrack { Location = @"D:\Music\Talk\show.mp3", IsPodcast = true };
-                    var podMusic = new ITunesTrack { Location = @"D:\Music\Rock\song.flac", IsPodcast = false };
-                    Assert(PodcastPolicyWouldDrop(podLabelled, false, false),
-                        "podcast policy: a labelled track with no override is dropped");
-                    Assert(!PodcastPolicyWouldDrop(podLabelled, true, false),
-                        "podcast policy: an include rule rescues a labelled track");
-                    Assert(!PodcastPolicyWouldDrop(podLabelled, false, true),
-                        "podcast policy: --include-podcasts rescues a labelled track");
-                    Assert(!PodcastPolicyWouldDrop(podMusic, false, false),
-                        "podcast policy: an unlabelled track is never dropped by it");
+                    var afterChain = FilterVideoFiles(FilterNonAudio(labelledNow, null), null);
+                    Assert(afterChain.Count == 2, $"phase3: a podcast-labelled track is no longer filtered (kept {afterChain.Count})");
+                    Assert(afterChain.Exists(t => t.Name == "Show"), "phase3: the labelled track specifically survives");
+                    Assert(afterChain.Find(t => t.Name == "Show")!.IsPodcast, "phase3: IsPodcast survives as evidence for the preview surface");
+                    Assert(afterChain.Find(t => t.Name == "Show")!.PodcastReason == "Genre=Podcast", "phase3: PodcastReason survives as evidence");
                 }
                 finally { _exclusions = saveSet; }
             }
