@@ -82,13 +82,15 @@ try {
     $s1 = (Get-Content $r1 -Raw | ConvertFrom-Json).summary
     $s2 = (Get-Content $r2 -Raw | ConvertFrom-Json).summary
 
-    # --- exclusion gates G1-G6 (property assertions, invariant-style) ---------------
+    # --- exclusion + arc gates G1-G8 (property assertions, invariant-style) ----------
     # Each gate scans into its OWN fresh moods dir: exclusions never PRUNE existing
     # entries, so a shared moods would leave excluded tracks in place and false-red.
     # --exclusions is passed explicitly (mail setup note) so the gates are independent
     # of default resolution beside the moods file. mbxmoods.json is the fixed base name
     # in every gate dir, so the skipped sidecar is unambiguously mbxmoods-skipped.csv.
-    Write-Host "replay: exclusion gates G1-G6..."
+    # G1-G6 pin the exclusion FILE mechanism; G7-G8 pin the 2026-07-25 scan-exclusions
+    # arc walk-back (heuristics no longer decide) - see the block comments on each.
+    Write-Host "replay: exclusion + arc gates G1-G8..."
 
     # Build a proper JSON array by hand: ConvertTo-Json in PS 5.1 collapses a single-
     # element array to an object, which would break `rules`/`add`/`remove`.
@@ -249,7 +251,98 @@ try {
     ExGate "G6 broken-file-refuses" (($g6exit -eq 1) -and $g6noMoods) `
         "exit=$g6exit (expected 1) wroteNoMoods=$g6noMoods"
 
-    Write-Host "replay: exclusion gates passed=$exGatePass failed=$exGateFail"
+    # G7 PODCAST-ANALYZED (arc walk-back, commits e320381 + 4b0c4fa + 8c029a2): a file
+    # carrying explicit podcast markers - an ID3v2 PCST flag ("this IS a podcast") AND a
+    # TCON genre of "Podcast" - is STILL ANALYZED. Phase 3 removed every mechanism that
+    # skipped work on a podcast label or marker; the sniffer now runs only inside --preview
+    # as evidence, never in a scan path. Nothing but an operator-written exclusion RULE
+    # keeps a file out of analysis. Regression target: a reintroduced scan-path marker skip
+    # (the thing e320381 deleted) would drop this file from mbxmoods.json. Invariant-style,
+    # no data-dependent counts. The marked file is built at runtime from the committed mp3
+    # fixture - strip its leading ID3v2 tag, prepend a fresh ID3v2.3 tag (PCST + TCON) - so
+    # no new binary is committed and the audio stream (hence Essentia's analysis) is intact.
+    $g7 = Join-Path $work "g7"; New-Item -ItemType Directory -Path $g7 | Out-Null
+    $mp3src = $fixtures | Where-Object { $_ -match '\.mp3$' } | Select-Object -First 1
+    $g7ok = $false; $g7why = "no .mp3 fixture to mark"
+    if ($mp3src) {
+        $bytes = [System.IO.File]::ReadAllBytes($mp3src)
+        # Skip a leading ID3v2 tag if present, so the crafted file has exactly one clean tag.
+        $audioStart = 0
+        if ($bytes.Length -gt 10 -and $bytes[0] -eq 0x49 -and $bytes[1] -eq 0x44 -and $bytes[2] -eq 0x33) {
+            $sz = (($bytes[6] -band 0x7F) -shl 21) -bor (($bytes[7] -band 0x7F) -shl 14) -bor (($bytes[8] -band 0x7F) -shl 7) -bor ($bytes[9] -band 0x7F)
+            $audioStart = 10 + $sz
+        }
+        # Fresh ID3v2.3 tag: TCON="Podcast" (genre-text marker) + PCST (the strong flag).
+        # v2.3 frame size is plain big-endian; the tag-header size is syncsafe.
+        function BE32([int]$n) { return @( (($n -shr 24) -band 0xFF), (($n -shr 16) -band 0xFF), (($n -shr 8) -band 0xFF), ($n -band 0xFF) ) }
+        function Syncsafe([int]$n) { return @( (($n -shr 21) -band 0x7F), (($n -shr 14) -band 0x7F), (($n -shr 7) -band 0x7F), ($n -band 0x7F) ) }
+        $tconPayload = @(0x00) + ([System.Text.Encoding]::ASCII.GetBytes("Podcast"))   # enc byte 0 (ISO-8859-1) + text
+        $tconFrame   = ([System.Text.Encoding]::ASCII.GetBytes("TCON")) + (BE32 $tconPayload.Length) + @(0,0) + $tconPayload
+        $pcstFrame   = ([System.Text.Encoding]::ASCII.GetBytes("PCST")) + (BE32 4) + @(0,0) + @(0,0,0,0)
+        $tagBody     = [byte[]]($tconFrame + $pcstFrame)
+        $tagHeader   = [byte[]](([System.Text.Encoding]::ASCII.GetBytes("ID3")) + @(0x03,0x00,0x00) + (Syncsafe $tagBody.Length))
+        $audioLen    = $bytes.Length - $audioStart
+        $g7bytes     = New-Object byte[] ($tagHeader.Length + $tagBody.Length + $audioLen)
+        [Array]::Copy($tagHeader, 0, $g7bytes, 0, $tagHeader.Length)
+        [Array]::Copy($tagBody,   0, $g7bytes, $tagHeader.Length, $tagBody.Length)
+        [Array]::Copy($bytes, $audioStart, $g7bytes, $tagHeader.Length + $tagBody.Length, $audioLen)
+        $g7file = Join-Path $g7 "podcast-marked.mp3"
+        [System.IO.File]::WriteAllBytes($g7file, $g7bytes)
+        $g7moods = Join-Path $g7 "mbxmoods.json"
+        $g7list = Join-Path $g7 "files.txt"; @($g7file) | Set-Content -Encoding UTF8 $g7list
+        # No exclusion file: the point is that a podcast MARKER, absent an operator rule,
+        # does not keep the file out of analysis.
+        & $TruedatExe --file-list $g7list --moods $g7moods --no-exclusions -p 2
+        $g7exit = $LASTEXITCODE
+        $g7analyzed = LeafInMoods $g7moods "podcast-marked.mp3"
+        # And it must not have been skipped for a podcast/marker reason.
+        $g7skip = Join-Path $g7 "mbxmoods-skipped.csv"; $g7podcastSkip = $false
+        if (Test-Path $g7skip) {
+            $g7csv = Get-Content $g7skip -Raw
+            if (($g7csv -match 'podcast-marked\.mp3') -and ($g7csv -match '(?i)podcast|marker')) { $g7podcastSkip = $true }
+        }
+        $g7ok  = ($g7exit -eq 0) -and $g7analyzed -and (-not $g7podcastSkip)
+        $g7why = "exit=$g7exit analyzed=$g7analyzed podcastSkipped=$g7podcastSkip (podcastSkipped must be false)"
+    }
+    ExGate "G7 podcast-analyzed" $g7ok $g7why
+
+    # G8 APPLY-EXCLUSIONS BADFILE (arc, the final-review CRITICAL): --apply-exclusions with a
+    # VALID decisions delta but a canonical mbxmoods-exclude.json that PARTIALLY fails to parse
+    # (one good rule + one of an unknown kind) must REFUSE - exit 1, canonical byte-identical,
+    # NO .bak - rather than rewrite the file and silently drop the rule it could not read.
+    # ExclusionStore.Merge's InvalidRuleCount guard is what stands between the tolerant reader
+    # and erasing a decision a newer MBXHub build wrote and this truedat does not understand.
+    # One good rule keeps the file out of the "zero valid rules" FATAL branch, isolating the
+    # partial-parse path this gate exists for.
+    $g8 = Join-Path $work "g8"; New-Item -ItemType Directory -Path $g8 | Out-Null
+    $g8ex = Join-Path $g8 "mbxmoods-exclude.json"; $g8delta = Join-Path $g8 "delta.json"
+    $g8canonical = @"
+{
+  "schemaVersion": 1,
+  "rules": [
+    { "kind": "file", "action": "exclude", "path": "C:\\keep\\real.mp3" },
+    { "kind": "wormhole", "action": "exclude", "pattern": "\\Junk\\**" }
+  ]
+}
+"@
+    Set-Content -Encoding UTF8 -Path $g8ex -Value $g8canonical
+    $g8before = Get-Content $g8ex -Raw
+    Write-DeltaFile $g8delta @(@{ kind = "file"; action = "exclude"; path = "C:\Music\add.mp3"; note = "replay G8" }) @()
+    & $TruedatExe --apply-exclusions $g8delta --exclusions $g8ex
+    $g8exit = $LASTEXITCODE
+    $g8after = if (Test-Path $g8ex) { Get-Content $g8ex -Raw } else { "" }
+    $g8unchanged = ($g8before -eq $g8after)
+    $g8noBak = -not (Test-Path (Join-Path $g8 "mbxmoods-exclude.json.bak.*"))
+    # apply-result.json must record the refusal (ok:false), never a silent failure.
+    $g8resultOk = $false; $g8resultPath = Join-Path $g8 "apply-result.json"
+    if (Test-Path $g8resultPath) {
+        $g8r = Get-Content $g8resultPath -Raw | ConvertFrom-Json
+        $g8resultOk = ($g8r.ok -eq $false)
+    }
+    ExGate "G8 apply-exclusions-badfile" (($g8exit -eq 1) -and $g8unchanged -and $g8noBak -and $g8resultOk) `
+        "exit=$g8exit (expected 1) canonicalUnchanged=$g8unchanged noBak=$g8noBak resultRefused=$g8resultOk"
+
+    Write-Host "replay: exclusion + arc gates passed=$exGatePass failed=$exGateFail"
 
     $total  = $s1.total + $s2.total + 1 + $exGatePass + $exGateFail
     $failed = $s1.failed + $s2.failed + $(if ($detPass) { 0 } else { 1 }) + $exGateFail
