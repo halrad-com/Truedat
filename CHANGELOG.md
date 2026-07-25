@@ -35,8 +35,11 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   went second. **`--exclusions <path>`** overrides the location;
   **`--no-exclusions`** bypasses it for one run with a warning.
 - Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused
-  it, and each scan prints per-rule hit counts, so a rule that matches nothing is
-  visible instead of silently doing nothing.
+  it, on every scan mode. The iTunes-XML library scan additionally prints per-rule
+  hit counts, so a rule that matches nothing is visible instead of silently doing
+  nothing; the per-file modes (`--analyze-file`, `--file-list`/`--folder`) have
+  nothing to count for a single invocation, but still print a warning for any
+  rule that failed to parse.
 - A missing exclusion file excludes nothing. A file that cannot be parsed makes
   truedat **exit 1 rather than scan** — analyzing everything while you believe
   your rules are in force is the silent failure this replaces. Invalid individual

@@ -46,8 +46,10 @@ namespace Truedat
 
         /// <summary>
         /// Merge/dedupe key: kind + action + normalized target. Note and sha are
-        /// metadata, NOT identity — re-saving a rule with a new note must update it,
-        /// not add a second copy.
+        /// metadata, NOT identity — re-adding a rule that differs only by note/sha is
+        /// a no-op (Merge counts it AlreadyPresent and keeps the stored Note/Sha as-is);
+        /// it does not update them. Identity exists to prevent a second copy, not to
+        /// carry edits.
         /// </summary>
         public string Identity() => (int)Kind + "|" + (int)Action + "|" + Norm;
     }

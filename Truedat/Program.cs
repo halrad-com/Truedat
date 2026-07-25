@@ -837,6 +837,26 @@ namespace Truedat
             try { return Path.GetExtension(path) ?? ""; } catch { return ""; }
         }
 
+        /// <summary>
+        /// A missing exclusion file is only benign at the DEFAULT (beside-the-moods-file)
+        /// location — that's a legitimate fresh install with nothing excluded yet. An
+        /// operator-named path via --exclusions is a deliberate ask; if it doesn't exist
+        /// that's almost always a typo, and ExclusionStore.Load's "missing = empty, no
+        /// error" contract would otherwise scan with silently zero exclusions applied.
+        /// Called once per invocation, immediately before the ExclusionStore.Load call,
+        /// at all three load sites (--analyze-file, --file-list/--folder, MoodsMode).
+        /// </summary>
+        static bool ValidateExplicitExclusionsPath(out string? error)
+        {
+            error = null;
+            if (_exclusionsPath != null && !File.Exists(_exclusionsPath))
+            {
+                error = $"--exclusions path not found: {_exclusionsPath}";
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>Re-extract canary, single source of truth for every cache tier.
         /// Base: DynamicRange + LoudnessMomentary present (pre-LRA / pre-extended
         /// builds re-analyze). Under --refresh-features, entries lacking the
@@ -1612,6 +1632,8 @@ namespace Truedat
                 if (report.NotFound > 0) Console.WriteLine($"  Not present: {report.NotFound}  (nothing to remove)");
                 if (report.BackupPath != null) Console.WriteLine($"  Backup:     {report.BackupPath}");
                 if (!report.Changed) Console.WriteLine("  No changes.");
+                foreach (var diag in report.Diagnostics)
+                    Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
                 Environment.ExitCode = 0;
                 return;
             }
@@ -1660,6 +1682,15 @@ namespace Truedat
                     return;
                 }
 
+                // Hoisted above the exclusion guard (and reused at the cache-key site
+                // below) so the guard matches a normalized absolute path instead of
+                // whatever the operator typed. IsExcluded folds separators/case but
+                // never makes a relative path absolute, so without this a relative
+                // invocation could silently dodge a folder/file rule that an absolute
+                // invocation of the same file would hit. Everything between here and
+                // the staging block is cheap metadata — safe to compute early.
+                var afKey = Path.GetFullPath(analyzeFilePath!);
+
                 // Explicit exclusions — same load-once-per-invocation semantics as
                 // MoodsMode. A missing file excludes nothing; a broken one refuses the scan.
                 var afExclDir = !string.IsNullOrEmpty(analyzeFileMoods)
@@ -1667,6 +1698,12 @@ namespace Truedat
                     : Environment.CurrentDirectory;
                 if (!_noExclusions)
                 {
+                    if (!ValidateExplicitExclusionsPath(out var afExclPathErr))
+                    {
+                        Console.Error.WriteLine($"Error: {afExclPathErr}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
                     _exclusions = ExclusionStore.Load(_exclusionsPath ?? Path.Combine(afExclDir, ExclusionStore.FileName), out var afExclErr);
                     if (afExclErr != null)
                     {
@@ -1675,13 +1712,23 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    foreach (var afDiag in _exclusions.Diagnostics)
+                        Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {afDiag}");
                 }
 
                 // Exclusion check runs before any cache tier — an excluded file never
                 // enters the catalog, so it can never hit tier 1, and letting it fall
                 // through to tier 4 would stage + hash it over the network for nothing.
-                if (!_noExclusions && _exclusions.IsExcluded(analyzeFilePath!, null, out var afExclReason))
+                // Matched on afKey (normalized full path), not the raw analyzeFilePath,
+                // so a relative invocation can't dodge an absolute file rule or a folder
+                // fragment the same way --file-list already guards against.
+                if (!_noExclusions && _exclusions.IsExcluded(afKey, null, out var afExclReason))
                 {
+                    // Ledgered like every other exclusion skip (--file-list's guard does
+                    // the same) — README promises every exclusion lands in the CSV, not
+                    // just the batch-mode ones. Report the path as typed; match on afKey.
+                    var afExclSkippedPath = Path.Combine(afExclDir, "mbxmoods-skipped.csv");
+                    AppendSkipped(afExclSkippedPath, analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), $"excluded (rule: {afExclReason})");
                     Console.Error.WriteLine($"[skipped excluded: {afExclReason}] {analyzeFilePath}");
                     Environment.ExitCode = 0;
                     return;
@@ -1702,7 +1749,6 @@ namespace Truedat
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
                 var afFileSize = new FileInfo(analyzeFilePath!).Length;
-                var afKey = Path.GetFullPath(analyzeFilePath!);
                 DateTime afCurrentLastMod = DateTime.MinValue;
                 try { afCurrentLastMod = File.GetLastWriteTimeUtc(analyzeFilePath!); } catch { }
 
@@ -2162,6 +2208,12 @@ namespace Truedat
                 // A missing file excludes nothing; a broken one refuses the scan.
                 if (!_noExclusions)
                 {
+                    if (!ValidateExplicitExclusionsPath(out var flExclPathErr))
+                    {
+                        Console.Error.WriteLine($"Error: {flExclPathErr}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
                     _exclusions = ExclusionStore.Load(_exclusionsPath ?? Path.Combine(flSkippedDir, ExclusionStore.FileName), out var flExclErr);
                     if (flExclErr != null)
                     {
@@ -2170,6 +2222,8 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    foreach (var flDiag in _exclusions.Diagnostics)
+                        Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {flDiag}");
                 }
 
                 if (folderMode)
@@ -2856,6 +2910,13 @@ namespace Truedat
             }
             else
             {
+                if (!ValidateExplicitExclusionsPath(out var exclPathErr))
+                {
+                    Console.Error.WriteLine($"Error: {exclPathErr}");
+                    Environment.ExitCode = 1;
+                    tee?.Dispose();
+                    return;
+                }
                 _exclusions = ExclusionStore.Load(exclusionsFile, out var exclusionError);
                 if (exclusionError != null)
                 {
@@ -3704,6 +3765,15 @@ namespace Truedat
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var tracks = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Found {tracks.Count} tracks");
+            // Deliberately does NOT consult _exclusions: --check-filenames reports
+            // FILESYSTEM problems (over-length paths, zero-byte files), which are worth
+            // knowing about whether or not a track is excluded from analysis — "check is
+            // check, not exclude." FilterPodcasts is the legacy heuristic filter, not the
+            // exclusion mechanism, but it's a latent coupling worth flagging: if a future
+            // change moves _exclusions loading earlier into arg-parse (so it's populated
+            // by the time this runs), FilterPodcasts would start silently honoring
+            // ExclusionIncluded/include rules here too. That's fine only if it stays a
+            // conscious choice, not an accident of load-order.
             tracks = FilterRemoteUrls(tracks);
             tracks = FilterPodcasts(tracks);
             tracks = FilterVideoFiles(tracks);
@@ -7850,6 +7920,35 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var idA = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"D:\\\\a.mp3\",\"note\":\"one\"}"), out _).Rules[0];
                 var idB = ExclusionSet.FromJson(Rules("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"d:/A.MP3\",\"audioStreamSha256\":\"abc\"}"), out _).Rules[0];
                 Assert(idA.Identity() == idB.Identity(), "exclusion: identity ignores note/sha and normalizes the path");
+
+                // IMPORTANT (final review, 2026-07-25): IsExcluded folds separators/case
+                // but never anchors a relative path — a caller MUST normalize via
+                // Path.GetFullPath before matching (this is what the --analyze-file guard
+                // was fixed to do, matching --file-list's fullPath guard). Pin the
+                // equivalence here: the same rule matches an absolute path and matches
+                // the same file expressed relatively, once normalized — and does NOT
+                // match the unnormalized relative form, proving why the normalization
+                // step is load-bearing rather than cosmetic.
+                var savedCwd = Environment.CurrentDirectory;
+                var relRoot = Path.Combine(Path.GetTempPath(), $".truedat-selftest-relpath-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(Path.Combine(relRoot, "tests"));
+                try
+                {
+                    Environment.CurrentDirectory = relRoot;
+                    var relFragRule = Set(Folder("exclude", @"\tests\**"));
+                    var absForm = Path.Combine(relRoot, "tests", "x.flac");
+                    Assert(relFragRule.IsExcluded(absForm, null, out _), "exclusion: fragment rule matches the absolute form");
+                    const string typedRelative = @"tests\x.flac";
+                    Assert(!relFragRule.IsExcluded(typedRelative, null, out _),
+                        "exclusion: unnormalized relative path misses the same fragment rule (why a caller must normalize first)");
+                    Assert(relFragRule.IsExcluded(Path.GetFullPath(typedRelative), null, out _),
+                        "exclusion: Path.GetFullPath-normalizing the relative path makes it match, same as the absolute form");
+                }
+                finally
+                {
+                    Environment.CurrentDirectory = savedCwd;
+                    try { Directory.Delete(relRoot, true); } catch { }
+                }
             }
 
             // --- ExclusionStore: merge semantics (spec 2026-07-24) ---
@@ -7926,6 +8025,56 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ExclusionStore.Merge(corrupt, Delta(genrePodcast, ""), "self-test", out var e9);
                     Assert(e9 != null, "store: refuses to merge into an unparseable canonical file");
                     Assert(File.ReadAllText(corrupt) == "{ broken", "store: corrupt canonical file is left as-is");
+
+                    // CRITICAL (final review, 2026-07-25): a canonical file with a valid
+                    // rule PLUS a rule Load could not parse (unknown kind — the stand-in
+                    // for a future rule kind a newer MBXHub might write) must not be
+                    // silently rewritten down to just the valid rule. Hand-write the file
+                    // directly since Merge itself now refuses to ever produce one shaped
+                    // like this.
+                    var partialDir = Path.Combine(dir, "partial");
+                    Directory.CreateDirectory(partialDir);
+                    var partialCanonical = Path.Combine(partialDir, "mbxmoods-exclude.json");
+                    const string partialJson =
+                        "{\"schemaVersion\":1,\"rules\":["
+                        + "{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Podcast\"},"
+                        + "{\"kind\":\"artist\",\"action\":\"exclude\",\"value\":\"Some Artist\"}"
+                        + "]}";
+                    File.WriteAllText(partialCanonical, partialJson);
+                    var preLoad = ExclusionStore.Load(partialCanonical, out var preLoadErr);
+                    Assert(preLoadErr == null && preLoad.Rules.Count == 1 && preLoad.InvalidRuleCount == 1,
+                        "store: sanity check — hand-written partial file loads with one valid, one invalid rule");
+
+                    var beforeBytes = File.ReadAllBytes(partialCanonical);
+                    var filesBeforeMerge = Directory.GetFiles(partialDir).Length;
+                    var rPartial = ExclusionStore.Merge(partialCanonical, Delta(genreAudiobook, ""), "self-test", out var ePartial);
+                    Assert(ePartial != null, "CRITICAL: merge refuses when the canonical file has an unparseable rule");
+                    Assert(ePartial != null && ePartial.Contains("1") && ePartial.ToLowerInvariant().Contains("artist"),
+                        $"CRITICAL: refusal names the count and lists the diagnostic ({ePartial})");
+                    Assert(rPartial.BackupPath == null, "CRITICAL: no backup path reported on refusal");
+                    Assert(File.ReadAllBytes(partialCanonical).SequenceEqual(beforeBytes),
+                        "CRITICAL: canonical file is byte-identical after the refused merge");
+                    Assert(Directory.GetFiles(partialDir).Length == filesBeforeMerge,
+                        "CRITICAL: no .bak file was created by the refused merge");
+
+                    // Delta-side twin: an "add" array with one good rule and one typo'd
+                    // one must apply the good one AND report the dropped one, not swallow
+                    // it silently.
+                    var diagDir = Path.Combine(dir, "diag");
+                    Directory.CreateDirectory(diagDir);
+                    var diagCanonical = Path.Combine(diagDir, "mbxmoods-exclude.json");
+                    var rDiag = ExclusionStore.Merge(diagCanonical,
+                        Delta(genrePodcast + ",{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}", ""),
+                        "self-test", out var eDiag);
+                    Assert(eDiag == null && rDiag.Added == 1, "store: delta with one good + one bad add rule still applies the good one");
+                    Assert(rDiag.Diagnostics.Count == 1 && rDiag.Diagnostics[0].Contains("wombat"),
+                        $"store: the dropped delta rule is reported as a diagnostic, not swallowed (got {rDiag.Diagnostics.Count})");
+
+                    // MINOR 2: an all-invalid decisions side must not talk about "scanning"
+                    // — MBXHub relays this string verbatim into a UI response.
+                    ExclusionStore.Merge(diagCanonical, Delta("{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}", ""), "self-test", out var eWording);
+                    Assert(eWording != null && !eWording.ToLowerInvariant().Contains("scan"),
+                        $"MINOR: decisions-document error does not mention scanning (got: {eWording})");
                 }
                 finally { try { Directory.Delete(dir, true); } catch { } }
             }

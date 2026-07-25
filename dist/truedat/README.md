@@ -334,8 +334,11 @@ DSD file or a track over `--max-duration` still can't be analyzed, and a rule ca
 rule that was rescuing a track from the podcast heuristic stops rescuing it too, so that track
 is filtered (and its catalog entry pruned) again for the duration of that run.
 
-Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused it, and each
-scan reports per-rule hit counts, so a rule matching zero tracks is visible rather than silent:
+Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused it, on every
+scan mode (`--analyze-file`, `--file-list`/`--folder`, and the iTunes-XML library scan alike).
+The iTunes-XML library scan additionally reports per-rule hit counts, so a rule matching zero
+tracks is visible rather than silent — a single-file invocation has nothing to count, so the
+per-file modes skip that summary but still print a warning for any rule that failed to parse:
 
 ```
   Exclusions: 2 rule(s) from D:\MusicBee\Library\mbxmoods-exclude.json

@@ -17,6 +17,10 @@ namespace Truedat
         public int NotFound;
         public bool Changed;
         public string? BackupPath;
+        /// <summary>Non-fatal per-rule diagnostics from the incoming decisions delta —
+        /// e.g. an "add" array with one good rule and one typo'd one applies the good
+        /// one and reports the typo here, rather than dropping it with no trace.</summary>
+        public List<string> Diagnostics = new List<string>();
     }
 
     /// <summary>
@@ -70,12 +74,26 @@ namespace Truedat
 
             var add = new List<ExclusionRule>();
             var remove = new List<ExclusionRule>();
-            if (!TryParseDecisions(decisionsJson, add, remove, out error)) return report;
+            if (!TryParseDecisions(decisionsJson, add, remove, report.Diagnostics, out error)) return report;
 
             // Refuse to merge into a file we cannot understand: rewriting it would
             // destroy rules we failed to parse.
             var existingSet = Load(canonicalPath, out var loadErr);
             if (loadErr != null) { error = loadErr; return report; }
+
+            // Same refusal for the PARTIAL case: Load is a tolerant reader that drops
+            // unparseable/unknown-kind rules and merely counts them. Merge rebuilds the
+            // file from existingSet.Rules, so writing here would silently erase every
+            // rule that failed to parse — exactly what the comment above already
+            // forbids for the fatal case. A future-kind rule from a newer MBXHub build
+            // is the concrete scenario this guards: an older truedat must not delete a
+            // decision it doesn't understand.
+            if (existingSet.InvalidRuleCount > 0)
+            {
+                error = $"{canonicalPath}: {existingSet.InvalidRuleCount} existing rule(s) failed to parse — refusing to merge (would silently drop them):\n"
+                    + string.Join("\n", existingSet.Diagnostics);
+                return report;
+            }
 
             var merged = new List<ExclusionRule>(existingSet.Rules);
             var byIdentity = new Dictionary<string, ExclusionRule>(StringComparer.Ordinal);
@@ -154,7 +172,7 @@ namespace Truedat
         /// Parse a decisions delta. Reuses ExclusionSet's rule parser by wrapping each
         /// side in a rules document, so the two paths cannot drift on what a valid rule is.
         /// </summary>
-        static bool TryParseDecisions(string json, List<ExclusionRule> add, List<ExclusionRule> remove, out string? error)
+        static bool TryParseDecisions(string json, List<ExclusionRule> add, List<ExclusionRule> remove, List<string> diagnostics, out string? error)
         {
             error = null;
             JsonNode? root;
@@ -162,8 +180,8 @@ namespace Truedat
             catch (Exception ex) { error = "decisions document is not valid JSON: " + ex.Message; return false; }
             if (root == null) { error = "decisions document is empty"; return false; }
 
-            if (!Side(root, "add", add, out error)) return false;
-            if (!Side(root, "remove", remove, out error)) return false;
+            if (!Side(root, "add", add, diagnostics, out error)) return false;
+            if (!Side(root, "remove", remove, diagnostics, out error)) return false;
             if (add.Count == 0 && remove.Count == 0)
             {
                 error = "decisions document contains no valid rules in add or remove";
@@ -172,7 +190,7 @@ namespace Truedat
             return true;
         }
 
-        static bool Side(JsonNode root, string name, List<ExclusionRule> into, out string? error)
+        static bool Side(JsonNode root, string name, List<ExclusionRule> into, List<string> diagnostics, out string? error)
         {
             error = null;
             JsonArray? arr = null;
@@ -180,7 +198,21 @@ namespace Truedat
             if (arr == null || arr.Count == 0) return true;
             var wrapped = new JsonObject { ["schemaVersion"] = 1, ["rules"] = JsonNode.Parse(arr.ToJsonString()) };
             var set = ExclusionSet.FromJson(wrapped.ToJsonString(), out var why);
-            if (why != null) { error = $"decisions '{name}': {why}"; return false; }
+            if (why != null)
+            {
+                // wrapped is JSON we built ourselves from a non-empty array, so the only
+                // reachable failure here is "none of this side's rules are valid" — relay
+                // it in decisions-document terms. ExclusionSet.FromJson's own wording talks
+                // about "refusing to scan", which is misleading here: nothing is being
+                // scanned, and MBXHub is specced to relay this string verbatim into a UI
+                // response, so it must not claim a scan is in play.
+                error = $"decisions '{name}': has {arr.Count} rule(s) but none are valid";
+                return false;
+            }
+            // Non-fatal: some rules in this side were invalid but at least one was good.
+            // Those get applied silently unless we carry the diagnostic forward — this is
+            // the delta-side twin of the canonical-file InvalidRuleCount check above.
+            foreach (var d in set.Diagnostics) diagnostics.Add($"decisions '{name}': {d}");
             foreach (var r in set.Rules) into.Add(r);
             return true;
         }

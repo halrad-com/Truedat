@@ -94,7 +94,10 @@ A **missing** file excludes nothing (not an error). A **present but unparseable*
 truedat exit 1 rather than scan — analyzing everything while the operator believes rules are
 in force is the silent failure the whole design exists to remove. Invalid individual rules are
 skipped, counted and diagnosed (tolerant-reader convention). Exclusions never prune existing
-catalog entries. Per-rule hit counts print every scan so stale rules surface. `--exclusions`
+catalog entries. Every skip is ledgered in `mbxmoods-skipped.csv` on all scan modes; the
+iTunes-XML library scan additionally prints per-rule hit counts so stale rules surface (the
+per-file modes have nothing to count, but still print a warning per ignored/invalid rule
+diagnostic). `--exclusions`
 overrides the location, `--no-exclusions` bypasses for one run, `--apply-exclusions <delta>`
 merges (with backup) and is the **single** implementation of the merge semantics — MBXHub is
 expected to invoke it rather than write the file itself.
@@ -102,6 +105,12 @@ expected to invoke it rather than write the file itself.
 The `Episode Date` podcast heuristic is **deleted** (2026-07-24) and must not return:
 MusicBee maps ID3v2.4 `TDRL` (a *release* date) into that key, so it rides on ordinary music.
 Explicit labels only — `Podcast=true` or `Genre=Podcast`.
+
+`--check-filenames` (`RunCheckFilenames`) deliberately does **not** apply `_exclusions` —
+it reports filesystem problems (over-length paths, zero-byte files) that are worth
+surfacing whether or not a track is excluded from analysis ("check is check, not
+exclude"); it calls `FilterPodcasts` without ever calling `FilterExclusions` first, so
+don't "fix" that by wiring exclusions in without a deliberate decision to do so.
 
 ## Chunked scanning across machines
 
