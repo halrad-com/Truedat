@@ -44,7 +44,14 @@
           WorkingDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="ConsoleOutput" PropertyName="_GitCommitRaw" />
     </Exec>
-    <Exec Command="git status --porcelain --untracked-files=no"
+    <!-- Scoped to `.` — this Exec runs in the project directory, so it only sees changes
+         under Truedat/, i.e. the sources actually compiled into this binary. Deliberately
+         excludes dist/: dist/truedat/truedat.exe is a TRACKED file, so an already-rebuilt
+         but not-yet-committed exe would otherwise mark the next build +dirty even when
+         every source file is committed. A stale dist binary says nothing about the source
+         going into a new one, and a marker that cries wolf gets ignored — which would cost
+         us the one case it exists for. -->
+    <Exec Command="git status --porcelain --untracked-files=no -- ."
           ConsoleToMSBuild="true"
           ContinueOnError="true"
           IgnoreExitCode="true"
