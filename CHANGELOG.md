@@ -5,6 +5,17 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added — average track length in the scan summary (2026-07-24)
+
+- The end-of-scan summary now reports **`Avg length`** — the mean audio duration
+  of the analyzed tracks, with the measured **real-time factor** — next to the
+  existing `Avg/track` analysis time and `Analyzed IO … MB/s`. The three describe
+  the same run from different angles, and length is the one that explains a slow
+  scan: Essentia cost scales with audio duration, so a 40-minute average track
+  costs roughly 20× a 2-minute one at identical MB/s. Sampled from the
+  duration-known tracks (the same matched pair the ETA model uses); when that is
+  a subset of the analyzed set, the line says so.
+
 ### Added — read-only review surfaces (2026-07-22)
 
 - **`--list-speech [path]`** — lists the entries whose verdict is

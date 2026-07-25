@@ -409,6 +409,7 @@ namespace Truedat
         static long _etaNewAudioMsDone;
         static long _rtfAnalyzeTicks;   // thread ticks, only for tracks with known duration
         static long _rtfAudioMs;        // matching audio-ms sum
+        static long _rtfTrackCount;     // matching track count — lets the summary report average length
 
         static void RecordTrackOutcome(string cls, long swTicks)
         {
@@ -3243,6 +3244,7 @@ namespace Truedat
                             // ticks and audio-ms stay a matched pair).
                             Interlocked.Add(ref _rtfAnalyzeTicks, msResults.AnalyzeTicks);
                             Interlocked.Add(ref _rtfAudioMs, t.TotalTimeMs);
+                            Interlocked.Increment(ref _rtfTrackCount);
                         }
                         EtaDrainNewPool();  // XML-size based, matching the pre-flight totals
 
@@ -3385,6 +3387,26 @@ namespace Truedat
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
                 Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only)");
+            }
+            // Average analyzed track LENGTH next to the average analysis time and the MB/s.
+            // Those three are the same story from different angles, and length is the one
+            // that actually explains a slow scan: Essentia cost scales with audio duration,
+            // so a 40-minute average track costs ~20x a 2-minute one at identical MB/s.
+            // Printing the real-time factor makes the relationship explicit instead of
+            // leaving it to be inferred. Sampled from the duration-known tracks only, the
+            // same matched pair the ETA model uses (see ComputeEtaSecs).
+            long rtfTracks = Interlocked.Read(ref _rtfTrackCount);
+            if (rtfTracks > 0)
+            {
+                long rtfMs = Interlocked.Read(ref _rtfAudioMs);
+                var avgLen = TimeSpan.FromMilliseconds((double)rtfMs / rtfTracks);
+                double rtfAudioSecs = rtfMs / 1000.0;
+                double rtf = rtfAudioSecs > 0
+                    ? (double)Interlocked.Read(ref _rtfAnalyzeTicks) / Stopwatch.Frequency / rtfAudioSecs
+                    : 0;
+                var sampledTag = rtfTracks == analyzed ? "" : $", {rtfTracks} of {analyzed} sampled";
+                Console.WriteLine($"  Avg length: {FormatTimeSpan(avgLen)} of audio per analyzed track"
+                    + (rtf > 0 ? $"  ({rtf:F3}x realtime{sampledTag})" : sampledTag.Length > 0 ? $"  ({rtfTracks} sampled)" : ""));
             }
             // Per-outcome cost breakdown: what each track-handling class actually
             // cost this run (thread-time, so per-track, not wall). Makes the
