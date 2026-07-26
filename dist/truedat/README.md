@@ -4,7 +4,7 @@ Truedat is a Windows .NET CLI that extracts **per-track mood** across a music li
 
 **Mood is the core job, and truedat captures it two independent ways:**
 
-- **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract 55 acoustic features per track plus a valence/arousal mapping. The primary mood read. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
+- **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract the per-track acoustic feature set (see [Feature set](#feature-set) for the exact counts). The primary mood read. Truedat writes features, not an interpretation: the valence/arousal mapping is made downstream by the consumer (MBXHub/AutoQ) from these fields. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
 - **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
@@ -601,7 +601,24 @@ Creates `dist/truedat/truedat.exe` (single file, ~1 MB). Requires .NET SDK 8.0+.
 
 ## Extracted Features
 
-Truedat extracts 55 audio features per track from Essentia's output — 15 core features that feed valence/arousal, plus 40 extended descriptors that MBXHub persists for richer downstream scoring (sub-genre profiling, loudness normalisation, fingerprint-free clustering, etc.).
+### Feature set
+
+Truedat writes **features, not an interpretation**. It extracts descriptors from Essentia's output and stores them; the valence/arousal mapping and any mood scoring are made downstream by the consumer (MBXHub/AutoQ) from these fields. Nothing in `mbxmoods.json` is a mood coordinate — `valence` and `arousal` keys written by much older builds are stripped by `--migrate` as legacy.
+
+A fully analyzed track carries:
+
+| | Count | What |
+|---|---|---|
+| Core | 15 | Always present. 12 numeric, plus `key` and `mode` (strings) and `mfcc[]` (13 values). |
+| Extended | 40 | Nullable, omit-when-missing. Loudness envelope, silence, spectral shape, Bark/ERB/Mel band statistics, rhythm/tonal. |
+| Tonal/rhythm | 15 | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
+| Authenticity | 3 blocks | `bitUsage`, `hfEnergyRatio` + method, `hfSpectralStructure`. Populated only where the codec and sample rate make them meaningful. |
+
+That is **70 named feature fields**. Counting leaf *values* rather than fields — `mfcc[]` is 13 numbers, `chordsHistogram[]` is 24, each `keyVotes` profile carries its own strength — a complete entry holds **111 numbers**, of which **74 are scalar feature values** written as named keys.
+
+These counts are measured from the JSON write surface, not maintained by hand: analyse one file and count the numeric leaves in the result, minus the nine that are catalog/identity/housekeeping (`trackCount`, `trackId`, `analysisDuration`, and the six `fingerprint.v1` audio properties). Prefer re-measuring to trusting this table — an earlier figure of "55" survived here for months after the tonal/rhythm wave was added, because a hand-maintained count has nothing to check it.
+
+The 40 extended descriptors are what MBXHub persists for richer downstream scoring — sub-genre profiling, loudness normalisation, fingerprint-free clustering.
 
 Extended features are emitted as nullable JSON fields — absent/NaN Essentia paths become omitted keys, not zeros. Older mbxmoods.json entries that pre-date the extended set round-trip cleanly as `null`s.
 
