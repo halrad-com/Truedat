@@ -3100,9 +3100,16 @@ namespace Truedat
                 foreach (var tt in tracks)
                 {
                     if (string.IsNullOrEmpty(tt.Location)) continue;
-                    // Refresh-stale entries (see HasCurrentFeatures) will analyze too,
-                    // so they belong in the "new work" pool for an honest estimate.
-                    if (allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentFeatures(etaEntry.Features)) continue;
+                    // Count only what the scan will actually analyze, so this estimate does not
+                    // diverge from the loop the way it used to (I1): a current-features entry is
+                    // a cache hit, and a structural skip (DSD) or over-max-duration track is
+                    // dropped in the loop, so neither is new work here either. Refresh-stale
+                    // entries (see HasCurrentFeatures) DO re-analyze, so they stay in the pool.
+                    // Still an upper bound — the sha/head cache tiers catch more hits at scan
+                    // time, which needs IO this pre-flight avoids (hence "up to" in the print).
+                    bool current = allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentFeatures(etaEntry.Features);
+                    if (!IsAnalysisCandidate(current, StructuralSkipReason(tt.Location), OverLengthSkipReason(tt.TotalTimeMs / 1000, _maxEssentiaDurationSecs)))
+                        continue;
                     etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs;
                 }
                 _etaNewTotal = etaNew;
@@ -3113,7 +3120,7 @@ namespace Truedat
                 {
                     var newMb = etaNewBytes / (1024.0 * 1024.0);
                     var newSizeTag = etaNewBytes <= 0 ? "" : newMb >= 1024 ? $" / {newMb / 1024.0:F1} GB" : $" / {newMb:F0} MB";
-                    Console.WriteLine($"  New to catalog: {etaNew} track(s){newSizeTag} — full analysis expected");
+                    Console.WriteLine($"  New to catalog: up to {etaNew} track(s){newSizeTag} — full analysis expected (estimate; cache tiers may reduce this at scan time)");
                     // Duration-based pre-flight ETA (I2): bytes under-cost long low-bitrate
                     // speech by ~10x, so cost new work by audio duration × the catalog's
                     // measured RTF / parallelism — the model --preview already uses. The byte
@@ -9107,6 +9114,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(Math.Abs(PreflightEtaSecs(600_000, 0.10, 0) - 60.0) < 1e-6, "preflight-eta: parallelism floored to 1");
             }
 
+            // --- pre-flight new-work classifier matches what the scan analyzes (I1) ---
+            {
+                Assert(IsAnalysisCandidate(false, null, null), "preflight-work: uncached and analyzable -> counted as new work");
+                Assert(!IsAnalysisCandidate(true, null, null), "preflight-work: current-features cache entry -> not new work");
+                Assert(!IsAnalysisCandidate(false, "unsupported codec: DSD", null), "preflight-work: a structural skip is not new work (I1)");
+                Assert(!IsAnalysisCandidate(false, null, "over max duration: 60 min > 20 min ceiling"), "preflight-work: an over-length skip is not new work (I1)");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9484,6 +9499,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var p = parallelism < 1 ? 1 : parallelism;
             return newAudioMs / 1000.0 * rtf / p;
         }
+
+        /// <summary>True when the scan will actually hand this track to Essentia, from the
+        /// cheap (no-IO) signals the zero-arg pre-flight can see (I1): it is not already a
+        /// current-features cache entry, and it is neither a structural skip (DSD/video/
+        /// non-audio) nor over the --max-duration ceiling — both of which the scan loop drops
+        /// but the old pre-flight counted. This is an UPPER BOUND on new work: the sha/head
+        /// cache tiers can still catch a hit at scan time, which needs per-file IO the
+        /// pre-flight deliberately avoids, so the count is worded as an estimate, not a total.</summary>
+        internal static bool IsAnalysisCandidate(bool hasCurrentFeatures, string? structuralReason, string? overLengthReason)
+            => !hasCurrentFeatures && structuralReason == null && overLengthReason == null;
 
         /// <summary>Short bracket tag for the per-file console skip lines
         /// (<c>[skipped {tag}]</c>). Kept distinct from the full
