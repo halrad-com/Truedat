@@ -127,6 +127,22 @@ namespace Truedat
 
                 // --- structural: cannot analyze, not reviewable ---
                 if (t.IsRemote) { Bump("streamUrl"); continue; }
+
+                // --- policy: exclusion rules, evaluated HERE and not after the structural
+                // checks below, because IsExcluded is what increments per-rule hit counts and
+                // those counts must be taken over the SAME population the scan takes them
+                // over. The scan's chain is FilterRemoteUrls -> FilterExclusions -> video ->
+                // non-audio, i.e. everything except remote URLs reaches the rule check.
+                // Evaluating it after the structural `continue`s undercounted every rule that
+                // matched a structurally-skipped track — and on a METADATA-MIRROR box, where
+                // the audio lives on another machine and FileExists is false for everything,
+                // it meant the missing-file `continue` fired first for every track and EVERY
+                // rule reported "0 matched (stale rule?)" while working perfectly. A signal
+                // built to expose dead rules was condemning live ones.
+                string exclReason;
+                bool excluded = input.Exclusions.IsExcluded(loc, t.Genre, out exclReason);
+                bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
+                if (excluded) plan.Counts.Excluded++;
                 // A remote stream URL has no local file, so this check must come after the
                 // IsRemote check above — otherwise every stream would misclassify as "missing".
                 if (input.FileExists != null && !input.FileExists(loc)) { Bump("missing"); continue; }
@@ -140,17 +156,12 @@ namespace Truedat
                 bool overLimit = durSecs > input.MaxDurationSecs;
                 if (overLimit) Bump("overLimit");
 
-                // --- policy: exclusion rules. IsExcluded increments per-rule hit counts,
-                // which is what makes a stale rule visible below. Determined BEFORE the
-                // catalog-state block on purpose: the new-work accounting has to agree with
-                // the scan's own filters, and a rule-excluded track never reaches Essentia
-                // and never gets an mbxmoods.json entry (spec §10a Layering). Counting it as
-                // new work reported the saving on one line while leaving it in the cost on
-                // another — inverting the point of the mode.
-                string exclReason;
-                bool excluded = input.Exclusions.IsExcluded(loc, t.Genre, out exclReason);
-                bool included = !excluded && input.Exclusions.IsIncluded(loc, t.Genre);
-                if (excluded) plan.Counts.Excluded++;
+                // (exclusion rules were evaluated above, before the structural checks, so the
+                // per-rule hit counts see the same population the scan's chain sees. They are
+                // still known BEFORE the catalog-state block below, which is what the new-work
+                // accounting needs: a rule-excluded track never reaches Essentia and never gets
+                // an mbxmoods.json entry (spec §10a Layering), so counting it as new work would
+                // report the saving on one line while leaving it in the cost on another.)
 
                 // `included` mirrors what an include rule does inside IsExcluded itself
                 // (preview never mutates the track list, so there is no marker to set).

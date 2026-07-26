@@ -8248,6 +8248,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(planWithMissing.Estimate.NewTracks == 1,
                     $"preview: a missing file drops out of new-work count (got {planWithMissing.Estimate.NewTracks})");
 
+                // C-1 regression: a rule that matches a MISSING file must still report its hit.
+                // The scan's chain runs FilterExclusions before it ever checks existence, so the
+                // rule counts there; preview used to `continue` on missing first and count zero.
+                // On a metadata-mirror box every file is missing, so EVERY rule read as
+                // "0 matched (stale rule?)" while working — the stale-rule signal inverted from
+                // exposing dead rules to condemning live ones. Exact value, not an inequality:
+                // one track matches, so one hit.
+                var mirrorTarget = missingInput.Tracks[0].Location!;
+                var mirrorExcl = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"file\",\"action\":\"exclude\",\"path\":"
+                        + JsonSerializer.Serialize(mirrorTarget) + "}]}",
+                    out var mirrorFatal);
+                Assert(mirrorFatal == null, $"preview: mirror-box exclusion fixture parses ({mirrorFatal})");
+                // Reuse the same input, but with NOTHING on disk — the mirror-box condition.
+                missingInput.Exclusions = mirrorExcl;
+                missingInput.FileExists = _ => false;
+                var mirrorPlan = PreviewPlanner.Build(missingInput);
+                var mirrorRule = mirrorPlan.Rules.Count > 0 ? mirrorPlan.Rules[0] : null;
+                Assert(mirrorRule != null && mirrorRule.MatchCount == 1,
+                    $"preview: a rule matching a MISSING file still reports its hit (got {(mirrorRule == null ? "no rule" : mirrorRule.MatchCount.ToString())})");
+
                 // composite: a track that is BOTH over-limit AND rule-excluded must still
                 // appear exactly once, carry both reasons, respect the exclusion decision,
                 // and never be counted as new work — isolated fixture so it doesn't disturb
