@@ -5580,8 +5580,10 @@ namespace Truedat
         /// counts the UNION of the label and the acoustic verdict (an entry with stored
         /// genre=="Podcast" counts as speech even if it recomputes to acoustic "no", see
         /// ComputeCatalogStats), while this method lists only entries whose acoustic
-        /// verdict is speechLikely=="yes", regardless of genre label. So the two sets
-        /// overlap but neither contains the other — that is intentional, not a bug:
+        /// verdict is speechLikely=="yes", regardless of genre label. Acoustic-yes is a
+        /// subset of the union, so this list is a SUBSET of the --stats speech count —
+        /// they differ by the genre=="Podcast" entries that don't independently trigger
+        /// the acoustic verdict (in --stats but not here). That is intentional, not a bug:
         /// --stats answers "how much speech is in my catalog", this answers "which tracks
         /// did the acoustic signal flag". This is the only speech surface that works on
         /// the moods JSON alone — --preview needs the iTunes XML and can't run on a
