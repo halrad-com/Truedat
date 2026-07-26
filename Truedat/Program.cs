@@ -797,6 +797,18 @@ namespace Truedat
             return kept;
         }
 
+        /// <summary>
+        /// The mbxmoods-skipped.csv reason for a path the scan cannot find. Shared by
+        /// --file-list/--folder and --analyze-file so the two cannot word the same ledger row
+        /// differently. The MAX_PATH call-out is the useful half: "file not found" on a
+        /// 300-character path is almost always a length problem, not a deletion, and the
+        /// operator needs to be told which.
+        /// </summary>
+        internal static string MissingFileSkipReason(string path)
+            => (path ?? "").Length >= 260
+                ? $"file not found (path {path!.Length} chars >= 260 MAX_PATH)"
+                : "file not found";
+
         /// <summary>Path.GetExtension that never throws on invalid path chars (XML can carry anything).</summary>
         internal static string GetExtensionSafe(string path)
         {
@@ -1839,10 +1851,28 @@ namespace Truedat
             // --analyze-file: single file Essentia analysis (no iTunes XML needed)
             if (analyzeFileMode)
             {
-                if (string.IsNullOrEmpty(analyzeFilePath) || !File.Exists(analyzeFilePath))
+                // No path at all is a usage error and stays exit 1 — there is nothing to
+                // ledger and nothing the caller could have meant.
+                if (string.IsNullOrEmpty(analyzeFilePath))
                 {
-                    Console.Error.WriteLine($"Error: File not found: {analyzeFilePath}");
+                    Console.Error.WriteLine("Error: --analyze-file needs a file path.");
                     Environment.ExitCode = 1;
+                    return;
+                }
+                if (!File.Exists(analyzeFilePath))
+                {
+                    // Missing is a structural skip, not an analysis failure — the same call the
+                    // M6 fix made for --file-list, which the very same plugin workflow invokes.
+                    // CLAUDE.md:98 requires the skipped.csv row on ALL scan modes, and a piped
+                    // path that no longer exists is not a scan failure, so exit 0.
+                    var afMissReason = MissingFileSkipReason(analyzeFilePath!);
+                    var afMissDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                        ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
+                        : Environment.CurrentDirectory;
+                    AppendSkipped(Path.Combine(afMissDir, "mbxmoods-skipped.csv"),
+                        analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), afMissReason);
+                    Console.Error.WriteLine($"[skipped missing] {analyzeFilePath} ({afMissReason})");
+                    Environment.ExitCode = 0;
                     return;
                 }
 
@@ -2502,9 +2532,7 @@ namespace Truedat
                         // the counter fl already reports), and DON'T trip exit 1 — a piped path
                         // that no longer exists is not a scan failure. CLAUDE.md:98 requires the
                         // skipped.csv row on all scan modes.
-                        var flMissReason = filePath.Length >= 260
-                            ? $"file not found (path {filePath.Length} chars >= 260 MAX_PATH)"
-                            : "file not found";
+                        var flMissReason = MissingFileSkipReason(filePath);
                         AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), flMissReason);
                         Console.Error.WriteLine($"[skipped missing] {filePath} ({flMissReason})");
                         Interlocked.Increment(ref flDsdSkipped);
@@ -9350,6 +9378,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(StructuralSkipReason("") == null, "structural skip: empty path is not flagged");
                 Assert(StructuralSkipReason("C:\\music\\VIDEO.MP4") == "video file extension",
                     "structural skip: matching is case-insensitive (.MP4 behaves like .mp4)");
+            }
+
+            // --- I-5: one wording for "the scan cannot find this file", shared by
+            // --file-list/--folder and --analyze-file. Exact strings, because these land
+            // verbatim in mbxmoods-skipped.csv and an operator greps them.
+            {
+                Assert(MissingFileSkipReason(@"D:\M\gone.flac") == "file not found",
+                    $"missing-skip: an ordinary absent path reads 'file not found' (got '{MissingFileSkipReason(@"D:\M\gone.flac")}')");
+                var long260 = @"D:\M\" + new string('x', 255);   // 260 exactly
+                Assert(long260.Length == 260, $"missing-skip: fixture path is exactly 260 chars (got {long260.Length})");
+                Assert(MissingFileSkipReason(long260) == "file not found (path 260 chars >= 260 MAX_PATH)",
+                    $"missing-skip: at exactly MAX_PATH the reason names the length (got '{MissingFileSkipReason(long260)}')");
+                var long259 = long260.Substring(0, 259);
+                Assert(MissingFileSkipReason(long259) == "file not found",
+                    $"missing-skip: one char under MAX_PATH is an ordinary miss (got '{MissingFileSkipReason(long259)}')");
             }
 
             // --- over-max-duration is a structural skip, not a failure (I4) ---
