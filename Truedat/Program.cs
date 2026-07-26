@@ -821,6 +821,43 @@ namespace Truedat
             catch { }
         }
 
+        /// <summary>
+        /// Does this shard own <paramref name="path"/>? Hash-mod over PathComparer's FNV-1a,
+        /// which is deterministic across processes and machines, separator-normalized and
+        /// case-folded — so the same path lands in the same bucket everywhere regardless of XML
+        /// differences. `chunkTotal &lt;= 0` means "not sharding", i.e. this run owns everything.
+        ///
+        /// ONE implementation, used by both the work filter and the ledger scope (I-4). If those
+        /// two ever disagreed, a shard would either ledger work it never did or do work it never
+        /// ledgered.
+        /// </summary>
+        internal static bool ChunkOwns(string? path, int chunkIndex, int chunkTotal)
+        {
+            if (chunkTotal <= 0) return true;
+            if (string.IsNullOrEmpty(path)) return false;
+            return (PathComparer.Instance.GetHashCode(path!) & 0x7FFFFFFF) % chunkTotal == chunkIndex - 1;
+        }
+
+        /// <summary>
+        /// Which dropped tracks this run puts in its OWN mbxmoods-skipped.csv (I-4).
+        ///
+        /// The four pre-scan filters run before the chunk filter, deliberately: exclusion
+        /// evaluation has to see the whole library so per-rule hit counts are library-wide and
+        /// identical on every machine, which is what makes the stale-rule signal trustworthy.
+        /// But the LEDGER is a per-run artifact — its filename is already hostname-suffixed and
+        /// every other row in it (missing, error, structural) is shard-scoped. Writing the whole
+        /// library's exclusion rows into each shard's copy gave one CSV two different scopes and
+        /// N duplicates of every excluded track across an N-machine run, with --merge-moods
+        /// reconciling none of it.
+        ///
+        /// So: evaluate library-wide, ledger shard-scoped. Rule hit counts stay library-wide and
+        /// say so on the console.
+        /// </summary>
+        static Func<string?, bool> _ledgerScope = _ => true;
+        /// <summary>Suffix that tells the operator a printed count is this shard's share, not the
+        /// library's. Empty when not sharding, so an ordinary scan reads exactly as before.</summary>
+        static string _ledgerScopeNote = "";
+
         /// <summary>Drop tracks an exclusion rule excludes. Every drop is ledgered with the
         /// rule that caused it — the whole point of the mechanism is that an absent track is
         /// explainable, so a bare count is not enough. An include rule's job is simply to
@@ -835,19 +872,25 @@ namespace Truedat
             foreach (var t in tracks)
             {
                 if (string.IsNullOrEmpty(t.Location)) { kept.Add(t); continue; }
+                // IsExcluded runs for EVERY track, in or out of this shard's bucket — it is what
+                // increments per-rule MatchCount, and those counts must stay library-wide.
+                // Only the ledger row and the count below are shard-scoped.
                 if (_exclusions.IsExcluded(t.Location!, t.Genre, out var reason))
                 {
-                    removed++;
-                    if (skippedPath != null)
-                        AppendSkipped(skippedPath, t.Location!, GetExtensionSafe(t.Location!), $"excluded (rule: {reason})");
-                    if (_audit)
-                        Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
+                    if (_ledgerScope(t.Location))
+                    {
+                        removed++;
+                        if (skippedPath != null)
+                            AppendSkipped(skippedPath, t.Location!, GetExtensionSafe(t.Location!), $"excluded (rule: {reason})");
+                        if (_audit)
+                            Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
+                    }
                     continue;
                 }
                 kept.Add(t);
             }
             if (removed > 0)
-                Console.WriteLine($"  Excluded {removed} track(s) by rule"
+                Console.WriteLine($"  Excluded {removed} track(s) by rule{_ledgerScopeNote}"
                     + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
                     + (_audit ? "" : " (--audit lists each)"));
             // Per-rule hit counts, always when rules exist: a rule matching zero tracks is
@@ -856,6 +899,10 @@ namespace Truedat
             foreach (var rule in _exclusions.Rules)
                 Console.WriteLine($"    {rule.Describe()}: {rule.MatchCount} matched"
                     + (rule.MatchCount == 0 ? "   (stale rule?)" : ""));
+            // Under --chunk the two numbers above deliberately disagree, so say why rather than
+            // leaving the operator to reconcile "Excluded 93" against "genre=Podcast: 374".
+            if (_ledgerScopeNote.Length > 0 && !_exclusions.IsEmpty)
+                Console.WriteLine("    (rule counts are library-wide and identical on every chunk; the ledger holds this chunk's share)");
             return kept;
         }
 
@@ -938,16 +985,23 @@ namespace Truedat
         {
             var removed = tracks.Where(drop).ToList();
             if (removed.Count == 0) return tracks;
+            // Removal is library-wide (a video in another shard's bucket is not this shard's work
+            // either way); only the LEDGER is shard-scoped, so an N-machine run does not write N
+            // copies of every structural skip row (I-4).
+            int ledgered = 0;
             foreach (var t in removed)
             {
+                if (!_ledgerScope(t.Location)) continue;
+                ledgered++;
                 if (skippedPath != null)
                     AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), reason);
                 if (_audit)
                     Console.WriteLine($"  [skipped {reason}] {t.Artist} - {t.Name} :: {t.Location}");
             }
-            Console.WriteLine($"  Skipped {removed.Count} {label}"
-                + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
-                + (_audit ? "" : " (--audit lists each)"));
+            if (ledgered > 0)
+                Console.WriteLine($"  Skipped {ledgered} {label}{_ledgerScopeNote}"
+                    + (skippedPath != null ? $" — listed in {Path.GetFileName(skippedPath)}" : "")
+                    + (_audit ? "" : " (--audit lists each)"));
             return tracks.Where(t => !drop(t)).ToList();
         }
 
@@ -3199,6 +3253,17 @@ namespace Truedat
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
             }
 
+            // Scope this shard's ledger BEFORE the filters run (I-4). The filters themselves stay
+            // library-wide — exclusion evaluation has to see every track so per-rule hit counts
+            // are identical on every machine — but each shard writes only its own bucket's rows
+            // into its own hostname-suffixed mbxmoods-skipped.csv, so the union of N ledgers is
+            // the library rather than N copies of it.
+            if (chunkTotal > 0)
+            {
+                _ledgerScope = p => ChunkOwns(p, chunkIndex, chunkTotal);
+                _ledgerScopeNote = " (this chunk)";
+            }
+
             tracks = FilterRemoteUrls(tracks, skippedPath);
             tracks = FilterExclusions(tracks, skippedPath);
             tracks = FilterVideoFiles(tracks, skippedPath);
@@ -3217,10 +3282,9 @@ namespace Truedat
             {
                 int n = tracks.Count;
                 int bucket = chunkIndex - 1;
-                tracks = tracks
-                    .Where(t => !string.IsNullOrEmpty(t.Location)
-                        && (PathComparer.Instance.GetHashCode(t.Location) & 0x7FFFFFFF) % chunkTotal == bucket)
-                    .ToList();
+                // Same predicate the ledger scope uses, so what a shard DOES and what it
+                // RECORDS can never diverge (I-4).
+                tracks = tracks.Where(t => ChunkOwns(t.Location, chunkIndex, chunkTotal)).ToList();
                 Console.WriteLine($"Chunk {chunkIndex}/{chunkTotal} on {Environment.MachineName}: {tracks.Count} of {n} tracks (hash-mod, bucket {bucket})");
                 Console.WriteLine($"Output: {moodsPath}");
             }
@@ -9484,6 +9548,71 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(StructuralSkipReason("") == null, "structural skip: empty path is not flagged");
                 Assert(StructuralSkipReason("C:\\music\\VIDEO.MP4") == "video file extension",
                     "structural skip: matching is case-insensitive (.MP4 behaves like .mp4)");
+            }
+
+            // --- I-4: a chunked shard evaluates library-wide but LEDGERS its own bucket -----
+            // Every shard used to write the whole library's exclusion rows into its own
+            // hostname-suffixed skipped.csv, so an N-machine run produced N duplicates of every
+            // excluded track while missing/error/structural rows stayed shard-scoped: one CSV,
+            // two scopes. Rule hit counts must NOT become shard-scoped in the fix — they are the
+            // stale-rule signal and their cross-machine agreement is what makes them trustworthy.
+            {
+                Assert(ChunkOwns(@"D:\M\a.flac", 1, 0), "chunk-scope: chunkTotal 0 means not sharding — this run owns everything");
+                Assert(ChunkOwns(@"D:\M\a.flac", 3, -1), "chunk-scope: a negative chunkTotal also means not sharding");
+                Assert(!ChunkOwns("", 1, 4), "chunk-scope: an empty location is owned by no bucket");
+                Assert(!ChunkOwns(null, 1, 4), "chunk-scope: a null location is owned by no bucket");
+                foreach (var p in new[] { @"D:\M\a.flac", @"D:\M\b.mp3", @"\\srv\share\c.wav" })
+                {
+                    int owners = 0;
+                    for (int m = 1; m <= 4; m++) if (ChunkOwns(p, m, 4)) owners++;
+                    Assert(owners == 1, $"chunk-scope: {p} is owned by exactly one bucket of 4 (got {owners})");
+                }
+                Assert(ChunkOwns(@"D:/M/a.flac", 1, 4) == ChunkOwns(@"D:\M\a.flac", 1, 4),
+                    "chunk-scope: ownership is separator-normalized, so shards agree across XML dialects");
+
+                // Ledger scoping, over FilterExclusions itself.
+                var i4Dir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-chunk-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(i4Dir);
+                var i4SavedExcl = _exclusions;
+                var i4SavedScope = _ledgerScope;
+                var i4SavedNote = _ledgerScopeNote;
+                try
+                {
+                    const string mine  = @"D:\Music\Podcasts\mine.mp3";
+                    const string yours = @"D:\Music\Podcasts\yours.mp3";
+                    _exclusions = ExclusionSet.FromJson(
+                        "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}]}",
+                        out var i4Err);
+                    Assert(i4Err == null, $"chunk-ledger: fixture rule parses ({i4Err})");
+
+                    var i4Tracks = new List<ITunesTrack>
+                    {
+                        new ITunesTrack { Location = mine,  Name = "Mine" },
+                        new ITunesTrack { Location = yours, Name = "Yours" },
+                        new ITunesTrack { Location = @"D:\Music\Rock\keep.flac", Name = "Keep" },
+                    };
+                    // This shard owns exactly one of the two excluded tracks.
+                    _ledgerScope = p => string.Equals(p, mine, StringComparison.OrdinalIgnoreCase);
+                    _ledgerScopeNote = " (this chunk)";
+
+                    var i4Csv = Path.Combine(i4Dir, "mbxmoods-skipped.csv");
+                    var i4Kept = FilterExclusions(i4Tracks, i4Csv);
+
+                    Assert(i4Kept.Count == 1, $"chunk-ledger: both excluded tracks are still dropped from the work list (got {i4Kept.Count} kept)");
+                    var i4Rows = File.ReadAllLines(i4Csv);
+                    Assert(i4Rows.Length == 2, $"chunk-ledger: header + exactly ONE row — the out-of-bucket exclusion is not duplicated here (got {i4Rows.Length} lines)");
+                    Assert(i4Rows[1].StartsWith(mine, StringComparison.Ordinal),
+                        $"chunk-ledger: the row written is this shard's own track (got '{i4Rows[1]}')");
+                    Assert(_exclusions.Rules[0].MatchCount == 2,
+                        $"chunk-ledger: the rule's hit count stays LIBRARY-wide, not shard-scoped (got {_exclusions.Rules[0].MatchCount})");
+                }
+                finally
+                {
+                    _exclusions = i4SavedExcl;
+                    _ledgerScope = i4SavedScope;
+                    _ledgerScopeNote = i4SavedNote;
+                    try { Directory.Delete(i4Dir, true); } catch { }
+                }
             }
 
             // --- I-3: the startup orphan sweep must not eat a live sibling's working files.
