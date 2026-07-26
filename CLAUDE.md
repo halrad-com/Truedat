@@ -249,6 +249,41 @@ Outputs (writer tail always runs, even at zero groups): console (same/cross-fold
 
 Truedat never deletes or modifies files — every dedupe output is a report or a playlist; removal happens in MusicBee.
 
+## What an external launcher depends on (cross-repo surface)
+
+MBXHub drives truedat as a managed external tool (its Tool Lifecycle Service; the contract
+lives in **restfulbee** at `docs/reference/TOOL-LIFECYCLE-SERVICE.md` — read it there, do
+not copy it here, it is theirs and a duplicate would drift). truedat is its first customer.
+What matters on **our** side is that the following are a CONTRACT, not incidental behaviour.
+Changing any of them is a cross-repo decision that needs a heads-up to restfulbee, not a
+local tidy-up:
+
+- **Exit codes on the scan paths.** The autoscan plugin pipes paths to `truedat --file-list -`
+  and reads the exit code. A missing file is a *skip* (exit 0, ledgered to
+  `mbxmoods-skipped.csv`), not a failure — changed 2026-07-26 to match MoodsMode; if anything
+  ever moves back the other way the plugin's notion of "something went wrong" moves with it.
+- **`--apply-exclusions` writes `apply-result.json`** beside the exclusion file on **every**
+  path it reaches — success, not-found, unreadable, merge-error — and exits 1 on an invalid
+  document *without writing the exclusion file*. The hub reads that file rather than stdout
+  because its runner keeps only a bounded async tail, so a scraped summary can silently
+  truncate. **Never make a path that skips writing it**: the caller cannot distinguish "no
+  result" from "stale result from the previous run" without a freshness check, and it had to
+  add one after we shipped a case where truedat could die before writing.
+- **`--preview` emits both `preview.json` and the page**, and `preview.json` **is** the review
+  manifest the hub serves (its filename stem is the route id). The hub's asset route serves
+  only `.html` and no route serves an arbitrary sibling JSON, which is why the plan payload
+  rides inside the manifest envelope rather than beside it.
+- **`--preview` is not read-only in the filesystem sense.** It writes the manifest and the page
+  into the review folder. What it never does is analyze, or write `mbxmoods.json`. Say the
+  precise thing; "read-only" invites the wrong assumption.
+- **There is no `purge` mode, and there must not be one.** Nothing in truedat removes a catalog
+  entry on a classification — that whole class was deleted in the Heuristics → Evidence arc.
+  `--fixup` is the only mode that can cost an operator an entry, and it does so on ground truth
+  (`File.Exists` says the file is gone), not inference. Their contract briefly listed a `purge`
+  mode for truedat; it was removed on our correction. Do not implement one to satisfy a doc.
+- **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
+  by it — confirmed on their side. Enriching the text is safe; the shape is not.
+
 ## Conventions
 
 - **Offline-first.** No runtime network calls. No CDN-fetched assets, no cloud dependencies. Truedat reads files, runs subprocess tools, writes files.
