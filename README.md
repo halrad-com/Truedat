@@ -198,7 +198,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           Merge a decisions delta into the exclusion file. Backs up the
                           previous version and reports added / removed / already-set /
                           not-present counts. Exits 1 without writing if the document or
-                          the existing file cannot be parsed.
+                          the existing file cannot be parsed. The write is staged to a
+                          .tmp sibling and swapped atomically, so an interrupted or
+                          out-of-disk apply can never truncate your rules; the merge holds
+                          a zero-byte mbxmoods-exclude.json.lock sidecar across read and
+                          write, so two applies at once cannot lose one author's rules
+                          (a text editor saving the file at the same moment is outside
+                          any lock — that is what the .bak is for).
   --preview [path]        Read-only. Writes the scan work plan and the review-candidate list
                           to preview.json in the MBXHub review folder; when no MusicBee/MBXHub
                           instance is found it lands beside the moods file as

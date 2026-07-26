@@ -30,13 +30,19 @@ namespace Truedat
     /// Merge (not overwrite) is the point. The file has several legitimate authors —
     /// a hand edit, --apply-exclusions, and MBXHub relaying a review page — so a
     /// whole-file write would silently discard whichever author went second. Deltas
-    /// plus a backup make concurrent authorship safe, and keeping the merge here
-    /// means the hub delegates to truedat rather than reimplementing the semantics.
+    /// make SEQUENTIAL authorship safe; the load-modify-write inside Merge is what
+    /// makes CONCURRENT authorship unsafe, so it runs under <see cref="AcquireWriteLock"/>
+    /// (see that method for what the lock does and does not cover). Keeping the merge
+    /// here means the hub delegates to truedat rather than reimplementing the semantics.
     /// </summary>
     internal static class ExclusionStore
     {
         public const string FileName = "mbxmoods-exclude.json";
         public const string ApplyResultFileName = "apply-result.json";
+        /// <summary>Sidecar lock file suffix. Zero-byte, never deleted — see AcquireWriteLock.</summary>
+        public const string LockFileSuffix = ".lock";
+        const int LockAttempts = 10;
+        const int LockWaitMs = 100;
 
         /// <summary>
         /// Write the outcome of an apply beside the exclusion file, so a caller reads the
@@ -109,6 +115,59 @@ namespace Truedat
             return set;
         }
 
+        /// <summary>
+        /// Cross-process advisory lock over the canonical exclusion file, held across the
+        /// whole load-modify-write inside <see cref="Merge"/>.
+        ///
+        /// Without it, two interleaved --apply-exclusions runs both Load the same starting
+        /// state and the second Write discards the first author's rules entirely — a silent
+        /// lost update over the one artefact in the system that is pure human judgement and
+        /// cannot be regenerated from anything else. MBXHub's single-slot ToolRunner
+        /// serialises HUB applies only; a CLI apply is outside it.
+        ///
+        /// A sidecar file rather than an exclusive handle on the canonical file itself,
+        /// because the atomic write needs File.Replace and File.Replace cannot replace a
+        /// file we are holding open. Never deleted on release: deleting it would let a third
+        /// process create a fresh lock file while a second still held the old handle, and
+        /// both would believe they held the lock. A zero-byte sibling is the boring,
+        /// correct choice.
+        ///
+        /// SCOPE: this serialises truedat against truedat. It cannot serialise truedat
+        /// against a text editor saving the file — nothing can, short of the editor
+        /// cooperating — so the .bak remains the recovery path for that case.
+        /// </summary>
+        internal static IDisposable? AcquireWriteLock(string canonicalPath, out string? error)
+        {
+            error = null;
+            var lockPath = canonicalPath + LockFileSuffix;
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(lockPath));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
+            }
+            catch { /* the open below reports the real reason */ }
+
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    // A denied ACL or a read-only directory is not contention; retrying
+                    // cannot help, so fail immediately rather than stalling for a second.
+                    error = $"cannot lock {lockPath}: {ex.Message}";
+                    return null;
+                }
+                catch (IOException) { }
+                if (attempt >= LockAttempts - 1) break;
+                System.Threading.Thread.Sleep(LockWaitMs);
+            }
+            error = $"another truedat is writing {canonicalPath} (lock held on {lockPath}) — nothing was merged";
+            return null;
+        }
+
         public static MergeReport Merge(string canonicalPath, string decisionsJson, string updatedBy, out string? error)
         {
             error = null;
@@ -116,7 +175,20 @@ namespace Truedat
 
             var add = new List<ExclusionRule>();
             var remove = new List<ExclusionRule>();
+            // Validating the delta needs no lock, so it happens before we contend for one.
             if (!TryParseDecisions(decisionsJson, add, remove, report.Diagnostics, out error)) return report;
+
+            using (var lk = AcquireWriteLock(canonicalPath, out error))
+            {
+                if (error != null) return report;
+                return MergeLocked(canonicalPath, add, remove, updatedBy, report, out error);
+            }
+        }
+
+        static MergeReport MergeLocked(string canonicalPath, List<ExclusionRule> add, List<ExclusionRule> remove,
+            string updatedBy, MergeReport report, out string? error)
+        {
+            error = null;
 
             // Refuse to merge into a file we cannot understand: rewriting it would
             // destroy rules we failed to parse.
@@ -207,8 +279,34 @@ namespace Truedat
                 ["rules"] = arr,
             };
             var json = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(path, json, new UTF8Encoding(false));
+
+            // tmp + atomic replace, the same discipline every other file truedat owns uses
+            // (SaveResults, RunMigrate, RunMergeMoods). This file is the ONE artefact in the
+            // system that is pure operator judgement and cannot be regenerated from anything
+            // else, and it was the only one still going out through a plain WriteAllText — a
+            // kill or a full disk mid-write left it truncated, and the next scan then refuses
+            // to run (correct fail-safe) with the operator's rules gone.
+            var tmpPath = TempWritePath(path);
+            try
+            {
+                File.WriteAllText(tmpPath, json, new UTF8Encoding(false));
+                Program.AtomicReplace(tmpPath, path);
+            }
+            catch
+            {
+                // Never leave a half-written sibling beside the policy file: it reads as
+                // corruption and nothing else in the system would ever clean it up.
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                throw;
+            }
         }
+
+        /// <summary>
+        /// Staging path for the atomic write. Must live in the SAME directory as the target:
+        /// File.Replace is a same-volume operation, so a %TEMP%-based tmp would fail whenever
+        /// the library is on another drive — which is the normal case.
+        /// </summary>
+        internal static string TempWritePath(string targetPath) => targetPath + ".tmp";
 
         /// <summary>
         /// Parse a decisions delta. Reuses ExclusionSet's rule parser by wrapping each

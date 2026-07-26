@@ -1656,7 +1656,13 @@ namespace Truedat
                 {
                     var errResultPath = ExclusionStore.WriteApplyResult(canonicalExcl, report, mergeError);
                     Console.Error.WriteLine($"Error: {mergeError}");
-                    Console.Error.WriteLine("Nothing was written.");
+                    // Say what is actually true. The old wording ("Nothing was written.") was
+                    // false in the one case that matters — a failure inside the non-atomic
+                    // Write had already truncated the file — and it was also false in every
+                    // case about apply-result.json, which the line below names. Merge's write
+                    // is now tmp + atomic replace and every other refusal path returns before
+                    // touching the file, so the canonical file really is unmodified on any error.
+                    Console.Error.WriteLine("The exclusion file was not modified.");
                     Console.Error.WriteLine($"  Result:     {errResultPath}");
                     Environment.ExitCode = 1;
                     return;
@@ -8901,7 +8907,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "store: sanity check — hand-written partial file loads with one valid, one invalid rule");
 
                     var beforeBytes = File.ReadAllBytes(partialCanonical);
-                    var filesBeforeMerge = Directory.GetFiles(partialDir).Length;
+                    // Count .bak files specifically, not every sibling: Merge legitimately
+                    // creates the zero-byte .lock sidecar (I-1) even on a refusal, and a
+                    // whole-directory count would read that as "a backup was taken".
+                    var filesBeforeMerge = Directory.GetFiles(partialDir, "*.bak.*").Length;
                     var rPartial = ExclusionStore.Merge(partialCanonical, Delta(genreAudiobook, ""), "self-test", out var ePartial);
                     Assert(ePartial != null, "CRITICAL: merge refuses when the canonical file has an unparseable rule");
                     Assert(ePartial != null && ePartial.Contains("1") && ePartial.ToLowerInvariant().Contains("artist"),
@@ -8909,7 +8918,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(rPartial.BackupPath == null, "CRITICAL: no backup path reported on refusal");
                     Assert(File.ReadAllBytes(partialCanonical).SequenceEqual(beforeBytes),
                         "CRITICAL: canonical file is byte-identical after the refused merge");
-                    Assert(Directory.GetFiles(partialDir).Length == filesBeforeMerge,
+                    Assert(Directory.GetFiles(partialDir, "*.bak.*").Length == filesBeforeMerge,
                         "CRITICAL: no .bak file was created by the refused merge");
 
                     // --- apply-result.json (Phase 2a) ---
@@ -8956,6 +8965,53 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ExclusionStore.Merge(diagCanonical, Delta("{\"kind\":\"wombat\",\"action\":\"exclude\",\"value\":\"x\"}", ""), "self-test", out var eWording);
                     Assert(eWording != null && !eWording.ToLowerInvariant().Contains("scan"),
                         $"MINOR: decisions-document error does not mention scanning (got: {eWording})");
+
+                    // --- I-1: atomic write + cross-process lock ---
+                    {
+                        var atomicDir = Path.Combine(dir, "atomic");
+                        Directory.CreateDirectory(atomicDir);
+                        var ac = Path.Combine(atomicDir, "mbxmoods-exclude.json");
+                        ExclusionStore.Merge(ac, Delta(genrePodcast, ""), "self-test", out var seedErr);
+                        Assert(seedErr == null, $"I-1: seed merge succeeds ({seedErr})");
+                        var seeded = File.ReadAllBytes(ac);
+
+                        Assert(Path.GetDirectoryName(ExclusionStore.TempWritePath(ac)) == atomicDir
+                               && ExclusionStore.TempWritePath(ac) != ac,
+                            "I-1: the atomic write stages in the target's OWN directory (File.Replace is same-volume)");
+
+                        // Block the tmp path with a DIRECTORY of the same name: the tmp write
+                        // then fails, the atomic swap never happens, and the canonical file is
+                        // untouched. A plain File.WriteAllText(canonical) would have SUCCEEDED
+                        // here and rewritten the file — which is precisely what these two
+                        // assertions pin.
+                        var blocked = ExclusionStore.TempWritePath(ac);
+                        Directory.CreateDirectory(blocked);
+                        ExclusionStore.Merge(ac, Delta(genreAudiobook, ""), "self-test", out var eBlocked);
+                        Assert(eBlocked != null, "I-1: a merge whose staged write fails reports the error instead of succeeding");
+                        Assert(File.ReadAllBytes(ac).SequenceEqual(seeded),
+                            "I-1: the canonical file is byte-identical when the write fails (tmp + atomic replace)");
+                        Directory.Delete(blocked);
+
+                        // Destination open for READ sharing: File.Copy (the backup) still works,
+                        // File.Replace cannot — so the tmp file IS created and then orphaned.
+                        using (new FileStream(ac, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            ExclusionStore.Merge(ac, Delta(genreAudiobook, ""), "self-test", out _);
+                        Assert(Directory.GetFiles(atomicDir, "*.tmp").Length == 0,
+                            "I-1: a failed atomic swap leaves no .tmp sibling beside the policy file");
+
+                        // Cross-process lock: a held sidecar lock must refuse the merge, not
+                        // silently lose the other author's rules.
+                        using (new FileStream(ac + ExclusionStore.LockFileSuffix, FileMode.OpenOrCreate,
+                                              FileAccess.ReadWrite, FileShare.None))
+                        {
+                            var rLocked = ExclusionStore.Merge(ac, Delta(genreAudiobook, ""), "self-test", out var eLocked);
+                            Assert(eLocked != null && eLocked.ToLowerInvariant().Contains("lock"),
+                                $"I-1: merge refuses while another writer holds the exclusion-file lock (got: {eLocked})");
+                            Assert(!rLocked.Changed, "I-1: a lock-refused merge reports nothing changed");
+                            Assert(File.ReadAllBytes(ac).SequenceEqual(seeded),
+                                "I-1: a lock-refused merge leaves the canonical file byte-identical");
+                        }
+                    }
                 }
                 finally { try { Directory.Delete(dir, true); } catch { } }
             }
@@ -12375,7 +12431,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Atomic file replacement — uses File.Replace on Windows (ReplaceFile API) which
         /// ensures either the old or new file exists, never neither.
         /// </summary>
-        static void AtomicReplace(string tmpPath, string targetPath)
+        internal static void AtomicReplace(string tmpPath, string targetPath)
         {
             if (File.Exists(targetPath))
                 File.Replace(tmpPath, targetPath, null);

@@ -103,6 +103,21 @@ overrides the location, `--no-exclusions` bypasses for one run, `--apply-exclusi
 merges (with backup) and is the **single** implementation of the merge semantics — MBXHub is
 expected to invoke it rather than write the file itself.
 
+The merge is the one write in the system over an artefact that **cannot be regenerated** — it is
+pure operator judgement — so it gets the strongest discipline: `ExclusionStore.Write` stages to
+`mbxmoods-exclude.json.tmp` in the **same directory** (`TempWritePath`; `File.Replace` is
+same-volume) and swaps via `Program.AtomicReplace`, matching `SaveResults` / `--migrate` /
+`--merge-moods`; the tmp is deleted on failure so a half-written sibling never sits beside the
+policy file. `Merge`'s whole load-modify-write runs under `AcquireWriteLock` — a zero-byte
+`mbxmoods-exclude.json.lock` sidecar opened `FileShare.None`, 10 × 100 ms then refuse. The lock
+file is **deliberately never deleted** (deleting it would let a third process create a fresh one
+while a second still held the old handle, and both would believe they held the lock). Scope is
+honest: it serialises truedat against truedat, which is the lost-update case; it cannot serialise
+truedat against a text editor saving the file, and the `.bak` remains the recovery path there.
+Because every refusal path returns before touching the file and the write is atomic, the failure
+message is `The exclusion file was not modified.` — the old `Nothing was written.` was false both
+for a mid-write failure and for the `apply-result.json` the same run does write.
+
 The `Episode Date` podcast heuristic is **deleted** (2026-07-24) and must not return:
 MusicBee maps ID3v2.4 `TDRL` (a *release* date) into that key, so it rides on ordinary music.
 Explicit labels only — `Podcast=true` or `Genre=Podcast` — and even those are evidence now,
