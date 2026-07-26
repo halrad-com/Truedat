@@ -5,6 +5,8 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+## [5.4.4] — 2026-07-25
+
 ### Changed — speech is analyzed by default; the class is "speech", not "podcast" (2026-07-25)
 
 **Breaking behaviour change.** Nothing in truedat guesses at speech any more. Older builds
@@ -75,6 +77,26 @@ Migrate before your next scan:
 - **`--apply-exclusions` now writes `apply-result.json`** beside the exclusion
   file, on failure as well as success, so a tool driving truedat reads a file
   instead of parsing console output.
+
+### Added — `mbxmoods-preview.html`, the interactive scan-preview review page (2026-07-25)
+
+- **`--preview` co-emits a self-contained review page** beside `preview.json` and
+  records `source.reviewHtml`, so MBXHub serves it byte-for-byte (the `dupes.html`
+  precedent). It also opens offline from `file://` — the plan data is embedded
+  inline. It renders the manifest and emits an exclusion *decisions delta*
+  (`add`/`remove`); it never writes the exclusion file — `--apply-exclusions` is the
+  only writer.
+- **Bulk-first triage:** a searchable genre picker dialog (excluded genres show as a
+  short removable list), per-row exclude/include, a per-row folder-subtree picker,
+  and *exclude / include all shown* over the currently-filtered rows. Pending genre
+  and folder exclusions reflect live on the affected candidate rows.
+- **Over-limit tracks are read-only** — a file past the analysis ceiling is a
+  structural skip, not a decision, so it is shown for awareness (split/transcode, or
+  raise `--max-duration`) without exclude/include controls.
+- **Host-aware:** served from MBXHub the page refreshes counts and posts decisions
+  back to the hub; opened from disk it downloads the delta and shows the
+  `--apply-exclusions` line. Every served call has a timeout and falls back to the
+  offline path, so the page never hangs on the hub.
 
 ### Fixed — structural skips (video/DSD/playlist) now agree across every scan mode (2026-07-25)
 
