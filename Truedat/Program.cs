@@ -3744,7 +3744,7 @@ namespace Truedat
             Console.WriteLine($"  Analyzed:   {analyzed}");
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             if (dsdSkipped > 0)
-                Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
+                Console.WriteLine($"  Skipped (structural): {dsdSkipped}  (DSD / video / playlist — see mbxmoods-skipped.csv)");
             if (overLengthSkipped > 0)
                 Console.WriteLine($"  Over-length: {overLengthSkipped}  (exceeds --max-duration ceiling — see mbxmoods-skipped.csv)");
             if (missingSkipped > 0)
@@ -9121,6 +9121,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(over != null && over.Contains("20 min"), "overlength: reason names the ceiling in minutes");
                 Assert(OverLengthSkipReason(1000, 1200) == null, "overlength: a track under the ceiling is analyzed, not skipped");
                 Assert(OverLengthSkipReason(1200, 1200) == null, "overlength: exactly at the ceiling is analyzed (strict >)");
+                Assert(OverLengthSkipReason(90, 30)!.Contains("30 s"), "overlength: sub-minute ceiling shows seconds, not '0 min' (M8)");
             }
 
             // --- --preview no-ETA line distinguishes "nothing new" from "no history" (I3) ---
@@ -9498,7 +9499,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         internal static string? OverLengthSkipReason(int trackDurationSecs, int maxDurationSecs)
         {
             if (trackDurationSecs <= maxDurationSecs) return null;
-            return $"over max duration: {trackDurationSecs / 60.0:F0} min > {maxDurationSecs / 60.0:F0} min ceiling (--max-duration to override)";
+            // M8: a sub-minute value must not render as "0 min" (F0 of e.g. 0.33) — show
+            // seconds below a minute so a small --max-duration reads honestly.
+            string Dur(int s) => s < 60 ? $"{s} s" : $"{s / 60.0:F0} min";
+            return $"over max duration: {Dur(trackDurationSecs)} > {Dur(maxDurationSecs)} ceiling (--max-duration to override)";
         }
 
         /// <summary>The `--preview` Estimate line for the no-ETA case. A negative EtaSecs means
