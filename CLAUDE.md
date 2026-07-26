@@ -84,6 +84,19 @@ fragment matches under any root, which is what makes rules portable across mirro
 libraries), `genre` (exact, case-insensitive, trimmed — deliberately **not** substring) and
 `file` — each `exclude` or `include`, with **`include` always winning** regardless of order.
 
+A `file` rule's optional `audioStreamSha256` is **report-only, never matching** (I-2, 2026-07-26).
+Matching stays exact normalized path equality; the sha exists so that when the path is gone,
+`PreviewPlanner.BuildRuleStats` can report `PreviewRuleStat.State` as `moved-or-deleted` and name
+the catalog paths still holding that content in `Candidates` (emitted as `state` / `candidates[]`
+in `preview.json`, rendered by `PreviewRuleNote` on the console and `ruleNote()` in the page).
+Absent-from-disk but still-in-catalog is a third state, `path-unreachable` — the metadata-mirror
+case; calling it "moved" would condemn every live rule on a mirror box, which is the same
+inversion C-1 fixed. Do **not** make the sha match: one `audioStreamSha256` covers every copy of
+the audio (it is what `--duplicates` groups on), so re-matching would silently widen a rule the
+operator wrote narrowly. Candidate resolution deliberately does **not** use `BuildHashIndex` —
+that index is first-wins on duplicate shas, so it would name an arbitrary copy; `BuildRuleStats`
+scans the catalog once and lists all matches, sorted.
+
 Layering is two-tier, and no heuristic sits in it any more: structural skips (missing /
 video / stream URL / non-audio / DSD / over `--max-duration`) are "cannot analyze" and ignore
 `include`; everything else is policy, decided solely by `ExclusionSet.IsExcluded` —

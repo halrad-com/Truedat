@@ -74,11 +74,47 @@ namespace Truedat
         public int Count = 0;
     }
 
+    /// <summary>
+    /// One exclusion rule's hit count, plus why a zero count means what it means.
+    ///
+    /// MatchCount alone is the documented stale-rule signal, and on a `file` rule it lies in a
+    /// specific way: a rule whose target MOVED reports 0 exactly like a rule whose target never
+    /// existed, and the documented operator response to a zero count is to delete the rule —
+    /// which silently re-admits the file. <see cref="State"/> separates the two, and
+    /// <see cref="Candidates"/> names where the content is now when the rule recorded an
+    /// audioStreamSha256 and the catalog still holds it.
+    ///
+    /// This is REPORTING, not matching. Spec §4.2 says a moved `file` rule is "reported as moved
+    /// or deleted and is re-resolvable against the catalog's sha index" — an offer to the
+    /// operator, not a silent re-match. Nothing here makes a rule start excluding a path the
+    /// operator did not name; that would widen a rule's reach behind their back, and because
+    /// audioStreamSha256 is exactly what --duplicates groups on, one sha routinely maps to
+    /// several copies.
+    /// </summary>
     internal sealed class PreviewRuleStat
     {
+        /// <summary>Path-matching rule whose target is present, or a rule whose kind is not
+        /// path-anchored (folder/genre), or existence could not be checked.</summary>
+        public const string StateLive = "live";
+        /// <summary>`file` rule whose path is absent from disk but STILL PRESENT in the catalog:
+        /// the audio has not moved, this machine just cannot see it. The metadata-mirror case
+        /// (audio on another box) — reporting those as moved-or-deleted would recreate exactly
+        /// the "every rule looks stale on a mirror" failure C-1 removed.</summary>
+        public const string StateUnreachable = "path-unreachable";
+        /// <summary>`file` rule whose path is absent from disk AND from the catalog.</summary>
+        public const string StateMoved = "moved-or-deleted";
+
         public string Rule = "";
         public string Action = "";
         public long MatchCount = 0;
+        /// <summary>One of the State* constants above.</summary>
+        public string State = StateLive;
+        /// <summary>Current catalog paths whose audioStreamSha256 equals the rule's recorded
+        /// sha — where the content is now. Empty when the rule carries no sha, when the sha is
+        /// not in the catalog (an unanalyzed file has no entry, so the operator could not have
+        /// obtained its sha either — likely genuinely deleted), or when State is not
+        /// <see cref="StateMoved"/>. ALL matches are listed, never an arbitrary one.</summary>
+        public List<string> Candidates = new List<string>();
     }
 
     internal sealed class PreviewGenre

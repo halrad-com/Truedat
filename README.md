@@ -365,8 +365,14 @@ Three rule kinds, each `exclude` or `include`:
   `\Podcasts\**` does not match `\MyPodcastsBackup\`.
 - **`genre`** — exact match, case-insensitive, trimmed. Not a substring match: `Podcast`
   does not match `Comedy Podcast`.
-- **`file`** — one exact path. Optional `audioStreamSha256` records the durable identity so
-  a moved file can be re-resolved later; optional `note` records why you decided.
+- **`file`** — one exact path. Matching is always that exact path, nothing else. Optional
+  `audioStreamSha256` records the audio's durable content identity: when the path no longer
+  exists, `--preview` reports the rule as **moved or deleted** rather than leaving it looking
+  like a stale rule you should delete, and names the catalog paths that still hold that content
+  so you can re-point the rule. It is a report and an offer — the rule never starts matching
+  those paths on its own, because one `audioStreamSha256` routinely covers several copies of
+  the same audio (that is exactly what `--duplicates` groups on) and a rule must not quietly
+  widen. Optional `note` records why you decided.
 
 **`include` always wins.** If any include rule matches, the track is analyzed — regardless of
 rule order. That is the escape hatch for music a label or an embedded marker misclassifies.
@@ -425,6 +431,14 @@ per-file modes skip that summary but still print a warning for any rule that fai
     genre=Podcast: 374 matched
     folder=\Old Shows\**: 0 matched   (stale rule?)
 ```
+
+`(stale rule?)` is a prompt to delete the rule, so `--preview` never prints it for a `file` rule
+that has merely *moved* — deleting that rule would re-admit the file you rejected. Such a rule is
+reported instead as `(moved — content now at: …)` when it recorded an `audioStreamSha256` the
+catalog still holds, `(moved or deleted — no catalog entry holds this content)` when it did not,
+and `(file not reachable from here — still in the catalog, rule is live)` when you are previewing
+from a machine that cannot see the audio (a metadata mirror, an unplugged drive, a share that is
+down). In `preview.json` these are the `state` and `candidates[]` fields on each rule.
 
 Excluding a file does not remove an existing `mbxmoods.json` entry — it only stops future
 analysis, so the decision is reversible.

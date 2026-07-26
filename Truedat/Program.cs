@@ -1805,7 +1805,7 @@ namespace Truedat
                 if (pvPlan.Counts.Excluded > 0)
                     Console.WriteLine($"  Excluded:   {pvPlan.Counts.Excluded,6:N0}  by rule");
                 foreach (var r in pvPlan.Rules)
-                    Console.WriteLine($"    {r.Rule}: {r.MatchCount} matched{(r.MatchCount == 0 ? "   (stale rule?)" : "")}");
+                    Console.WriteLine($"    {r.Rule}: {r.MatchCount} matched{PreviewRuleNote(r)}");
                 Console.WriteLine($"  To review:  {pvPlan.ReviewTotal}"
                     + (pvPlan.ReviewTruncated ? $"  (listing the first {pvPlan.Review.Count})" : ""));
                 Console.WriteLine($"  Ceiling:    {pvPlan.Limits.MaxDurationSecs / 60} min ({pvPlan.Limits.MaxDurationSource})"
@@ -8320,6 +8320,117 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
+            // --- I-2: a `file` rule whose target MOVED must not read as stale -------------
+            // MatchCount == 0 is the documented stale-rule signal and the documented response is
+            // to DELETE the rule; on a moved file that re-admits the very file the operator
+            // rejected. Spec 4.2 requires the rule be reported moved-or-deleted and its content
+            // re-resolvable against the catalog's shas. REPORTING only — matching stays exact
+            // path equality, so nothing starts excluding a path nobody named.
+            {
+                const string movedPath  = @"D:\M\gone\setlist.flac";
+                const string copyA      = @"D:\M\albums\setlist.flac";
+                const string copyB      = @"D:\M\archive\setlist.flac";
+                const string offlinePath = @"X:\Mirror\offline.flac";
+                const string livePath   = @"D:\M\here.flac";
+                const string sha = "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888";
+
+                TrackEntry Ent(string s) => new TrackEntry { AudioStreamSha256 = s };
+                var cat = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    // Deliberately inserted copyB-before-copyA so the sorted candidate list is
+                    // proving the sort, not the insertion order.
+                    [copyB] = Ent(sha),
+                    [copyA] = Ent(sha),
+                    [offlinePath] = Ent("ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000"),
+                };
+
+                string FileRule(string p, string? s) =>
+                    "{\"kind\":\"file\",\"action\":\"exclude\",\"path\":" + JsonSerializer.Serialize(p)
+                    + (s == null ? "" : ",\"audioStreamSha256\":" + JsonSerializer.Serialize(s)) + "}";
+
+                var i2Excl = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":["
+                    + FileRule(movedPath, sha) + ","
+                    + FileRule(offlinePath, sha) + ","
+                    + FileRule(@"D:\M\vanished\nosha.flac", null) + ","
+                    + FileRule(livePath, sha) + ","
+                    + "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"}]}",
+                    out var i2Err);
+                Assert(i2Err == null, $"I-2: fixture rule set parses ({i2Err})");
+                Assert(i2Excl.Rules.Count == 5, $"I-2: all five fixture rules survived parsing (got {i2Excl.Rules.Count})");
+                // Sha round-trips through the parser — the reserved-field contract every part of
+                // this feature stands on.
+                Assert(i2Excl.Rules[0].Sha == sha, "I-2: a file rule's audioStreamSha256 survives parsing");
+
+                var i2Plan = PreviewPlanner.Build(new PreviewPlannerInput
+                {
+                    Tracks = new List<ITunesTrack>(),
+                    Catalog = cat,
+                    Exclusions = i2Excl,
+                    MaxDurationSecs = 12000,
+                    LongTrackSecs = 1800,
+                    ReviewCap = 500,
+                    Parallelism = 1,
+                    // Only livePath is on disk. Everything else is absent, which is the whole
+                    // point: absent-and-uncatalogued is moved, absent-but-catalogued is a mirror.
+                    FileExists = p => p == livePath,
+                });
+                Assert(i2Plan.Rules.Count == 5, $"I-2: every rule still gets a stat row (got {i2Plan.Rules.Count})");
+
+                var rMoved = i2Plan.Rules[0];
+                Assert(rMoved.State == PreviewRuleStat.StateMoved,
+                    $"I-2: a file rule absent from disk AND from the catalog is reported moved-or-deleted (got {rMoved.State})");
+                Assert(rMoved.Candidates.Count == 2,
+                    $"I-2: ALL catalog copies sharing the sha are offered, not an arbitrary one (got {rMoved.Candidates.Count})");
+                Assert(rMoved.Candidates[0] == copyA && rMoved.Candidates[1] == copyB,
+                    $"I-2: candidates are sorted, so the list does not depend on catalog order (got {string.Join(",", rMoved.Candidates)})");
+                Assert(PreviewRuleNote(rMoved) == $"   (moved — content now at: {copyA} | {copyB})",
+                    $"I-2: the moved note names the current paths instead of prompting a delete (got '{PreviewRuleNote(rMoved)}')");
+
+                var rMirror = i2Plan.Rules[1];
+                Assert(rMirror.State == PreviewRuleStat.StateUnreachable,
+                    $"I-2: a file rule absent from disk but PRESENT in the catalog is path-unreachable, not moved (got {rMirror.State})");
+                Assert(rMirror.Candidates.Count == 0,
+                    $"I-2: an unreachable rule offers no candidates — nothing moved (got {rMirror.Candidates.Count})");
+                Assert(PreviewRuleNote(rMirror) == "   (file not reachable from here — still in the catalog, rule is live)",
+                    $"I-2: the unreachable note says the rule is live (got '{PreviewRuleNote(rMirror)}')");
+
+                var rNoSha = i2Plan.Rules[2];
+                Assert(rNoSha.State == PreviewRuleStat.StateMoved,
+                    $"I-2: a sha-less file rule whose path is gone is still moved-or-deleted (got {rNoSha.State})");
+                Assert(rNoSha.Candidates.Count == 0,
+                    $"I-2: with no recorded sha there is nothing to re-resolve against (got {rNoSha.Candidates.Count})");
+                Assert(PreviewRuleNote(rNoSha) == "   (moved or deleted — no catalog entry holds this content)",
+                    $"I-2: the no-candidate note does not claim to know where the file went (got '{PreviewRuleNote(rNoSha)}')");
+
+                var rLive = i2Plan.Rules[3];
+                Assert(rLive.State == PreviewRuleStat.StateLive,
+                    $"I-2: a file rule whose path is on disk stays live (got {rLive.State})");
+                Assert(PreviewRuleNote(rLive) == "   (stale rule?)",
+                    $"I-2: a live rule with zero hits still gets the stale prompt (got '{PreviewRuleNote(rLive)}')");
+
+                Assert(i2Plan.Rules[4].State == PreviewRuleStat.StateLive,
+                    $"I-2: a folder rule is never path-anchored, so never moved (got {i2Plan.Rules[4].State})");
+
+                // Matching is UNCHANGED: the rule still only matches the path it names. A moved
+                // rule must not start excluding the copies its sha resolved to.
+                Assert(!i2Excl.IsExcluded(copyA, null, out _),
+                    "I-2: a moved rule's sha-resolved candidate is NOT excluded (report, never re-match)");
+                Assert(i2Excl.IsExcluded(movedPath, null, out _),
+                    "I-2: the moved rule still matches exactly the path it names");
+
+                // No existence check injected (a caller that cannot check) must say nothing
+                // rather than guess: everything reads live.
+                var i2NoCheck = PreviewPlanner.Build(new PreviewPlannerInput
+                {
+                    Tracks = new List<ITunesTrack>(), Catalog = cat, Exclusions = i2Excl,
+                    MaxDurationSecs = 12000, LongTrackSecs = 1800, ReviewCap = 500, Parallelism = 1,
+                    FileExists = null,
+                });
+                Assert(i2NoCheck.Rules.TrueForAll(r => r.State == PreviewRuleStat.StateLive),
+                    "I-2: with no existence check injected, no rule is claimed moved");
+            }
+
             // --- --preview's new-work accounting must agree with the scan's own filters
             // (whole-branch fix wave). Every one of these classes is dropped before Essentia
             // sees it, so counting it as new work inflates newTracks, newBytes AND the ETA
@@ -9643,6 +9754,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             newTracks == 0
                 ? "nothing new to analyze"
                 : "not estimable (no analyzed history yet to learn from)";
+
+        /// <summary>
+        /// The trailing note on a `--preview` rule line (I-2). `(stale rule?)` on a zero count is
+        /// the documented prompt to DELETE the rule, and for a `file` rule whose target moved that
+        /// advice is both wrong and destructive — deleting it re-admits the file the operator
+        /// rejected. So the moved/unreachable states suppress the stale prompt and say what is
+        /// actually true, naming the content's current path(s) when the rule recorded a sha and
+        /// the catalog still holds it. A non-zero count gets no note at all.
+        /// </summary>
+        internal static string PreviewRuleNote(PreviewRuleStat r)
+        {
+            if (r.State == PreviewRuleStat.StateUnreachable)
+                return "   (file not reachable from here — still in the catalog, rule is live)";
+            if (r.State == PreviewRuleStat.StateMoved)
+                return r.Candidates.Count > 0
+                    ? $"   (moved — content now at: {string.Join(" | ", r.Candidates)})"
+                    : "   (moved or deleted — no catalog entry holds this content)";
+            return r.MatchCount == 0 ? "   (stale rule?)" : "";
+        }
 
         /// <summary>Pre-flight ETA in seconds for a zero-arg scan, or -1 when it cannot be
         /// estimated. Duration-based, NOT bytes: wall-clock ≈ total new-audio duration × the

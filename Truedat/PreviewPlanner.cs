@@ -231,13 +231,7 @@ namespace Truedat
                 plan.AutoSkip.Add(new PreviewBucket { Class = kv.Key, Count = kv.Value });
             plan.AutoSkip.Sort((a, b) => b.Count.CompareTo(a.Count));
 
-            foreach (var rule in input.Exclusions.Rules)
-                plan.Rules.Add(new PreviewRuleStat
-                {
-                    Rule = rule.Describe(),
-                    Action = rule.Action == ExclusionAction.Include ? "include" : "exclude",
-                    MatchCount = rule.MatchCount,
-                });
+            BuildRuleStats(input, plan);
 
             foreach (var kv in genres) plan.Genres.Add(kv.Value);
             plan.Genres.Sort((a, b) => b.Tracks.CompareTo(a.Tracks));
@@ -269,6 +263,76 @@ namespace Truedat
                 plan.Estimate.EtaBasis = "unavailable";
             }
             return plan;
+        }
+
+        /// <summary>
+        /// Per-rule hit counts, plus the moved-or-deleted determination for `file` rules (I-2).
+        ///
+        /// Why this exists at all: MatchCount == 0 is the documented stale-rule signal, and the
+        /// documented response to it is to delete the rule. On a `file` rule whose target MOVED
+        /// that advice is wrong and destructive — deleting the rule re-admits the file the
+        /// operator rejected. Spec §4.2 requires such a rule be "reported as moved or deleted and
+        /// re-resolvable against the catalog's sha index", so the state is reported and the
+        /// current path(s) of the content are OFFERED. Matching is untouched: a `file` rule is
+        /// still exact normalized path equality, so nothing starts excluding a path the operator
+        /// never named.
+        ///
+        /// Cost: one pass over the catalog, and only when at least one rule actually needs a sha
+        /// resolved. Deliberately NOT routed through BuildHashIndex — that index is first-wins on
+        /// duplicate shas, and one sha legitimately maps to several catalog paths (it is exactly
+        /// what --duplicates groups on), so an index lookup would name an arbitrary copy. Naming
+        /// one of three copies is worse than naming all three or none.
+        /// </summary>
+        static void BuildRuleStats(PreviewPlannerInput input, PreviewPlan plan)
+        {
+            var needSha = new List<(PreviewRuleStat Stat, string Sha)>();
+            foreach (var rule in input.Exclusions.Rules)
+            {
+                var stat = new PreviewRuleStat
+                {
+                    Rule = rule.Describe(),
+                    Action = rule.Action == ExclusionAction.Include ? "include" : "exclude",
+                    MatchCount = rule.MatchCount,
+                };
+                plan.Rules.Add(stat);
+
+                // Only `file` rules are anchored to one path, so only they can go stale by a
+                // move. No existence check injected (self-tests, and any caller that cannot
+                // reach the audio) means we say nothing rather than guess.
+                if (rule.Kind != ExclusionKind.File || input.FileExists == null) continue;
+                if (input.FileExists(rule.Value)) continue;
+
+                // Absent from disk but still in the catalog: the content has not moved, this
+                // machine just cannot see the file. Calling that "moved or deleted" on a
+                // metadata-mirror box would condemn every live rule at once.
+                if (input.Catalog.ContainsKey(rule.Value))
+                {
+                    stat.State = PreviewRuleStat.StateUnreachable;
+                    continue;
+                }
+
+                stat.State = PreviewRuleStat.StateMoved;
+                if (!string.IsNullOrEmpty(rule.Sha)) needSha.Add((stat, rule.Sha!));
+            }
+
+            if (needSha.Count == 0) return;
+
+            var wanted = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var n in needSha)
+                if (!wanted.ContainsKey(n.Sha)) wanted[n.Sha] = new List<string>();
+
+            foreach (var kv in input.Catalog)
+            {
+                var sha = kv.Value == null ? null : kv.Value.AudioStreamSha256;
+                if (string.IsNullOrEmpty(sha)) continue;
+                List<string> hits;
+                if (wanted.TryGetValue(sha!, out hits)) hits.Add(kv.Key);
+            }
+
+            // Sorted so the reported candidate order does not depend on catalog iteration
+            // order — the operator sees the same list on every run.
+            foreach (var hits in wanted.Values) hits.Sort(StringComparer.OrdinalIgnoreCase);
+            foreach (var n in needSha) n.Stat.Candidates.AddRange(wanted[n.Sha]);
         }
     }
 }

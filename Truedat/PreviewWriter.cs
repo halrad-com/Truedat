@@ -204,6 +204,17 @@ namespace Truedat
                     w.WriteString("rule", r.Rule);
                     w.WriteString("action", r.Action);
                     w.WriteNumber("matchCount", r.MatchCount);
+                    // state qualifies a zero matchCount: "live" means the count is meaningful,
+                    // "moved-or-deleted" / "path-unreachable" mean it is not (I-2). Always
+                    // written so a consumer never has to infer it from absence; candidates only
+                    // when there are some.
+                    w.WriteString("state", r.State);
+                    if (r.Candidates.Count > 0)
+                    {
+                        w.WriteStartArray("candidates");
+                        foreach (var c in r.Candidates) w.WriteStringValue(c);
+                        w.WriteEndArray();
+                    }
                     w.WriteEndObject();
                 }
                 w.WriteEndArray();
@@ -478,6 +489,17 @@ let LONG=(D.limits&&D.limits.longTrackSecs)||1800;
 let genreFilter='';
 function renderCounts(){const c=D.counts||{};document.getElementById('counts').innerHTML=num(c.libraryTotal)+' tracks · '+num(c.analyzed)+' analyzed · '+num(c.excluded)+' excluded · '+`<span class='badge'>${num(c.awaitingReview)} awaiting</span>`;document.getElementById('host').textContent='host: '+(OFFLINE?'offline':'served');}
 function renderSummary(){const e=D.estimate||{},l=D.limits||{},sk=D.autoSkip||[];const skips=sk.length?sk.map(b=>num(b.count)+' '+esc(b.class)).join(' · '):'none';document.getElementById('summary').innerHTML=`<div><span class='k'>Estimate</span><b>${num(e.newTracks)}</b> new · <b>${bytes(e.newBytes)}</b> · ETA <b>${hms(e.etaSecs)}</b> <span class='ci'>(${esc(e.etaBasis||'unavailable')})</span></div>`+`<div><span class='k'>Limits</span>ceiling <b>${num(l.maxDurationSecs)}s</b> (${esc(l.maxDurationSource)}) · long ≥ <b>${Math.round((l.longTrackSecs||0)/60)} min</b> <span class='ci' title='${esc(l.extractorNote)}'>ⓘ</span></div>`+`<div><span class='k'>Auto-skipped</span><span class='ci' title='structural — a scan cannot analyze these; not reviewable'>can&#39;t analyze:</span> ${skips}</div>`;}
+// Mirrors Program.PreviewRuleNote. '(0 - stale?)' is the prompt to DELETE a rule, and on a
+// file rule whose target moved that is wrong and destructive - deleting it re-admits the file.
+// state qualifies the count; candidates name where the content is now. Reporting only: the page
+// never turns a candidate into a rule.
+function ruleNote(r){
+  if(r.state==='path-unreachable')return ` <span class='n'>(not reachable from here - still in the catalog, rule is live)</span>`;
+  if(r.state==='moved-or-deleted')return (r.candidates&&r.candidates.length)
+    ?` <span class='stale'>(moved - content now at: ${r.candidates.map(esc).join(' | ')})</span>`
+    :` <span class='stale'>(moved or deleted - no catalog entry holds this content)</span>`;
+  return r.matchCount===0?` <span class='stale'>(0 - stale?)</span>`:` <span class='n'>(${num(r.matchCount)})</span>`;
+}
 function renderBulk(){
   // The actionable genres are the excluded few — a short always-visible removable list.
   // Adding one is a deliberate pick from a searchable dialog (the full list can run to
@@ -487,7 +509,7 @@ function renderBulk(){
   const excl=genres.filter(isExcl);
   const exclBlock=excl.length?`<div class='sec-h'>Excluded genres — click to un-exclude</div><div class='chips'>${excl.map(g=>`<button class='chip excl' data-genre='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span> ✕</button>`).join('')}</div>`:'';
   const adderBlock=genres.length?`<div class='sec-h'>Genres</div><button class='sec' id='gpick'>＋ exclude genres… <span class='n'>(${genres.length})</span></button>`:'';
-  const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));const stale=r.matchCount===0?` <span class='stale'>(0 — stale?)</span>`:` <span class='n'>(${num(r.matchCount)})</span>`;return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${stale}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
+  const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${ruleNote(r)}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
   document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='${Math.max(7200,LONG*2)}' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};

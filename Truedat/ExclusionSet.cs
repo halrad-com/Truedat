@@ -21,7 +21,15 @@ namespace Truedat
         public ExclusionAction Action;
         /// <summary>Folder pattern, genre name, or file path — exactly as authored.</summary>
         public string Value = "";
-        /// <summary>Optional durable identity for file rules; lets a moved file be re-resolved.</summary>
+        /// <summary>
+        /// Optional durable content identity (audioStreamSha256) for `file` rules. Read by
+        /// PreviewPlanner.BuildRuleStats to report a rule whose path has gone as
+        /// <c>moved-or-deleted</c> and to NAME the catalog paths that still hold the content.
+        /// It is deliberately NOT part of matching: a `file` rule is exact normalized path
+        /// equality, and re-matching by content would silently widen the rule to every copy of
+        /// the audio (one sha maps to several paths — it is exactly what --duplicates groups on).
+        /// Report and offer, never re-match. Also not part of <see cref="Identity"/>.
+        /// </summary>
         public string? Sha;
         /// <summary>Optional operator note, round-tripped so the reason for a decision survives.</summary>
         public string? Note;
