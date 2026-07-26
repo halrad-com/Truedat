@@ -487,6 +487,13 @@ function renderBulk(){
   document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='7200' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
+// The two DURATION reason values, emitted by PreviewPlanner (see the two reasons.Add calls
+// beside its LongTrackSecs / overLimit checks). The slider filters on them, which makes this a
+// CONTRACT with the C# side rather than free text: if the planner's wording changes and this
+// list is not updated, the slider silently stops filtering - it fails OPEN, showing every row,
+// with no error anywhere. Keep it in one place so there is a single thing to keep in step.
+const DURATION_REASONS=['long','over-limit'];
+function isDurationReason(r){return DURATION_REASONS.indexOf(r)>=0;}
 function rsnClass(r){if(r.indexOf('marker:')===0)return 'mark';return RSN[r]||'';}
 // Does a pending GENRE or FOLDER rule of this action match candidate c? Mirrors the
 // exclusion matcher closely enough for live table feedback: genre exact/case-insensitive,
@@ -519,7 +526,7 @@ function bulkDecide(paths,action){
 function renderTable(){
   const body=document.getElementById('body');
   if(!(D.review||[]).length){body.innerHTML=`<div class='empty'>Nothing awaiting review.</div>`;shownDecidable=[];return;}
-  const rows=(D.review||[]).filter(c=>c.durationSecs>=LONG||c.overLimit||(c.reasons||[]).some(r=>r!=='long'&&r!=='over-limit'));
+  const rows=(D.review||[]).filter(c=>c.durationSecs>=LONG||c.overLimit||(c.reasons||[]).some(r=>!isDurationReason(r)));
   const trunc=D.reviewTruncated?`<div class='trunc'>showing ${num(D.review.length)} of ${num(D.reviewTotal)} — narrow with the chips or the slider</div>`:'';
   if(!rows.length){body.innerHTML=trunc+`<div class='empty'>No candidates at the current long-track filter.</div>`;shownDecidable=[];return;}
   // Over-limit is a STRUCTURAL skip (Essentia can't analyze past the ceiling), not a policy
