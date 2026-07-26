@@ -389,6 +389,24 @@ all assert the same thing:
 
 An explicit `PCST` flag is stronger evidence than a `WFED` feed URL for exactly that reason.
 
+**There are three independent sources, and they answer different questions.** The two above are
+*declared* evidence — someone wrote a label or a tag. The third is *measured*: the
+[`speechLikely` verdict](#truedat-verdict-block) is computed from the audio's own features
+(danceability, chord strength, silence rate, zero-crossing rate, tempo-peak weight, key strength)
+and is the only one that can see a file nobody labelled. That matters because the two classes of
+talk content behave differently: a **registered** podcast — subscribed in MusicBee, carrying a feed
+URL and a genre — is already identified by its labels, while a **downloaded or copied archive** of
+the same show carries nothing at all and is invisible to every label and marker. The acoustic
+verdict is what finds the second kind.
+
+**What identification deliberately does not do.** It classifies the *genus* — is this
+speech-dominant? — and stops there. Audiobook, comedy, lecture, news, interview and talk-dominant
+are one class, and truedat does not try to tell them apart, because the thing that separates them
+is provenance (was this distributed as an episodic feed?) and provenance is not in the audio. A
+file that lost its feed registration lost that information permanently; no amount of signal
+processing recovers it. Species-level questions are answered by things that do carry provenance —
+folder layout, genre, feed registration — which is to say, by rules you write.
+
 Every exclusion is ledgered in `mbxmoods-skipped.csv` with the rule that caused it, on every
 scan mode (`--analyze-file`, `--file-list`/`--folder`, and the iTunes-XML library scan alike).
 The iTunes-XML library scan additionally reports per-rule hit counts, so a rule matching zero

@@ -130,6 +130,23 @@ read-only review surfaces (`--list-speech`, the `--stats` speech count) recomput
 report it — neither one skips a file or removes an entry. `--include-podcasts` and
 `ITunesTrack.ExclusionIncluded` are retired outright (hard cut, 2026-07-25) — the file
 `mbxmoods-exclude.json` is the only override, via its own `include` rules.
+
+**Taxonomy — the class is SPEECH, and there will be no podcast detector** (operator ruling,
+2026-07-25). Audiobook, comedy, lecture, news, interview and talk-dominant are ONE GENUS: speech.
+"Podcast" is never a class — it is the name of a particular piece of *evidence* (the `Genre=Podcast`
+or `Podcast=true` label, a `PCST` marker) or an external key, and those literals keep their real
+names precisely because they belong to other systems. Identification therefore has three sources
+answering two different questions: the XML labels and the embedded markers are **declared**
+evidence, and `speechLikely` is the **measured** one — the only source that can see a *downloaded
+or copied archive* of a show, which carries no feed registration and is invisible to every label
+and marker. That archive class is the entire reason the acoustic verdict exists.
+**Do not add a `podcastLikely` verdict.** Content analysis can answer "is this speech-dominant"
+and nothing more; podcast-vs-audiobook-vs-lecture is *provenance* — was this distributed as an
+episodic feed — and provenance is not present in the audio. A file that lost its feed registration
+lost that fact permanently, and no signal processing recovers it. Species-level questions are
+answered by folder layout, genre and feed registration, i.e. by operator-written rules. Proposing
+an audio-derived podcast classifier means proposing to assert something the evidence cannot
+support, which is the same category error the whole Heuristics → Evidence arc removed.
 This has been walked back **twice** now (the `Episode Date` vote in 2026-07-24, then the
 label/marker skip + the two `--migrate` purges + `--include-podcasts` in this phase) —
 a third heuristic-decides-something attempt should have to argue against this paragraph in
