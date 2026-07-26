@@ -5823,7 +5823,7 @@ namespace Truedat
             if (s.Speech > 0)
             {
                 Console.WriteLine();
-                Console.WriteLine($"  {"Speech",-20} {s.Speech,9:N0} tracks   (review: truedat --list-speech, then exclude via --apply-exclusions)");
+                Console.WriteLine($"  {"Speech",-20} {s.Speech,9:N0} tracks   (review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions)");
             }
 
             // Recommended next steps — detected state -> exact command. Advisory
@@ -5869,12 +5869,14 @@ namespace Truedat
                 if (waveFiltered > 0)
                     waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: exclusion-rule/video/URL/non-audio)");
                 if (waveStale > 0)
-                    waveBreakdown.Add($"{waveStale,6:N0}  analyzable, just stale  ->  truedat --refresh-features");
+                    waveBreakdown.Add(scanWorkList == null
+                        ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh-features  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
+                        : $"{waveStale,6:N0}  analyzable, just stale   ->  truedat --refresh-features");
             }
             if (s.MissingFingerprint > 0)
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
-                rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate");
+                rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate  (needs the library's iTunes XML; run from the library dir, not a metadata mirror)");
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
             {
