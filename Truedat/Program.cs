@@ -2366,18 +2366,22 @@ namespace Truedat
                     {
                         var ext = Path.GetExtension(p);
                         if (string.IsNullOrEmpty(ext)) continue;
-                        if (UnsupportedExtensions.Contains(ext))
+                        if (AudioExtensions.Contains(ext)) { walked.Add(p); continue; }
+                        // Non-audio: ledger the recognized structural types (DSD / video /
+                        // playlist-redirector) so a .mp4 / .m3u in the tree is visible rather
+                        // than silently dropped (M7). Genuinely irrelevant files (art, text,
+                        // logs) are ignored without a row so the ledger is not flooded.
+                        var folderSkip = StructuralSkipReason(p);
+                        if (folderSkip != null)
                         {
                             unsupportedCount++;
-                            AppendSkipped(flSkippedPath, p, ext, "unsupported codec: DSD");
-                            Console.Error.WriteLine($"[skipped DSD] {p}");
-                            continue;
+                            AppendSkipped(flSkippedPath, p, ext, folderSkip);
+                            Console.Error.WriteLine($"[skipped {StructuralSkipConsoleTag(folderSkip)}] {p}");
                         }
-                        if (AudioExtensions.Contains(ext)) walked.Add(p);
                     }
                     filePaths = walked;
                     Console.Error.WriteLine($"  Found {filePaths.Count} audio file(s)" +
-                        (unsupportedCount > 0 ? $" (skipped {unsupportedCount} unsupported DSD/DSF)" : ""));
+                        (unsupportedCount > 0 ? $" (skipped {unsupportedCount} non-audio: DSD/video/playlist — see mbxmoods-skipped.csv)" : ""));
                 }
                 else if (fileListPath == "-")
                 {
@@ -2459,9 +2463,17 @@ namespace Truedat
                 {
                     if (!File.Exists(filePath))
                     {
-                        Interlocked.Increment(ref flFailed);
-                        flErrors.Add($"{filePath}: file not found");
-                        Console.Error.WriteLine($"[SKIP] {filePath}: file not found");
+                        // Missing is a structural skip, not an analysis failure (M6): ledger it
+                        // to mbxmoods-skipped.csv like MoodsMode does, count it as a skip (reuse
+                        // the counter fl already reports), and DON'T trip exit 1 — a piped path
+                        // that no longer exists is not a scan failure. CLAUDE.md:98 requires the
+                        // skipped.csv row on all scan modes.
+                        var flMissReason = filePath.Length >= 260
+                            ? $"file not found (path {filePath.Length} chars >= 260 MAX_PATH)"
+                            : "file not found";
+                        AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), flMissReason);
+                        Console.Error.WriteLine($"[skipped missing] {filePath} ({flMissReason})");
+                        Interlocked.Increment(ref flDsdSkipped);
                         return;
                     }
 
