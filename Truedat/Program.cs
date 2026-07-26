@@ -1761,7 +1761,7 @@ namespace Truedat
                 if (pvPlan.Estimate.EtaSecs >= 0)
                     Console.WriteLine($"  Estimate:   {FormatTimeSpan(TimeSpan.FromSeconds(pvPlan.Estimate.EtaSecs))} ({pvPlan.Estimate.EtaBasis})");
                 else
-                    Console.WriteLine("  Estimate:   not estimable (nothing analyzed yet to learn from)");
+                    Console.WriteLine($"  Estimate:   {PreviewNoEtaReason(pvPlan.Estimate.NewTracks)}");
                 foreach (var b in pvPlan.AutoSkip)
                     Console.WriteLine($"  Skipped:    {b.Count,6:N0}  {b.Class}  (structural — cannot be analyzed)");
                 if (pvPlan.Counts.Excluded > 0)
@@ -9080,6 +9080,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(OverLengthSkipReason(1200, 1200) == null, "overlength: exactly at the ceiling is analyzed (strict >)");
             }
 
+            // --- --preview no-ETA line distinguishes "nothing new" from "no history" (I3) ---
+            {
+                Assert(PreviewNoEtaReason(0) == "nothing new to analyze", "preview-eta: New:0 says nothing new to analyze, not 'not estimable' (I3)");
+                Assert(PreviewNoEtaReason(5).Contains("not estimable"), "preview-eta: new work but no history is genuinely not estimable");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9432,6 +9438,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (trackDurationSecs <= maxDurationSecs) return null;
             return $"over max duration: {trackDurationSecs / 60.0:F0} min > {maxDurationSecs / 60.0:F0} min ceiling (--max-duration to override)";
         }
+
+        /// <summary>The `--preview` Estimate line for the no-ETA case. A negative EtaSecs means
+        /// two very different things and must not share one message (I3): when there is no new
+        /// work (NewTracks == 0) the honest line is "nothing new to analyze"; "not estimable" is
+        /// reserved for genuinely absent history — new work exists but no prior analysisDuration
+        /// yet to learn an RTF from. Saying "nothing analyzed yet" on a fully-analyzed,
+        /// caught-up library is the wrong answer to the wrong question.</summary>
+        internal static string PreviewNoEtaReason(int newTracks) =>
+            newTracks == 0
+                ? "nothing new to analyze"
+                : "not estimable (no analyzed history yet to learn from)";
 
         /// <summary>Short bracket tag for the per-file console skip lines
         /// (<c>[skipped {tag}]</c>). Kept distinct from the full
