@@ -1,5 +1,56 @@
 # Truedat Backlog
 
+## Scan policy — next items
+
+The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
+rewrite all shipped in v0.5.4.4. What's left:
+
+- **`speech` as a fourth exclusion rule kind.** `{"kind":"speech","action":"exclude"}`
+  beside `folder`/`genre`/`file`, parsed and matched by `ExclusionSet`, merged through
+  the existing generic `--apply-exclusions` (so MBXHub needs nothing new), under the same
+  include-always-wins layering. **The constraint is the design, not a limitation:**
+  exclusions are evaluated at scan time against the XML work list, *before* analysis,
+  but `speechLikely` derives from Essentia features that only exist *after* it. So a
+  speech rule cannot gate a track nobody has analysed yet. Honest semantics are
+  **analyse once, classify, excluded thereafter** — the rule set and the catalog
+  co-evolve and the work shrinks every pass. Rejected alternative: gating on a cheap
+  pre-analysis proxy (duration + codec) — that is a heuristic deciding, which is exactly
+  what this arc removed.
+- **`--log [path]`** — tee console output to a file *without* `--audit`'s per-track
+  verbosity. Today the only way to keep a run's output is `--audit`, which couples
+  "persist my output" to "tell me about every skipped track"; an operator who just wants
+  the final summary after the window closes gets a much noisier file than they asked for.
+  `TeeWriter` and the plumbing already exist — `--audit` would become "verbose, implies
+  `--log`". This also removes most of the reason to want a pause-at-exit in the launcher.
+- **`mbxmoods-skipped.csv` growth.** It appends every run by design (README documents the
+  cross-run history as intentional, and that history is the diagnostic value). On a large
+  library with many structural skips this grows without bound. **Ruled 2026-07-26: leave
+  as documented.** If it ever needs solving, the answer is keep-last-N *rotation*, never
+  per-run truncation — rotation preserves the documented semantics, truncation silently
+  deletes a record the docs promise.
+- **`--apply-exclusions` concurrency.** The write is atomic and takes a cross-process lock,
+  so truedat cannot lose another truedat's rules. Nothing can serialise it against a text
+  editor saving over the file; the `.bak` remains the recovery path there. Recorded so the
+  gap is known rather than assumed closed.
+
+## Speech → transcription
+
+`speechLikely` classifies a **genus** — audiobook, comedy, lecture, news, interview and
+talk-dominant are one class — and deliberately does not attempt the species, because
+podcast-vs-audiobook is provenance and provenance is not in the audio. **There will be no
+`podcastLikely` verdict** (see `CLAUDE.md`).
+
+Transcription is the direction detection points at. Not started, and it changes the tuning
+question: today the thresholds favour precision because a `"yes"` once drove a destructive
+prune (the danceability < 0.50 gate exists because that purge took Charlie Parker, NIN and
+Travis). As a *transcription selector* the cost matrix inverts — a false positive wastes
+one transcode, a false negative means a recording is never transcribed — so the gates want
+loosening, but deliberately: a method-tag bump against a labelled set, not drift. Binding
+constraints: offline-first (never cloud ASR) and the three-tier Python rule, so it ships as
+an opt-in sibling tool on the `vam-tools/` / `smfm-tools/` precedent, never a runtime
+dependency of the scanner. Segment-level speech/music boundaries would need real extraction
+— i.e. a rescan — unlike the write-time verdict.
+
 ## Duplicate review workflow
 
 **Shipped (see CHANGELOG 5.3.9):** exact + probable detection, keeper recommendation
@@ -117,8 +168,9 @@ Plan: [`docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md`](docs/pl
 4. DSD/DSF codec support (currently fails analysis) — **P4, deferred**.
    Phase 5.1 catches `.dsf` / `.dff` / `.dsd` cleanly at scan entry: rows
    land in `mbxmoods-skipped.csv` with reason `unsupported codec: DSD`,
-   no entry in `mbxmoods.json` or `mbxmoods-errors.csv`, console emits
-   `[skipped DSD]`. User-visible failures are gone; full DSD-to-PCM
+   and no entry in `mbxmoods.json` or `mbxmoods-errors.csv`. (The summary
+   line that reported these was relabelled on 2026-07-26 — it counted every
+   structural skip while naming only DSD.) User-visible failures are gone; full DSD-to-PCM
    support (likely via an ffmpeg `dsd2pcm` bridge) is still P4.
 5. AAC ESDS-box encoder fingerprint (MP3 LAME tag equivalent for AAC/M4A)
 6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
@@ -259,8 +311,8 @@ already handled `more than 2 channels` downmix):
   mbxmoods.json. Mutually exclusive with all other standalone modes.
 
 Acceptance: opus file that previously exited 1 in 0.1s with
-`AudioLoader: Unsupported codec!` now analyzes end-to-end (exit 0, all
-55 features populated, `fingerprint.v1.codec="opus"`,
+`AudioLoader: Unsupported codec!` now analyzes end-to-end (exit 0, the full
+feature set populated, `fingerprint.v1.codec="opus"`,
 `audioStreamSha256` set). Reduces (but doesn't close) the broader
 "DSD / Non-PCM Format Support" item below — DSD likely errors with a
 different essentia string and may need its own trigger.
@@ -274,9 +326,11 @@ Essentia. `fingerprint.v1` composite (pathTail + fileSize + audio props + 64 KB
 invariant-region MD5) is the ms-scale peer-pull ping primitive; `stream` level
 adds durable `audioStreamSha256` over the audio region. Default Essentia scans
 ride-along both `fingerprint.v1` and `audioStreamSha256` via two concurrent
-tasks (6 total: essentia + fileMd5 + audioMd5 + chromaprint + fingerprintV1 +
-audioStreamSha256), so every full scan emits an identity-complete row —
-not just `--hash-only --level stream` runs. Zero new deps. Wire format frozen
+tasks, so every full scan emits an identity-complete row — not just
+`--hash-only --level stream` runs. (The fan-out described here as six tasks was
+accurate in 2026-04: `audioMd5` and `chromaprint` were removed with the legacy
+fingerprint pipeline in v5.4.0, and `fileMd5` became opt-in behind `--file-md5`
+on 2026-07-11.) Zero new deps. Wire format frozen
 at `docs/reference/identity-wire-format.md`; consumed by the MetaServer side
 (Phase 2 Track B, separate repo).
 

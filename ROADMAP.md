@@ -38,10 +38,41 @@ reconciliation across library copies (e.g. treating enriched tags like SMFM as a
 syncable field) rather than re-copying audio — read/detect in Truedat, apply outside
 the read-only binary.
 
+**5. Scan policy — shipped, expanding.**
+Truedat used to guess which files not to analyse: a podcast label, an embedded marker,
+a genre string. Every guess was wrong for someone, and two of them were walked back
+after they cost real music its catalog entries. That whole class is gone.
+`mbxmoods-exclude.json` — typed rules (`folder`/`genre`/`file`, `exclude`/`include`,
+include always wins) — is now the **only** thing that keeps a file out of a scan, and
+nothing removes a catalog entry on a verdict. The signals survive as *evidence* on the
+review surface: `--preview` reports what a scan would do without doing it, and emits a
+self-contained review page for turning that into rules. Next: a fourth rule kind,
+`speech`, with analyse-once-then-excluded semantics — a classification-derived rule
+cannot gate a track nobody has analysed yet, and that constraint is the design, not a
+limitation to engineer around.
+
+**6. Speech — classification shipped, interpretation ahead.**
+`speechLikely` is a write-time verdict over stored features, so a threshold change is
+retroactive across the catalog with no rescan. It classifies a **genus**: audiobook,
+comedy, lecture, news, interview and talk-dominant are one class. It deliberately does
+not attempt the species — podcast vs audiobook is *provenance*, and provenance is not
+in the audio; a file that lost its feed registration lost that fact permanently. The
+open direction is transcription, for which detection is the selector. That inverts the
+tuning: today the thresholds favour precision because a false positive once drove a
+destructive prune; as a transcription selector a false negative costs more, so the
+gates want revisiting deliberately — with a method-tag bump, against a labelled set,
+not by drift.
+
 ## Principles (unchanging)
 
 - **Read-only over audio.** Apply/removal never lives in `truedat.exe`.
 - **Offline-first.** No runtime network calls; self-contained outputs.
 - **The JSON is the contract.** Tolerant-reader boundary to any consumer; no shared lib.
 - **Report, don't decide.** Truedat surfaces the evidence; a human (or a downstream
-  tool) acts.
+  tool) acts. This is the one that took the longest to actually mean: heuristics that
+  quietly decided what not to scan were removed twice before the principle was enforced
+  in the code rather than stated in a doc. A signal may inform a decision; it may not be
+  the decision.
+- **Every build better than the last.** No release regresses the suite, the replay
+  gates, or a documented behaviour. Coverage may shrink only when the behaviour it
+  pinned is deliberately removed, and the removal is named.
