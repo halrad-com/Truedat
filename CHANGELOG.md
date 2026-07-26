@@ -7,6 +7,76 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [5.4.4] — 2026-07-25
 
+### Fixed — post-ship gap hunt: nine defects in the exclusion and scan paths (2026-07-26)
+
+A review pass over the shipped code, aimed at the seams *between* separately-reviewed pieces
+rather than at any one change. Everything below was demonstrated with a reproduction before
+being fixed. All nine shipped under this tag.
+
+**Three that misled the operator, in the order they mattered:**
+
+- **`--apply-exclusions` wrote to the wrong file and reported success.** With no positional
+  argument it fell back to the *current directory*, creating a brand-new exclusion file
+  wherever you happened to be standing, printing `Added: 1` and exiting 0 — while `--preview`
+  and the scan read the library's file and excluded nothing. That was the exact invocation the
+  migration note documents. It now resolves the library the same way the other modes do, and
+  **refuses** rather than silently creating a file it cannot place. The target is printed
+  before the merge, so a wrong one is visible even when the merge then fails.
+- **`genre` rules did nothing on the per-file scan paths.** `--file-list`, `--folder` and
+  `--analyze-file` check exclusions before any cache tier and so had no parsed tags; they
+  passed a hard-coded null genre. A `genre` rule therefore worked on the library scan and was
+  inert on the plugin-driven autoscan path — where new files actually arrive. Now read via a
+  header-only lookup, gated so the cost is paid only when a genre rule exists.
+- **`--preview` reported working rules as stale.** It counted rule hits after its structural
+  checks, the scan counted them before, so preview under-reported and printed
+  `0 matched (stale rule?)` against live rules. On a metadata-mirror box — where the audio
+  lives on another machine — *every* rule read as stale. A signal built to expose dead rules
+  was condemning live ones. Both now count over the same population.
+
+**Six more:**
+
+- The exclusion file — the one artefact you cannot regenerate, since it is hand-authored
+  policy — was the only file written without the atomic-replace discipline used everywhere
+  else, and an unlocked read-modify-write besides. Now atomic and serialised against other
+  truedat runs. (Nothing can serialise it against a text editor saving over it; the `.bak`
+  remains the recovery path there.) It also printed `Nothing was written.` in a case where it
+  had written.
+- A `file` rule's `audioStreamSha256` was stored and round-tripped but never read, so a rule
+  whose file had *moved* looked identical to a dead one. It is now reported as
+  moved-or-deleted, and `--preview` names the catalog paths that still hold that content.
+  Deliberately **reporting only** — re-matching by content would silently widen a
+  single-file rule to every copy of the audio, since one hash covers them all.
+- `--analyze-file` failed the run on a missing file while `--file-list` ledgered it as a skip.
+  Now consistent.
+- `--preview` was documented as read-only while writing into a live MusicBee instance's
+  review folder. The docs now say the precise thing: it never analyzes and never writes
+  `mbxmoods.json`.
+- The staging sweep at startup reached past `--stage-dir` and could delete files a concurrent
+  run was reading. It now respects the override and refuses when a sibling truedat is
+  detected. One target still cannot be isolated — it holds hardlinks, which cannot cross
+  volumes — and is covered by that refusal plus an age gate.
+- Under `--chunk`, every shard ledgered the whole library's skips, so an N-shard run wrote N
+  copies of each row. Each shard now ledgers its own bucket. Per-rule counts stay
+  library-wide, which is what makes a stale rule visible.
+
+### Docs — feature counts measured, and truedat no longer claims to map valence/arousal (2026-07-26)
+
+Three places advertised "55 audio features per track". That was right for the core and extended
+sets but was never updated when the tonal/rhythm wave added fifteen more; the real figure is **70
+named feature fields** (74 scalar values; 111 numbers once `mfcc[]`, `chordsHistogram[]` and the
+`keyVotes` strengths are counted as values). The counts are now measured from the JSON write
+surface with the recipe written down, and `CLAUDE.md` says not to maintain a total by hand — a
+hand-kept number has nothing to check it and reads as authoritative while being wrong.
+
+The larger error was attribution: two places said truedat produces a valence/arousal mapping. It
+does not — it writes features, and the mapping is made downstream. `--migrate` actively *strips*
+`valence` and `arousal` as legacy keys, so the docs promised an output the tool deliberately
+removes.
+
+Also: `README.md` and `SBOM.md` at the repo root are now the single master for their `dist/`
+copies, and the build copies both. The two README copies had diverged such that the next routine
+build would have silently overwritten the corrected one with the stale one.
+
 ### Docs — migration guidance corrected: analyze once, then exclude (2026-07-26)
 
 The upgrade note shipped in af3fb2f told upgraders to write an exclusion rule *before* their next
