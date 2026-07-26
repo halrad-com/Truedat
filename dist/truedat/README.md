@@ -173,7 +173,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --bit-depth <16|24>     With --transcode: override output bit depth (default: match source).
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
-  --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --stage-dir <path>      Override the scratch dir used for staged source copies and
+                          multi-channel downmixes (default %TEMP%\.truedat-stage). Also the
+                          isolation lever if you ever need two truedats on one machine —
+                          see "Run one truedat at a time" below.
   --max-duration <secs>   Max track length for Essentia analysis (default 12000 = 200 min —
                           the stock extractor's ChordsDetection buffer limit). Longer tracks
                           are recorded in the errors CSV and count as failed (not the
@@ -198,15 +201,25 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           Merge a decisions delta into the exclusion file. Backs up the
                           previous version and reports added / removed / already-set /
                           not-present counts. Exits 1 without writing if the document or
-                          the existing file cannot be parsed.
-  --preview [path]        Read-only. Writes the scan work plan and the review-candidate list
-                          to preview.json in the MBXHub review folder; when no MusicBee/MBXHub
-                          instance is found it lands beside the moods file as
-                          mbxmoods-preview.json instead. Auto-discovers the iTunes XML the same
-                          way a normal scan does (exe dir, its parent, then the cwd), so it
-                          needs no positional argument when run from inside the library folder.
-                          Analyzes nothing, writes no mbxmoods.json, and never touches the
-                          exclusion file. [path] is an OUTPUT and is only claimed when it looks
+                          the existing file cannot be parsed. The write is staged to a
+                          .tmp sibling and swapped atomically, so an interrupted or
+                          out-of-disk apply can never truncate your rules; the merge holds
+                          a zero-byte mbxmoods-exclude.json.lock sidecar across read and
+                          write, so two applies at once cannot lose one author's rules
+                          (a text editor saving the file at the same moment is outside
+                          any lock — that is what the .bak is for).
+  --preview [path]        Analyzes nothing, writes no mbxmoods.json, and never touches the
+                          exclusion file. It DOES write two files: the scan work plan and the
+                          review-candidate list go to preview.json plus mbxmoods-preview.html
+                          in the MBXHub review folder of the instance that owns the library you
+                          pointed it at (creating that folder if needed) — so this is read-only
+                          over your catalog, not over the disk. When no MusicBee/MBXHub instance
+                          owns the library they land beside the moods file as
+                          mbxmoods-preview.json instead; never in some other instance's folder.
+                          Pass [path] to choose the destination yourself. Auto-discovers the
+                          iTunes XML the same way a normal scan does (exe dir, its parent, then
+                          the cwd), so it needs no positional argument when run from inside the
+                          library folder. [path] is an OUTPUT and is only claimed when it looks
                           like one (a directory separator or a .json suffix), so the library
                           path can still be positional; and it refuses, with exit 1 and nothing
                           written, to overwrite an .xml or an existing mood catalog.
@@ -218,6 +231,17 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
 
 **Network libraries:** when the source is on a UNC share (`\\server\share\…`), a mapped network drive (e.g. `Z:\` mapped to `\\server\share`), or a local path with non-ASCII characters, truedat stages each file once to a local temp copy and runs the 8-9 concurrent per-track workers (and the cache hierarchy's tier-2/3/4 body reads) against the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. Cache tier-1 (path + mtime equality) doesn't stage — already-cached tracks stay free. Local-ASCII paths read directly. Use `--no-stage` to opt out, or `--stage-dir` to relocate the staging directory (e.g. to a fast scratch volume when `%TEMP%` is on a small SSD). Per-track stage failures fall back to direct read with a one-line warning — scans never abort over a staging hiccup. End-of-scan summary reports `staging: N staged` (or `N staged, M direct-fallback`), with a stderr warning when >5% of attempted stages fell back so a wedged stage-dir is visible.
+
+**Run one truedat at a time.** Truedat is single-instance by design. At startup it sweeps
+leftover scratch files from previous runs — staged copies and downmix WAVs under the staging
+dir, and `.truedat-tmp` hardlinks on each drive — and it cannot tell a *dead* run's leftovers
+from a *live* sibling's working files. Two guards make that safe rather than merely documented:
+a second truedat process on the machine skips the sweep entirely with a warning, and any file
+touched in the last 60 minutes is left alone regardless. If you genuinely need two runs at once,
+give each its own `--stage-dir` (or pass `--no-stage`); note the per-drive `.truedat-tmp`
+hardlink area cannot be relocated, because a hardlink has to sit on the same volume as its
+source, so it leans on those two guards. To scale across *machines*, use `--chunk M/N` and
+`--merge-moods` rather than concurrent runs against one library.
 
 **Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
 - Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
@@ -231,7 +255,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
 - **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
 - **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
-- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines.
+- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
 - **Resumable** - Stop and restart anytime. Progress is saved every 25 analyzed tracks.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches the disk. FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`) — no re-analysis; FLACs whose tags were rewritten *before* upgrading are re-keyed **automatically during a normal scan** (props-gated, no re-analysis — the `FLAC re-key` summary line reports it); `--verify --backfill --accept-flac-tag-drift` applies the same rule in a verify pass without running a scan. Detail goes to `mbxmoods-verify.csv`; exit 1 on any drift / missing / error makes it CI-friendly. Add `--backfill` to repair missing fields in place without re-running Essentia. Two tiers run by default: identity (audioStreamSha256 / fileMd5 with `--file-md5` / fingerprint.v1 / bitDepth / encoder / MP3 LAME tag — TagLib-driven, fast) and features (bitUsage / hfEnergyRatio / hfSpectralStructure — ffmpeg-driven, ~30s per applicable lossless 24-bit track). Use `--backfill-level identity` to skip the slow ffmpeg tier on a first pass, or `--backfill-level features` to fill only the ffmpeg-tier fields on a library whose identity is already complete. All tiers are gated by the SHA drift check, so drifted entries are flagged as `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - The progress line shows estimated completion, running average per track, and the live analyzed-data rate (MB/s over a trailing window). The estimate is two-class aware: tracks new to the catalog are costed by **audio duration** (the iTunes XML `Total Time` field) at the measured analysis real-time-factor — duration is what Essentia cost actually scales with, so a queue of 3-hour episodes prices correctly even when the first completions were short tracks — while already-cataloged tracks are costed at the measured cache-hit average. No ETA is shown until something has actually been measured. The end-of-scan summary breaks down count and average cost per outcome class (analyzed vs each cache tier vs skips).
@@ -359,8 +383,14 @@ Three rule kinds, each `exclude` or `include`:
   `\Podcasts\**` does not match `\MyPodcastsBackup\`.
 - **`genre`** — exact match, case-insensitive, trimmed. Not a substring match: `Podcast`
   does not match `Comedy Podcast`.
-- **`file`** — one exact path. Optional `audioStreamSha256` records the durable identity so
-  a moved file can be re-resolved later; optional `note` records why you decided.
+- **`file`** — one exact path. Matching is always that exact path, nothing else. Optional
+  `audioStreamSha256` records the audio's durable content identity: when the path no longer
+  exists, `--preview` reports the rule as **moved or deleted** rather than leaving it looking
+  like a stale rule you should delete, and names the catalog paths that still hold that content
+  so you can re-point the rule. It is a report and an offer — the rule never starts matching
+  those paths on its own, because one `audioStreamSha256` routinely covers several copies of
+  the same audio (that is exactly what `--duplicates` groups on) and a rule must not quietly
+  widen. Optional `note` records why you decided.
 
 **`include` always wins.** If any include rule matches, the track is analyzed — regardless of
 rule order. That is the escape hatch for music a label or an embedded marker misclassifies.
@@ -420,6 +450,14 @@ per-file modes skip that summary but still print a warning for any rule that fai
     folder=\Old Shows\**: 0 matched   (stale rule?)
 ```
 
+`(stale rule?)` is a prompt to delete the rule, so `--preview` never prints it for a `file` rule
+that has merely *moved* — deleting that rule would re-admit the file you rejected. Such a rule is
+reported instead as `(moved — content now at: …)` when it recorded an `audioStreamSha256` the
+catalog still holds, `(moved or deleted — no catalog entry holds this content)` when it did not,
+and `(file not reachable from here — still in the catalog, rule is live)` when you are previewing
+from a machine that cannot see the audio (a metadata mirror, an unplugged drive, a share that is
+down). In `preview.json` these are the `state` and `candidates[]` fields on each rule.
+
 Excluding a file does not remove an existing `mbxmoods.json` entry — it only stops future
 analysis, so the decision is reversible.
 
@@ -462,9 +500,17 @@ Scan preview (nothing was analyzed):
 (Illustrative numbers, not a measurement — a real run reports your own library's counts, and
 the estimate is derived from your own catalog, never a canned figure.)
 
-It also writes `preview.json` — the same data as a machine-readable manifest, which is what
-MBXHub's review surface renders. It goes to the MBXHub review folder, or beside the moods file
-as `mbxmoods-preview.json` when no MusicBee/MBXHub instance is found.
+**What "preview" does and does not touch.** It analyzes nothing, writes no `mbxmoods.json`, and
+never modifies your exclusion file — those are the guarantees. It is *not* read-only over the
+disk: it writes `preview.json` (the same data as a machine-readable manifest, which is what
+MBXHub's review surface renders) and `mbxmoods-preview.html` (a self-contained review page you
+can open offline). Both go into the MBXHub review folder of the instance that owns the library
+you pointed it at — `<library root>\AppData\MBXHub\review\`, created if it does not exist, which
+is a live application's data directory. The destination is anchored to the *scanned library*, the
+same way `--duplicates --manifest` is, so several MusicBee instances on one machine cannot
+receive each other's plans. When no instance owns the library, both land beside the moods file
+(`mbxmoods-preview.json`) instead — never in some other instance's folder. Pass an explicit
+`--preview <path>` to choose the destination yourself.
 
 `New` counts only the tracks a scan would actually hand to the analyser, and the estimate is
 built from those tracks alone — so the structural skips and the rule-excluded tracks are
