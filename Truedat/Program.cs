@@ -6251,13 +6251,16 @@ namespace Truedat
             }
             catch { /* fall through to process match */ }
 
-            // 2. Fallback: a running MusicBee whose own folder carries an MBXHub data dir.
-            //    Prefer one whose root matches the scanned library's root; else first found.
+            // 2. Fallback: a running MusicBee whose own exe folder IS the scanned library's
+            //    root. Match on root ONLY — never "some other running MusicBee". Writing a
+            //    review surface into an instance that does not own this library (I5) silently
+            //    drops the operator's work plan into a stranger's hub; when nothing owns the
+            //    library, fall through to null so the caller writes next-to-moods instead.
             try
             {
                 string? scannedRoot = null;
                 try { scannedRoot = Path.GetDirectoryName(Path.GetFullPath(moodsDir)); } catch { }
-                string? firstMatch = null;
+                var instances = new List<(string root, string mbxhubDir)>();
                 foreach (var proc in System.Diagnostics.Process.GetProcessesByName("MusicBee"))
                 {
                     try
@@ -6268,27 +6271,36 @@ namespace Truedat
                         if (string.IsNullOrEmpty(root)) continue;
                         var mbxhub = Path.Combine(root!, "AppData", "MBXHub");
                         if (!Directory.Exists(mbxhub)) continue;
-                        if (scannedRoot != null && string.Equals(root, scannedRoot, StringComparison.OrdinalIgnoreCase))
-                        {
-                            var rd = Path.Combine(mbxhub, "review");
-                            Directory.CreateDirectory(rd);
-                            Console.WriteLine($"  (matched running MusicBee to the scanned library: {root})");
-                            return rd;
-                        }
-                        firstMatch ??= mbxhub;
+                        instances.Add((root!, mbxhub));
                     }
                     catch { /* access denied / 32-vs-64-bit mismatch — try the next process */ }
                 }
-                if (firstMatch != null)
+                var matched = MatchReviewMbxhub(scannedRoot, instances);
+                if (matched != null)
                 {
-                    var rd = Path.Combine(firstMatch, "review");
+                    var rd = Path.Combine(matched, "review");
                     Directory.CreateDirectory(rd);
-                    Console.WriteLine($"  (no instance owns this library directly; using the one running MusicBee with an MBXHub folder: {Path.GetDirectoryName(firstMatch)})");
+                    Console.WriteLine($"  (matched running MusicBee to the scanned library: {Path.GetDirectoryName(matched)})");
                     return rd;
                 }
             }
             catch { /* Process enumeration blocked — fall through */ }
 
+            return null;
+        }
+
+        /// <summary>Pick the MBXHub data dir of the running instance that OWNS the scanned
+        /// library — the one whose exe root equals the library root (case-insensitive).
+        /// Returns null when none matches; deliberately does NOT fall back to "first instance
+        /// found", because writing a review surface into an instance that does not own this
+        /// library (I5) silently drops the operator's work plan into a stranger's hub. Pure,
+        /// testable seam over ResolveReviewDir's process enumeration.</summary>
+        internal static string? MatchReviewMbxhub(string? scannedRoot, IEnumerable<(string root, string mbxhubDir)> instances)
+        {
+            if (scannedRoot == null || instances == null) return null;
+            foreach (var inst in instances)
+                if (string.Equals(inst.root, scannedRoot, StringComparison.OrdinalIgnoreCase))
+                    return inst.mbxhubDir;
             return null;
         }
 
@@ -8896,6 +8908,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(showAfterChain != null && showAfterChain.SpeechReason == "Genre=Podcast", "phase3: SpeechReason survives as evidence");
                 }
                 finally { _exclusions = saveSet; }
+            }
+
+            // --- ResolveReviewDir instance match (I5): never write into a non-owning instance ---
+            {
+                var owning = MatchReviewMbxhub(@"C:\Lib", new[] { (@"C:\Other", @"C:\Other\AppData\MBXHub"), (@"C:\Lib", @"C:\Lib\AppData\MBXHub") });
+                Assert(owning == @"C:\Lib\AppData\MBXHub", "review-match: picks the instance whose exe root owns the scanned library");
+                var stranger = MatchReviewMbxhub(@"C:\Lib", new[] { (@"C:\Other", @"C:\Other\AppData\MBXHub"), (@"C:\Third", @"C:\Third\AppData\MBXHub") });
+                Assert(stranger == null, "review-match: no owning instance -> null, never a stranger's hub (I5)");
+                Assert(MatchReviewMbxhub(null, new[] { (@"C:\X", @"C:\X\AppData\MBXHub") }) == null, "review-match: null scanned root -> null");
+                Assert(MatchReviewMbxhub(@"c:\lib", new[] { (@"C:\LIB", @"C:\LIB\AppData\MBXHub") }) == @"C:\LIB\AppData\MBXHub", "review-match: root comparison is case-insensitive");
             }
 
             // --- speechLikely verdict (spec 2026-07-22 B1) ---
