@@ -27,6 +27,13 @@ namespace Truedat
         public int Parallelism = 1;
         /// <summary>Recomputed speech verdict for an already-analyzed entry; null disables.</summary>
         public Func<TrackEntry, string?>? SpeechVerdict;
+        /// <summary>Decides whether a catalog entry counts as already analyzed — i.e. a cache
+        /// hit the scan would NOT re-run. Inject the scan's own HasCurrentFeatures so preview,
+        /// the pre-flight and the scan share one classifier and cannot disagree (I1). Null falls
+        /// back to "has any features", which under-reports a --refresh-features wave — so the
+        /// real caller always injects it, and only self-tests that predate the wave rely on the
+        /// default.</summary>
+        public Func<TrackEntry?, bool>? IsAnalyzed;
         /// <summary>What to call the ETA's model when <see cref="MeasuredRtf"/> is usable.
         /// Injected rather than relabelled afterwards: --preview's RTF is derived from the
         /// catalog's stored analysis times ("catalog-rtf"), not from a fresh measurement, and
@@ -152,7 +159,8 @@ namespace Truedat
 
                 // --- catalog state ---
                 TrackEntry? entry;
-                bool analyzed = input.Catalog.TryGetValue(loc, out entry) && entry?.Features != null;
+                bool analyzed = input.Catalog.TryGetValue(loc, out entry)
+                    && (input.IsAnalyzed != null ? input.IsAnalyzed(entry) : entry?.Features != null);
                 if (analyzed) { cachedTracks++; plan.Counts.Analyzed++; }
                 else if (!overLimit && !excluded)
                 {

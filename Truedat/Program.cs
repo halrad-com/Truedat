@@ -1722,6 +1722,11 @@ namespace Truedat
                     EtaBasisLabel = "catalog-rtf",
                     Parallelism = Math.Max(1, parallelism),
                     FileExists = File.Exists,
+                    // Share the scan's own cache-hit classifier so --preview counts new work
+                    // the same way the pre-flight and the scan do (I1): a legacy entry with
+                    // features but not the re-extract canary re-analyzes, so it is NOT
+                    // "already analyzed" — Features != null would have hidden it.
+                    IsAnalyzed = e => HasCurrentFeatures(e?.Features),
                     SniffMarkers = p =>
                     {
                         var m = SpeechTagSniffer.TryDetectAll(p);
@@ -8314,6 +8319,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(podPlan.Estimate.NewTracks == 1, $"preview accounting: a speech-labelled new track now contributes to new work (got {podPlan.Estimate.NewTracks})");
                 Assert(podPlan.Review.Count == 1 && podPlan.Review[0].Reasons.Contains("speech-labelled"),
                     "preview accounting: a speech-labelled track is still surfaced for review");
+
+                // --- preview honors the injected cache-hit classifier, matching the scan (I1) ---
+                // A catalog entry WITH features but not "current" (fails the re-extract canary)
+                // re-analyzes in the scan, so preview must count it as new work too. The default
+                // Features != null classifier would hide it (the refresh-features under-report).
+                var lgLoc = @"D:\M\legacy.flac";
+                var lgTrk = One(lgLoc, 180000, 5_000_000);
+                var lgCat = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    [lgLoc] = new TrackEntry { Features = new TrackFeatures { FilePath = lgLoc } }
+                };
+                PreviewPlannerInput LgIn(Func<TrackEntry?, bool>? isAnalyzed) => new PreviewPlannerInput
+                {
+                    Tracks = new List<ITunesTrack> { lgTrk }, Catalog = lgCat, Exclusions = ExclusionSet.Empty,
+                    MaxDurationSecs = 12000, LongTrackSecs = 1800, ReviewCap = 500, MeasuredRtf = 0.10,
+                    Parallelism = 1, IsAnalyzed = isAnalyzed,
+                };
+                Assert(PreviewPlanner.Build(LgIn(null)).Estimate.NewTracks == 0,
+                    "preview-classifier: default (Features != null) treats an entry with features as analyzed");
+                Assert(PreviewPlanner.Build(LgIn(_ => false)).Estimate.NewTracks == 1,
+                    "preview-classifier: injected classifier makes a non-current entry new work, matching the scan (I1)");
             }
 
             // --- --preview must never truncate a file that isn't a preview (whole-branch fix
