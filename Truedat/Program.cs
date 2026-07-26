@@ -8869,6 +8869,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     };
                     var afterChain = FilterVideoFiles(FilterNonAudio(labelledNow, null), null);
                     var showAfterChain = afterChain.Find(t => t.Name == "Show");
+
+                    // The FULL MoodsMode chain, in its real order, not just two of the four
+                    // filters. MoodsMode is the operator's primary (zero-arg) path, and a drop
+                    // reinstated in FilterRemoteUrls or FilterExclusions would sail straight past
+                    // a test that only exercises the video/non-audio pair — which is exactly the
+                    // coverage gap the replay-gate review found in its file-list-only gate.
+                    // _exclusions is neutralised so this pins the CHAIN, not whatever rule set a
+                    // neighbouring test happened to leave behind.
+                    var savedExclusions = _exclusions;
+                    _exclusions = ExclusionSet.Empty;
+                    var fullChain = FilterNonAudio(
+                                        FilterVideoFiles(
+                                            FilterExclusions(
+                                                FilterRemoteUrls(labelledNow, null), null), null), null);
+                    _exclusions = savedExclusions;
+                    Assert(fullChain.Count == 2,
+                        $"phase3: the full MoodsMode filter chain keeps a speech-labelled track (kept {fullChain.Count})");
+                    Assert(fullChain.Exists(t => t.Name == "Show"),
+                        "phase3: the speech-labelled track survives all four MoodsMode filters");
                     Assert(afterChain.Count == 2, $"phase3: a speech-labelled track is no longer filtered (kept {afterChain.Count})");
                     Assert(afterChain.Exists(t => t.Name == "Show"), "phase3: the labelled track specifically survives");
                     Assert(showAfterChain != null && showAfterChain.IsSpeech, "phase3: IsSpeech survives as evidence for the preview surface");
