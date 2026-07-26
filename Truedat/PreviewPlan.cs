@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace Truedat
 {
     /// <summary>
-    /// The read-only work plan `--preview` produces: what a scan would do, what it would
+    /// The work plan `--preview` produces: what a scan would do, what it would
     /// skip and why, and which tracks a human should look at before it runs. Plain data —
     /// PreviewPlanner fills it, PreviewWriter serialises it, and (Phase 2b) the review page
     /// renders it. Deliberately free of behaviour so both sides can be tested against a

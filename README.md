@@ -205,14 +205,18 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           write, so two applies at once cannot lose one author's rules
                           (a text editor saving the file at the same moment is outside
                           any lock — that is what the .bak is for).
-  --preview [path]        Read-only. Writes the scan work plan and the review-candidate list
-                          to preview.json in the MBXHub review folder; when no MusicBee/MBXHub
-                          instance is found it lands beside the moods file as
-                          mbxmoods-preview.json instead. Auto-discovers the iTunes XML the same
-                          way a normal scan does (exe dir, its parent, then the cwd), so it
-                          needs no positional argument when run from inside the library folder.
-                          Analyzes nothing, writes no mbxmoods.json, and never touches the
-                          exclusion file. [path] is an OUTPUT and is only claimed when it looks
+  --preview [path]        Analyzes nothing, writes no mbxmoods.json, and never touches the
+                          exclusion file. It DOES write two files: the scan work plan and the
+                          review-candidate list go to preview.json plus mbxmoods-preview.html
+                          in the MBXHub review folder of the instance that owns the library you
+                          pointed it at (creating that folder if needed) — so this is read-only
+                          over your catalog, not over the disk. When no MusicBee/MBXHub instance
+                          owns the library they land beside the moods file as
+                          mbxmoods-preview.json instead; never in some other instance's folder.
+                          Pass [path] to choose the destination yourself. Auto-discovers the
+                          iTunes XML the same way a normal scan does (exe dir, its parent, then
+                          the cwd), so it needs no positional argument when run from inside the
+                          library folder. [path] is an OUTPUT and is only claimed when it looks
                           like one (a directory separator or a .json suffix), so the library
                           path can still be positional; and it refuses, with exit 1 and nothing
                           written, to overwrite an .xml or an existing mood catalog.
@@ -482,9 +486,17 @@ Scan preview (nothing was analyzed):
 (Illustrative numbers, not a measurement — a real run reports your own library's counts, and
 the estimate is derived from your own catalog, never a canned figure.)
 
-It also writes `preview.json` — the same data as a machine-readable manifest, which is what
-MBXHub's review surface renders. It goes to the MBXHub review folder, or beside the moods file
-as `mbxmoods-preview.json` when no MusicBee/MBXHub instance is found.
+**What "preview" does and does not touch.** It analyzes nothing, writes no `mbxmoods.json`, and
+never modifies your exclusion file — those are the guarantees. It is *not* read-only over the
+disk: it writes `preview.json` (the same data as a machine-readable manifest, which is what
+MBXHub's review surface renders) and `mbxmoods-preview.html` (a self-contained review page you
+can open offline). Both go into the MBXHub review folder of the instance that owns the library
+you pointed it at — `<library root>\AppData\MBXHub\review\`, created if it does not exist, which
+is a live application's data directory. The destination is anchored to the *scanned library*, the
+same way `--duplicates --manifest` is, so several MusicBee instances on one machine cannot
+receive each other's plans. When no instance owns the library, both land beside the moods file
+(`mbxmoods-preview.json`) instead — never in some other instance's folder. Pass an explicit
+`--preview <path>` to choose the destination yourself.
 
 `New` counts only the tracks a scan would actually hand to the analyser, and the estimate is
 built from those tracks alone — so the structural skips and the rule-excluded tracks are

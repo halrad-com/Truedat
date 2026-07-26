@@ -43,9 +43,11 @@ namespace Truedat
     }
 
     /// <summary>
-    /// Builds the read-only scan work plan. Pure computation over the parsed library, the
-    /// existing catalog and the exclusion rules — it never analyzes audio and never writes
-    /// anything. The one exception is a bounded header sniff over review CANDIDATES only
+    /// Builds the scan work plan. Pure computation over the parsed library, the existing
+    /// catalog and the exclusion rules — THIS CLASS never analyzes audio and never writes
+    /// anything (the mode as a whole does write: PreviewWriter emits preview.json and the
+    /// review page — see the --preview block in Program.Main, I-6). The one exception to the
+    /// no-IO rule here is a bounded header sniff over review CANDIDATES only
     /// (hundreds of files, not the whole library), which is what lets the evidence column
     /// say "marker:PCST"; the count of files sniffed is reported rather than hidden.
     ///

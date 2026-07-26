@@ -988,7 +988,7 @@ namespace Truedat
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
-            bool previewMode = false;          // --preview: read-only work plan + review candidates
+            bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
             int longTrackMins = 30;            // --long-track-mins: review prompt threshold, NOT a rule
             bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
@@ -1694,9 +1694,14 @@ namespace Truedat
                 return;
             }
 
-            // --preview: read-only. Builds the scan work plan and the review-candidate list
-            // and writes preview.json into the MBXHub review folder. Analyzes nothing, writes
-            // no mbxmoods.json, and never touches the exclusion file.
+            // --preview: builds the scan work plan and the review-candidate list. Analyzes
+            // nothing, writes no mbxmoods.json, and never touches the exclusion file — those
+            // are the guarantees, and they are what "read-only" used to be shorthand for.
+            // It is NOT read-only over the filesystem (I-6): with no explicit path it creates
+            // <library root>\AppData\MBXHub\review\ and writes preview.json + the review page
+            // there, i.e. into a running application's data directory. Anchored to the SCANNED
+            // library via ResolveReviewDir — the same resolver the duplicates manifest uses —
+            // so a multi-instance box cannot receive another instance's plan.
             if (previewMode)
             {
                 // Same auto-discovery the default scan path uses (exe-dir parent, exe-dir,
@@ -6317,7 +6322,7 @@ namespace Truedat
         /// not whichever process the OS happens to list first. Falls back to matching a
         /// running MusicBee by its exe folder (MusicBeeDetector's pure-Win32 lookup), then
         /// to next-to-moods. An explicit --manifest &lt;path&gt; always wins over all of this.</summary>
-        static string ResolveManifestDest(string moodsDir)
+        internal static string ResolveManifestDest(string moodsDir)
         {
             var rd = ResolveReviewDir(moodsDir);
             if (rd != null) return Path.Combine(rd, "dupes.json");
@@ -9233,6 +9238,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(stranger == null, "review-match: no owning instance -> null, never a stranger's hub (I5)");
                 Assert(MatchReviewMbxhub(null, new[] { (@"C:\X", @"C:\X\AppData\MBXHub") }) == null, "review-match: null scanned root -> null");
                 Assert(MatchReviewMbxhub(@"c:\lib", new[] { (@"C:\LIB", @"C:\LIB\AppData\MBXHub") }) == @"C:\LIB\AppData\MBXHub", "review-match: root comparison is case-insensitive");
+            }
+
+            // --- I-6: --preview's auto-locate uses the SAME library anchor the duplicates
+            // manifest does, not a second implementation. Both go through ResolveReviewDir, so
+            // the destination follows the library truedat was pointed at rather than whichever
+            // MusicBee the OS happens to list first — pinned here so the two cannot fork later.
+            {
+                var i6Root = Path.Combine(Path.GetTempPath(), $".truedat-selftest-review-{Guid.NewGuid():N}");
+                var i6Lib = Path.Combine(i6Root, "Library");
+                try
+                {
+                    Directory.CreateDirectory(i6Lib);
+                    Directory.CreateDirectory(Path.Combine(i6Root, "AppData", "MBXHub"));
+                    var expectedReview = Path.Combine(i6Root, "AppData", "MBXHub", "review");
+
+                    Assert(ResolveReviewDir(i6Lib) == expectedReview,
+                        $"I-6: the review dir is derived from the SCANNED library's root (got {ResolveReviewDir(i6Lib)})");
+                    Assert(PreviewWriter.ResolveDest(i6Lib) == Path.Combine(expectedReview, PreviewWriter.FileName),
+                        $"I-6: --preview auto-locates into that same review dir (got {PreviewWriter.ResolveDest(i6Lib)})");
+                    Assert(ResolveManifestDest(i6Lib) == Path.Combine(expectedReview, "dupes.json"),
+                        $"I-6: --manifest auto-locates into that same review dir (got {ResolveManifestDest(i6Lib)})");
+                    Assert(Path.GetDirectoryName(PreviewWriter.ResolveDest(i6Lib))
+                           == Path.GetDirectoryName(ResolveManifestDest(i6Lib)),
+                        "I-6: preview and the duplicates manifest share ONE anchor, two filenames");
+
+                    // No MBXHub tree under the scanned library's root: fall back beside the moods
+                    // file. Never into some other running instance's hub.
+                    var i6Bare = Path.Combine(i6Root, "Bare", "Library");
+                    Directory.CreateDirectory(i6Bare);
+                    Assert(ResolveReviewDir(i6Bare) == null,
+                        "I-6: no MBXHub tree under the scanned library -> no review dir, never a stranger's");
+                    Assert(PreviewWriter.ResolveDest(i6Bare) == Path.Combine(i6Bare, "mbxmoods-preview.json"),
+                        $"I-6: --preview then lands beside the moods file (got {PreviewWriter.ResolveDest(i6Bare)})");
+                }
+                finally { try { Directory.Delete(i6Root, true); } catch { } }
             }
 
             // --- speechLikely verdict (spec 2026-07-22 B1) ---

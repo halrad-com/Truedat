@@ -187,10 +187,18 @@ exclude"); it filters only `FilterRemoteUrls` / `FilterVideoFiles` / `FilterNonA
 (structural) and never calls `FilterExclusions`, so don't "fix" that by wiring exclusions
 in without a deliberate decision to do so.
 
-`--preview` (read-only) builds the same picture without scanning: `PreviewPlanner` computes a
-`PreviewPlan` from the parsed XML + existing catalog + `ExclusionSet`, and `PreviewWriter` emits
-`preview.json` into the MBXHub review folder (`ResolveReviewDir`, shared with the duplicates
-manifest). **`preview.json` IS the review-surface manifest** — MBXHub's asset route serves only
+`--preview` builds the same picture without scanning. **It is read-only over the CATALOG, not
+over the filesystem** — say "never writes `mbxmoods.json`, never analyzes", because unqualified
+"read-only" is false and already misled one reviewer (I-6): with no explicit path it *creates*
+`<library root>\AppData\MBXHub\review\` and writes `preview.json` + `mbxmoods-preview.html`
+into it, i.e. into a running application's data directory. Those files are regenerable and the
+destination is anchored to the library truedat was pointed at, so this is by design — but it is a
+write and the docs must not imply otherwise. `PreviewPlanner` computes a `PreviewPlan` from the
+parsed XML + existing catalog + `ExclusionSet`, and `PreviewWriter` emits `preview.json` into the
+MBXHub review folder via `ResolveReviewDir` — the **same** function `ResolveManifestDest` uses for
+the duplicates manifest, so both derive the instance root from the moods file's `<root>\Library\`
+location and neither can drift to "whichever MusicBee the OS lists first". Do not write a second
+resolver; the self-tests pin that preview and the manifest share one anchor and two filenames. **`preview.json` IS the review-surface manifest** — MBXHub's asset route serves only
 `.html` and no route serves an arbitrary sibling JSON, so the payload rides inside the envelope;
 `source.reviewHtml` stays absent until the Phase 2b page exists. Preview touches audio in exactly
 one place — a bounded header sniff over review *candidates* only — and reports `sniffedCount` so
