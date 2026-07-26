@@ -392,27 +392,55 @@ function folderUrl(p){return 'file:///'+encodeURI(p.replace(/\\/g,'/'));}
 function ancestors(p){const parts=folderOf(p).split(/[\\/]/).filter(Boolean);const out=[];for(let i=parts.length-1;i>=1;i--)out.push('\\'+parts[i]+'\\**');return out;}
 
 // ---- rule identity + delta -------------------------------------------------
-// desired = the rule set the operator wants after this session; orig = what preview.json
-// already reflects. Save emits only the difference. Identity mirrors the C# side closely
-// enough to avoid a spurious duplicate add; the authoritative merge (dedupe, note/sha) is
-// `truedat --apply-exclusions`.
+// The delta is derived from what the operator DID this session (sAdd/sRem), never from a
+// remembered absolute rule set. That distinction is load-bearing. If we persisted 'the rules
+// I want' and diffed it against a freshly loaded manifest, then any rule ANOTHER author added
+// while this page sat open - a hand-edit, a second browser, MBXHub - would be absent from our
+// remembered set and would land in remove[], silently deleted on the next Save. That is exactly
+// what the delta design exists to prevent (spec 4.3: a delta, not a whole file, so concurrent
+// hand-edits survive), and a page that diffs absolute state is a whole-file writer wearing a
+// delta's clothes.
+// INVARIANT: a rule the operator never touched appears in neither add[] nor remove[].
+// `desired` is DERIVED (orig - sRem + sAdd) and exists only for rendering; never persist it.
+// Identity mirrors the C# side closely enough to avoid a spurious duplicate add; the
+// authoritative merge (dedupe, note/sha) is `truedat --apply-exclusions`.
 function ruleTarget(r){return r.pattern!=null?r.pattern:(r.value!=null?r.value:(r.path!=null?r.path:''));}
 function normTarget(kind,t){t=''+t;return kind==='genre'?t.trim().toLowerCase():t.replace(/\//g,'\\').replace(/\\+$/,'').toLowerCase();}
 function idOf(r){return r.kind+'|'+r.action+'|'+normTarget(r.kind,ruleTarget(r));}
 function parseRuleStr(s,action){const i=s.indexOf('=');const kind=s.slice(0,i),val=s.slice(i+1);if(kind==='folder')return{kind,action,pattern:val};if(kind==='genre')return{kind,action,value:val};return{kind,action,path:val};}
-const orig=new Map(),byId=new Map();
-(D.rules||[]).forEach(r=>{const ro=parseRuleStr(r.rule,r.action);const id=idOf(ro);orig.set(id,ro);byId.set(id,ro);});
+// truedat's ExclusionSet parses exactly these three. Anything else makes --apply-exclusions
+// reject the whole document (exit 1, nothing written), so a stray kind would turn Save into a
+// silent no-op. Nothing invalid is allowed to reach the delta.
+const KINDS={folder:1,genre:1,file:1};
+function validRule(r){return !!(r&&KINDS[r.kind]===1);}
+let orig=new Map();const byId=new Map();
+function indexRules(){orig=new Map();(D.rules||[]).forEach(r=>{const ro=parseRuleStr(r.rule,r.action);if(!validRule(ro))return;const id=idOf(ro);orig.set(id,ro);byId.set(id,ro);});}
+indexRules();
 const SKEY='truedat-preview:'+((D.source&&D.source.moodsPath)||'')+':'+(D.id||'');
-let desired=new Set(orig.keys());
+// This session's ACTIONS - the only thing that is persisted or that can author a delta entry.
+let sAdd=new Set(),sRem=new Set();
+let desired=new Set();
 try{const saved=JSON.parse(localStorage.getItem(SKEY+':rules')||'{}');Object.keys(saved).forEach(id=>{if(!byId.has(id))byId.set(id,saved[id]);});}catch(e){}
-try{const s=JSON.parse(localStorage.getItem(SKEY)||'null');if(Array.isArray(s))desired=new Set(s);}catch(e){}
-function persist(){try{localStorage.setItem(SKEY,JSON.stringify([...desired]));const m={};byId.forEach((v,k)=>m[k]=v);localStorage.setItem(SKEY+':rules',JSON.stringify(m));}catch(e){}}
+try{const a=JSON.parse(localStorage.getItem(SKEY+':add')||'[]');if(Array.isArray(a))sAdd=new Set(a);}catch(e){}
+try{const r=JSON.parse(localStorage.getItem(SKEY+':rem')||'[]');if(Array.isArray(r))sRem=new Set(r);}catch(e){}
+function recompute(){desired=new Set(orig.keys());sRem.forEach(id=>desired.delete(id));sAdd.forEach(id=>desired.add(id));}
+recompute();
+// Adopt the current manifest as the baseline and drop this session's actions. Called after a
+// successful apply so the page stops reporting as pending a change the hub has already made.
+function rebase(){indexRules();sAdd=new Set();sRem=new Set();recompute();persist();}
+// SKEY (the old absolute-state key) is removed on every write so a page left over from the
+// previous build cannot resurrect a remembered rule set and start authoring removals again.
+function persist(){try{localStorage.setItem(SKEY+':add',JSON.stringify([...sAdd]));localStorage.setItem(SKEY+':rem',JSON.stringify([...sRem]));const m={};byId.forEach((v,k)=>m[k]=v);localStorage.setItem(SKEY+':rules',JSON.stringify(m));localStorage.removeItem(SKEY);}catch(e){}}
+function setDesired(id,on){if(on){sAdd.add(id);sRem.delete(id);}else{sRem.add(id);sAdd.delete(id);}recompute();}
 function desiredHas(rule){return desired.has(idOf(rule));}
-function toggleRule(rule){const id=idOf(rule);byId.set(id,rule);if(desired.has(id))desired.delete(id);else desired.add(id);persist();refresh();}
+function toggleRule(rule){const id=idOf(rule);byId.set(id,rule);setDesired(id,!desired.has(id));persist();refresh();}
 // exclude/include on the same target are different identities; selecting one clears the
 // other so a target never emits both.
-function setExclusive(rule){const id=idOf(rule);byId.set(id,rule);const anti=idOf({kind:rule.kind,action:rule.action==='exclude'?'include':'exclude',pattern:rule.pattern,value:rule.value,path:rule.path});desired.delete(anti);if(desired.has(id))desired.delete(id);else desired.add(id);persist();refresh();}
-function buildDelta(){const add=[],remove=[];desired.forEach(id=>{if(!orig.has(id)&&byId.has(id))add.push(byId.get(id));});orig.forEach((r,id)=>{if(!desired.has(id))remove.push(r);});return{schemaVersion:1,kind:'exclusion-decisions',generatedBy:'mbxmoods-preview.html',add,remove};}
+function setExclusive(rule){const id=idOf(rule);byId.set(id,rule);const anti=idOf({kind:rule.kind,action:rule.action==='exclude'?'include':'exclude',pattern:rule.pattern,value:rule.value,path:rule.path});setDesired(anti,false);setDesired(id,!desired.has(id));persist();refresh();}
+// add[] = rules this session created that the manifest does not already have.
+// remove[] = rules this session dropped that the manifest still has.
+// A rule touched by nobody is in neither set, so it can never be emitted.
+function buildDelta(){const add=[],remove=[];sAdd.forEach(id=>{const r=byId.get(id);if(!orig.has(id)&&validRule(r))add.push(r);});sRem.forEach(id=>{const r=orig.get(id);if(validRule(r))remove.push(r);});return{schemaVersion:1,kind:'exclusion-decisions',generatedBy:'mbxmoods-preview.html',add,remove};}
 function dirty(){const d=buildDelta();return d.add.length+d.remove.length>0;}
 
 // ---- host adapter ----------------------------------------------------------
@@ -437,7 +465,7 @@ function ep(kind){return '/review/'+kind+'/'+encodeURIComponent(D.id||'preview')
 function fetchT(url,opts,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms||8000);return fetch(url,Object.assign({signal:c.signal},opts||{})).finally(()=>clearTimeout(t));}
 const servedHost={mode:'served',
   load(){return fetchT(ep('manifest'),{headers:{'accept':'application/json'}},6000).then(r=>r.ok?r.json():Promise.reject(r.status)).then(fresh=>{console.log('[preview] served: refreshed manifest');Object.assign(D,fresh);return D;}).catch(e=>{console.log('[preview] served load failed, using embedded:',e);return D;});},
-  save(delta){console.log('[preview] served save: POST decisions',delta);return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Saved: '+bits.join(', ')+'.',true);return this.load().then(refresh);}banner('Save rejected: '+esc(res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
+  save(delta){console.log('[preview] served save: POST decisions',delta);return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Saved: '+bits.join(', ')+'.',true);return this.load().then(()=>{rebase();refresh();});}banner('Save rejected: '+esc(res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
   rescan(){console.log('[preview] served: re-loading manifest');return this.load().then(refresh).then(()=>banner('Counts refreshed from the hub. A standalone re-preview trigger is planned; a Save already re-runs the preview.',true));}};
 let host=OFFLINE?offlineHost:servedHost;
 
@@ -485,7 +513,7 @@ function decState(c){
 let shownDecidable=[];
 // Set every given path to one decision in a single pass, then one refresh (not N).
 function bulkDecide(paths,action){
-  paths.forEach(p=>{const id=idOf({kind:'file',action,path:p});const anti=idOf({kind:'file',action:action==='exclude'?'include':'exclude',path:p});desired.delete(anti);desired.add(id);byId.set(id,{kind:'file',action,path:p});});
+  paths.forEach(p=>{const id=idOf({kind:'file',action,path:p});const anti=idOf({kind:'file',action:action==='exclude'?'include':'exclude',path:p});byId.set(id,{kind:'file',action,path:p});setDesired(anti,false);setDesired(id,true);});
   persist();refresh();
 }
 function renderTable(){
@@ -543,7 +571,8 @@ document.addEventListener('input',ev=>{
 document.addEventListener('change',ev=>{if(ev.target.classList.contains('fsel')&&ev.target.value){toggleRule({kind:'folder',action:'exclude',pattern:ev.target.value});ev.target.value='';}});
 document.getElementById('save').addEventListener('click',()=>{if(dirty())host.save(buildDelta());});
 document.getElementById('rescan').addEventListener('click',()=>host.rescan());
-document.getElementById('reset').addEventListener('click',()=>{desired=new Set(orig.keys());persist();document.getElementById('banner').style.display='none';refresh();});
+// Reset discards this session's actions and returns to exactly what the manifest says.
+document.getElementById('reset').addEventListener('click',()=>{sAdd=new Set();sRem=new Set();recompute();persist();document.getElementById('banner').style.display='none';refresh();});
 refresh();
 if(!OFFLINE)host.load().then(refresh);
 </script>
