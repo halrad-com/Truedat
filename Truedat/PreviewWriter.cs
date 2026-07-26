@@ -351,6 +351,7 @@ namespace Truedat
   .dec button{padding:2px 8px;font-size:12px;margin-right:3px}
   .dec button.on-x{background:#7a3030}
   .dec button.on-i{background:#2e7d46}
+  .byrule{margin-top:3px;font-size:11px;color:#c99}
   .fexcl{margin-top:3px;font-size:11px;color:#888}
   .fexcl select{background:#242424;color:#ddd;border:1px solid #3a3a3a;border-radius:4px;font-size:11px}
 </style>
@@ -459,7 +460,26 @@ function renderBulk(){
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 function rsnClass(r){if(r.indexOf('marker:')===0)return 'mark';return RSN[r]||'';}
-function decState(c){const x=desiredHas({kind:'file',action:'exclude',path:c.path});const i=desiredHas({kind:'file',action:'include',path:c.path});if(x)return 'x';if(i)return 'i';return c.currentDecision==='excluded'?'x0':c.currentDecision==='included'?'i0':'';}
+// Does a pending GENRE or FOLDER rule of this action match candidate c? Mirrors the
+// exclusion matcher closely enough for live table feedback: genre exact/case-insensitive,
+// folder fragment boundary-aligned (leading '\') or absolute prefix. This is what makes a
+// bulk genre/folder exclusion visibly land on the affected rows, not just in the delta.
+function pnorm(p){return (''+p).replace(/\//g,'\\').toLowerCase();}
+function ruleHits(c,action){
+  if(c.genre && desired.has(idOf({kind:'genre',action,value:c.genre})))return true;
+  const np=pnorm(c.path);
+  for(const id of desired){const r=byId.get(id);if(!r||r.kind!=='folder'||r.action!==action)continue;const pat=pnorm(r.pattern||'').replace(/\\\*\*$/,'');if(!pat)continue;if(pat.charAt(0)==='\\'){if(np.indexOf(pat+'\\')>=0)return true;}else if(np.indexOf(pat+'\\')===0)return true;}
+  return false;
+}
+// include always wins over exclude; per-file rules take the highlighted button, genre/folder
+// rules shade the row (marked 'by rule') without implying a per-row file rule.
+function decState(c){
+  if(desiredHas({kind:'file',action:'include',path:c.path}))return 'i';
+  if(ruleHits(c,'include'))return 'ir';
+  if(desiredHas({kind:'file',action:'exclude',path:c.path}))return 'x';
+  if(ruleHits(c,'exclude'))return 'xr';
+  return c.currentDecision==='excluded'?'x0':c.currentDecision==='included'?'i0':'';
+}
 // The paths of the currently-shown DECIDABLE rows (over-limit excluded — see below), so the
 // bulk buttons act on exactly what the filter is showing.
 let shownDecidable=[];
@@ -485,9 +505,10 @@ function renderTable(){
       // does nothing (structural beats include). Informational row only.
       return `<tr class='olimit' data-p='${esc(c.path)}'><td class='dec'><span class='skiptag' title='exceeds the analysis ceiling — Essentia cannot analyze it. Split/transcode it, or raise --max-duration.'>can&#39;t analyze</span></td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
     }
-    const st=decState(c);const cls=st==='x'||st==='x0'?'excl':st==='i'||st==='i0'?'incl':'';
+    const st=decState(c);const cls=st.charAt(0)==='x'?'excl':st.charAt(0)==='i'?'incl':'';
+    const byrule=(st==='xr'||st==='ir')?`<div class='byrule'>${st==='xr'?'excluded':'kept'} by rule</div>`:'';
     const anc=ancestors(c.path);const opts=anc.map(a=>`<option value='${esc(a)}'>${esc(a)}</option>`).join('');
-    return `<tr class='${cls}' data-p='${esc(c.path)}'><td class='dec'><button class='sec dx ${st==='x'?'on-x':''}'>excl</button><button class='sec di ${st==='i'?'on-i':''}'>incl</button>${anc.length?`<div class='fexcl'>folder: <select class='fsel'><option value=''>—</option>${opts}</select></div>`:''}</td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
+    return `<tr class='${cls}' data-p='${esc(c.path)}'><td class='dec'><button class='sec dx ${st==='x'?'on-x':''}'>excl</button><button class='sec di ${st==='i'?'on-i':''}'>incl</button>${byrule}${anc.length?`<div class='fexcl'>folder: <select class='fsel'><option value=''>—</option>${opts}</select></div>`:''}</td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
   }).join('');
   body.innerHTML=trunc+bulkbar+`<table><thead><tr><th>decision</th><th>path</th><th class='num'>len</th><th>genre</th><th>codec</th><th>state</th><th>reasons</th></tr></thead><tbody>${tr}</tbody></table>`;
 }
