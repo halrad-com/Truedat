@@ -8,11 +8,19 @@ dist/truedat/ffmpeg.exe
 dist/truedat/ffprobe.exe
 dist/truedat/ffplay.exe
 
-# Release bundle — too large for GitHub (>100MB), ship via Releases instead
-dist/truedat/truedat.zip
+# Release bundles — too large for GitHub (>100MB), ship via Releases instead.
+# Any .zip anywhere under dist/: dist/truedat.zip, dist/truedat<ver>.zip,
+# dist/truedat/truedat.zip. The old dist/truedat/truedat.zip rule missed the
+# top-level bundles the packaging step actually writes.
+dist/**/*.zip
 
 # Synthetic library data (large downloads)
 data/
+
+# Scan-output CSVs — regenerated every run, carry local absolute paths; never
+# tracked (mbxmoods-skipped/errors/speech/verify/duplicates/smfm-missing).
+# The tracked mbxmoods.json fixture is .json, so it is unaffected.
+mbxmoods-*.csv
 
 # Internal docs — never published
 _docs/
