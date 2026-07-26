@@ -7,6 +7,16 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [5.4.4] — 2026-07-25
 
+### Docs — migration guidance corrected: analyze once, then exclude (2026-07-26)
+
+The upgrade note shipped in af3fb2f told upgraders to write an exclusion rule *before* their next
+scan. For talk you want AutoQ to stop playing, that backfires: AutoQ picks from the MusicBee library,
+not `mbxmoods.json`, and drops talk by reading each track's `speechLikely` verdict — which exists only
+once the track is analyzed. Excluding speech from scanning before it is analyzed removes that signal, so
+AutoQ becomes *more* likely to play it, not less. README now leads with **analyze once, then exclude**
+and states the trade for excluding-before-scan (skip the scan cost, forfeit the AutoQ signal). Behaviour
+unchanged; docs only.
+
 ### Changed — speech is analyzed by default; the class is "speech", not "podcast" (2026-07-25)
 
 **Breaking behaviour change.** Nothing in truedat guesses at speech any more. Older builds

@@ -307,15 +307,31 @@ you can act on, never an instruction the scanner infers on its own.
 ### Upgrading: speech (podcasts, talk) is no longer skipped automatically
 
 Older builds guessed which files were speech — podcasts, talk — and skipped them. Nothing guesses now —
-the only thing that keeps a file out of analysis is a rule you wrote. If you relied on the
-old behaviour, add a rule **before** your next scan:
+the only thing that keeps a file out of analysis is a rule you wrote. But **the order matters**, and it
+is counter-intuitive: to keep talk *out of what AutoQ plays*, **analyze once, then exclude** — do not
+exclude first.
 
-1. `truedat --preview` — lists what a scan would do, including every track worth a look.
-2. Write a decisions delta, e.g.
+Here is why. AutoQ picks from your MusicBee library, not from `mbxmoods.json`, and it keeps talk out by
+reading each track's `speechLikely` verdict — which only exists once the track has been analyzed. So
+excluding speech from scanning *before it has ever been analyzed* removes the very signal AutoQ needs: no
+analysis → no verdict → AutoQ's speech gate can't fire → the track stays fully pickable. **Excluding
+speech from scanning makes AutoQ more likely to play it, not less.**
+
+The recommended order:
+
+1. **Scan once** — let Essentia analyze everything, talk included, so every track gets its `speechLikely`
+   verdict. AutoQ's speech gate (on by default) now keeps talk out of your queues.
+2. `truedat --preview` — see what a scan would do and which tracks are worth a look.
+3. `truedat --list-speech` — review the tracks the acoustic verdict flagged as talk.
+4. For the ones you never want *re-analyzed*, write a decisions delta and apply it:
    `{"schemaVersion":1,"kind":"exclusion-decisions","add":[{"kind":"folder","action":"exclude","pattern":"\\Podcasts\\**"}],"remove":[]}`
-   (a `genre` rule for `Podcast` works too — pick whichever matches how your library is organised).
-3. `truedat --apply-exclusions decisions.json`
-4. Scan.
+   then `truedat --apply-exclusions decisions.json` (a `genre` rule for `Podcast` works too). This saves
+   Essentia time on every *future* scan, and the AutoQ gate keeps working because the verdict already exists.
+
+Excluding a folder you genuinely never want analyzed — a bulk podcast archive you never play — is still
+legitimate and saves real scan time up front. Just know the trade: you skip the scan cost, but those tracks
+get no `speechLikely` signal, so AutoQ has nothing to keep them out of a queue. Skip-to-save only when you
+never want it played *and* never want it analyzed; analyze-first when you want AutoQ to keep it out for you.
 
 `--include-podcasts` is gone; it was all-or-nothing, which is the problem the rule file solves.
 `--migrate` no longer removes speech-labelled or speech-likely entries either — pruning an entry
