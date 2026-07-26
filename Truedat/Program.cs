@@ -3153,6 +3153,7 @@ namespace Truedat
             int analyzed = 0;
             int skipped = 0;
             int dsdSkipped = 0;
+            int overLengthSkipped = 0;
             int missingSkipped = 0;
             int failed = 0;
             int timedOut = 0;
@@ -3553,18 +3554,20 @@ namespace Truedat
 
                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
 
-                        // Pre-flight: skip files that exceed Essentia's ChordsDetection buffer
+                        // Pre-flight: a track past the Essentia ChordsDetection ceiling is a
+                        // STRUCTURAL skip, not a failure — a scan cannot analyze it at this
+                        // ceiling. Ledger it to mbxmoods-skipped.csv and keep it OUT of
+                        // mbxmoods-errors.csv, so raising --max-duration re-evaluates it rather
+                        // than it being remembered as a prior-run error and skipped forever (I4).
                         var trackDurationSecs = t.TotalTimeMs / 1000;
-                        if (trackDurationSecs > _maxEssentiaDurationSecs)
+                        var overReason = OverLengthSkipReason(trackDurationSecs, _maxEssentiaDurationSecs);
+                        if (overReason != null)
                         {
-                            var durationMin = trackDurationSecs / 60.0;
-                            var limitMin = _maxEssentiaDurationSecs / 60.0;
-                            var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                            var msg = $"Skipped: duration {durationMin:F0} min exceeds Essentia ChordsDetection buffer limit ({limitMin:F0} min; --max-duration to override)";
-                            Console.WriteLine($"  WARNING: {msg}");
-                            AppendError(errorsPath, t.Location, t.Artist, t.Name, msg, sizeMb, 0, saveLock);
-                            Interlocked.Increment(ref failed);
+                            AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), overReason);
+                            Console.WriteLine($"[skipped over-length] {t.Location} ({overReason})");
+                            Interlocked.Increment(ref overLengthSkipped);
                             EtaDrainNewPool();
+                            trackClass = "skip·overlength";
                             return;
                         }
 
@@ -3720,11 +3723,13 @@ namespace Truedat
             Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
             if (dsdSkipped > 0)
                 Console.WriteLine($"  SkippedDSD: {dsdSkipped}  (unsupported codec)");
+            if (overLengthSkipped > 0)
+                Console.WriteLine($"  Over-length: {overLengthSkipped}  (exceeds --max-duration ceiling — see mbxmoods-skipped.csv)");
             if (missingSkipped > 0)
                 Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + missingSkipped + failed}");
+            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
             if (analyzed > 0)
             {
@@ -9065,6 +9070,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "structural skip: matching is case-insensitive (.MP4 behaves like .mp4)");
             }
 
+            // --- over-max-duration is a structural skip, not a failure (I4) ---
+            {
+                var over = OverLengthSkipReason(3600, 1200);   // 60-min track, 20-min ceiling
+                Assert(over != null, "overlength: a track past the ceiling is a skip");
+                Assert(over != null && over.Contains("--max-duration"), "overlength: reason names the --max-duration flag (I4)");
+                Assert(over != null && over.Contains("20 min"), "overlength: reason names the ceiling in minutes");
+                Assert(OverLengthSkipReason(1000, 1200) == null, "overlength: a track under the ceiling is analyzed, not skipped");
+                Assert(OverLengthSkipReason(1200, 1200) == null, "overlength: exactly at the ceiling is analyzed (strict >)");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9404,6 +9419,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (VideoExtensions.Contains(ext)) return "video file extension";
             if (NonAudioExtensions.Contains(ext)) return "playlist / redirector extension";
             return null;
+        }
+
+        /// <summary>Reason string for a track that exceeds the Essentia analysis ceiling, or
+        /// null when it is within the ceiling. This is a STRUCTURAL skip (a scan cannot analyze
+        /// it at this ceiling), not an analysis failure — the caller ledgers it to
+        /// mbxmoods-skipped.csv and must NOT write it to mbxmoods-errors.csv, so raising
+        /// --max-duration re-evaluates it instead of it being remembered as a prior error and
+        /// skipped forever (I4). Strict &gt;: exactly at the ceiling is analyzable.</summary>
+        internal static string? OverLengthSkipReason(int trackDurationSecs, int maxDurationSecs)
+        {
+            if (trackDurationSecs <= maxDurationSecs) return null;
+            return $"over max duration: {trackDurationSecs / 60.0:F0} min > {maxDurationSecs / 60.0:F0} min ceiling (--max-duration to override)";
         }
 
         /// <summary>Short bracket tag for the per-file console skip lines
