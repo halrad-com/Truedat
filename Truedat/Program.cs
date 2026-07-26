@@ -691,14 +691,101 @@ namespace Truedat
             return path;
         }
 
-        // Startup orphan sweep — single-instance only. Concurrent truedat invocations
-        // sharing the same stage-dir (or .truedat-tmp / temp downmix area) is not a
-        // supported model: this sweep would race the other instance's staged files
-        // mid-scan. The supported model for cross-machine scaling is `--chunk M/N`
-        // shard-and-merge, where each chunk runs on its own machine.
+        /// <summary>How long a scratch file must have gone untouched before the startup sweep
+        /// will treat it as an orphan. Deliberately generous: a staged copy or a downmix WAV is
+        /// held open for the whole of one track's analysis, so an eager sweep deletes a LIVE
+        /// run's working file — and that surfaces as an analysis failure attributed to the
+        /// track, in mbxmoods-errors.csv, looking exactly like a corrupt file. Leaving a
+        /// handful of genuine orphans for one more run costs nothing (the stage dir is bounded
+        /// by the worker count); deleting a live file costs a mis-diagnosed bug report.</summary>
+        internal static readonly TimeSpan OrphanMinAge = TimeSpan.FromMinutes(60);
+
+        /// <summary>Age gate for the startup sweep. Anything written recently might belong to a
+        /// sibling invocation this process cannot see, so it is left alone.</summary>
+        internal static bool IsSweepableOrphan(DateTime lastWriteUtc, DateTime nowUtc)
+            => nowUtc - lastWriteUtc >= OrphanMinAge;
+
+        /// <summary>
+        /// Whether the startup sweep may run at all. Truedat is single-instance BY DESIGN
+        /// (CLAUDE.md), but nothing enforced it and nothing warned: the sweep cannot tell a live
+        /// sibling's staged files from a dead run's, so with a sibling running the only correct
+        /// action is not to sweep. Orphans are not urgent — they are collected by the next run
+        /// that has the place to itself.
+        /// </summary>
+        internal static bool ShouldSweepOrphans(int siblingCount) => siblingCount == 0;
+
+        /// <summary>Other truedat processes on this machine. Best-effort: process enumeration can
+        /// be blocked, and a blocked lookup returns 0 so the sweep still happens — the age gate
+        /// is the backstop for that case, which is why both exist.</summary>
+        internal static int CountSiblingTruedatProcesses()
+        {
+            try
+            {
+                int me = Process.GetCurrentProcess().Id;
+                var name = Process.GetCurrentProcess().ProcessName;
+                int n = 0;
+                foreach (var p in Process.GetProcessesByName(name))
+                {
+                    try { if (p.Id != me) n++; } catch { }
+                    finally { try { p.Dispose(); } catch { } }
+                }
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>Delete aged-out files matching a pattern; returns how many were left alone
+        /// because they were too recent. A non-zero return means the directory itself must be
+        /// kept — something may still be using it.</summary>
+        static int SweepAged(string dir, string pattern, string label)
+        {
+            int skipped = 0, deleted = 0;
+            var now = DateTime.UtcNow;
+            foreach (var f in Directory.GetFiles(dir, pattern))
+            {
+                try
+                {
+                    if (!IsSweepableOrphan(File.GetLastWriteTimeUtc(f), now)) { skipped++; continue; }
+                    File.Delete(f);
+                    deleted++;
+                }
+                catch { skipped++; }
+            }
+            if (deleted > 0) Console.WriteLine($"  Cleaning {deleted} orphaned {label} from {dir}");
+            if (skipped > 0)
+                Console.WriteLine($"  Left {skipped} recent file(s) in {dir} alone (younger than {OrphanMinAge.TotalMinutes:F0} min — may belong to a running scan)");
+            return skipped;
+        }
+
+        /// <summary>
+        /// Startup orphan sweep. Truedat is single-instance by design — the supported model for
+        /// cross-machine scaling is `--chunk M/N`, not concurrent same-library runs — and this
+        /// sweep is why: it cannot distinguish a live sibling's working files from a dead run's
+        /// leftovers.
+        ///
+        /// Two guards, because each covers the other's blind spot (I-3):
+        ///  * a sibling truedat process means don't sweep AT ALL, and say so;
+        ///  * an age gate, because process enumeration can be blocked and because a sibling on
+        ///    another machine sharing a stage dir is invisible to any local check.
+        ///
+        /// --stage-dir now isolates two of the three targets: the staged copies and the downmix
+        /// WAVs both live under it. The third — `&lt;drive&gt;\.truedat-tmp` hardlinks — cannot be
+        /// relocated, because a hardlink must sit on the same volume as its source. That one
+        /// relies on the two guards above, and is the reason they are not optional.
+        /// </summary>
         static void CleanupOrphanedFiles()
         {
-            // Clean up orphaned hardlinks from .truedat-tmp directories on all drives
+            int siblings = CountSiblingTruedatProcesses();
+            if (!ShouldSweepOrphans(siblings))
+            {
+                Console.Error.WriteLine($"  WARNING: {siblings} other truedat process(es) running — skipping the orphan sweep.");
+                Console.Error.WriteLine("           Truedat is single-instance by design; concurrent runs on one library are not supported");
+                Console.Error.WriteLine("           (use --chunk M/N across machines). Sweeping now could delete the other run's working files.");
+                return;
+            }
+
+            // Hardlinks from .truedat-tmp on every ready drive. NOT relocatable by --stage-dir:
+            // a hardlink cannot cross volumes, so it has to live on the source's own drive.
             try
             {
                 foreach (var drive in DriveInfo.GetDrives())
@@ -708,52 +795,27 @@ namespace Truedat
                     if (!Directory.Exists(tmpDir)) continue;
                     try
                     {
-                        var files = Directory.GetFiles(tmpDir);
-                        if (files.Length > 0)
-                        {
-                            Console.WriteLine($"  Cleaning {files.Length} orphaned hardlink(s) from {tmpDir}");
-                            foreach (var f in files)
-                                try { File.Delete(f); } catch { }
-                        }
-                        // Attempt removal unconditionally; the call fails if anything
-                        // remained (e.g. permission denied on a stuck file) and we
-                        // move on — cheaper than a second GetFiles.
-                        try { Directory.Delete(tmpDir); } catch { }
+                        // Only remove the directory when nothing was left behind — a kept file
+                        // means something may still be using this dir.
+                        if (SweepAged(tmpDir, "*", "hardlink(s)") == 0)
+                            try { Directory.Delete(tmpDir); } catch { }
                     }
                     catch { }
                 }
             }
             catch { }
 
-            // Clean up orphaned downmix WAV files from temp directory
-            try
-            {
-                var tempDir = Path.GetTempPath();
-                var orphans = Directory.GetFiles(tempDir, "truedat_stereo_*.wav");
-                if (orphans.Length > 0)
-                {
-                    Console.WriteLine($"  Cleaning {orphans.Length} orphaned downmix file(s) from {tempDir}");
-                    foreach (var f in orphans)
-                        try { File.Delete(f); } catch { }
-                }
-            }
-            catch { }
-
-            // Clean up orphaned staged files from the source-staging directory
-            // (created by OpenStagedSource when staging UNC sources). Honours --stage-dir.
+            // Downmix WAVs and staged copies both live under the stage dir now, so one sweep
+            // covers both and --stage-dir isolates both.
             try
             {
                 var stageDir = _stageOpts.StageDir;
                 if (Directory.Exists(stageDir))
                 {
-                    var orphans = Directory.GetFiles(stageDir);
-                    if (orphans.Length > 0)
-                    {
-                        Console.WriteLine($"  Cleaning {orphans.Length} orphaned staged file(s) from {stageDir}");
-                        foreach (var f in orphans)
-                            try { File.Delete(f); } catch { }
-                    }
-                    try { Directory.Delete(stageDir); } catch { }
+                    // One pass, not one per kind: a second glob over the same directory would
+                    // report the same recent file twice in the "left alone" line.
+                    if (SweepAged(stageDir, "*", "staged/downmix file(s)") == 0)
+                        try { Directory.Delete(stageDir); } catch { }
                 }
             }
             catch { }
@@ -5406,7 +5468,11 @@ namespace Truedat
         {
             var ext = Path.GetExtension(audioPath);
             var root = Path.GetPathRoot(Path.GetFullPath(audioPath)) ?? Path.GetTempPath();
-            string[] candidates = { Path.Combine(root, ".truedat-tmp"), Path.Combine(Path.GetTempPath(), ".truedat-tmp") };
+            // First candidate MUST be the source's own volume — a hardlink cannot cross
+            // volumes, which is why that one is not relocatable by --stage-dir (I-3) and why
+            // the sweep of <drive>\.truedat-tmp leans on the age gate + sibling check instead.
+            // The FALLBACK is relocatable, so it follows --stage-dir like everything else.
+            string[] candidates = { Path.Combine(root, ".truedat-tmp"), Path.Combine(_stageOpts.StageDir, ".truedat-tmp") };
 
             int lastErr = 0;
             foreach (var tempDir in candidates)
@@ -9420,6 +9486,33 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "structural skip: matching is case-insensitive (.MP4 behaves like .mp4)");
             }
 
+            // --- I-3: the startup orphan sweep must not eat a live sibling's working files.
+            // Exact boundaries, because both guards are the difference between "collect
+            // leftovers" and "delete a running scan's staged copy and blame the track".
+            {
+                var i3Now = new DateTime(2026, 7, 26, 12, 0, 0, DateTimeKind.Utc);
+                Assert(OrphanMinAge == TimeSpan.FromMinutes(60),
+                    $"sweep: the orphan age gate is 60 minutes (got {OrphanMinAge.TotalMinutes})");
+                Assert(!IsSweepableOrphan(i3Now, i3Now),
+                    "sweep: a file written just now is NOT an orphan");
+                Assert(!IsSweepableOrphan(i3Now.AddMinutes(-59), i3Now),
+                    "sweep: 59 minutes old is still too recent to sweep");
+                Assert(IsSweepableOrphan(i3Now.AddMinutes(-60), i3Now),
+                    "sweep: exactly 60 minutes old is sweepable (boundary is >=)");
+                Assert(IsSweepableOrphan(i3Now.AddDays(-3), i3Now),
+                    "sweep: a three-day-old leftover is swept");
+
+                Assert(ShouldSweepOrphans(0), "sweep: with no sibling truedat running, the sweep proceeds");
+                Assert(!ShouldSweepOrphans(1), "sweep: ONE sibling truedat is enough to refuse the sweep");
+                Assert(!ShouldSweepOrphans(7), "sweep: several siblings also refuse");
+                // This process is itself a truedat, and must not count itself — otherwise the
+                // sweep would refuse on every run and never collect anything. Asserted as a
+                // difference so it holds whether or not the operator has other scans running.
+                int i3Named = Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName).Length;
+                Assert(i3Named - CountSiblingTruedatProcesses() == 1,
+                    $"sweep: the sibling count excludes exactly this process ({i3Named} named, {CountSiblingTruedatProcesses()} siblings)");
+            }
+
             // --- I-5: one wording for "the scan cannot find this file", shared by
             // --file-list/--folder and --analyze-file. Exact strings, because these land
             // verbatim in mbxmoods-skipped.csv and an operator greps them.
@@ -9500,7 +9593,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var ffmpeg = _ffmpegPath.Value;
             if (ffmpeg == null) return null;
 
-            string tempPath = Path.Combine(Path.GetTempPath(), $"truedat_stereo_{Guid.NewGuid():N}.wav");
+            // Into the STAGE DIR, not %TEMP% (I-3). The startup sweep deletes
+            // truedat_stereo_*.wav, and while the producer hard-coded %TEMP% a second
+            // invocation could not be isolated from a live one no matter what --stage-dir
+            // said: it would delete the running scan's in-flight downmix WAVs, and losing a
+            // WAV mid-Essentia surfaces in mbxmoods-errors.csv as if the TRACK were corrupt.
+            // Multi-channel sources are exactly the hi-res material the authenticity work
+            // targets, so this was the collision most likely to be mis-diagnosed.
+            string downmixDir = _stageOpts.StageDir;
+            try { Directory.CreateDirectory(downmixDir); }
+            catch { downmixDir = Path.GetTempPath(); }   // never fail a downmix over the dir
+            string tempPath = Path.Combine(downmixDir, $"truedat_stereo_{Guid.NewGuid():N}.wav");
             try
             {
                 var psi = new ProcessStartInfo

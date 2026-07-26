@@ -173,7 +173,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --bit-depth <16|24>     With --transcode: override output bit depth (default: match source).
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
-  --stage-dir <path>      Override staging dir (default %TEMP%\.truedat-stage).
+  --stage-dir <path>      Override the scratch dir used for staged source copies and
+                          multi-channel downmixes (default %TEMP%\.truedat-stage). Also the
+                          isolation lever if you ever need two truedats on one machine —
+                          see "Run one truedat at a time" below.
   --max-duration <secs>   Max track length for Essentia analysis (default 12000 = 200 min —
                           the stock extractor's ChordsDetection buffer limit). Longer tracks
                           are recorded in the errors CSV and count as failed (not the
@@ -228,6 +231,17 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
 
 **Network libraries:** when the source is on a UNC share (`\\server\share\…`), a mapped network drive (e.g. `Z:\` mapped to `\\server\share`), or a local path with non-ASCII characters, truedat stages each file once to a local temp copy and runs the 8-9 concurrent per-track workers (and the cache hierarchy's tier-2/3/4 body reads) against the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. Cache tier-1 (path + mtime equality) doesn't stage — already-cached tracks stay free. Local-ASCII paths read directly. Use `--no-stage` to opt out, or `--stage-dir` to relocate the staging directory (e.g. to a fast scratch volume when `%TEMP%` is on a small SSD). Per-track stage failures fall back to direct read with a one-line warning — scans never abort over a staging hiccup. End-of-scan summary reports `staging: N staged` (or `N staged, M direct-fallback`), with a stderr warning when >5% of attempted stages fell back so a wedged stage-dir is visible.
+
+**Run one truedat at a time.** Truedat is single-instance by design. At startup it sweeps
+leftover scratch files from previous runs — staged copies and downmix WAVs under the staging
+dir, and `.truedat-tmp` hardlinks on each drive — and it cannot tell a *dead* run's leftovers
+from a *live* sibling's working files. Two guards make that safe rather than merely documented:
+a second truedat process on the machine skips the sweep entirely with a warning, and any file
+touched in the last 60 minutes is left alone regardless. If you genuinely need two runs at once,
+give each its own `--stage-dir` (or pass `--no-stage`); note the per-drive `.truedat-tmp`
+hardlink area cannot be relocated, because a hardlink has to sit on the same volume as its
+source, so it leans on those two guards. To scale across *machines*, use `--chunk M/N` and
+`--merge-moods` rather than concurrent runs against one library.
 
 **Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
 - Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
