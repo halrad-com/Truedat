@@ -82,12 +82,24 @@ namespace Truedat
             _rules = rules;
             _diagnostics = diagnostics;
             InvalidRuleCount = invalidCount;
+            foreach (var r in rules)
+                if (r.Kind == ExclusionKind.Genre) { HasGenreRules = true; break; }
         }
 
         public IReadOnlyList<ExclusionRule> Rules => _rules;
         public IReadOnlyList<string> Diagnostics => _diagnostics;
         public int InvalidRuleCount { get; }
         public bool IsEmpty => _rules.Length == 0;
+
+        /// <summary>
+        /// True when any rule matches on genre. Callers that do not already know a track's
+        /// genre use this to decide whether reading it is worth the IO: the per-file scan
+        /// paths check exclusions BEFORE any cache tier (deliberately — an excluded file must
+        /// never stage and hash itself on every run), so a genre read there costs a TagLib
+        /// open per file per run. Gating on this means the cost is paid only by operators who
+        /// actually wrote a genre rule, and is zero for everyone else. Computed once at parse.
+        /// </summary>
+        public bool HasGenreRules { get; private set; }
 
         /// <summary>Fold separators and case the same way PathComparer does, so a rule
         /// written with either slash on either machine behaves identically.</summary>

@@ -1597,10 +1597,37 @@ namespace Truedat
             {
                 string? moodsForExcl = analyzeFileMoods ?? xmlPath;
                 if (string.IsNullOrEmpty(moodsForExcl))
-                    moodsForExcl = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
+                {
+                    // Auto-discover the library exactly as --preview and the scan do. The old
+                    // behaviour defaulted to the CURRENT DIRECTORY, which made the README's own
+                    // documented invocation (`truedat --apply-exclusions decisions.json`) create a
+                    // BRAND-NEW exclusion file wherever the operator happened to be standing,
+                    // print "Added: N" and exit 0 — while --preview and the scan read the
+                    // library's file and excluded nothing, with no error anywhere to explain it.
+                    // All three modes must agree on which file they mean.
+                    var discoveredXml = ResolveITunesXml(null);
+                    if (File.Exists(discoveredXml))
+                        moodsForExcl = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(discoveredXml)) ?? ".", "mbxmoods.json");
+                }
                 else if (Directory.Exists(moodsForExcl))
                     moodsForExcl = Path.Combine(moodsForExcl, "mbxmoods.json");
+
+                if (string.IsNullOrEmpty(moodsForExcl) && string.IsNullOrEmpty(_exclusionsPath))
+                {
+                    // Refuse rather than fall back to the CWD. CREATING an exclusion file is
+                    // legitimate — first use has none, and Merge creates it — but creating it in
+                    // an arbitrary directory is indistinguishable from success while achieving
+                    // nothing, which is the whole defect. Make the operator name the target.
+                    Console.Error.WriteLine("Error: cannot tell which library to apply exclusions to — no iTunes Music Library.xml found.");
+                    Console.Error.WriteLine("  Pass the library (or the folder holding it) as a positional argument, or name the exclusion file directly with --exclusions <path>.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
                 var canonicalExcl = _exclusionsPath ?? ExclusionStore.Resolve(moodsForExcl!);
+                // Print the target BEFORE merging, not only on success: if this is not the file
+                // the operator expected, they need to see that even when the merge then fails.
+                Console.WriteLine($"Applying to: {canonicalExcl}");
 
                 if (!File.Exists(applyExclusionsPath))
                 {
@@ -1869,7 +1896,8 @@ namespace Truedat
                 // Matched on afKey (normalized full path), not the raw analyzeFilePath,
                 // so a relative invocation can't dodge an absolute file rule or a folder
                 // fragment the same way --file-list already guards against.
-                if (!_noExclusions && _exclusions.IsExcluded(afKey, null, out var afExclReason))
+                var afGenre = (!_noExclusions && _exclusions.HasGenreRules) ? ReadGenreForExclusion(afKey) : null;
+                if (!_noExclusions && _exclusions.IsExcluded(afKey, afGenre, out var afExclReason))
                 {
                     // Ledgered like every other exclusion skip (--file-list's guard does
                     // the same) — README promises every exclusion lands in the CSV, not
@@ -2504,7 +2532,8 @@ namespace Truedat
                         // copy on UNC) every single run for nothing. Matched on fullPath
                         // (not the raw filePath) so a relative file-list entry can't dodge
                         // an absolute file rule or a folder fragment.
-                        if (!_noExclusions && _exclusions.IsExcluded(fullPath, null, out var flExclReason))
+                        var flGenre = (!_noExclusions && _exclusions.HasGenreRules) ? ReadGenreForExclusion(fullPath) : null;
+                        if (!_noExclusions && _exclusions.IsExcluded(fullPath, flGenre, out var flExclReason))
                         {
                             AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"excluded (rule: {flExclReason})");
                             Console.Error.WriteLine($"[skipped excluded: {flExclReason}] {Path.GetFileName(filePath)}");
@@ -8654,6 +8683,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(gen.IsExcluded(@"D:\a.mp3", "  Podcast  ", out _), "exclusion: genre match is trimmed");
                 Assert(!gen.IsExcluded(@"D:\a.mp3", "Comedy Podcast", out _), "exclusion: genre is exact, not substring");
                 Assert(!gen.IsExcluded(@"D:\a.mp3", null, out _), "exclusion: null genre never matches a genre rule");
+                // HasGenreRules gates whether the per-file scan paths spend a TagLib open
+                // reading genre before their pre-cache exclusion check. Those paths used to
+                // pass a hard-coded null, which made every genre rule silently inert on the
+                // autoscan path. If this flag ever reports false while a genre rule exists,
+                // the rules go inert again and nothing else fails — so pin it directly.
+                Assert(gen.HasGenreRules, "exclusion: a genre rule sets HasGenreRules (gates the per-file genre read)");
+                Assert(!frag.HasGenreRules, "exclusion: a folder-only set does not set HasGenreRules (no needless IO)");
+                Assert(!ExclusionSet.Empty.HasGenreRules, "exclusion: the empty set does not set HasGenreRules");
 
                 // file rule
                 var fil = Set(FileRule("exclude", @"D:\Music\setlist.mp3"));
@@ -11293,6 +11330,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             try
             {
                 using var tfile = TagLib.File.Create(filePath);
+                // (see ReadGenreForExclusion below for the genre-only variant used by the
+                // pre-cache exclusion check on the per-file scan paths)
                 var tag = tfile.Tag;
                 if (tag != null)
                 {
@@ -11306,6 +11345,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             catch { /* best-effort */ }
             return m;
+        }
+
+        /// <summary>
+        /// Genre only, for the exclusion check on the per-file scan paths (--file-list,
+        /// --folder, --analyze-file). Those paths check exclusions BEFORE any cache tier and
+        /// so have no parsed tags yet, which is why they passed a hard-coded null genre and
+        /// made every `genre` rule silently INERT there — including on the plugin-driven
+        /// autoscan path, which is where new files actually arrive. Header-only TagLib read,
+        /// and callers gate it on <see cref="ExclusionSet.HasGenreRules"/> so it costs nothing
+        /// unless the operator wrote a genre rule. Never throws: an unreadable file yields
+        /// null, which cannot match a genre rule — the same outcome as before, but now by
+        /// accident of the file rather than by construction.
+        /// </summary>
+        static string? ReadGenreForExclusion(string path)
+        {
+            try
+            {
+                using var tfile = TagLib.File.Create(path);
+                var g = tfile.Tag?.FirstGenre;
+                return string.IsNullOrWhiteSpace(g) ? null : g;
+            }
+            catch { return null; }
         }
 
         /// <summary>Best-effort encoder identification from codec-specific tag accessors.
