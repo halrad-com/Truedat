@@ -1733,18 +1733,26 @@ namespace Truedat
                 });
 
                 var pvDest = previewOutPath ?? PreviewWriter.ResolveDest(pvOutputDir);
-                if (!PreviewWriter.TryWritePreviewJson(pvDest, pvPlan, PreviewWriter.PreviewHtmlFileName))
+                // Co-emit the review page BEFORE the manifest, and name it in the manifest only
+                // if it actually landed. Writing the manifest first meant a page-write failure
+                // left source.reviewHtml pointing at a file that does not exist — and MBXHub
+                // follows that pointer to serve the page, so the broken link would surface on
+                // the hub rather than here. A page-write failure is still a warning, not a mode
+                // failure: the JSON is the machine contract and stays valid without the pointer.
+                var pvHtml = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pvDest)) ?? pvOutputDir,
+                                          PreviewWriter.PreviewHtmlFileName);
+                string? pvHtmlName = null;
+                try
+                {
+                    PreviewWriter.WritePreviewHtml(pvHtml, pvPlan);
+                    pvHtmlName = PreviewWriter.PreviewHtmlFileName;
+                }
+                catch (Exception ex) { Console.Error.WriteLine($"  (warning: preview page not written: {ex.Message})"); }
+                if (!PreviewWriter.TryWritePreviewJson(pvDest, pvPlan, pvHtmlName))
                 {
                     Environment.ExitCode = 1;
                     return;
                 }
-                // Co-emit the review page beside the manifest. The manifest already names it;
-                // a page-write failure is a warning, not a mode failure — the JSON is the
-                // machine contract and stays valid.
-                var pvHtml = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pvDest)) ?? pvOutputDir,
-                                          PreviewWriter.PreviewHtmlFileName);
-                try { PreviewWriter.WritePreviewHtml(pvHtml, pvPlan); }
-                catch (Exception ex) { Console.Error.WriteLine($"  (warning: preview page not written: {ex.Message})"); }
 
                 Console.WriteLine();
                 Console.WriteLine("Scan preview (nothing was analyzed):");

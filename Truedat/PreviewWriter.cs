@@ -8,10 +8,14 @@ namespace Truedat
     /// Serialises a PreviewPlan to preview.json. Two things about this file are contract,
     /// not preference:
     ///
-    /// 1. preview.json IS the review-surface manifest MBXHub serves via GET /review/{id} —
-    ///    their GetAsset route serves only .html and no route serves an arbitrary sibling
-    ///    JSON, so the plan payload has to ride inside the manifest envelope rather than
-    ///    living beside it.
+    /// 1. preview.json IS the review-surface manifest MBXHub serves via GET /review/manifest/{id}
+    ///    — their asset route (GET /review/asset/{id}) serves only .html and no route serves an
+    ///    arbitrary sibling JSON, so the plan payload has to ride inside the manifest envelope
+    ///    rather than living beside it. The page POSTs its decisions delta to
+    ///    POST /review/decisions/{id}. Those three route shapes are restfulbee's C4 route table
+    ///    (TOOL-LIFECYCLE-SERVICE.md) and are what the emitted page actually calls; earlier
+    ///    drafts of this comment and of the design spec said GET /review/{id} and
+    ///    POST /review/{id}/decisions, which were never what shipped.
     /// 2. An unestimable ETA is OMITTED, never written as the -1 sentinel. A consumer that
     ///    reads -1 as a number would render "-1 seconds"; absent is unambiguous.
     /// </summary>
@@ -465,7 +469,7 @@ function ep(kind){return '/review/'+kind+'/'+encodeURIComponent(D.id||'preview')
 function fetchT(url,opts,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms||8000);return fetch(url,Object.assign({signal:c.signal},opts||{})).finally(()=>clearTimeout(t));}
 const servedHost={mode:'served',
   load(){return fetchT(ep('manifest'),{headers:{'accept':'application/json'}},6000).then(r=>r.ok?r.json():Promise.reject(r.status)).then(fresh=>{console.log('[preview] served: refreshed manifest');Object.assign(D,fresh);return D;}).catch(e=>{console.log('[preview] served load failed, using embedded:',e);return D;});},
-  save(delta){console.log('[preview] served save: POST decisions',delta);return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Saved: '+bits.join(', ')+'.',true);return this.load().then(()=>{rebase();refresh();});}banner('Save rejected: '+esc(res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
+  save(delta){console.log('[preview] served save: POST decisions',delta);return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Saved: '+bits.join(', ')+'.',true);return this.load().then(()=>{rebase();refresh();});}banner('Save rejected: '+(res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
   rescan(){console.log('[preview] served: re-loading manifest');return this.load().then(refresh).then(()=>banner('Counts refreshed from the hub. A standalone re-preview trigger is planned; a Save already re-runs the preview.',true));}};
 let host=OFFLINE?offlineHost:servedHost;
 
@@ -484,7 +488,7 @@ function renderBulk(){
   const exclBlock=excl.length?`<div class='sec-h'>Excluded genres — click to un-exclude</div><div class='chips'>${excl.map(g=>`<button class='chip excl' data-genre='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span> ✕</button>`).join('')}</div>`:'';
   const adderBlock=genres.length?`<div class='sec-h'>Genres</div><button class='sec' id='gpick'>＋ exclude genres… <span class='n'>(${genres.length})</span></button>`:'';
   const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));const stale=r.matchCount===0?` <span class='stale'>(0 — stale?)</span>`:` <span class='n'>(${num(r.matchCount)})</span>`;return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${stale}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
-  document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='7200' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
+  document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='${Math.max(7200,LONG*2)}' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 // The two DURATION reason values, emitted by PreviewPlanner (see the two reasons.Add calls
@@ -581,7 +585,9 @@ document.getElementById('rescan').addEventListener('click',()=>host.rescan());
 // Reset discards this session's actions and returns to exactly what the manifest says.
 document.getElementById('reset').addEventListener('click',()=>{sAdd=new Set();sRem=new Set();recompute();persist();document.getElementById('banner').style.display='none';refresh();});
 refresh();
-if(!OFFLINE)host.load().then(refresh);
+// Unconditional: offlineHost.load() resolves the embedded manifest, so the host difference
+// stays inside the adapter rather than leaking out here as an OFFLINE branch.
+host.load().then(refresh);
 </script>
 </body>
 </html>";
