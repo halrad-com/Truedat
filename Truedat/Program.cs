@@ -3114,6 +3114,16 @@ namespace Truedat
                     var newMb = etaNewBytes / (1024.0 * 1024.0);
                     var newSizeTag = etaNewBytes <= 0 ? "" : newMb >= 1024 ? $" / {newMb / 1024.0:F1} GB" : $" / {newMb:F0} MB";
                     Console.WriteLine($"  New to catalog: {etaNew} track(s){newSizeTag} — full analysis expected");
+                    // Duration-based pre-flight ETA (I2): bytes under-cost long low-bitrate
+                    // speech by ~10x, so cost new work by audio duration × the catalog's
+                    // measured RTF / parallelism — the model --preview already uses. The byte
+                    // figure above stays as a secondary signal; this is the honest time.
+                    var preflightRtf = MedianCatalogRtf(tracks, allTracks);
+                    var preflightEta = PreflightEtaSecs(etaNewAudioMs, preflightRtf, parallelism);
+                    if (preflightEta >= 0)
+                        Console.WriteLine($"  Estimated time: {FormatTimeSpan(TimeSpan.FromSeconds(preflightEta))}  ({FormatTimeSpan(TimeSpan.FromMilliseconds(etaNewAudioMs))} of new audio, {preflightRtf:F2}x realtime, {Math.Max(1, parallelism)} workers)");
+                    else
+                        Console.WriteLine("  Estimated time: not estimable yet (no analyzed history to learn a rate from)");
                 }
                 if (!_refreshFeatures)
                 {
@@ -9086,6 +9096,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(PreviewNoEtaReason(5).Contains("not estimable"), "preview-eta: new work but no history is genuinely not estimable");
             }
 
+            // --- zero-arg pre-flight ETA is duration-based, not bytes (I2) ---
+            {
+                // 600s of new audio at 0.10x realtime across 4 workers -> 600*0.10/4 = 15s
+                Assert(Math.Abs(PreflightEtaSecs(600_000, 0.10, 4) - 15.0) < 1e-6, "preflight-eta: duration x rtf / parallelism");
+                // Longer audio costs more even at identical byte-rate — duration-driven, not bytes
+                Assert(PreflightEtaSecs(3_600_000, 0.10, 1) > PreflightEtaSecs(600_000, 0.10, 1), "preflight-eta: longer audio costs more (duration-driven, not bytes) (I2)");
+                Assert(PreflightEtaSecs(0, 0.10, 4) < 0, "preflight-eta: no new audio -> not estimable");
+                Assert(PreflightEtaSecs(600_000, 0, 4) < 0, "preflight-eta: no measured RTF -> not estimable");
+                Assert(Math.Abs(PreflightEtaSecs(600_000, 0.10, 0) - 60.0) < 1e-6, "preflight-eta: parallelism floored to 1");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -9449,6 +9470,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             newTracks == 0
                 ? "nothing new to analyze"
                 : "not estimable (no analyzed history yet to learn from)";
+
+        /// <summary>Pre-flight ETA in seconds for a zero-arg scan, or -1 when it cannot be
+        /// estimated. Duration-based, NOT bytes: wall-clock ≈ total new-audio duration × the
+        /// catalog's measured real-time factor / parallelism — the same model --preview uses.
+        /// Bytes systematically under-cost long low-bitrate speech (a 45-min 64 kbps podcast
+        /// is ~20 MB but ~45 min of Essentia work), which is exactly the content this release
+        /// newly analyzes (I2). Returns -1 when there is no new audio or no measured RTF yet
+        /// (rtf comes from MedianCatalogRtf, which returns 0 with no analyzed history).</summary>
+        internal static double PreflightEtaSecs(long newAudioMs, double rtf, int parallelism)
+        {
+            if (newAudioMs <= 0 || rtf <= 0) return -1;
+            var p = parallelism < 1 ? 1 : parallelism;
+            return newAudioMs / 1000.0 * rtf / p;
+        }
 
         /// <summary>Short bracket tag for the per-file console skip lines
         /// (<c>[skipped {tag}]</c>). Kept distinct from the full
