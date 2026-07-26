@@ -1638,11 +1638,13 @@ namespace Truedat
             // inside it). Writes nothing.
             if (statsMode)
             {
-                string? statsPath = analyzeFileMoods ?? xmlPath;
-                if (string.IsNullOrEmpty(statsPath))
-                    statsPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
-                else if (Directory.Exists(statsPath))
-                    statsPath = Path.Combine(statsPath, "mbxmoods.json");
+                string? statsPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var statsRefusal);
+                if (statsRefusal != null)
+                {
+                    Console.Error.WriteLine(statsRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 if (!File.Exists(statsPath))
                 {
                     Console.Error.WriteLine($"Error: moods file not found: {statsPath}");
@@ -1672,11 +1674,13 @@ namespace Truedat
             // first-N preview. Writes no changes to the moods file itself.
             if (listSpeechMode)
             {
-                string? speechPath = analyzeFileMoods ?? xmlPath;
-                if (string.IsNullOrEmpty(speechPath))
-                    speechPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
-                else if (Directory.Exists(speechPath))
-                    speechPath = Path.Combine(speechPath, "mbxmoods.json");
+                string? speechPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var speechRefusal);
+                if (speechRefusal != null)
+                {
+                    Console.Error.WriteLine(speechRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 if (!File.Exists(speechPath))
                 {
                     Console.Error.WriteLine($"Error: moods file not found: {speechPath}");
@@ -1697,11 +1701,13 @@ namespace Truedat
             // CSV; the moods file is untouched.
             if (listSmfmMissingMode)
             {
-                string? smfmPath = analyzeFileMoods ?? xmlPath;
-                if (string.IsNullOrEmpty(smfmPath))
-                    smfmPath = Path.Combine(Environment.CurrentDirectory, "mbxmoods.json");
-                else if (Directory.Exists(smfmPath))
-                    smfmPath = Path.Combine(smfmPath, "mbxmoods.json");
+                string? smfmPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var smfmRefusal);
+                if (smfmRefusal != null)
+                {
+                    Console.Error.WriteLine(smfmRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 if (!File.Exists(smfmPath))
                 {
                     Console.Error.WriteLine($"Error: moods file not found: {smfmPath}");
@@ -5467,6 +5473,61 @@ namespace Truedat
         // check fails with the same shape as before. moodsPath continues to derive
         // from Path.GetDirectoryName(xmlPath), so the output lands next to whichever
         // copy was found.
+        /// <summary>
+        /// Resolve the mood catalog for the read-only JSON modes (`--stats`, `--list-speech`,
+        /// `--list-missing-smfm`). They take their catalog POSITIONALLY, and when the operator
+        /// gives nothing the catalog is derived from the LIBRARY'S DIRECTORY — never the library
+        /// file itself.
+        ///
+        /// That distinction is the whole point. These modes used to fall back to
+        /// `analyzeFileMoods ?? xmlPath`, so a bare `truedat --list-missing-smfm` handed the
+        /// auto-discovered `iTunes Music Library.xml` straight to <see cref="LoadExistingMoods"/>.
+        /// The XML exists, so the File.Exists guard passed; the JSON reader then failed on the
+        /// leading '&lt;', the file was declared **corrupt**, a `.corrupt.&lt;date&gt;` copy of the
+        /// user's library was written, and the console advised DELETING it. A read-only lister
+        /// must never be able to reach that state — reported by a user on 0.5.4.4.
+        ///
+        /// Returns null and sets <paramref name="refusal"/> when the caller named something that
+        /// cannot be a catalog; the caller prints it and exits 1.
+        /// </summary>
+        internal const string MoodsFileName = "mbxmoods.json";
+
+        static string? ResolveMoodsCatalog(string? explicitPath, string? libraryXmlPath, out string? refusal)
+        {
+            refusal = null;
+
+            if (!string.IsNullOrEmpty(explicitPath))
+            {
+                // A directory means "the catalog in here".
+                if (Directory.Exists(explicitPath))
+                    return Path.Combine(explicitPath!, MoodsFileName);
+
+                // Naming the library is a plausible mistake — it is the positional argument every
+                // OTHER mode takes — so say what to do instead of parsing it as JSON and calling
+                // the result corrupt.
+                if (explicitPath!.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                {
+                    refusal = $"Error: {explicitPath} is an iTunes library XML, not a mood catalog." + Environment.NewLine
+                            + $"  These modes read {MoodsFileName}. Pass its path or its folder, or omit the argument to use the one beside your library.";
+                    return null;
+                }
+
+                return explicitPath;
+            }
+
+            // Nothing given: the catalog sits beside the library, so use the library's DIRECTORY.
+            if (!string.IsNullOrEmpty(libraryXmlPath))
+            {
+                var dir = Directory.Exists(libraryXmlPath)
+                    ? libraryXmlPath!
+                    : Path.GetDirectoryName(Path.GetFullPath(libraryXmlPath!));
+                if (!string.IsNullOrEmpty(dir))
+                    return Path.Combine(dir!, MoodsFileName);
+            }
+
+            return Path.Combine(Environment.CurrentDirectory, MoodsFileName);
+        }
+
         static string ResolveITunesXml(string? explicitArg)
         {
             const string XmlName = "iTunes Music Library.xml";
@@ -8703,6 +8764,34 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.WriteAllText(xmlTarget, "<?xml version=\"1.0\"?><plist></plist>");
                     Assert(PreviewWriter.IsProtectedTarget(xmlTarget, out why),
                         "previewguard: an .xml target is refused (the library is the input)");
+
+                    // --- catalog resolution for the read-only JSON modes -------------------
+                    // Reported by a user on 0.5.4.4: a bare `--list-missing-smfm` fell back to
+                    // the auto-discovered library XML, File.Exists passed, the JSON reader hit
+                    // '<', and truedat declared their LIBRARY corrupt, wrote a .corrupt copy of
+                    // it, and printed advice to delete it. The catalog must be derived from the
+                    // library's DIRECTORY, never be the library file.
+                    string? resolveWhy;
+                    var derived = ResolveMoodsCatalog(null, xmlTarget, out resolveWhy);
+                    Assert(resolveWhy == null, "catalogpath: an auto-discovered library is not a refusal");
+                    Assert(derived == Path.Combine(gdir, "mbxmoods.json"),
+                        $"catalogpath: no explicit path derives the catalog beside the library (got {derived})");
+                    Assert(!string.Equals(derived, xmlTarget, StringComparison.OrdinalIgnoreCase),
+                        "catalogpath: the resolved catalog is never the library XML itself");
+
+                    var namedXml = ResolveMoodsCatalog(xmlTarget, null, out resolveWhy);
+                    Assert(namedXml == null && resolveWhy != null,
+                        "catalogpath: naming an .xml explicitly is refused, not parsed as JSON");
+                    Assert(resolveWhy != null && resolveWhy.IndexOf("not a mood catalog", StringComparison.OrdinalIgnoreCase) >= 0,
+                        "catalogpath: the refusal says what the file actually is");
+
+                    var fromDir = ResolveMoodsCatalog(gdir, null, out resolveWhy);
+                    Assert(resolveWhy == null && fromDir == Path.Combine(gdir, "mbxmoods.json"),
+                        "catalogpath: a directory resolves to the catalog inside it");
+
+                    var explicitJson = Path.Combine(gdir, "elsewhere.json");
+                    Assert(ResolveMoodsCatalog(explicitJson, xmlTarget, out resolveWhy) == explicitJson && resolveWhy == null,
+                        "catalogpath: an explicit catalog path wins over the library");
 
                     var catalogTarget = Path.Combine(gdir, "mbxmoods.json");
                     File.WriteAllText(catalogTarget, "{\"tracks\":{}}");
