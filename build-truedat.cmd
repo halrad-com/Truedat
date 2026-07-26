@@ -52,7 +52,12 @@ if errorlevel 1 (
 copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\
 echo Done: truedat.exe
 
-REM Ship README.md alongside the binary so the distributed bundle is self-documenting.
+REM Ship the docs alongside the binary so the distributed bundle is self-documenting.
+REM The ROOT copy is the master; dist\truedat\ is GENERATED from it on every build. Never
+REM edit dist\truedat\README.md or dist\truedat\SBOM.md by hand — the next build overwrites
+REM them. This direction is deliberate and was learned the hard way: the two copies drifted,
+REM the corrected text ended up only in the dist copy, and a routine build would have
+REM silently replaced it with the stale root version.
 echo Copying README.md...
 copy /Y README.md "dist\truedat\" >nul
 if errorlevel 1 (
@@ -61,6 +66,15 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Done: README.md
+
+echo Copying SBOM.md...
+copy /Y SBOM.md "dist\truedat\" >nul
+if errorlevel 1 (
+    echo ERROR: SBOM.md copy failed
+    pause
+    exit /b 1
+)
+echo Done: SBOM.md
 
 echo.
 echo ========================================

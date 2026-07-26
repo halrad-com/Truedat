@@ -1,10 +1,10 @@
 # Truedat - Music Mood Extractor & Fingerprinter
 
-Truedat is a Windows .NET CLI that extracts **per-track mood** across a music library — the signal MBXHub's AutoQ engine uses for **mood-aware shuffle** — and writes it (alongside identity, authenticity, and metadata) into `mbxmoods.json` that MBXHub reads directly.
+Truedat is a Windows .NET CLI that extracts **per-track mood** across a music library — the signal [MBXHub's ](https://mbxhub.com/download.htm) - [AutoQ](https://mbxhub.com/features.html#autoq)  engine uses for **mood-aware shuffle** — and writes it (alongside identity, authenticity, and metadata) into `mbxmoods.json` that MBXHub reads directly.
 
 **Mood is the core job, and truedat captures it two independent ways:**
 
-- **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract the per-track acoustic feature set (see [Feature set](#feature-set) for the exact counts). The primary mood read. Truedat writes features, not an interpretation: the valence/arousal mapping is made downstream by the consumer (MBXHub/AutoQ) from these fields. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
+- **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract the per-track acoustic feature set (see [Extracted Features](#extracted-features) for the exact counts). The primary mood read. Truedat writes features, not an interpretation: the valence/arousal mapping is made downstream by the consumer (MBXHub/AutoQ) from these fields. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
 - **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
@@ -244,6 +244,7 @@ source, so it leans on those two guards. To scale across *machines*, use `--chun
 `--merge-moods` rather than concurrent runs against one library.
 
 **Optional:** Place `ffmpeg.exe` and `ffprobe.exe` alongside `truedat.exe` (or on PATH) to enable:
+
 - Auto-downmix of multi-channel (5.1+) audio files during scans (without ffmpeg, multi-channel files are skipped with a warning).
 - Auto-retry of files essentia can't decode natively — e.g. `.opus`, which this essentia build lacks. The file is transcoded to a stereo WAV and essentia is re-run against it, all transparently.
 - Standalone `--transcode` mode for converting opus/etc. to uncompressed FLAC.
@@ -579,11 +580,11 @@ Place `truedat.exe` and the required tools in the same folder. No additional run
 
 Truedat calls these tools as subprocesses. Place them alongside `truedat.exe` or on PATH.
 
-| Tool | Enables | License | Source |
-| ---- | ------- | ------- | ------ |
-| [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode) | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
-| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe` | Multi-channel downmix, opus decode retry, `bitUsage` / HF-analysis authenticity signals, `--transcode` | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
-| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe` | `--transcode` source-property matching | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps) |
+| Tool                                                                           | Enables                                                                                                | License  | Source                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Essentia](https://essentia.upf.edu/) `essentia_streaming_extractor_music.exe` | Mood analysis (default mode)                                                                           | AGPL-3.0 | [Essentia](https://github.com/MTG/essentia) / [x64 build](https://github.com/halrad-com/Truedat/tree/main/essentia-build/output-x64) / [dist](https://github.com/halrad-com/Truedat/tree/main/dist/truedat) |
+| [FFmpeg](https://ffmpeg.org/) `ffmpeg.exe`                                     | Multi-channel downmix, opus decode retry, `bitUsage` / HF-analysis authenticity signals, `--transcode` | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps)                                                                                           |
+| [FFmpeg](https://ffmpeg.org/) `ffprobe.exe`                                    | `--transcode` source-property matching                                                                 | GPL-3.0+ | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) / [deps](https://github.com/halrad-com/Truedat/tree/truedat-deps)                                                                                           |
 
 All tools are optional — truedat runs without them but the corresponding features are unavailable. The scan's identity fields (`fingerprint.v1`, `audioStreamSha256`, and `fileMd5` with `--file-md5`) are computed in pure-managed code with no subprocess. Custom x64 Essentia builds are in [`essentia-build/`](essentia-build/), ready to use from [`dist/truedat/`](https://github.com/halrad-com/Truedat/tree/main/dist/truedat).
 
@@ -601,18 +602,16 @@ Creates `dist/truedat/truedat.exe` (single file, ~1 MB). Requires .NET SDK 8.0+.
 
 ## Extracted Features
 
-### Feature set
-
 Truedat writes **features, not an interpretation**. It extracts descriptors from Essentia's output and stores them; the valence/arousal mapping and any mood scoring are made downstream by the consumer (MBXHub/AutoQ) from these fields. Nothing in `mbxmoods.json` is a mood coordinate — `valence` and `arousal` keys written by much older builds are stripped by `--migrate` as legacy.
 
 A fully analyzed track carries:
 
-| | Count | What |
-|---|---|---|
-| Core | 15 | Always present. 12 numeric, plus `key` and `mode` (strings) and `mfcc[]` (13 values). |
-| Extended | 40 | Nullable, omit-when-missing. Loudness envelope, silence, spectral shape, Bark/ERB/Mel band statistics, rhythm/tonal. |
-| Tonal/rhythm | 15 | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
-| Authenticity | 3 blocks | `bitUsage`, `hfEnergyRatio` + method, `hfSpectralStructure`. Populated only where the codec and sample rate make them meaningful. |
+| Group        | Count     | What                                                                                                        |
+| ------------ | --------- | ----------------------------------------------------------------------------------------------------------- |
+| Core         | 15        | Always present. 12 numeric, plus `key` and `mode` (strings) and `mfcc[]` (13 values).                        |
+| Extended     | 40        | Nullable, omit-when-missing. Loudness envelope, silence, spectral shape, Bark/ERB/Mel band statistics, rhythm/tonal. |
+| Tonal/rhythm | 15        | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
+| Authenticity | 3 blocks  | `bitUsage`, `hfEnergyRatio` + method, `hfSpectralStructure`. Populated only where the codec and sample rate make them meaningful. |
 
 That is **70 named feature fields**. Counting leaf *values* rather than fields — `mfcc[]` is 13 numbers, `chordsHistogram[]` is 24, each `keyVotes` profile carries its own strength — a complete entry holds **111 numbers**, of which **74 are scalar feature values** written as named keys.
 
@@ -649,78 +648,78 @@ Extended features are emitted as nullable JSON fields — absent/NaN Essentia pa
 
 ### Extended — Loudness envelope (EBU R128)
 
-| JSON key              | Essentia Path                                 | What It Measures                                       |
-| --------------------- | --------------------------------------------- | ------------------------------------------------------ |
-| `dynamicRange`        | `lowlevel.loudness_ebu128.loudness_range`     | EBU R128 loudness range (LRA) in LU — quiet↔loud span  |
-| `loudnessMomentary`   | `lowlevel.loudness_ebu128.momentary.mean`     | Mean momentary loudness (400 ms gate), LU              |
-| `loudnessShortTerm`   | `lowlevel.loudness_ebu128.short_term.mean`    | Mean short-term loudness (3 s gate), LU                |
-| `replayGain`          | `metadata.audio_properties.replay_gain`       | ReplayGain adjustment for normalised playback, dB      |
+| JSON key            | Essentia Path                              | What It Measures                                      |
+| ------------------- | ------------------------------------------ | ----------------------------------------------------- |
+| `dynamicRange`      | `lowlevel.loudness_ebu128.loudness_range`  | EBU R128 loudness range (LRA) in LU — quiet↔loud span |
+| `loudnessMomentary` | `lowlevel.loudness_ebu128.momentary.mean`  | Mean momentary loudness (400 ms gate), LU             |
+| `loudnessShortTerm` | `lowlevel.loudness_ebu128.short_term.mean` | Mean short-term loudness (3 s gate), LU               |
+| `replayGain`        | `metadata.audio_properties.replay_gain`    | ReplayGain adjustment for normalised playback, dB     |
 
 ### Extended — Silence profile
 
 Fraction of analysis frames whose RMS falls below the given threshold — higher = sparser / more silent content.
 
-| JSON key           | Essentia Path                      | Threshold |
-| ------------------ | ---------------------------------- | --------- |
-| `silenceRate20dB`  | `lowlevel.silence_rate_20dB.mean`  | -20 dB    |
-| `silenceRate30dB`  | `lowlevel.silence_rate_30dB.mean`  | -30 dB    |
-| `silenceRate60dB`  | `lowlevel.silence_rate_60dB.mean`  | -60 dB    |
+| JSON key          | Essentia Path                     | Threshold |
+| ----------------- | --------------------------------- | --------- |
+| `silenceRate20dB` | `lowlevel.silence_rate_20dB.mean` | -20 dB    |
+| `silenceRate30dB` | `lowlevel.silence_rate_30dB.mean` | -30 dB    |
+| `silenceRate60dB` | `lowlevel.silence_rate_60dB.mean` | -60 dB    |
 
 ### Extended — Spectral shape
 
-| JSON key                | Essentia Path                                    | What It Measures                                            |
-| ----------------------- | ------------------------------------------------ | ----------------------------------------------------------- |
-| `spectralRolloff`       | `lowlevel.spectral_rolloff.mean`                 | Hz below which 85% of spectral energy sits (bright↔dark)    |
-| `spectralComplexity`    | `lowlevel.spectral_complexity.mean`              | Count of significant spectral peaks per frame               |
-| `spectralEntropy`       | `lowlevel.spectral_entropy.mean`                 | Shannon entropy of normalised spectrum (noise↔tone)         |
-| `spectralKurtosis`      | `lowlevel.spectral_kurtosis.mean`                | Peakedness of spectral distribution                         |
-| `spectralSkewness`      | `lowlevel.spectral_skewness.mean`                | Asymmetry of spectral distribution                          |
-| `spectralSpread`        | `lowlevel.spectral_spread.mean`                  | 2nd-moment spread around centroid                           |
-| `spectralStrongPeak`    | `lowlevel.spectral_strongpeak.mean`              | Prominence of dominant spectral peak                        |
-| `spectralDecrease`      | `lowlevel.spectral_decrease.mean`                | Average slope; negative ⇒ energy concentrated at low freqs  |
-| `spectralEnergy`        | `lowlevel.spectral_energy.mean`                  | Total spectral energy                                       |
-| `spectralEnergyLow`     | `lowlevel.spectral_energyband_low.mean`          | Energy in low band (Essentia split)                         |
-| `spectralEnergyMidLow`  | `lowlevel.spectral_energyband_middle_low.mean`   | Energy in mid-low band                                      |
-| `spectralEnergyMidHigh` | `lowlevel.spectral_energyband_middle_high.mean`  | Energy in mid-high band                                     |
-| `spectralEnergyHigh`    | `lowlevel.spectral_energyband_high.mean`         | Energy in high band                                         |
-| `hfc`                   | `lowlevel.hfc.mean`                              | High-frequency content — cymbals, sibilance, brightness     |
+| JSON key                | Essentia Path                                   | What It Measures                                           |
+| ----------------------- | ----------------------------------------------- | ---------------------------------------------------------- |
+| `spectralRolloff`       | `lowlevel.spectral_rolloff.mean`                | Hz below which 85% of spectral energy sits (bright↔dark)   |
+| `spectralComplexity`    | `lowlevel.spectral_complexity.mean`             | Count of significant spectral peaks per frame              |
+| `spectralEntropy`       | `lowlevel.spectral_entropy.mean`                | Shannon entropy of normalised spectrum (noise↔tone)        |
+| `spectralKurtosis`      | `lowlevel.spectral_kurtosis.mean`               | Peakedness of spectral distribution                        |
+| `spectralSkewness`      | `lowlevel.spectral_skewness.mean`               | Asymmetry of spectral distribution                         |
+| `spectralSpread`        | `lowlevel.spectral_spread.mean`                 | 2nd-moment spread around centroid                          |
+| `spectralStrongPeak`    | `lowlevel.spectral_strongpeak.mean`             | Prominence of dominant spectral peak                       |
+| `spectralDecrease`      | `lowlevel.spectral_decrease.mean`               | Average slope; negative ⇒ energy concentrated at low freqs |
+| `spectralEnergy`        | `lowlevel.spectral_energy.mean`                 | Total spectral energy                                      |
+| `spectralEnergyLow`     | `lowlevel.spectral_energyband_low.mean`         | Energy in low band (Essentia split)                        |
+| `spectralEnergyMidLow`  | `lowlevel.spectral_energyband_middle_low.mean`  | Energy in mid-low band                                     |
+| `spectralEnergyMidHigh` | `lowlevel.spectral_energyband_middle_high.mean` | Energy in mid-high band                                    |
+| `spectralEnergyHigh`    | `lowlevel.spectral_energyband_high.mean`        | Energy in high band                                        |
+| `hfc`                   | `lowlevel.hfc.mean`                             | High-frequency content — cymbals, sibilance, brightness    |
 
 ### Extended — Psychoacoustic bands
 
 Shape statistics over perceptually-spaced filterbanks. Same five statistics across three scales: **Bark** (27 critical bands), **ERB** (40 equivalent-rectangular-bandwidth bands), **Mel** (40 mel-scaled bands).
 
-| JSON key (per scale)       | Essentia Path                              | What It Measures                                           |
-| -------------------------- | ------------------------------------------ | ---------------------------------------------------------- |
-| `{bark,erb,mel}Crest`      | `lowlevel.{bark,erb,mel}bands_crest.mean`  | Peak-to-mean ratio — high ⇒ tonal/peaky within the band    |
-| `{bark,erb,mel}Flatness`   | `lowlevel.{bark,erb,mel}bands_flatness_db.mean` | Geometric/arithmetic mean ratio in dB (noisy↔tonal)    |
-| `{bark,erb,mel}Kurtosis`   | `lowlevel.{bark,erb,mel}bands_kurtosis.mean` | Peakedness of the band distribution                      |
-| `{bark,erb,mel}Skewness`   | `lowlevel.{bark,erb,mel}bands_skewness.mean` | Asymmetry of the band distribution                       |
-| `{bark,erb,mel}Spread`     | `lowlevel.{bark,erb,mel}bands_spread.mean`  | Second-moment spread across the bands                     |
+| JSON key (per scale)     | Essentia Path                                   | What It Measures                                        |
+| ------------------------ | ----------------------------------------------- | ------------------------------------------------------- |
+| `{bark,erb,mel}Crest`    | `lowlevel.{bark,erb,mel}bands_crest.mean`       | Peak-to-mean ratio — high ⇒ tonal/peaky within the band |
+| `{bark,erb,mel}Flatness` | `lowlevel.{bark,erb,mel}bands_flatness_db.mean` | Geometric/arithmetic mean ratio in dB (noisy↔tonal)     |
+| `{bark,erb,mel}Kurtosis` | `lowlevel.{bark,erb,mel}bands_kurtosis.mean`    | Peakedness of the band distribution                     |
+| `{bark,erb,mel}Skewness` | `lowlevel.{bark,erb,mel}bands_skewness.mean`    | Asymmetry of the band distribution                      |
+| `{bark,erb,mel}Spread`   | `lowlevel.{bark,erb,mel}bands_spread.mean`      | Second-moment spread across the bands                   |
 
 ### Extended — Rhythm & tonal aggregates
 
-| JSON key         | Essentia Path                  | What It Measures                                                    |
-| ---------------- | ------------------------------ | ------------------------------------------------------------------- |
-| `beatsLoudness`  | `rhythm.beats_loudness.mean`   | Mean loudness at beat positions — kick/snare intensity              |
-| `chordsStrength` | `tonal.chords_strength.mean`   | Mean chord-detector confidence (0-1)                                |
-| `hpcpCrest`      | `tonal.hpcp_crest.mean`        | Crest of 12-bin harmonic pitch class profile — tonal focus (dB)     |
-| `hpcpEntropy`    | `tonal.hpcp_entropy.mean`      | Entropy of HPCP — high ⇒ atonal/chromatic, low ⇒ diatonic           |
+| JSON key         | Essentia Path                | What It Measures                                                |
+| ---------------- | ---------------------------- | --------------------------------------------------------------- |
+| `beatsLoudness`  | `rhythm.beats_loudness.mean` | Mean loudness at beat positions — kick/snare intensity          |
+| `chordsStrength` | `tonal.chords_strength.mean` | Mean chord-detector confidence (0-1)                            |
+| `hpcpCrest`      | `tonal.hpcp_crest.mean`      | Crest of 12-bin harmonic pitch class profile — tonal focus (dB) |
+| `hpcpEntropy`    | `tonal.hpcp_entropy.mean`    | Entropy of HPCP — high ⇒ atonal/chromatic, low ⇒ diatonic       |
 
 ### Extended — Tonal/rhythm wave (2026-07-22)
 
 All nullable, populated on fresh analysis only (legacy entries lack them until re-analyzed). To fill an existing catalog, run scans with **`--refresh-features`** — entries missing these fields re-analyze, everything else stays cached; resumable (progress saves every 25 tracks), so run it in sessions until coverage is complete.
 
-| field | Essentia source | meaning |
-|-------|-----------------|---------|
-| `keyVotes` | `tonal.key_{krumhansl,temperley,edma}` | Nested block: all three key-profile votes, each `{key, scale, strength}` — confidence + agreement for harmonic mixing (flat `key`/`mode` come from edma) |
-| `bpmFirstPeak` / `bpmFirstPeakWeight` | `rhythm.bpm_histogram_first_peak_*` | Dominant tempo-histogram peak + its weight |
-| `bpmSecondPeak` / `bpmSecondPeakWeight` / `bpmSecondPeakSpread` | `rhythm.bpm_histogram_second_peak_*` | Secondary peak — half/double-time ambiguity evidence |
-| `chordsKey` / `chordsScale` | `tonal.chords_key` / `chords_scale` | Chord-level tonality (vs the key-profile view) |
-| `chordsHistogram` | `tonal.chords_histogram` | 24-bin chord distribution |
-| `chordsNumberRate` | `tonal.chords_number_rate` | Chord vocabulary richness |
-| `tuningFrequency` | `tonal.tuning_frequency` | Reference tuning in Hz (~440) |
-| `tuningEqualTemperedDeviation` / `tuningDiatonicStrength` / `tuningNontemperedEnergyRatio` | `tonal.tuning_*` | Temperament deviation / diatonic strength / non-tempered energy |
-| `averageLoudness` | `lowlevel.average_loudness` | Simple 0..1 loudness (distinct from the LUFS envelope) |
+| field                                                                                      | Essentia source                        | meaning                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `keyVotes`                                                                                 | `tonal.key_{krumhansl,temperley,edma}` | Nested block: all three key-profile votes, each `{key, scale, strength}` — confidence + agreement for harmonic mixing (flat `key`/`mode` come from edma) |
+| `bpmFirstPeak` / `bpmFirstPeakWeight`                                                      | `rhythm.bpm_histogram_first_peak_*`    | Dominant tempo-histogram peak + its weight                                                                                                               |
+| `bpmSecondPeak` / `bpmSecondPeakWeight` / `bpmSecondPeakSpread`                            | `rhythm.bpm_histogram_second_peak_*`   | Secondary peak — half/double-time ambiguity evidence                                                                                                     |
+| `chordsKey` / `chordsScale`                                                                | `tonal.chords_key` / `chords_scale`    | Chord-level tonality (vs the key-profile view)                                                                                                           |
+| `chordsHistogram`                                                                          | `tonal.chords_histogram`               | 24-bin chord distribution                                                                                                                                |
+| `chordsNumberRate`                                                                         | `tonal.chords_number_rate`             | Chord vocabulary richness                                                                                                                                |
+| `tuningFrequency`                                                                          | `tonal.tuning_frequency`               | Reference tuning in Hz (~440)                                                                                                                            |
+| `tuningEqualTemperedDeviation` / `tuningDiatonicStrength` / `tuningNontemperedEnergyRatio` | `tonal.tuning_*`                       | Temperament deviation / diatonic strength / non-tempered energy                                                                                          |
+| `averageLoudness`                                                                          | `lowlevel.average_loudness`            | Simple 0..1 loudness (distinct from the LUFS envelope)                                                                                                   |
 
 ## Output Format
 
@@ -886,7 +885,6 @@ Multi-signal weighted voting per question. Hi-res verdict combines four signals:
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
 **Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). One known gap remains for Phase 5+: LAME-to-LAME re-encode chains verdict `"no"` because the second LAME encode rewrites the Xing tag — needs cascade-encode artifact detection. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
-
 
 ## How Mood Vectors Work
 
