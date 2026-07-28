@@ -352,6 +352,7 @@ namespace Truedat
         readonly TextWriter _console;
         readonly StreamWriter _file;
         readonly object _lock = new object();
+        bool _disposed;
 
         public TeeWriter(TextWriter console, string logPath)
         {
@@ -368,9 +369,22 @@ namespace Truedat
         public override void WriteLine(string? value) { _console.WriteLine(value); lock (_lock) { _file.WriteLine(value); } }
         public override void WriteLine() { _console.WriteLine(); lock (_lock) { _file.WriteLine(); } }
 
+        /// <summary>Write a (possibly multi-line) block to the LOG FILE ONLY — the console
+        /// never sees it. One call = one lock hold, so concurrent workers' blocks land in
+        /// the log whole, never interleaved. Used for the high-volume --audit verdict
+        /// traces that would flood the console at per-entry-per-save volume.</summary>
+        public void FileOnly(string block)
+        {
+            lock (_lock)
+            {
+                if (_disposed) return;
+                _file.WriteLine(block);
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { _file.Flush(); _file.Dispose(); }
+            if (disposing) { lock (_lock) { if (!_disposed) { _disposed = true; _file.Flush(); _file.Dispose(); } } }
             base.Dispose(disposing);
         }
     }
@@ -507,6 +521,11 @@ namespace Truedat
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
         static bool _audit;
+        // The active --audit tee (stdout -> console + truedat.log), when one is installed.
+        // Lets ComputeTruedatVerdict route its per-entry signal traces to the log FILE
+        // only (TeeWriter.FileOnly) — at per-entry-per-save volume they'd flood the
+        // console, and Console.Error wasn't tee'd so the detail never reached the log.
+        static TeeWriter? _tee;
         internal static StageOptions _stageOpts = new StageOptions();
         // CLI signal-disable toggles live on StageOptions (siblings of the staging
         // knobs they share an end-of-scan cost profile with). Loose static bools
@@ -1657,9 +1676,9 @@ namespace Truedat
                 // --audit: tee the summary to truedat.log next to the moods file.
                 TeeWriter? statsTee = null;
                 string statsLog = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log");
-                if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); }
+                if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); _tee = statsTee; }
                 ReportCatalog(statsPath!, statsTracks.Values, statsDetailThreshold);
-                if (statsTee != null) { Console.WriteLine($"Log:    {statsLog}"); statsTee.Dispose(); }
+                if (statsTee != null) { Console.WriteLine($"Log:    {statsLog}"); _tee = null; statsTee.Dispose(); }
                 Environment.ExitCode = 0;
                 return;
             }
@@ -3160,6 +3179,7 @@ namespace Truedat
             {
                 tee = new TeeWriter(Console.Out, logPath);
                 Console.SetOut(tee);
+                _tee = tee;
             }
 
             var modeList = new List<string>();
@@ -10489,6 +10509,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var f = entry.Features;
             var fp = entry.FingerprintV1;
 
+            // --audit signal trace: built per verdict computation into a local buffer and
+            // emitted as ONE file-only block at the end (TeeWriter.FileOnly holds the lock
+            // for the whole block, so 14 workers' traces never interleave in the log).
+            // The console NEVER sees these — at per-entry-per-save volume (recomputed for
+            // every catalog entry on save) they flooded a 72k-track scan with a million+
+            // unreadable lines; worse, they went to stderr which the tee didn't capture,
+            // so the detail never reached truedat.log either. Null when !_audit — the
+            // ?. calls skip argument evaluation, keeping the common path zero-cost.
+            var trace = _audit ? new StringBuilder() : null;
+            trace?.AppendLine($"TRUEDAT verdict: {(string.IsNullOrEmpty(trackPath) ? "(unknown)" : trackPath)}");
+
             // ----- hi-res verdict -----
             // Applicability gate: lossless container + claim of >=24-bit.
             if (fp != null && IsLosslessCodecForHiresCheck(fp.Codec) && fp.BitDepth >= 24)
@@ -10503,7 +10534,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int lnz = f.BitUsage.LowestNonZeroBit;
                     int vote = lnz <= 10 ? 1 : lnz >= 14 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires lowestNonZeroBit={lnz} vote={vote:+#;-#;0} weight=0.40");
+                    trace?.AppendLine($"  TRUEDAT hires lowestNonZeroBit={lnz} vote={vote:+#;-#;0} weight=0.40");
                 }
 
                 // Signal: hfEnergyRatio. Phase 5 corpus1 retune: bin-sharp FFT
@@ -10518,7 +10549,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     double hr = f.HfEnergyRatio.Value;
                     int vote = hr >= 1e-5 ? 1 : 0;
                     if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfEnergyRatio={hr:E2} vote={vote:+#;-#;0} weight=0.40");
+                    trace?.AppendLine($"  TRUEDAT hires hfEnergyRatio={hr:E2} vote={vote:+#;-#;0} weight=0.40");
                 }
 
                 // Signal: bitUsage.effectiveBits. Real 24-bit easily exceeds 18 bits
@@ -10528,7 +10559,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     double eb = f.BitUsage.EffectiveBits;
                     int vote = eb >= 18 ? 1 : eb <= 14 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires effectiveBits={eb:F2} vote={vote:+#;-#;0} weight=0.20");
+                    trace?.AppendLine($"  TRUEDAT hires effectiveBits={eb:F2} vote={vote:+#;-#;0} weight=0.20");
                 }
 
                 // Signal F: hfSpectralStructure (Phase 5 — FFT-derived). Distinguishes
@@ -10554,11 +10585,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (fl < 0.005 && pm > 50) vote = -1;                  // imaging-spike signature → fake
                     else if (fl > 0.5) vote = +1;                          // broadband HF → reinforce real
                     if (vote != 0) { score += vote * 0.35; maxWeight += 0.35; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT hires hfSpectralStructure: flatness={fl:F4} peakToMean={pm:F2} imagingSymmetry={sy:F4} vote={vote:+#;-#;0} weight=0.35");
+                    trace?.AppendLine($"  TRUEDAT hires hfSpectralStructure: flatness={fl:F4} peakToMean={pm:F2} imagingSymmetry={sy:F4} vote={vote:+#;-#;0} weight=0.35");
                 }
 
                 (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
-                if (_audit) Console.Error.WriteLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
+                trace?.AppendLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
             }
 
             // ----- lossy-transcode verdict -----
@@ -10574,7 +10605,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = enc.StartsWith("lavc") || enc.StartsWith("lavf") ? 1
                              : enc.StartsWith("lame") ? -1 : 0;
                     if (vote != 0) { score += vote * 0.30; maxWeight += 0.30; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.30");
+                    trace?.AppendLine($"  TRUEDAT transcode encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.30");
                 }
 
                 // Signal B: mp3LameTag.lowpassHz (MP3 only — LAME tag is MP3-specific).
@@ -10594,7 +10625,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (fp.Mp3LowpassHz < 17500) vote = 1;
                     else if (fp.Mp3LowpassHz >= 19000) vote = -1;
                     if (vote != 0) { score += vote * 0.35; maxWeight += 0.35; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameLowpassHz={fp.Mp3LowpassHz} bitrate={fp.Bitrate} vote={vote:+#;-#;0} weight=0.35");
+                    trace?.AppendLine($"  TRUEDAT transcode lameLowpassHz={fp.Mp3LowpassHz} bitrate={fp.Bitrate} vote={vote:+#;-#;0} weight=0.35");
                 }
 
                 // Signal C: mp3LameTag presence vs encoder cross-check.
@@ -10606,7 +10637,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (!hasLameTag && (enc.StartsWith("lavc") || enc.StartsWith("lavf"))) vote = 1;
                     else if (hasLameTag && fp.Mp3LameVersion!.StartsWith("LAME", StringComparison.OrdinalIgnoreCase)) vote = -1;
                     if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode lameTagPresent={hasLameTag} encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.20");
+                    trace?.AppendLine($"  TRUEDAT transcode lameTagPresent={hasLameTag} encoder=\"{fp.Encoder}\" vote={vote:+#;-#;0} weight=0.20");
                 }
 
                 // Signal D: spectralRolloff — DISABLED (weight 0).
@@ -10634,11 +10665,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     double sr = f.SpectralRolloff.Value;
                     int vote = sr < 14000 ? 1 : sr >= 18000 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.0; maxWeight += 0.0; }
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode spectralRolloff={sr:F0} vote={vote:+#;-#;0} weight=0 (disabled)");
+                    trace?.AppendLine($"  TRUEDAT transcode spectralRolloff={sr:F0} vote={vote:+#;-#;0} weight=0 (disabled)");
                 }
 
                 (v.LossyTranscodeLikely, v.LossyTranscodeConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.30);
-                if (_audit) Console.Error.WriteLine($"  TRUEDAT transcode SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.LossyTranscodeLikely}");
+                trace?.AppendLine($"  TRUEDAT transcode SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.LossyTranscodeLikely}");
             }
 
             // ----- speechLikely verdict (spec 2026-07-22 B1) -----
@@ -10666,7 +10697,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = f.Danceability < 0.7 ? 1 : f.Danceability > 1.1 ? -1 : 0;
                     maxWeight += 0.30;
                     if (vote != 0) score += vote * 0.30;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech danceability={f.Danceability:F2} vote={vote:+#;-#;0} weight=0.30");
+                    trace?.AppendLine($"  TRUEDAT speech danceability={f.Danceability:F2} vote={vote:+#;-#;0} weight=0.30");
                 }
                 // Chords strength: speech has no harmonic bed.
                 if (f.ChordsStrength.HasValue)
@@ -10675,7 +10706,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = cs < 0.46 ? 1 : cs > 0.53 ? -1 : 0;
                     maxWeight += 0.25;
                     if (vote != 0) score += vote * 0.25;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech chordsStrength={cs:F3} vote={vote:+#;-#;0} weight=0.25");
+                    trace?.AppendLine($"  TRUEDAT speech chordsStrength={cs:F3} vote={vote:+#;-#;0} weight=0.25");
                 }
                 // Silence rate: conversational pauses push it up.
                 if (f.SilenceRate30dB.HasValue)
@@ -10684,7 +10715,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = sr > 0.25 ? 1 : sr < 0.05 ? -1 : 0;
                     maxWeight += 0.20;
                     if (vote != 0) score += vote * 0.20;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech silenceRate30dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
+                    trace?.AppendLine($"  TRUEDAT speech silenceRate30dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
                 }
                 // Zero-crossing rate: speech sits higher than most music.
                 // Core field, always present — no presence gate (0 is a legitimate value).
@@ -10692,7 +10723,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     maxWeight += 0.15;
                     if (zcrVote != 0) score += zcrVote * 0.15;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={zcrVote:+#;-#;0} weight=0.15");
+                    trace?.AppendLine($"  TRUEDAT speech zcr={f.ZeroCrossingRate:F3} vote={zcrVote:+#;-#;0} weight=0.15");
                 }
                 // Tempo-peak weight (2026-07-22 wave, when present): speech has no
                 // stable tempo peak.
@@ -10702,7 +10733,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = bw < 0.05 ? 1 : bw > 0.15 ? -1 : 0;
                     maxWeight += 0.20;
                     if (vote != 0) score += vote * 0.20;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech bpmFirstPeakWeight={bw:F3} vote={vote:+#;-#;0} weight=0.20");
+                    trace?.AppendLine($"  TRUEDAT speech bpmFirstPeakWeight={bw:F3} vote={vote:+#;-#;0} weight=0.20");
                 }
                 // Key confidence (2026-07-22 wave, when present): craters on speech.
                 if (f.KeyVoteEdma != null)
@@ -10711,7 +10742,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int vote = ks < 0.50 ? 1 : ks > 0.65 ? -1 : 0;
                     maxWeight += 0.15;
                     if (vote != 0) score += vote * 0.15;
-                    if (_audit) Console.Error.WriteLine($"  TRUEDAT speech keyStrength={ks:F3} vote={vote:+#;-#;0} weight=0.15");
+                    trace?.AppendLine($"  TRUEDAT speech keyStrength={ks:F3} vote={vote:+#;-#;0} weight=0.15");
                 }
 
                 if (maxWeight > 0)
@@ -10745,8 +10776,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Demote to "unknown", never "no" — same reasoning as the zcr gate.
                 if (v.SpeechLikely == "yes" && f.Danceability >= 0.50)
                     v.SpeechLikely = "unknown";
-                if (_audit) Console.Error.WriteLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} danceability={f.Danceability:F2} -> verdict={v.SpeechLikely}");
+                trace?.AppendLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} danceability={f.Danceability:F2} -> verdict={v.SpeechLikely}");
             }
+
+            // One atomic write of the whole per-track block to the log file only. When
+            // --audit is set but no tee/log is active (a mode without a log file), the
+            // detail is dropped — the console must never get it either way.
+            if (trace != null)
+                _tee?.FileOnly(trace.ToString().TrimEnd());
 
             return v;
         }
