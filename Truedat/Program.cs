@@ -2397,7 +2397,7 @@ namespace Truedat
                 var hoErrors = new ConcurrentBag<string>();
                 var hoSw = System.Diagnostics.Stopwatch.StartNew();
 
-                Parallel.ForEach(Partitioner.Create(hoPaths, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions
+                Parallel.ForEach(hoPaths, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
                     CancellationToken = CancellationToken.None
@@ -2646,7 +2646,7 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
 
-                Parallel.ForEach(Partitioner.Create(filePaths, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions
+                Parallel.ForEach(filePaths, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
                     CancellationToken = CancellationToken.None
@@ -3425,7 +3425,7 @@ namespace Truedat
 
             try
             {
-                Parallel.ForEach(Partitioner.Create(tracks, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
+                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
                 {
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
@@ -4767,7 +4767,7 @@ namespace Truedat
             var sw = Stopwatch.StartNew();
             int done = 0;
 
-            Parallel.ForEach(Partitioner.Create(allTracks, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
+            Parallel.ForEach(allTracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
             {
                 var path = kvp.Key;
                 var entry = kvp.Value;
