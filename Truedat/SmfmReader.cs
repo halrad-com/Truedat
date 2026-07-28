@@ -6,7 +6,8 @@ using System.Text;
 namespace Truedat
 {
     /// <summary>Reads Sony SMFM (12-TONE analysis) payloads embedded directly into audio files
-    /// by Music Center. Supports FLAC (APPLICATION block), MP3 (GEOB frame), and WMA (ASF ECD).
+    /// by Music Center. Supports FLAC (APPLICATION block), MP3 (GEOB frame), M4A/MP4 (ID3v2 GEOB
+    /// frame inside an MP4 'ID32' box under moov/udta/meta), and WMA (ASF ECD).
     /// All methods are static and thread-safe. Never throws — returns null on any failure.</summary>
     internal static class SmfmReader
     {
@@ -51,6 +52,8 @@ namespace Truedat
                 {
                     case ".flac": payload = ReadFlac(path); break;
                     case ".mp3":  payload = ReadMp3(path);  break;
+                    case ".m4a":  payload = ReadM4a(path);  break;
+                    case ".mp4":  payload = ReadM4a(path);  break;
                     case ".wma":  payload = ReadWma(path);  break;
                     default:      return null;
                 }
@@ -133,6 +136,15 @@ namespace Truedat
                 }
             }
 
+            return WalkId3FramesForSmfm(tagData, syncsafeFrames);
+        }
+
+        /// <summary>Walks the ID3v2 frame list in <paramref name="tagData"/> (the tag body, after the
+        /// 10-byte ID3 header), returning the SMFM GEOB object or null. Shared by the MP3 reader and
+        /// the M4A reader (which finds an ID3v2 tag embedded in an MP4 ID32 box). <paramref name="syncsafeFrames"/>
+        /// selects ID3v2.4 syncsafe frame sizes vs ID3v2.3 plain sizes. Never throws.</summary>
+        static byte[]? WalkId3FramesForSmfm(byte[] tagData, bool syncsafeFrames)
+        {
             int p = 0;
             while (p + 10 <= tagData.Length)
             {
@@ -150,6 +162,141 @@ namespace Truedat
                 p += 10 + fsize;
             }
             return null;
+        }
+
+        static byte[]? ReadM4a(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096);
+            long fileLen = fs.Length;
+
+            // The SMFM payload rides in an ID3v2 GEOB frame inside an MP4 'ID32' box, which lives
+            // inside a 'meta' box (a FullBox: 4 version/flags bytes before its children; ID32 is
+            // NOT the first child — an 'hdlr' box precedes it). Music Center writes that meta box
+            // as a DIRECT child of 'moov' (a sibling of the iTunes 'udta/meta' that holds ilst) —
+            // and a file can carry BOTH metas, so we must try every meta in both locations and
+            // keep the one that actually yields an SMFM GEOB. Other writers use moov/udta/meta.
+            if (!FindChildBox(fs, 0, fileLen, "moov", out long moovStart, out long moovEnd)) return null;
+
+            foreach (var child in EnumerateChildBoxes(fs, moovStart, moovEnd))
+            {
+                if (child.Type == "meta")
+                {
+                    var got = ExtractSmfmFromMeta(fs, child.PayloadStart, child.PayloadEnd);
+                    if (got != null) return got;
+                }
+                else if (child.Type == "udta")
+                {
+                    foreach (var g in EnumerateChildBoxes(fs, child.PayloadStart, child.PayloadEnd))
+                    {
+                        if (g.Type != "meta") continue;
+                        var got = ExtractSmfmFromMeta(fs, g.PayloadStart, g.PayloadEnd);
+                        if (got != null) return got;
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>Given a 'meta' box payload range, finds its ID32 child, reads the embedded ID3v2
+        /// tag and returns the SMFM GEOB object (or null). Fully bounds-checked; never throws.</summary>
+        static byte[]? ExtractSmfmFromMeta(FileStream fs, long metaStart, long metaEnd)
+        {
+            long metaChildStart = metaStart + 4; // skip meta FullBox version+flags
+            if (metaChildStart > metaEnd) return null;
+
+            if (!FindChildBox(fs, metaChildStart, metaEnd, "ID32", out long id32Start, out long id32End)) return null;
+
+            // ID32 box body: 4 bytes fullbox version+flags, 2 bytes language, then the ID3v2 tag.
+            long id3Pos = id32Start + 6;
+            if (id3Pos + 10 > id32End) return null;
+
+            fs.Seek(id3Pos, SeekOrigin.Begin);
+            var hdr = new byte[10];
+            if (fs.Read(hdr, 0, 10) < 10) return null;
+            if (hdr[0] != 'I' || hdr[1] != 'D' || hdr[2] != '3') return null;
+            int version = hdr[3];
+            if (version != 3 && version != 4) return null;
+            bool syncsafeFrames = (version == 4);
+            // Tag size is a syncsafe int28 (7 bits per byte)
+            int tagSize = (hdr[6] << 21) | (hdr[7] << 14) | (hdr[8] << 7) | hdr[9];
+            if (tagSize <= 0 || tagSize > 64 * 1024 * 1024) return null;
+            if (id3Pos + 10 + tagSize > id32End) return null; // must stay within the ID32 box
+            var tagData = new byte[tagSize];
+            int read = 0;
+            while (read < tagSize)
+            {
+                int n = fs.Read(tagData, read, tagSize - read);
+                if (n <= 0) break;
+                read += n;
+            }
+            if (read < tagSize) return null;
+
+            return WalkId3FramesForSmfm(tagData, syncsafeFrames);
+        }
+
+        struct Mp4Box { public string Type; public long PayloadStart; public long PayloadEnd; }
+
+        /// <summary>Enumerates the direct child MP4 boxes within [rangeStart, rangeEnd) of the file,
+        /// yielding each child's 4-char type and payload byte range. Fully bounds-checked — stops on
+        /// any short/malformed box rather than misparsing. 64-bit largesize (size==1) is decoded;
+        /// size==0 means "to range end". Reads box headers only (not payloads).</summary>
+        static List<Mp4Box> EnumerateChildBoxes(FileStream fs, long rangeStart, long rangeEnd)
+        {
+            var boxes = new List<Mp4Box>();
+            if (rangeEnd > fs.Length) rangeEnd = fs.Length;
+            long pos = rangeStart;
+            var hdr = new byte[8];
+            while (pos + 8 <= rangeEnd)
+            {
+                fs.Seek(pos, SeekOrigin.Begin);
+                if (fs.Read(hdr, 0, 8) < 8) break;
+                long size = ((long)hdr[0] << 24) | ((long)hdr[1] << 16) | ((long)hdr[2] << 8) | hdr[3];
+                long headerBytes = 8;
+                if (size == 1)
+                {
+                    // 64-bit largesize follows the 8-byte header.
+                    var big = new byte[8];
+                    if (pos + 16 > rangeEnd || fs.Read(big, 0, 8) < 8) break;
+                    size = ((long)big[0] << 56) | ((long)big[1] << 48) | ((long)big[2] << 40) | ((long)big[3] << 32)
+                         | ((long)big[4] << 24) | ((long)big[5] << 16) | ((long)big[6] << 8) | big[7];
+                    headerBytes = 16;
+                }
+                else if (size == 0)
+                {
+                    size = rangeEnd - pos; // box extends to the end of the range
+                }
+                if (size < headerBytes) break;
+                long boxEnd = pos + size;
+                if (boxEnd > rangeEnd) break;
+
+                boxes.Add(new Mp4Box
+                {
+                    Type = Encoding.ASCII.GetString(hdr, 4, 4),
+                    PayloadStart = pos + headerBytes,
+                    PayloadEnd = boxEnd
+                });
+                pos = boxEnd;
+            }
+            return boxes;
+        }
+
+        /// <summary>Finds the first child MP4 box of the given 4-char <paramref name="type"/> within the
+        /// byte range [rangeStart, rangeEnd) of the file, setting payloadStart/payloadEnd to the child
+        /// box's payload byte range. Fully bounds-checked — returns false on any short/malformed box.</summary>
+        static bool FindChildBox(FileStream fs, long rangeStart, long rangeEnd, string type,
+                                 out long payloadStart, out long payloadEnd)
+        {
+            foreach (var b in EnumerateChildBoxes(fs, rangeStart, rangeEnd))
+            {
+                if (b.Type == type)
+                {
+                    payloadStart = b.PayloadStart;
+                    payloadEnd = b.PayloadEnd;
+                    return true;
+                }
+            }
+            payloadStart = 0; payloadEnd = 0;
+            return false;
         }
 
         static byte[]? ExtractGeobObject(byte[] arr, int start, int count)
