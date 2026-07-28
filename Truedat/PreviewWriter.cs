@@ -366,6 +366,10 @@ namespace Truedat
   .dec button{padding:2px 8px;font-size:12px;margin-right:3px}
   .dec button.on-x{background:#7a3030}
   .dec button.on-i{background:#2e7d46}
+  .dx.on-x{background:#7a3030}
+  .di.on-i{background:#2e7d46}
+  .grow button{padding:2px 8px;font-size:12px}
+  .chip.incl{background:#17281b;border-color:#2f6a3f;color:#a0e0b0}
   .byrule{margin-top:3px;font-size:11px;color:#c99}
   .fexcl{margin-top:3px;font-size:11px;color:#888}
   .fexcl select{background:#242424;color:#ddd;border:1px solid #3a3a3a;border-radius:4px;font-size:11px}
@@ -387,7 +391,7 @@ namespace Truedat
 </main>
 <div class='modal' id='gmodal'>
   <div class='mpanel'>
-    <div class='mhead'><b>Exclude genres from scanning</b><button class='sec' id='gclose'>close</button></div>
+    <div class='mhead'><b>Genre rules (exclude / include)</b><button class='sec' id='gclose'>close</button></div>
     <input id='gfilter' class='gfilter' placeholder='filter genres…' autocomplete='off'>
     <div class='mlist' id='glist'></div>
   </div>
@@ -506,11 +510,14 @@ function renderBulk(){
   // hundreds on a granular library), not a wall of inline chips.
   const genres=(D.genres||[]).filter(g=>g.name&&g.name!=='(none)');
   const isExcl=g=>desiredHas({kind:'genre',action:'exclude',value:g.name});
+  const isIncl=g=>desiredHas({kind:'genre',action:'include',value:g.name});
   const excl=genres.filter(isExcl);
+  const incl=genres.filter(isIncl);
   const exclBlock=excl.length?`<div class='sec-h'>Excluded genres — click to un-exclude</div><div class='chips'>${excl.map(g=>`<button class='chip excl' data-genre='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span> ✕</button>`).join('')}</div>`:'';
-  const adderBlock=genres.length?`<div class='sec-h'>Genres</div><button class='sec' id='gpick'>＋ exclude genres… <span class='n'>(${genres.length})</span></button>`:'';
+  const inclBlock=incl.length?`<div class='sec-h'>Included genres — click to un-include</div><div class='chips'>${incl.map(g=>`<button class='chip incl' data-genre-i='${esc(g.name)}'>${esc(g.name)} <span class='n'>×${num(g.tracks)}</span> ✓</button>`).join('')}</div>`:'';
+  const adderBlock=genres.length?`<div class='sec-h'>Genres</div><button class='sec' id='gpick'>＋ genre rules… <span class='n'>(${genres.length})</span></button>`:'';
   const rules=(D.rules||[]).map(r=>{const ro=parseRuleStr(r.rule,r.action);const rm=!desired.has(idOf(ro));return `<div class='rule${rm?' pending-rm':''}'><span class='rn'>${esc(r.rule)}</span> <span class='n'>${esc(r.action)}</span>${ruleNote(r)}<button class='sec' data-rmrule='${esc(r.rule)}' data-rmact='${esc(r.action)}'>${rm?'keep':'remove'}</button></div>`;}).join('');
-  document.getElementById('bulk').innerHTML=exclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='${Math.max(7200,LONG*2)}' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
+  document.getElementById('bulk').innerHTML=exclBlock+inclBlock+adderBlock+(rules?`<div class='sec-h'>Existing rules</div><div class='rules'>${rules}</div>`:'')+`<div class='sec-h'>Long-track filter (view only)</div><div class='slider'><input type='range' id='longr' min='0' max='${Math.max(7200,LONG*2)}' step='300' value='${LONG}'> ≥ <b id='longv'>${Math.round(LONG/60)}</b> min</div>`;
 }
 const RSN={'long':'long','over-limit':'over','speech-likely':'speech','excluded':'excl','speech-labelled':'mark'};
 // The two DURATION reason values, emitted by PreviewPlanner (see the two reasons.Add calls
@@ -569,7 +576,7 @@ function renderTable(){
     const st=decState(c);const cls=st.charAt(0)==='x'?'excl':st.charAt(0)==='i'?'incl':'';
     const byrule=(st==='xr'||st==='ir')?`<div class='byrule'>${st==='xr'?'excluded':'kept'} by rule</div>`:'';
     const anc=ancestors(c.path);const opts=anc.map(a=>`<option value='${esc(a)}'>${esc(a)}</option>`).join('');
-    return `<tr class='${cls}' data-p='${esc(c.path)}'><td class='dec'><button class='sec dx ${st==='x'?'on-x':''}'>excl</button><button class='sec di ${st==='i'?'on-i':''}'>incl</button>${byrule}${anc.length?`<div class='fexcl'>folder: <select class='fsel'><option value=''>—</option>${opts}</select></div>`:''}</td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
+    return `<tr class='${cls}' data-p='${esc(c.path)}'><td class='dec'><button class='sec dx ${st==='x'?'on-x':''}'>excl</button><button class='sec di ${st==='i'?'on-i':''}'>incl</button>${byrule}${anc.length?`<div class='fexcl'>folder: <select class='fsel'><option value=''>—</option>${opts}</select> <button class='sec fx'>excl</button><button class='sec fi'>incl</button></div>`:''}</td><td class='path'><a class='flink' href='${esc(folderUrl(folderOf(c.path)))}' title='open folder'>${esc(c.path)}</a></td><td class='num'>${hms(c.durationSecs)}</td><td>${esc(c.genre)}</td><td>${esc(c.codec)}</td><td>${esc(c.state)}</td><td>${badges}</td></tr>`;
   }).join('');
   body.innerHTML=trunc+bulkbar+`<table><thead><tr><th>decision</th><th>path</th><th class='num'>len</th><th>genre</th><th>codec</th><th>state</th><th>reasons</th></tr></thead><tbody>${tr}</tbody></table>`;
 }
@@ -580,7 +587,7 @@ function renderGenreList(){
   const glist=document.getElementById('glist');if(!glist)return;
   const q=genreFilter.toLowerCase();
   const genres=(D.genres||[]).filter(g=>g.name&&g.name!=='(none)'&&g.name.toLowerCase().indexOf(q)>=0);
-  glist.innerHTML=genres.length?genres.map(g=>{const on=desiredHas({kind:'genre',action:'exclude',value:g.name});return `<button class='grow${on?' on':''}' data-gpick='${esc(g.name)}'><span class='gck'>${on?'✓':''}</span><span class='gnm'>${esc(g.name)}</span><span class='n'>×${num(g.tracks)}</span></button>`;}).join(''):`<div class='empty'>no genres match</div>`;
+  glist.innerHTML=genres.length?genres.map(g=>{const onx=desiredHas({kind:'genre',action:'exclude',value:g.name});const oni=desiredHas({kind:'genre',action:'include',value:g.name});return `<div class='grow'><span class='gnm'>${esc(g.name)}</span><span class='n'>×${num(g.tracks)}</span><button class='sec dx ${onx?'on-x':''}' data-gpick='${esc(g.name)}'>excl</button><button class='sec di ${oni?'on-i':''}' data-gpick='${esc(g.name)}'>incl</button></div>`;}).join(''):`<div class='empty'>no genres match</div>`;
 }
 function openGenres(){genreFilter='';document.getElementById('gmodal').classList.add('open');renderGenreList();const f=document.getElementById('gfilter');if(f){f.value='';f.focus();}}
 function closeGenres(){document.getElementById('gmodal').classList.remove('open');}
@@ -592,16 +599,16 @@ document.addEventListener('click',ev=>{
   if(ev.target.closest('#gclose')||ev.target.id==='gmodal'){closeGenres();return;}
   if(ev.target.id==='exclshown'){bulkDecide(shownDecidable,'exclude');return;}
   if(ev.target.id==='inclshown'){bulkDecide(shownDecidable,'include');return;}
-  const gp=ev.target.closest('[data-gpick]');if(gp){toggleRule({kind:'genre',action:'exclude',value:gp.getAttribute('data-gpick')});renderGenreList();return;}
+  const gp=ev.target.closest('[data-gpick]');if(gp){const action=gp.classList.contains('di')?'include':'exclude';setExclusive({kind:'genre',action,value:gp.getAttribute('data-gpick')});renderGenreList();return;}
   const g=ev.target.closest('[data-genre]');if(g){toggleRule({kind:'genre',action:'exclude',value:g.getAttribute('data-genre')});return;}
+  const gInc=ev.target.closest('[data-genre-i]');if(gInc){toggleRule({kind:'genre',action:'include',value:gInc.getAttribute('data-genre-i')});return;}
   const rr=ev.target.closest('[data-rmrule]');if(rr){toggleRule(parseRuleStr(rr.getAttribute('data-rmrule'),rr.getAttribute('data-rmact')));return;}
-  const row=ev.target.closest('tr[data-p]');if(row){const p=row.getAttribute('data-p');if(ev.target.classList.contains('dx')){setExclusive({kind:'file',action:'exclude',path:p});return;}if(ev.target.classList.contains('di')){setExclusive({kind:'file',action:'include',path:p});return;}}
+  const row=ev.target.closest('tr[data-p]');if(row){const p=row.getAttribute('data-p');if(ev.target.classList.contains('fx')||ev.target.classList.contains('fi')){const sel=ev.target.closest('.fexcl').querySelector('.fsel');if(sel&&sel.value){setExclusive({kind:'folder',action:ev.target.classList.contains('fi')?'include':'exclude',pattern:sel.value});sel.value='';}return;}if(ev.target.classList.contains('dx')){setExclusive({kind:'file',action:'exclude',path:p});return;}if(ev.target.classList.contains('di')){setExclusive({kind:'file',action:'include',path:p});return;}}
 });
 document.addEventListener('keydown',ev=>{if(ev.key==='Escape')closeGenres();});
 document.addEventListener('input',ev=>{
   if(ev.target.id==='gfilter'){genreFilter=ev.target.value;renderGenreList();return;}
   if(ev.target.id==='longr'){LONG=+ev.target.value;const v=document.getElementById('longv');if(v)v.textContent=Math.round(LONG/60);renderTable();}});
-document.addEventListener('change',ev=>{if(ev.target.classList.contains('fsel')&&ev.target.value){toggleRule({kind:'folder',action:'exclude',pattern:ev.target.value});ev.target.value='';}});
 document.getElementById('save').addEventListener('click',()=>{if(dirty())host.save(buildDelta());});
 document.getElementById('rescan').addEventListener('click',()=>host.rescan());
 // Reset discards this session's actions and returns to exactly what the manifest says.
