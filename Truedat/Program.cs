@@ -1722,7 +1722,8 @@ namespace Truedat
             // (--migrate never removes entries) — so the operator can review them first
             // (the verdict is -untuned; high-zcr real music such as ambient / field
             // recordings can reach "yes"). Recomputes the verdict from stored features per
-            // entry, same as the --stats class-stat count. Path resolution mirrors --stats.
+            // entry, count-equal with the --stats "Speech (acoustic)" line (label-only
+            // Podcast entries are --stats' separate line). Path resolution mirrors --stats.
             // Writes mbxmoods-speech.csv next to the moods file; console gets a count +
             // first-N preview. Writes no changes to the moods file itself.
             if (listSpeechMode)
@@ -5869,7 +5870,12 @@ namespace Truedat
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
             public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
-            public int Speech;            // one speech class: genre=="Podcast" label OR ComputeTruedatVerdict.SpeechLikely=="yes" (union, each entry once)
+            // Speech splits into two disjoint counts so each summary line can point at a
+            // surface that actually shows what it counted (the old union count pointed at
+            // --list-speech, which lists only the acoustic subset — live: "Speech: 1" vs
+            // an empty --list-speech, because the 1 was label-only).
+            public int SpeechAcoustic;    // recomputed SpeechLikely=="yes" — exactly the set RunListSpeech lists
+            public int SpeechLabelOnly;   // genre=="Podcast" label but NOT acoustic-yes — invisible to --list-speech; a genre rule reaches them
             public int MissingFingerprint; // entries with no fingerprint.v1 block
         }
 
@@ -5879,17 +5885,14 @@ namespace Truedat
         /// touched either way). Writes mbxmoods-speech.csv
         /// (path,artist,title,album,genre,codec,speechConfidence,method) next to the
         /// moods file and prints a count + first-20 preview. The verdict is recomputed
-        /// via ComputeTruedatVerdict (write-time verdict, not persisted in the entry) —
-        /// but this lister is NOT count-equal with the --stats speech count. --stats
-        /// counts the UNION of the label and the acoustic verdict (an entry with stored
-        /// genre=="Podcast" counts as speech even if it recomputes to acoustic "no", see
-        /// ComputeCatalogStats), while this method lists only entries whose acoustic
-        /// verdict is speechLikely=="yes", regardless of genre label. Acoustic-yes is a
-        /// subset of the union, so this list is a SUBSET of the --stats speech count —
-        /// they differ by the genre=="Podcast" entries that don't independently trigger
-        /// the acoustic verdict (in --stats but not here). That is intentional, not a bug:
-        /// --stats answers "how much speech is in my catalog", this answers "which tracks
-        /// did the acoustic signal flag". This is the only speech surface that works on
+        /// via ComputeTruedatVerdict (write-time verdict, not persisted in the entry).
+        /// This list is count-equal with the --stats "Speech (acoustic)" line — both are
+        /// exactly the recomputed speechLikely=="yes" set, regardless of genre label
+        /// (see ComputeCatalogStats). Entries whose stored genre is "Podcast" but whose
+        /// acoustic verdict did NOT reach yes are deliberately NOT listed here — --stats
+        /// reports them separately as "Speech (genre label)" and points at a genre rule,
+        /// because this surface structurally cannot show them (the old union count
+        /// pointed here and the numbers disagreed). This is the only speech surface that works on
         /// the moods JSON alone — --preview needs the iTunes XML and can't run on a
         /// metadata-mirror box.</summary>
         static void RunListSpeech(string moodsPath, IEnumerable<TrackEntry> entries)
@@ -5998,21 +6001,21 @@ namespace Truedat
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
                 if (e.Features != null)
                 {
-                    // ONE speech class, not two. Speech is a single genus (audiobook,
-                    // comedy, lecture, news, interview, talk-dominant); "podcast" is one
-                    // kind of EVIDENCE about a speech track, not a class of its own. An
-                    // entry is speech if EITHER the label says so (stored genre "Podcast" —
-                    // an explicit author claim) OR the acoustic verdict says so
-                    // (speechLikely=="yes"). Counted once: the label short-circuits the
-                    // acoustic recompute, so an entry carrying both kinds of evidence still
-                    // adds one. Per-track evidence (which kind) stays visible in
-                    // --list-speech and --preview reasons; this is only the summary count.
+                    // ONE speech genus (audiobook, comedy, lecture, news, interview,
+                    // talk-dominant), but TWO kinds of evidence, counted disjointly:
+                    // the acoustic verdict (speechLikely=="yes" — exactly the set
+                    // --list-speech lists) and the label-only remainder (stored genre
+                    // "Podcast" — an explicit author claim — whose acoustic verdict did
+                    // NOT reach yes). Disjoint because the summary must point each count
+                    // at a surface that can show it: --list-speech cannot show a
+                    // label-only entry, so lumping them (the old union count) made the
+                    // advisor's number and its review surface disagree. An entry carrying
+                    // both kinds of evidence counts once, as acoustic.
                     bool isSpeechGenre = string.Equals(e.Features.Genre, "Podcast", StringComparison.OrdinalIgnoreCase);
-                    if (isSpeechGenre
-                        || ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely == "yes")
-                    {
-                        s.Speech++;
-                    }
+                    if (ComputeTruedatVerdict(e.Features.FilePath ?? "", e).SpeechLikely == "yes")
+                        s.SpeechAcoustic++;
+                    else if (isSpeechGenre)
+                        s.SpeechLabelOnly++;
                 }
             }
             foreach (var c in shaCount.Values)
@@ -6092,16 +6095,20 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
             }
-            // Speech (label OR acoustic verdict) is one class stat, same as Duplicate
-            // audio above — a fact about the catalog, not a nag. Not a --migrate
-            // recommendation: the purge that used to sit behind it is gone, so the only
-            // real action left is review + an exclusion rule (decisions delta +
-            // --apply-exclusions).
-            if (s.Speech > 0)
-            {
+            // Speech is a class stat like Duplicate audio above — a fact about the
+            // catalog, not a nag. Two lines, not one: each must point ONLY at a surface
+            // that can show what it counted (d146a04 advisor rule). The acoustic count
+            // IS --list-speech's list; label-only entries are invisible there (it lists
+            // acoustic-yes regardless of genre), so the old union count produced
+            // "Speech: 1" while --list-speech printed 0. Label-only entries are reached
+            // by a genre rule, not by the acoustic review flow. Not a --migrate
+            // recommendation: the purge that used to sit behind it is gone.
+            if (s.SpeechAcoustic > 0 || s.SpeechLabelOnly > 0)
                 Console.WriteLine();
-                Console.WriteLine($"  {"Speech",-20} {s.Speech,9:N0} tracks   (review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions)");
-            }
+            if (s.SpeechAcoustic > 0)
+                Console.WriteLine($"  {"Speech (acoustic)",-20} {s.SpeechAcoustic,9:N0} tracks   (review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions)");
+            if (s.SpeechLabelOnly > 0)
+                Console.WriteLine($"  {"Speech (genre label)",-20} {s.SpeechLabelOnly,9:N0} tracks   (labeled Podcast in the library; not acoustically speech — a genre rule excludes them: kind:genre, value:Podcast)");
 
             // Recommended next steps — detected state -> exact command. Advisory
             // only: truedat NEVER prompts; it prints what to run and moves on.
