@@ -2646,11 +2646,10 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
 
-                Parallel.ForEach(filePaths, new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = parallelism,
-                    CancellationToken = CancellationToken.None
-                }, filePath =>
+                // Two-lane triage (see MoodsMode for the rationale): the per-file body below
+                // is IDENTICAL to the single loop it replaces. Split dispatch only, so cheap
+                // cache hits catch up fast while the slow analyses spread evenly across threads.
+                Action<string> processFile = filePath =>
                 {
                     if (!File.Exists(filePath))
                     {
@@ -2932,7 +2931,37 @@ namespace Truedat
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
                     }
                     finally { flStagedSrc?.Dispose(); }
-                });
+                };
+
+                // Perf-hint split (no file IO): a path already in the loaded catalog with
+                // complete features almost certainly hits a cache tier -> fast lane; new /
+                // absent / stale paths -> work lane. Advisory only: the body re-runs every
+                // cache tier, so a mis-hinted path is still correct, just under the other
+                // partitioner. The dict is keyed by Path.GetFullPath, so the hint matches the
+                // body's tier-1 key; an empty dict (no --moods) sends everything to the work lane.
+                var flLikelyCached = new List<string>();
+                var flLikelyWork = new List<string>();
+                foreach (var filePath in filePaths)
+                {
+                    bool flHint = false;
+                    try
+                    {
+                        flHint = flMoodsTracks.TryGetValue(Path.GetFullPath(filePath), out var flHintEntry)
+                                 && HasCurrentFeatures(flHintEntry.Features);
+                    }
+                    catch { flHint = false; }
+                    if (flHint) flLikelyCached.Add(filePath);
+                    else flLikelyWork.Add(filePath);
+                }
+                if (flLikelyCached.Count + flLikelyWork.Count != filePaths.Count)
+                    throw new InvalidOperationException("two-lane split dropped or duplicated files");
+                var flOptions = new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = CancellationToken.None };
+                // Fast lane: default (chunked) partitioner -> % races up on cheap cache hits.
+                Parallel.ForEach(flLikelyCached, flOptions, processFile);
+                // Work lane: single-item NoBuffering -> slow analyses spread across all threads.
+                Parallel.ForEach(
+                    Partitioner.Create(flLikelyWork, EnumerablePartitionerOptions.NoBuffering),
+                    flOptions, processFile);
 
                 flSw.Stop();
 
@@ -3425,7 +3454,12 @@ namespace Truedat
 
             try
             {
-                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
+                // Two-lane triage: the per-track body below is IDENTICAL to the single
+                // loop it replaces. We only split dispatch so the scan gets BOTH the fast
+                // cache-hit catch-up (% races up) AND an even spread of the slow Essentia
+                // analyses across threads. See the split + two Parallel.ForEach passes after
+                // this lambda.
+                Action<ITunesTrack> processTrack = t =>
                 {
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
@@ -3923,7 +3957,34 @@ namespace Truedat
                         msStagedSrc?.Dispose();
                         RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
                     }
-                });
+                };
+
+                // Split by a cheap perf-hint (no file IO): a track already in the loaded
+                // catalog with complete features will almost certainly hit a cache tier, so
+                // it goes in the fast lane. Everything else — new, absent, or stale — goes in
+                // the work lane. The hint is advisory ONLY: the body re-runs every cache tier,
+                // so a mis-hinted track is still processed correctly, just under the other
+                // partitioner. No mtime/hash/staging here — that is exactly the IO this avoids.
+                var msLikelyCached = new List<ITunesTrack>();
+                var msLikelyWork = new List<ITunesTrack>();
+                foreach (var t in tracks)
+                {
+                    if (allTracks.TryGetValue(t.Location, out var msHintEntry) && HasCurrentFeatures(msHintEntry.Features))
+                        msLikelyCached.Add(t);
+                    else
+                        msLikelyWork.Add(t);
+                }
+                if (msLikelyCached.Count + msLikelyWork.Count != tracks.Count)
+                    throw new InvalidOperationException("two-lane split dropped or duplicated tracks");
+                var msOptions = new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token };
+                // Fast lane: default (chunked) partitioner -> high throughput on cheap
+                // cache hits -> the % races up to the already-scanned count quickly.
+                Parallel.ForEach(msLikelyCached, msOptions, processTrack);
+                // Work lane: single-item NoBuffering -> the slow analyses spread evenly
+                // across all threads instead of pinning 1-2 at low CPU on an incremental scan.
+                Parallel.ForEach(
+                    Partitioner.Create(msLikelyWork, EnumerablePartitionerOptions.NoBuffering),
+                    msOptions, processTrack);
             }
             catch (OperationCanceledException) { }
 
