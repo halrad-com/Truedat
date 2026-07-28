@@ -418,6 +418,17 @@ namespace Truedat
         static long _etaNewBytesTotal;
         static long _etaNewBytesDone;
         static int _scanParallelism;
+        // Periodic incremental save: every SaveInterval analyzed tracks (crash/cancel
+        // resilience — Ctrl+C additionally always flushes via the unconditional final
+        // SaveResults). Raised 25 -> 100 (2026-07-28): each save rewrites the WHOLE
+        // catalog, so on a big-library rescan the save cost is proportional to the
+        // catalog, not the remaining work — at 25 it dominated wall time.
+        const int SaveInterval = 100;
+        // Measured periodic-save cost (Stopwatch ticks + count), fed to the ETA:
+        // the analysis-only model couldn't see the save tax at all, which is why
+        // resume/rescan estimates read far low on large catalogs (2026-07-28).
+        static long _saveTicksTotal;
+        static int _saveCount;
         // Duration-based ETA model: Essentia cost scales with AUDIO DURATION, not
         // file size (a 3-hour 64kbps podcast costs ~90x a 4-minute FLAC of the same
         // byte size). The XML Total Time supplies per-track durations up front; the
@@ -665,7 +676,22 @@ namespace Truedat
                 newSecs = 0;
 
             double knownSecs = knownRemaining * KnownAvgThreadSecs() / _scanParallelism;
-            return newSecs + knownSecs;
+            double saveSecs = SaveOverheadSecs(newRemaining, SaveInterval,
+                Volatile.Read(ref _saveCount), Interlocked.Read(ref _saveTicksTotal));
+            return newSecs + knownSecs + saveSecs;
+        }
+
+        /// <summary>Wall-seconds of periodic-save overhead ahead: a save fires every
+        /// saveInterval analyses and costs the measured average. Each save rewrites the
+        /// WHOLE catalog, so on a big-library rescan this cost is proportional to the
+        /// catalog rather than the remaining work — the analysis-only ETA couldn't see
+        /// it, which is why resume/rescan estimates read far low (2026-07-28). Returns
+        /// 0 until a save has actually been measured — never guessed.</summary>
+        internal static double SaveOverheadSecs(int newRemaining, int saveInterval, int saveCount, long saveTicksTotal)
+        {
+            if (saveCount <= 0 || newRemaining <= 0 || saveInterval <= 0) return 0;
+            double avgSecs = (double)saveTicksTotal / Stopwatch.Frequency / saveCount;
+            return (double)newRemaining / saveInterval * avgSecs;
         }
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
@@ -3374,7 +3400,6 @@ namespace Truedat
             int processed = 0;
             int total = tracks.Count;
             int lastSaveAnalyzed = 0;
-            const int SaveInterval = 25;
             var saveLock = new object();
 
             var startTime = DateTime.Now;
@@ -3888,6 +3913,8 @@ namespace Truedat
                                     var saveSw = Stopwatch.StartNew();
                                     SaveResults(moodsPath, allTracks);
                                     saveSw.Stop();
+                                    Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                                    Interlocked.Increment(ref _saveCount);
                                     Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
                                 }
                             }
@@ -9886,6 +9913,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!IsAnalysisCandidate(true, null, null), "preflight-work: current-features cache entry -> not new work");
                 Assert(!IsAnalysisCandidate(false, "unsupported codec: DSD", null), "preflight-work: a structural skip is not new work (I1)");
                 Assert(!IsAnalysisCandidate(false, null, "over max duration: 60 min > 20 min ceiling"), "preflight-work: an over-length skip is not new work (I1)");
+            }
+
+            // --- ETA charges the measured periodic-save cost (2026-07-28) ---
+            {
+                // 2 measured saves totalling 60s -> 30s avg; 400 new tracks at
+                // interval 100 -> 4 saves ahead -> exactly 120s of overhead.
+                long ticks60s = Stopwatch.Frequency * 60;
+                Assert(Math.Abs(SaveOverheadSecs(400, 100, 2, ticks60s) - 120.0) < 1e-6,
+                    "save-overhead: 4 saves ahead at a measured 30s avg -> exactly 120s");
+                // Fractional saves stay fractional (150 tracks = 1.5 saves x 30s = 45s)
+                // rather than rounding — the estimate should drain smoothly.
+                Assert(Math.Abs(SaveOverheadSecs(150, 100, 2, ticks60s) - 45.0) < 1e-6,
+                    "save-overhead: partial interval is charged pro-rata (1.5 saves x 30s = 45s)");
+                Assert(SaveOverheadSecs(400, 100, 0, 0) == 0,
+                    "save-overhead: zero until a save has been measured — never guessed");
+                Assert(SaveOverheadSecs(0, 100, 2, ticks60s) == 0,
+                    "save-overhead: no new work ahead -> no save cost");
             }
 
             Console.WriteLine(failures == 0
