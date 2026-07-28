@@ -2397,7 +2397,7 @@ namespace Truedat
                 var hoErrors = new ConcurrentBag<string>();
                 var hoSw = System.Diagnostics.Stopwatch.StartNew();
 
-                Parallel.ForEach(hoPaths, new ParallelOptions
+                Parallel.ForEach(Partitioner.Create(hoPaths, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
                     CancellationToken = CancellationToken.None
@@ -2646,7 +2646,7 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
 
-                Parallel.ForEach(filePaths, new ParallelOptions
+                Parallel.ForEach(Partitioner.Create(filePaths, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions
                 {
                     MaxDegreeOfParallelism = parallelism,
                     CancellationToken = CancellationToken.None
@@ -3425,7 +3425,7 @@ namespace Truedat
 
             try
             {
-                Parallel.ForEach(tracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
+                Parallel.ForEach(Partitioner.Create(tracks, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = cts.Token }, t =>
                 {
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
@@ -4767,7 +4767,7 @@ namespace Truedat
             var sw = Stopwatch.StartNew();
             int done = 0;
 
-            Parallel.ForEach(allTracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
+            Parallel.ForEach(Partitioner.Create(allTracks, EnumerablePartitionerOptions.NoBuffering), new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
             {
                 var path = kvp.Key;
                 var entry = kvp.Value;
@@ -8239,6 +8239,94 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(both != null && both.Strong.Contains("PCST") && both.Provenance.Contains("WFED"),
                     "sniffer: all markers are reported, not just the first");
                 Assert(both != null && both.Describe().Contains("PCST"), "sniffer: Describe names the strong marker");
+            }
+
+            // --- SmfmReader M4A path (ID3v2 GEOB inside MP4 ID32 box) ---
+            // Portable regression for the .m4a/.mp4 SMFM reader: a synthetic in-code MP4
+            // (moov>udta>meta[FullBox]>ID32>ID3v2.3 tag>GEOB 'application/SMFMF' > GBPM+STMO)
+            // so the container path has coverage independent of any operator file.
+            {
+                byte[] Be32(int v) => new byte[] { (byte)((v >> 24) & 0xFF), (byte)((v >> 16) & 0xFF), (byte)((v >> 8) & 0xFF), (byte)(v & 0xFF) };
+                byte[] Cat(params byte[][] parts)
+                {
+                    using var ms = new MemoryStream();
+                    foreach (var pp in parts) ms.Write(pp, 0, pp.Length);
+                    return ms.ToArray();
+                }
+                // SMFM sub-block: tag(4) + magic(8) + 4 reserved + BE length(4) + payload.
+                byte[] SubBlock(string tag, byte[] payload) => Cat(
+                    Encoding.ASCII.GetBytes(tag),
+                    Encoding.ASCII.GetBytes("STAEMMLW"),   // PC-firmware magic
+                    new byte[4],                            // reserved
+                    Be32(payload.Length),
+                    payload);
+
+                // GBPM: big-endian float32 = 120.0f (0x42F00000).
+                var gbpm = SubBlock("GBPM", new byte[] { 0x42, 0xF0, 0x00, 0x00 });
+                // STMO: 40 records [type, channel, sub, value]; channel = i%10, value = (ch+1)*10
+                // → averaged scores [10,20,...,100], argmax channel 9.
+                var stmoPayload = new byte[160];
+                for (int i = 0; i < 40; i++)
+                {
+                    int ch = i % 10;
+                    stmoPayload[i * 4 + 1] = (byte)ch;
+                    stmoPayload[i * 4 + 3] = (byte)((ch + 1) * 10);
+                }
+                var stmo = SubBlock("STMO", stmoPayload);
+                var smfmObject = Cat(gbpm, stmo);
+
+                // GEOB frame content: encoding(0) + mime\0 + filename\0 + description\0 + object.
+                var geobContent = Cat(new byte[] { 0 },
+                    Encoding.ASCII.GetBytes("application/SMFMF"), new byte[] { 0 },
+                    new byte[] { 0 }, new byte[] { 0 }, smfmObject);
+                // ID3v2.3 GEOB frame: id(4) + plain BE size(4) + flags(2) + content.
+                var geobFrame = Cat(Encoding.ASCII.GetBytes("GEOB"), Be32(geobContent.Length), new byte[2], geobContent);
+                // ID3v2.3 tag: "ID3" v3 rev0 flags0 + syncsafe int28 size + frames.
+                int tagBodyLen = geobFrame.Length;
+                var syncsafe = new byte[] { (byte)((tagBodyLen >> 21) & 0x7F), (byte)((tagBodyLen >> 14) & 0x7F), (byte)((tagBodyLen >> 7) & 0x7F), (byte)(tagBodyLen & 0x7F) };
+                var id3Tag = Cat(new byte[] { (byte)'I', (byte)'D', (byte)'3', 3, 0, 0 }, syncsafe, geobFrame);
+
+                // MP4 box: size(4, includes 8-byte header) + type(4) + body.
+                byte[] Box(string type, byte[] body)
+                {
+                    var b = new byte[8 + body.Length];
+                    Array.Copy(Be32(b.Length), 0, b, 0, 4);
+                    Encoding.ASCII.GetBytes(type, 0, 4, b, 4);
+                    Array.Copy(body, 0, b, 8, body.Length);
+                    return b;
+                }
+                // ID32 body: 4 fullbox version/flags + 2 language + ID3 tag.
+                var id32 = Box("ID32", Cat(new byte[4], new byte[2], id3Tag));
+                var meta = Box("meta", Cat(new byte[4], id32));   // meta is a FullBox
+                var udta = Box("udta", meta);
+                var moov = Box("moov", udta);
+                var ftyp = Box("ftyp", Encoding.ASCII.GetBytes("M4A "));
+                var mp4 = Cat(ftyp, moov);
+
+                var tmpM4a = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.m4a");
+                try
+                {
+                    File.WriteAllBytes(tmpM4a, mp4);
+                    var res = SmfmReader.TryRead(tmpM4a);
+                    Assert(res.HasValue, "smfm m4a: synthetic MP4 ID32/GEOB yields a result");
+                    Assert(res.HasValue && Math.Abs(res.Value.Bpm - 120.0) < 0.001, $"smfm m4a: GBPM decodes to 120 (got {res?.Bpm})");
+                    Assert(res.HasValue && res.Value.Scores.Length == 10, $"smfm m4a: 10 STMO scores (got {res?.Scores?.Length})");
+                    Assert(res.HasValue && res.Value.Scores[0] == 10 && res.Value.Scores[9] == 100,
+                        $"smfm m4a: per-channel averages [10..100] (got [{(res.HasValue ? string.Join(",", res.Value.Scores) : "")}])");
+                    Assert(res.HasValue && res.Value.Channel == 9, $"smfm m4a: argmax channel is 9 (got {res?.Channel})");
+                }
+                finally { try { File.Delete(tmpM4a); } catch { } }
+
+                // Defensive: missing and truncated containers return null, never throw.
+                Assert(SmfmReader.TryRead(Path.Combine(Path.GetTempPath(), $"nope-{Guid.NewGuid():N}.m4a")) == null,
+                    "smfm m4a: missing file returns null");
+                var tmpTrunc = Path.Combine(Path.GetTempPath(), $".truedat-selftest-{Guid.NewGuid():N}.m4a");
+                try
+                {
+                    File.WriteAllBytes(tmpTrunc, new byte[] { 0, 0, 0, 8, (byte)'m', (byte)'o', (byte)'o' });  // short/truncated box
+                    Assert(SmfmReader.TryRead(tmpTrunc) == null, "smfm m4a: truncated container returns null");
+                }
+                finally { try { File.Delete(tmpTrunc); } catch { } }
             }
 
             // --- speech labelling: explicit labels only (2026-07-24) ---
