@@ -345,7 +345,12 @@ namespace Truedat
 
     /// <summary>
     /// Tee writer — sends all Console.WriteLine output to both console and a log file.
-    /// Thread-safe via lock on the file writer. WriteThrough ensures real-time tail -f.
+    /// Thread-safe via lock on the file writer. AutoFlush keeps tail -f live — the
+    /// flushed bytes land in the OS cache, which is what a reader sees, so live
+    /// tailing never needed the durability of WriteThrough. The log is deliberately
+    /// NOT WriteThrough: forcing a durable device write on every line turned a
+    /// 72k-entry --audit save into ~11 min (71.5k synchronous flushes). Thread-safety
+    /// lives in the lock + FileOnly's one-block-per-lock, not in the flush mode.
     /// </summary>
     class TeeWriter : TextWriter
     {
@@ -358,7 +363,7 @@ namespace Truedat
         {
             _console = console;
             _file = new StreamWriter(
-                new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough),
+                new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.Read, 4096, FileOptions.SequentialScan),
                 new UTF8Encoding(false))
             { AutoFlush = true };
         }
@@ -10432,6 +10437,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             "mp3" => true, "aac" => true, _ => false,
         };
 
+        /// <summary>True when a verdict axis reached an actual decision — "yes" or
+        /// "no", as opposed to "unknown"/"n/a". Gates the --audit trace emission:
+        /// only decided tracks earn a logged block.</summary>
+        internal static bool IsDecidedVerdict(string verdict) => verdict == "yes" || verdict == "no";
+
         /// <summary>Compute the per-track verdict. Pure function: depends only on
         /// the entry's already-extracted features. Runs inline in WriteTrackEntry
         /// on every save so threshold changes ship without a rescan.</summary>
@@ -10714,7 +10724,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // One atomic write of the whole per-track block to the log file only. When
             // --audit is set but no tee/log is active (a mode without a log file), the
             // detail is dropped — the console must never get it either way.
-            if (trace != null)
+            // Decision-only (2026-07-28): emit the block only when some axis actually
+            // DECIDED (yes/no). The verdict recomputes for every catalog entry on every
+            // save, and ~91% of entries land all-unknown — identical, diagnostically
+            // empty blocks re-logged save after save grew a 72k-library audit log to
+            // 1.9 GB in a day. An "unknown" is not a decision point; a track that
+            // matters shows up the moment any axis decides.
+            if (trace != null &&
+                (IsDecidedVerdict(v.HiresGenuine) || IsDecidedVerdict(v.LossyTranscodeLikely) || IsDecidedVerdict(v.SpeechLikely)))
                 _tee?.FileOnly(trace.ToString().TrimEnd());
 
             return v;
