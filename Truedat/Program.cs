@@ -418,12 +418,13 @@ namespace Truedat
         static long _etaNewBytesTotal;
         static long _etaNewBytesDone;
         static int _scanParallelism;
-        // Periodic incremental save: every SaveInterval analyzed tracks (crash/cancel
-        // resilience — Ctrl+C additionally always flushes via the unconditional final
-        // SaveResults). Raised 25 -> 100 (2026-07-28): each save rewrites the WHOLE
-        // catalog, so on a big-library rescan the save cost is proportional to the
-        // catalog, not the remaining work — at 25 it dominated wall time.
-        const int SaveInterval = 100;
+        // Periodic incremental save: TIME-based (2026-07-28) — fires on the first
+        // analysis completion >= SavePeriodSecs after the previous save. A count
+        // interval bounds work-at-risk in TRACKS, which on a slow machine could mean
+        // hours between saves; a time period bounds it in MINUTES on any machine.
+        // Crash/cancel resilience is the whole point of ongoing saves — Ctrl+C
+        // additionally always flushes via the unconditional final SaveResults.
+        const double SavePeriodSecs = 300;
         // Measured periodic-save cost (Stopwatch ticks + count), fed to the ETA:
         // the analysis-only model couldn't see the save tax at all, which is why
         // resume/rescan estimates read far low on large catalogs (2026-07-28).
@@ -676,22 +677,24 @@ namespace Truedat
                 newSecs = 0;
 
             double knownSecs = knownRemaining * KnownAvgThreadSecs() / _scanParallelism;
-            double saveSecs = SaveOverheadSecs(newRemaining, SaveInterval,
+            double baseSecs = newSecs + knownSecs;
+            double saveSecs = SaveOverheadSecs(baseSecs, SavePeriodSecs,
                 Volatile.Read(ref _saveCount), Interlocked.Read(ref _saveTicksTotal));
-            return newSecs + knownSecs + saveSecs;
+            return baseSecs + saveSecs;
         }
 
         /// <summary>Wall-seconds of periodic-save overhead ahead: a save fires every
-        /// saveInterval analyses and costs the measured average. Each save rewrites the
-        /// WHOLE catalog, so on a big-library rescan this cost is proportional to the
-        /// catalog rather than the remaining work — the analysis-only ETA couldn't see
-        /// it, which is why resume/rescan estimates read far low (2026-07-28). Returns
-        /// 0 until a save has actually been measured — never guessed.</summary>
-        internal static double SaveOverheadSecs(int newRemaining, int saveInterval, int saveCount, long saveTicksTotal)
+        /// savePeriodSecs of scan time while work remains, and costs the measured
+        /// average. Each save rewrites the WHOLE catalog, so on a big-library rescan
+        /// this cost is proportional to the catalog rather than the remaining work —
+        /// the analysis-only ETA couldn't see it, which is why resume/rescan estimates
+        /// read far low (2026-07-28). Returns 0 until a save has actually been
+        /// measured — never guessed.</summary>
+        internal static double SaveOverheadSecs(double baseRemainingSecs, double savePeriodSecs, int saveCount, long saveTicksTotal)
         {
-            if (saveCount <= 0 || newRemaining <= 0 || saveInterval <= 0) return 0;
+            if (saveCount <= 0 || baseRemainingSecs <= 0 || savePeriodSecs <= 0) return 0;
             double avgSecs = (double)saveTicksTotal / Stopwatch.Frequency / saveCount;
-            return (double)newRemaining / saveInterval * avgSecs;
+            return baseRemainingSecs / savePeriodSecs * avgSecs;
         }
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
@@ -3399,7 +3402,7 @@ namespace Truedat
             int timedOut = 0;
             int processed = 0;
             int total = tracks.Count;
-            int lastSaveAnalyzed = 0;
+            long lastSaveElapsedTicks = 0;   // sw ticks at the end of the last periodic save
             var saveLock = new object();
 
             var startTime = DateTime.Now;
@@ -3903,18 +3906,25 @@ namespace Truedat
                         trackClass = "analyzed";
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
-                        if (newAnalyzed - Volatile.Read(ref lastSaveAnalyzed) >= SaveInterval)
+                        // Time-based periodic save. This check lives ONLY in the
+                        // analysis-completion path, so the "and something new was
+                        // actually analyzed since the last save" condition is implicit —
+                        // a pure cache-hit stretch never rewrites the catalog.
+                        long savePeriodTicks = (long)(SavePeriodSecs * Stopwatch.Frequency);
+                        if (sw.ElapsedTicks - Interlocked.Read(ref lastSaveElapsedTicks) >= savePeriodTicks)
                         {
                             lock (saveLock)
                             {
-                                if (newAnalyzed - lastSaveAnalyzed >= SaveInterval)
+                                if (sw.ElapsedTicks - lastSaveElapsedTicks >= savePeriodTicks)
                                 {
-                                    lastSaveAnalyzed = newAnalyzed;
                                     var saveSw = Stopwatch.StartNew();
                                     SaveResults(moodsPath, allTracks);
                                     saveSw.Stop();
                                     Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
                                     Interlocked.Increment(ref _saveCount);
+                                    // Period measures save-end to save-start: a slow save
+                                    // must not eat its own next interval.
+                                    Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
                                     Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
                                 }
                             }
@@ -9917,19 +9927,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- ETA charges the measured periodic-save cost (2026-07-28) ---
             {
-                // 2 measured saves totalling 60s -> 30s avg; 400 new tracks at
-                // interval 100 -> 4 saves ahead -> exactly 120s of overhead.
+                // 2 measured saves totalling 60s -> 30s avg; 1500s of work ahead at a
+                // 300s save period -> 5 saves ahead -> exactly 150s of overhead.
                 long ticks60s = Stopwatch.Frequency * 60;
-                Assert(Math.Abs(SaveOverheadSecs(400, 100, 2, ticks60s) - 120.0) < 1e-6,
-                    "save-overhead: 4 saves ahead at a measured 30s avg -> exactly 120s");
-                // Fractional saves stay fractional (150 tracks = 1.5 saves x 30s = 45s)
+                Assert(Math.Abs(SaveOverheadSecs(1500, 300, 2, ticks60s) - 150.0) < 1e-6,
+                    "save-overhead: 5 saves ahead at a measured 30s avg -> exactly 150s");
+                // Fractional periods stay fractional (450s = 1.5 saves x 30s = 45s)
                 // rather than rounding — the estimate should drain smoothly.
-                Assert(Math.Abs(SaveOverheadSecs(150, 100, 2, ticks60s) - 45.0) < 1e-6,
-                    "save-overhead: partial interval is charged pro-rata (1.5 saves x 30s = 45s)");
-                Assert(SaveOverheadSecs(400, 100, 0, 0) == 0,
+                Assert(Math.Abs(SaveOverheadSecs(450, 300, 2, ticks60s) - 45.0) < 1e-6,
+                    "save-overhead: partial period is charged pro-rata (1.5 saves x 30s = 45s)");
+                Assert(SaveOverheadSecs(1500, 300, 0, 0) == 0,
                     "save-overhead: zero until a save has been measured — never guessed");
-                Assert(SaveOverheadSecs(0, 100, 2, ticks60s) == 0,
-                    "save-overhead: no new work ahead -> no save cost");
+                Assert(SaveOverheadSecs(0, 300, 2, ticks60s) == 0,
+                    "save-overhead: no work ahead -> no save cost");
             }
 
             Console.WriteLine(failures == 0
