@@ -5,6 +5,16 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- **Preview page: searchable genre-rule picker.** The `--preview` review page's genre
+  dialog lists every genre in the library with its track count and filters the list as
+  you type (the box keeps focus while results narrow). Each genre row carries its own
+  `excl` / `incl` buttons, so a rule is one keystroke-and-click away instead of hunting
+  a wall of chips; the folder builder gained the same per-row split buttons. The picker
+  dialog itself landed at the tail of the 5.4.4 window — the include half and the
+  per-row button pattern are new here.
+
 ## [5.4.4] — 2026-07-25
 
 ### Fixed — post-ship gap hunt: nine defects in the exclusion and scan paths (2026-07-26)
