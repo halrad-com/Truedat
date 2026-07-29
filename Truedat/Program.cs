@@ -398,6 +398,11 @@ namespace Truedat
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
+        // Live count of running Essentia subprocesses — the saturation gauge on the
+        // progress line ("ess N/P"). Debugging aid: if this sits well below the
+        // parallelism while new work remains, workers are parked on something other
+        // than analysis (disk, staging, a lane tail) and THAT is worth hunting.
+        static int _essentiaActive;
 
         // ---- Scan telemetry (MoodsMode) ----
         // Per-outcome class stats: [0]=count, [1]=Stopwatch ticks of thread-time.
@@ -11385,6 +11390,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             var tempJson = Path.GetTempFileName();
+            Interlocked.Increment(ref _essentiaActive);   // paired decrement in finally
             try
             {
                 var psi = new ProcessStartInfo
@@ -11500,6 +11506,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             finally
             {
+                Interlocked.Decrement(ref _essentiaActive);
                 try { File.Delete(tempJson); } catch { }
                 if (tempLink != null)
                 {
@@ -13077,9 +13084,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // comparable across libraries with different track lengths.
             var rate = CurrentRateMBps(elapsed.TotalSeconds);
             var rateTag = rate > 0 ? $" · {rate:F1} MB/s" : "";
+            // Saturation gauge: running Essentia subprocesses vs the worker count.
+            // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
+            // "ess 12/14" well below full while new work remains = workers parked
+            // on something other than analysis — that gap is the thing to debug.
+            var essTag = _scanParallelism > 0 ? $" · ess {Volatile.Read(ref _essentiaActive)}/{_scanParallelism}" : "";
             // Negative = no honest estimate yet; show the measured bits without an ETA.
             var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
-            return $" {etaTag}{avgTag}{rateTag}";
+            return $" {etaTag}{avgTag}{rateTag}{essTag}";
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>
