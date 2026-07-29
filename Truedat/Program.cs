@@ -3247,7 +3247,7 @@ namespace Truedat
             var exclusionsFile = _exclusionsPath ?? ExclusionStore.Resolve(moodsPath);
             if (_noExclusions)
             {
-                Console.WriteLine("  WARNING: --no-exclusions — the exclusion file is being ignored for this run");
+                Console.WriteLine($"  WARNING: --no-exclusions — ignoring {exclusionsFile} for this run");
             }
             else
             {
@@ -3267,8 +3267,14 @@ namespace Truedat
                     tee?.Dispose();
                     return;
                 }
-                if (!_exclusions.IsEmpty)
-                    Console.WriteLine($"  Exclusions: {_exclusions.Rules.Count} rule(s) from {exclusionsFile}");
+                // Always name the policy file in the header — which exclusion file is
+                // in force is a scan parameter like the XML and moods paths, and the
+                // old only-when-non-empty line was unreadable in the negative: no line
+                // meant "no file", "empty file", or "old build" indistinguishably.
+                if (!File.Exists(exclusionsFile))
+                    Console.WriteLine($"  Exclusions: {exclusionsFile} (not present — nothing excluded)");
+                else
+                    Console.WriteLine($"  Exclusions: {exclusionsFile} ({_exclusions.Rules.Count} rule(s))");
                 foreach (var diag in _exclusions.Diagnostics)
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
             }
