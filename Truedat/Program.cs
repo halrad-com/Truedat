@@ -403,6 +403,29 @@ namespace Truedat
         // parallelism while new work remains, workers are parked on something other
         // than analysis (disk, staging, a lane tail) and THAT is worth hunting.
         static int _essentiaActive;
+        // Trailing peak of _essentiaActive, displayed instead of the instantaneous
+        // count and reset by each progress line. The line is printed by a worker at
+        // its own track boundary — an instant when its OWN slot is by definition
+        // released — so a raw sample structurally tops out at P-1 on a saturated
+        // box and reads as "missing one worker". The peak-since-last-line has no
+        // such observer bias: if all P ran together at any point in the window,
+        // the gauge says P.
+        static int _essentiaPeak;
+
+        /// <summary>CAS-max: record a newly observed concurrent-essentia count into
+        /// the trailing peak. Monotonic within a window — a lower observation never
+        /// lowers the peak.</summary>
+        internal static void RaiseEssentiaPeak(int observed)
+        {
+            int oldPeak;
+            while (observed > (oldPeak = Volatile.Read(ref _essentiaPeak)))
+                if (Interlocked.CompareExchange(ref _essentiaPeak, observed, oldPeak) == oldPeak)
+                    break;
+        }
+
+        /// <summary>Read-and-reset the trailing peak (the display consumes the
+        /// window; the next window starts at 0).</summary>
+        internal static int TakeEssentiaPeak() => Interlocked.Exchange(ref _essentiaPeak, 0);
 
         // ---- Scan telemetry (MoodsMode) ----
         // Per-outcome class stats: [0]=count, [1]=Stopwatch ticks of thread-time.
@@ -9953,6 +9976,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "save-overhead: no work ahead -> no save cost");
             }
 
+            // --- ess gauge peak-hold (2026-07-29): the progress line shows the peak
+            // since the previous line, because the printing worker's own slot is
+            // always free at print time — a raw sample reads P-1 on a full box.
+            {
+                TakeEssentiaPeak(); // reset any residue
+                RaiseEssentiaPeak(3);
+                RaiseEssentiaPeak(2);
+                Assert(TakeEssentiaPeak() == 3,
+                    "ess-peak: a lower observation never lowers the peak (3 then 2 reads 3)");
+                Assert(TakeEssentiaPeak() == 0,
+                    "ess-peak: reading the peak consumes the window (second read is 0)");
+                RaiseEssentiaPeak(5);
+                Assert(TakeEssentiaPeak() == 5,
+                    "ess-peak: a new window records fresh observations after reset");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -11396,7 +11435,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             var tempJson = Path.GetTempFileName();
-            Interlocked.Increment(ref _essentiaActive);   // paired decrement in finally
+            RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
             try
             {
                 var psi = new ProcessStartInfo
@@ -13092,9 +13131,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var rateTag = rate > 0 ? $" · {rate:F1} MB/s" : "";
             // Saturation gauge: running Essentia subprocesses vs the worker count.
             // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
-            // "ess 12/14" well below full while new work remains = workers parked
+            // "ess 8/14" well below full while new work remains = workers parked
             // on something other than analysis — that gap is the thing to debug.
-            var essTag = _scanParallelism > 0 ? $" · ess {Volatile.Read(ref _essentiaActive)}/{_scanParallelism}" : "";
+            // Displays the PEAK since the previous line, floored at the live count:
+            // this line is printed by a worker at its own track boundary, so a raw
+            // instantaneous sample can never include the printer and would read
+            // P-1 on a fully saturated box (looks like a missing worker).
+            var essTag = _scanParallelism > 0
+                ? $" · ess {Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive))}/{_scanParallelism}"
+                : "";
             // Negative = no honest estimate yet; show the measured bits without an ETA.
             var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
             return $" {etaTag}{avgTag}{rateTag}{essTag}";
