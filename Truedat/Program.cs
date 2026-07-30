@@ -5360,7 +5360,6 @@ namespace Truedat
             });
 
             sw.Stop();
-            KeepAwakeRelease();   // catalog walk is over; nothing left to hold awake for
 
             // In backfill mode write the merged file back atomically — only when we actually
             // changed something. Idempotent re-runs do zero IO on the moods file.
@@ -5379,6 +5378,7 @@ namespace Truedat
                     return 1;
                 }
             }
+            KeepAwakeRelease();   // walk + save are over; nothing left to hold awake for
 
             var csvPath = Path.Combine(
                 Path.GetDirectoryName(moodsPath) ?? ".",
