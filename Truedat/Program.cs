@@ -625,6 +625,10 @@ namespace Truedat
             Console.WriteLine("  --bit-depth <16|24> With --transcode: override output bit depth (default: match source).");
             Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
             Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
+            Console.WriteLine("  --allow-sleep       Let the machine sleep during scans. Default: work-bearing runs");
+            Console.WriteLine("                      (scan/verify/transcode) hold the system awake while on AC power");
+            Console.WriteLine("                      (visible in powercfg /requests; display still sleeps; on battery");
+            Console.WriteLine("                      normal sleep always applies).");
             Console.WriteLine("  --synthesize        Generate a synthetic MusicBee library from a catalog");
             Console.WriteLine("  --catalog <path>    With --synthesize: path to catalog JSONL (.jsonl or .jsonl.gz)");
             Console.WriteLine("  --synth-output <dir> With --synthesize: output directory for synthesized library");
@@ -663,8 +667,8 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions",
-            "accept-flac-tag-drift", "refresh-features", "pause", "stage-dir",
-            "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
+            "accept-flac-tag-drift", "refresh-features", "pause", "allow-sleep",
+            "stage-dir", "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
         };
 
@@ -1576,6 +1580,10 @@ namespace Truedat
             try { MainCore(args); }
             finally
             {
+                // Idempotent — a mode that never asserted (read-only) or already released
+                // just no-ops here. Guarantees a finished run sitting at the pause prompt
+                // never pins the machine awake overnight.
+                KeepAwakeRelease();
                 if (pause)
                 {
                     Console.WriteLine();
@@ -1826,6 +1834,7 @@ namespace Truedat
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "refresh-features") _refreshFeatures = true;
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
+                else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -2550,6 +2559,7 @@ namespace Truedat
                 }
                 try
                 {
+                KeepAwakePump(workMode: true);   // single-item mode: initial assert, no loop pump needed
 
                 // Cache hierarchy — same tiers as MoodsMode and --file-list.
                 if (afMoodsTracks != null)
@@ -2760,7 +2770,7 @@ namespace Truedat
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
                 Environment.ExitCode = 0;
                 }
-                finally { afStagedSrc?.Dispose(); }
+                finally { afStagedSrc?.Dispose(); KeepAwakeRelease(); }
                 return;
             }
 
@@ -3348,7 +3358,7 @@ namespace Truedat
                         flErrors.Add($"{filePath}: {ex.Message}");
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
                     }
-                    finally { flStagedSrc?.Dispose(); }
+                    finally { flStagedSrc?.Dispose(); KeepAwakePump(workMode: true); }
                 };
 
                 // Perf-hint split (no file IO): a path already in the loaded catalog with
@@ -3374,6 +3384,7 @@ namespace Truedat
                 if (flLikelyCached.Count + flLikelyWork.Count != filePaths.Count)
                     throw new InvalidOperationException("two-lane split dropped or duplicated files");
                 var flOptions = new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = CancellationToken.None };
+                KeepAwakePump(workMode: true);   // initial assert before the scan phase starts
                 // Fast lane: default (chunked) partitioner -> % races up on cheap cache hits.
                 Parallel.ForEach(flLikelyCached, flOptions, processFile);
                 // Work lane: single-item NoBuffering -> slow analyses spread across all threads.
@@ -3389,6 +3400,7 @@ namespace Truedat
                     SaveResults(analyzeFileMoods!, flMoodsTracks);
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                 }
+                KeepAwakeRelease();   // scan phase (incl. save) is over; nothing left to hold awake for
 
                 int flCachedTotal = flCachedByMtime + flCachedByHeadPath + flCachedByShaPath + flCachedByShaCross;
 
@@ -3770,6 +3782,7 @@ namespace Truedat
 
             Console.WriteLine();
 
+            KeepAwakePump(workMode: true);   // initial assert (AC + !--allow-sleep) before the scan phase
             try
             {
                 // Two-lane triage: the per-track body below is IDENTICAL to the single
@@ -4283,6 +4296,7 @@ namespace Truedat
                     {
                         msStagedSrc?.Dispose();
                         RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
+                        KeepAwakePump(workMode: true);   // throttled internally; handles AC<->battery mid-run
                     }
                 };
 
@@ -4322,6 +4336,7 @@ namespace Truedat
             var finalSaveSw = Stopwatch.StartNew();
             SaveResults(moodsPath, allTracks);
             finalSaveSw.Stop();
+            KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
             if (wasCancelled)
@@ -5155,6 +5170,9 @@ namespace Truedat
             var sw = Stopwatch.StartNew();
             int done = 0;
 
+            // Verify walks the whole catalog recomputing hashes (full audio reads) even
+            // without --backfill, so it counts as work-bearing — not merely read-only-fast.
+            KeepAwakePump(workMode: true);
             Parallel.ForEach(allTracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
             {
                 var path = kvp.Key;
@@ -5298,9 +5316,11 @@ namespace Truedat
                     var pct = (n * 100) / loaded;
                     Console.WriteLine($"[{n}/{loaded} {pct}%{FormatEta(sw.Elapsed, n, loaded)}] {(backfill ? "backfilling" : "verifying")}...");
                 }
+                KeepAwakePump(workMode: true);   // throttled internally; handles AC<->battery mid-run
             });
 
             sw.Stop();
+            KeepAwakeRelease();   // catalog walk is over; nothing left to hold awake for
 
             // In backfill mode write the merged file back atomically — only when we actually
             // changed something. Idempotent re-runs do zero IO on the moods file.
@@ -10340,7 +10360,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     try { PrintHelpAll(); } finally { Console.SetOut(prev); }
                     return sw.ToString();
                 }
-                var helpFlags = System.Text.RegularExpressions.Regex.Matches(CaptureAll(), @"--([a-z][a-z0-9-]+)")
+                var fullHelpText = CaptureAll();
+                var helpFlags = System.Text.RegularExpressions.Regex.Matches(fullHelpText, @"--([a-z][a-z0-9-]+)")
                     .Cast<System.Text.RegularExpressions.Match>()
                     .Select(m => m.Groups[1].Value)
                     .Distinct()
@@ -10349,13 +10370,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var missing = helpFlags.Where(f => !known.Contains(f)).ToList();
                 Assert(missing.Count == 0,
                     "every flag in --help all is in KnownFlags" + (missing.Count > 0 ? " (missing: " + string.Join(", ", missing) + ")" : ""));
+                Assert(fullHelpText.Contains("--allow-sleep"), "help all lists --allow-sleep");
             }
 
             // --- keep-awake gate ---------------------------------------------
-            // _allowSleep is wired by Task 2's flag parser (no assignment site exists
-            // yet in Task 1 alone); assign here only so this build stays 0W/0E ahead
-            // of that wiring. Does not touch the real power-request/ExecutionState APIs.
-            _allowSleep = false;
             Assert(ShouldKeepAwake(1, false, true), "keep-awake: AC + work asserts");
             Assert(ShouldKeepAwake(255, false, true), "keep-awake: unknown power counts as AC (desktop)");
             Assert(!ShouldKeepAwake(0, false, true), "keep-awake: battery never asserts");
@@ -10509,6 +10527,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            KeepAwakePump(workMode: true);   // single-item mode: assert (gated by AC/--allow-sleep) before the ffmpeg run, release on every exit below
             try
             {
                 using var proc = Process.Start(psi)!;
@@ -10544,6 +10563,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine($"Error: transcode failed: {ex.Message}");
                 return 1;
             }
+            finally { KeepAwakeRelease(); }
         }
 
         static AudioDetails? ProbeAudio(string ffprobe, string audioPath)
