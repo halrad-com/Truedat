@@ -27,6 +27,12 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   a wall of chips; the folder builder gained the same per-row split buttons. The picker
   dialog itself landed at the tail of the 5.4.4 window — the include half and the
   per-row button pattern are new here.
+- **Scans keep the machine awake (AC only).** Work-bearing runs hold a Windows
+  power request (`powercfg /requests` shows the reason; auto-released on exit,
+  display still sleeps) so new Win11 machines stop sleeping mid-scan overnight.
+  On battery normal sleep applies; `--allow-sleep` opts out. Truedat and its
+  analysis subprocesses also opt out of Win11 efficiency throttling except
+  under `--background`/`--cpu-limit`.
 
 ## [5.4.4] — 2026-07-25
 

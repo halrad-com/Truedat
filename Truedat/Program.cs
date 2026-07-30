@@ -1001,6 +1001,40 @@ namespace Truedat
                 AssignProcessToJobObject(_jobHandle, proc.Handle);
         }
 
+        // -- Win11 efficiency-throttling (EcoQoS) opt-out ---------------------
+        // Win11 can put background processes in "efficiency mode": throttled
+        // clocks and E-core scheduling on hybrid CPUs — silently slowing a scan.
+        // Opt truedat and its children out by explicitly requesting normal QoS.
+        // EXCEPT under --background/--cpu-limit: those flags exist to yield, and
+        // EcoQoS pointing the same direction matches the operator's intent.
+        // Soft-fails silently pre-Win11 (info class unsupported).
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROCESS_POWER_THROTTLING_STATE
+        {
+            public uint Version;      // PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1
+            public uint ControlMask;  // PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+            public uint StateMask;    // 0 with the bit in ControlMask = force NORMAL QoS
+        }
+        const int ProcessPowerThrottlingInfo = 4; // PROCESS_INFORMATION_CLASS.ProcessPowerThrottling
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetProcessInformation(IntPtr hProcess, int infoClass,
+            ref PROCESS_POWER_THROTTLING_STATE info, int size);
+
+        static bool _yieldMode; // true under --background / --cpu-limit
+
+        static void DisableEcoQos(IntPtr processHandle)
+        {
+            if (_yieldMode) return;
+            try
+            {
+                var s = new PROCESS_POWER_THROTTLING_STATE
+                { Version = 1, ControlMask = 0x1, StateMask = 0 };
+                SetProcessInformation(processHandle, ProcessPowerThrottlingInfo,
+                    ref s, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>());
+            }
+            catch { /* pre-Win11 or denied: irrelevant, carry on */ }
+        }
+
         // -- Keep-awake: power availability request ---------------------------
         // Windows sleeps on input-idle timers regardless of CPU load; a scan has
         // never held a machine awake by running. While analysis-bearing work is
@@ -1980,10 +2014,12 @@ namespace Truedat
 
             if (cpuLimit > 0)
             {
+                _yieldMode = true;
                 InitCpuLimitJob(cpuLimit);
                 if (_jobHandle != IntPtr.Zero)
                     Console.Error.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
             }
+            DisableEcoQos(Process.GetCurrentProcess().Handle);
 
             if (showHelp)
             {
@@ -7783,6 +7819,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 using var proc = Process.Start(psi);
                 if (proc == null) return null;
+                DisableEcoQos(proc.Handle);
                 // Drain stderr async so a chatty ffmpeg can't deadlock the pipe.
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
@@ -8054,6 +8091,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 using var proc = Process.Start(psi);
                 if (proc == null) return (null, null, null);
+                DisableEcoQos(proc.Handle);
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
                 var buf = new byte[64 * 1024];
@@ -10434,6 +10472,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 };
                 using var proc = Process.Start(psi)!;
                 ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(300000)) // 5 min timeout
@@ -10532,6 +10571,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 using var proc = Process.Start(psi)!;
                 ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(300000)) // 5 min, matches DownmixToStereo
@@ -10582,6 +10622,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 using var proc = Process.Start(psi);
                 if (proc == null) { if (_audit) Console.WriteLine($"  DEBUG probe: failed to start: {audioPath}"); return null; }
                 ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(30000))
@@ -11847,6 +11888,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 using var proc = Process.Start(psi);
                 if (proc == null) return (null, "Failed to start Essentia process");
                 ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
                 var pid = proc.Id;
 
                 var stderrTask = proc.StandardError.ReadToEndAsync();

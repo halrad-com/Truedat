@@ -331,6 +331,27 @@ truedat.exe "iTunes Music Library.xml" --chunk 2/2     REM machine B
 truedat.exe --merge-moods --merge-source mbxmoods.machineA.json --merge-source mbxmoods.machineB.json --merge-output mbxmoods.json
 ```
 
+### Power & sleep
+
+While a scan, verify, or transcode is running **on AC power**, truedat holds a
+Windows power request so the machine will not idle into sleep mid-run (the
+display still sleeps; closing a laptop lid still sleeps the machine). The hold
+is visible in `powercfg /requests` (admin console) as
+"truedat: library scan in progress" and is released automatically when the run
+ends — including on crashes, since Windows frees it with the process.
+
+- On **battery**, normal sleep always applies — plug in for overnight runs.
+- `--allow-sleep` disables the hold entirely for operators whose machine
+  policy should win.
+- On Windows 11, truedat also opts itself and its analysis subprocesses out of
+  efficiency-mode throttling (EcoQoS) so hybrid-CPU boxes do not silently park
+  a scan on efficiency cores — except under `--background`/`--cpu-limit`,
+  which exist to yield.
+
+Two things no process can override, worth setting on a dedicated scan box:
+Windows Update restarts (set active hours) and the Windows 11 power-mode
+slider (prefer Balanced or better while scanning).
+
 ## Excluding files from analysis
 
 Truedat decides what to skip from one file: `mbxmoods-exclude.json`, beside `mbxmoods.json`.
