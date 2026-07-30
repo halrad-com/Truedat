@@ -62,33 +62,7 @@ being fixed. All nine shipped under this tag.
   lives on another machine — *every* rule read as stale. A signal built to expose dead rules
   was condemning live ones. Both now count over the same population.
 
-**Six more:**
-
-- The exclusion file — the one artefact you cannot regenerate, since it is hand-authored
-  policy — was the only file written without the atomic-replace discipline used everywhere
-  else, and an unlocked read-modify-write besides. Now atomic and serialised against other
-  truedat runs. (Nothing can serialise it against a text editor saving over it; the `.bak`
-  remains the recovery path there.) It also printed `Nothing was written.` in a case where it
-  had written.
-- A `file` rule's `audioStreamSha256` was stored and round-tripped but never read, so a rule
-  whose file had *moved* looked identical to a dead one. It is now reported as
-  moved-or-deleted, and `--preview` names the catalog paths that still hold that content.
-  Deliberately **reporting only** — re-matching by content would silently widen a
-  single-file rule to every copy of the audio, since one hash covers them all.
-- `--analyze-file` failed the run on a missing file while `--file-list` ledgered it as a skip.
-  Now consistent.
-- `--preview` was documented as read-only while writing into a live MusicBee instance's
-  review folder. The docs now say the precise thing: it never analyzes and never writes
-  `mbxmoods.json`.
-- The staging sweep at startup reached past `--stage-dir` and could delete files a concurrent
-  run was reading. It now respects the override and refuses when a sibling truedat is
-  detected. One target still cannot be isolated — it holds hardlinks, which cannot cross
-  volumes — and is covered by that refusal plus an age gate.
-- Under `--chunk`, every shard ledgered the whole library's skips, so an N-shard run wrote N
-  copies of each row. Each shard now ledgers its own bucket. Per-rule counts stay
-  library-wide, which is what makes a stale rule visible.
-
-### Docs — feature counts measured, and truedat no longer claims to map valence/arousal (2026-07-26)
+### Docs — feature counts measured (2026-07-26)
 
 Three places advertised "55 audio features per track". That was right for the core and extended
 sets but was never updated when the tonal/rhythm wave added fifteen more; the real figure is **70
@@ -98,13 +72,13 @@ surface with the recipe written down, and `CLAUDE.md` says not to maintain a tot
 hand-kept number has nothing to check it and reads as authoritative while being wrong.
 
 The larger error was attribution: two places said truedat produces a valence/arousal mapping. It
-does not — it writes features, and the mapping is made downstream. `--migrate` actively *strips*
-`valence` and `arousal` as legacy keys, so the docs promised an output the tool deliberately
-removes.
+does not — it writes features, and the mapping to valence/arousal values is made downstream. 
 
-Also: `README.md` and `SBOM.md` at the repo root are now the single master for their `dist/`
-copies, and the build copies both. The two README copies had diverged such that the next routine
-build would have silently overwritten the corrected one with the stale one.
+--migrate` actively *strips* valence` and `arousal` as legacy keys, that were once written,
+
+in favor of computing them so the model updates are dynamic wihtout re-writes. 
+
+so the docs promised an output the tool deliberately removes in current design intents. 
 
 ### Docs — migration guidance corrected: analyze once, then exclude (2026-07-26)
 
@@ -134,7 +108,6 @@ Migrate before your next scan:
    (a `genre` rule for `Podcast` works too — pick whichever matches how your library is organised).
 3. `truedat --apply-exclusions decisions.json`
 4. Scan.
-
 - **The class is "speech", not "podcast".** Truedat's internal vocabulary was migrated
   podcast→speech: audiobook, comedy, lecture, news, interview and talk-dominant are one genus —
   speech. "Podcast" is one kind of *evidence* about a speech track, not a class of its own.
@@ -438,6 +411,7 @@ via an audio-props gate (tier 2.5, `FLAC re-key` summary line).
 ## [5.4.0] — 2026-07-11
 
 ### Removed — legacy fingerprint pipeline
+
 - **`--fingerprint`, `--md5-only`, `--quick-fingerprint`, `--details`** modes and the
   binaries that backed them (`essentia_streaming_md5.exe`, `fpcalc.exe`). Identity is
   now pure-managed: `fingerprint.v1` + `audioStreamSha256`, computed on every scan.
@@ -455,6 +429,7 @@ once to clean stripped fields out of the file.
 ## [5.3.9] — 2026-07-05
 
 ### Duplicate review workflow
+
 - **`--duplicates`** now always writes a self-contained interactive **review page**
   (`mbxmoods-duplicates.html`) alongside the CSV/JSON, and prints it as a clickable
   console link. Offline, no server.
@@ -480,6 +455,7 @@ once to clean stripped fields out of the file.
   co-emits the interactive page beside it.
 
 ### Scan performance
+
 - **SHA256Cng** (hardware SHA-NI) for `audioStreamSha256` — faster on CPU-bound rescans.
 - **Single-pass** whole-file MD5 + invariant-region SHA in the cache-tier walks (one read
   instead of up to three).
@@ -490,6 +466,7 @@ once to clean stripped fields out of the file.
   all cores, `-p N` sets exactly N.
 
 ### `--fixup`
+
 - A remap target must now **exist on disk** — a stale iTunes XML that still lists a
   deleted file no longer resurrects it via a no-op same-path remap.
 - **Hash-resolve**: when a gone file's audio survives at another path (the kept copy of a
@@ -497,5 +474,6 @@ once to clean stripped fields out of the file.
   *Resolved* instead of kept.
 
 ### Fixed
+
 - Review-page HTML now escapes `'` and `"` — paths with an apostrophe no longer break a
   group's include control.
