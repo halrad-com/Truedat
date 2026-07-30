@@ -644,6 +644,86 @@ namespace Truedat
             Console.WriteLine("Optional: ffmpeg on PATH enables auto-downmix of multi-channel (5.1+) audio files.");
         }
 
+        /// <summary>Every canonical flag name the parse loop accepts (bare, no
+        /// dashes). Feeds the unknown-option suggestion and the self-test drift
+        /// guard that checks --help all against this list. When adding a flag to
+        /// the parse chain, add it here — the drift test fails by name if the
+        /// help mentions a flag this list lacks.</summary>
+        static readonly string[] KnownFlags = new[]
+        {
+            "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
+            "list-speech", "list-missing-smfm", "backfill", "backfill-level",
+            "retry-errors", "migrate", "analyze", "audit", "check-filenames",
+            "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
+            "synthesize", "catalog", "synth-output", "count", "album-ratio",
+            "synth-moods", "seed", "dry-run", "seed-moods", "seed-catalog",
+            "seed-target", "merge-moods", "merge-source", "merge-output",
+            "analyze-file", "file-list", "folder", "hash-only", "level",
+            "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
+            "json-output", "output", "chunk", "self-test", "no-stage",
+            "no-quick-cache", "file-md5", "apply-exclusions", "preview",
+            "long-track-mins", "exclusions", "no-exclusions",
+            "accept-flac-tag-drift", "refresh-features", "pause", "stage-dir",
+            "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
+            "background", "cpu-limit",
+        };
+
+        /// <summary>Flags that consume the next token as a value. Used to turn a
+        /// trailing value-less flag into a precise error instead of "unknown".</summary>
+        static readonly string[] ValueFlags = new[]
+        {
+            "remap", "stats-detail", "backfill-level", "p", "parallel",
+            "catalog", "synth-output", "count", "album-ratio", "synth-moods",
+            "seed", "seed-catalog", "seed-target", "merge-source",
+            "merge-output", "analyze-file", "file-list", "folder", "level",
+            "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
+            "output", "chunk", "apply-exclusions", "long-track-mins",
+            "exclusions", "stage-dir", "max-duration", "cpu-limit",
+        };
+
+        /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
+        /// null when nothing is close enough to be a plausible typo. Threshold:
+        /// distance &lt;= 2 for names under 10 chars, &lt;= 3 otherwise; unknowns
+        /// shorter than 3 chars never suggest (everything is 1 edit from them).</summary>
+        static string? SuggestFlag(string canonical)
+        {
+            if (string.IsNullOrEmpty(canonical) || canonical.Length < 3) return null;
+            string? best = null;
+            int bestDist = int.MaxValue;
+            foreach (var k in KnownFlags)
+            {
+                int d = DamerauLevenshtein(canonical.ToLowerInvariant(), k);
+                if (d < bestDist || (d == bestDist && best != null && k.Length < best.Length))
+                {
+                    bestDist = d;
+                    best = k;
+                }
+            }
+            int limit = canonical.Length >= 10 ? 3 : 2;
+            return bestDist <= limit ? best : null;
+        }
+
+        /// <summary>Plain O(n*m) Damerau-Levenshtein (with adjacent transposition).
+        /// Flag names are &lt;25 chars; no need for anything cleverer.</summary>
+        static int DamerauLevenshtein(string a, string b)
+        {
+            int n = a.Length, m = b.Length;
+            var d = new int[n + 1, m + 1];
+            for (int i = 0; i <= n; i++) d[i, 0] = i;
+            for (int j = 0; j <= m; j++) d[0, j] = j;
+            for (int i = 1; i <= n; i++)
+            {
+                for (int j = 1; j <= m; j++)
+                {
+                    int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                    if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
+                        d[i, j] = Math.Min(d[i, j], d[i - 2, j - 2] + 1);
+                }
+            }
+            return d[n, m];
+        }
+
         static void RecordTrackOutcome(string cls, long swTicks)
         {
             var a = _classStats.GetOrAdd(cls, _ => new long[2]);
@@ -1610,6 +1690,26 @@ namespace Truedat
                 else if (canonical == "background") cpuLimit = 25;
                 else if (canonical == "cpu-limit" && i + 1 < args.Length && int.TryParse(args[i + 1], out var cl) && cl >= 1 && cl <= 100) { cpuLimit = cl; i++; }
                 else if (!arg.StartsWith("-") && !arg.StartsWith("/") && xmlPath == null) xmlPath = args[i];
+                else if ((arg.StartsWith("-") || arg.StartsWith("/")) && arg.Length > 1)
+                {
+                    // Previously an unrecognized flag was silently IGNORED — a typo'd
+                    // --refresh-featuers ran a plain full scan with no warning, which is
+                    // the silent-wrong failure mode this repo keeps paying for. Fail loud.
+                    // A known value-taking flag reaching here means its value was missing
+                    // (its clause requires i+1 < args.Length) — say that precisely.
+                    if (ValueFlags.Contains(canonical, StringComparer.OrdinalIgnoreCase))
+                        Console.Error.WriteLine($"Error: {arg} requires a value.");
+                    else
+                    {
+                        Console.Error.WriteLine($"Error: unknown option {arg}");
+                        var suggestion = SuggestFlag(canonical);
+                        if (suggestion != null)
+                            Console.Error.WriteLine($"Did you mean --{suggestion}?");
+                        Console.Error.WriteLine("Run truedat --help all for the full option list.");
+                    }
+                    Environment.ExitCode = 1;
+                    return;
+                }
             }
 
             _audit = auditLog;
@@ -10058,6 +10158,37 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "help all carries all sections");
                 Assert(full.Contains("--refresh-features") && full.Contains("--synthesize"),
                     "help all still lists everyday and niche flags");
+            }
+
+            // --- unknown-option suggestion helper --------------------------------
+            {
+                Assert(SuggestFlag("refresh-featuers") == "refresh-features",
+                    "SuggestFlag corrects a transposition typo");
+                Assert(SuggestFlag("duplicate") == "duplicates",
+                    "SuggestFlag corrects a near-miss");
+                Assert(SuggestFlag("zzqqxx") == null,
+                    "SuggestFlag stays silent on garbage");
+                Assert(SuggestFlag("xy") == null,
+                    "SuggestFlag ignores unknowns shorter than 3 chars");
+                // Drift guard: every --flag printed by the full help must be a
+                // flag the suggestion list knows about.
+                string CaptureAll()
+                {
+                    var prev = Console.Out;
+                    var sw = new System.IO.StringWriter();
+                    Console.SetOut(sw);
+                    try { PrintHelpAll(); } finally { Console.SetOut(prev); }
+                    return sw.ToString();
+                }
+                var helpFlags = System.Text.RegularExpressions.Regex.Matches(CaptureAll(), @"--([a-z][a-z0-9-]+)")
+                    .Cast<System.Text.RegularExpressions.Match>()
+                    .Select(m => m.Groups[1].Value)
+                    .Distinct()
+                    .ToList();
+                var known = new HashSet<string>(KnownFlags, StringComparer.OrdinalIgnoreCase);
+                var missing = helpFlags.Where(f => !known.Contains(f)).ToList();
+                Assert(missing.Count == 0,
+                    "every flag in --help all is in KnownFlags" + (missing.Count > 0 ? " (missing: " + string.Join(", ", missing) + ")" : ""));
             }
 
             Console.WriteLine(failures == 0
