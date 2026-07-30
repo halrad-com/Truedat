@@ -75,6 +75,10 @@ Output: `mbxmoods.json` (next to the XML file)
 
 ### Options
 
+`truedat --help` shows the short everyday page; `truedat --help all` lists every
+option. Unknown flags fail with a "did you mean" suggestion instead of being
+ignored. The full option reference below matches `--help all`.
+
 ```
 truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 

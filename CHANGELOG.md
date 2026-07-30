@@ -13,6 +13,10 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   analysis). Long tracks (podcasts, DJ sets, up to ~13.3 h) now analyze by
   default; pass `--max-duration 12000` only if running the old small-buffer
   `.1` extractor.
+- `--help` now shows a short everyday front page; the full option wall moved to
+  `--help all`. Unknown/typo'd flags now error (exit 1) with a nearest-flag
+  suggestion instead of being silently ignored — a typo'd flag used to run a
+  plain full scan with no warning.
 
 ### Added
 
