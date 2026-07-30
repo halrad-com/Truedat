@@ -379,7 +379,7 @@ namespace Truedat
 <header>
   <h1>Scan preview</h1>
   <span class='counts' id='counts'></span>
-  <button id='save' disabled>Save decisions</button>
+  <button id='save' disabled>Apply decisions</button>
   <button id='rescan' class='sec'>Rescan</button>
   <div class='tools'><span id='host'></span><button class='sec' id='reset'>reset</button></div>
 </header>
@@ -484,8 +484,19 @@ function ep(kind){return '/review/'+kind+'/'+encodeURIComponent(D.id||'preview')
 function fetchT(url,opts,ms){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms||8000);return fetch(url,Object.assign({signal:c.signal},opts||{})).finally(()=>clearTimeout(t));}
 const servedHost={mode:'served',
   load(){return fetchT(ep('manifest'),{headers:{'accept':'application/json'}},6000).then(r=>r.ok?r.json():Promise.reject(r.status)).then(fresh=>{console.log('[preview] served: refreshed manifest');Object.assign(D,fresh);return D;}).catch(e=>{console.log('[preview] served load failed, using embedded:',e);return D;});},
-  save(delta){console.log('[preview] served save: POST decisions',delta);return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false&&res.success!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Saved: '+bits.join(', ')+'.',true);return this.load().then(()=>{rebase();refresh();});}banner('Save rejected: '+((res.error&&res.error.message)||res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
-  rescan(){console.log('[preview] served: re-loading manifest');return this.load().then(refresh).then(()=>banner('Counts refreshed from the hub. A standalone re-preview trigger is planned; a Save already re-runs the preview.',true));}};
+  // A successful apply kicks off a hub-side re-preview that takes seconds-to-minutes,
+  // so an immediate load() gets the PRE-apply manifest. Rebasing on that stale state
+  // made every applied rule vanish from the page (and pre-UTF8-fix, the re-add loop it
+  // provoked minted duplicate rules). Poll `generated` until it advances; only a FRESH
+  // manifest is adopted as the baseline. On timeout the session's actions stay pending —
+  // honest, and idempotent to re-apply.
+  awaitFresh(prevGen,summary){const tryOnce=n=>this.load().then(()=>{
+    if(D.generated!==prevGen){rebase();refresh();banner(summary+' Preview refreshed.',true);return;}
+    if(n<=0){refresh();banner(summary+' Preview is still refreshing — your picks stay pending; hit Rescan in a moment.',true);return;}
+    return new Promise(r=>setTimeout(r,2000)).then(()=>tryOnce(n-1));});
+    return tryOnce(20);},
+  save(delta){console.log('[preview] served save: POST decisions',delta);const prevGen=D.generated;return fetchT(ep('decisions'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(delta)},8000).then(r=>r.json().then(res=>({ok:r.ok,res}))).then(o=>{const res=o.res||{};if(o.ok&&res.ok!==false&&res.success!==false){const bits=['added '+(res.added||0),'removed '+(res.removed||0)];if(res.alreadyPresent)bits.push(res.alreadyPresent+' already present');if(res.notFound)bits.push(res.notFound+' not found');banner('Applied: '+bits.join(', ')+'. Refreshing preview…',true);return this.awaitFresh(prevGen,'Applied: '+bits.join(', ')+'.');}banner('Apply rejected: '+((res.error&&res.error.message)||res.error||'hub returned an error')+' — delta downloaded as a fallback.',false);return offlineHost.save(delta);}).catch(e=>{console.log('[preview] POST failed, falling back to download:',e);return offlineHost.save(delta);});},
+  rescan(){console.log('[preview] served: re-loading manifest');return this.load().then(refresh).then(()=>banner('Counts refreshed from the hub. A standalone re-preview trigger is planned; Apply decisions already re-runs the preview.',true));}};
 let host=OFFLINE?offlineHost:servedHost;
 
 // ---- rendering -------------------------------------------------------------
