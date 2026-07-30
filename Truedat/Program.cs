@@ -997,6 +997,164 @@ namespace Truedat
                 AssignProcessToJobObject(_jobHandle, proc.Handle);
         }
 
+        // -- Keep-awake: power availability request ---------------------------
+        // Windows sleeps on input-idle timers regardless of CPU load; a scan has
+        // never held a machine awake by running. While analysis-bearing work is
+        // active on AC power, hold a SYSTEM power request (the thing backup tools
+        // and encoders use): visible in `powercfg /requests` with our reason
+        // string, auto-released by the OS on process exit including crashes, no
+        // admin, no settings mutated. Display is deliberately NOT held — the
+        // monitor sleeping is fine; lid-close still wins (hardware override).
+        // On battery we never assert: an overnight scan on battery is a cooked
+        // battery, not a feature. --allow-sleep suppresses everything.
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SYSTEM_POWER_STATUS
+        {
+            public byte ACLineStatus;       // 0 = battery, 1 = AC, 255 = unknown
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag;
+            public int BatteryLifeTime;
+            public int BatteryFullLifeTime;
+        }
+
+        [DllImport("kernel32.dll")]
+        static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
+
+        enum POWER_REQUEST_TYPE
+        {
+            PowerRequestDisplayRequired = 0,
+            PowerRequestSystemRequired = 1,
+            PowerRequestAwayModeRequired = 2,
+            PowerRequestExecutionRequired = 3,
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct REASON_CONTEXT
+        {
+            public uint Version;            // POWER_REQUEST_CONTEXT_VERSION = 0
+            public uint Flags;              // POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x1
+            public string SimpleReasonString;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr PowerCreateRequest(ref REASON_CONTEXT context);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool PowerSetRequest(IntPtr request, POWER_REQUEST_TYPE type);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool PowerClearRequest(IntPtr request, POWER_REQUEST_TYPE type);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint SetThreadExecutionState(uint esFlags);
+        const uint ES_SYSTEM_REQUIRED = 0x00000001;
+
+        static readonly object _keepAwakeLock = new object();
+        static IntPtr _powerRequest = IntPtr.Zero;   // created lazily, never closed (freed at exit)
+        static bool _keepAwakeHeld;
+        static bool _powerRequestBroken;             // PowerCreateRequest failed -> fallback pokes
+        static bool _allowSleep;                     // --allow-sleep (parsed in Task 2)
+        static long _lastPowerPumpTicks;
+        const int PowerPumpIntervalSecs = 60;
+
+        /// <summary>Pure gate: hold the system awake iff work is running, the
+        /// operator didn't opt out, and we're not on battery. AC (1) and
+        /// unknown (255 — no battery telemetry, i.e. a desktop) both count as
+        /// powered; only a definite battery reading (0) yields to sleep.</summary>
+        internal static bool ShouldKeepAwake(byte acLineStatus, bool allowSleep, bool workMode)
+            => workMode && !allowSleep && acLineStatus != 0;
+
+        static bool TryGetAcLineStatus(out byte status)
+        {
+            status = 255;
+            try
+            {
+                if (GetSystemPowerStatus(out var sps)) { status = sps.ACLineStatus; return true; }
+            }
+            catch { /* never let power telemetry break a scan */ }
+            return false;
+        }
+
+        static void KeepAwakeAssert()
+        {
+            lock (_keepAwakeLock)
+            {
+                if (_keepAwakeHeld) return;
+                if (_powerRequest == IntPtr.Zero && !_powerRequestBroken)
+                {
+                    try
+                    {
+                        var ctx = new REASON_CONTEXT
+                        {
+                            Version = 0,
+                            Flags = 0x1, // SIMPLE_STRING
+                            SimpleReasonString = "truedat: library scan in progress",
+                        };
+                        _powerRequest = PowerCreateRequest(ref ctx);
+                        if (_powerRequest == IntPtr.Zero || _powerRequest == new IntPtr(-1))
+                        { _powerRequest = IntPtr.Zero; _powerRequestBroken = true; }
+                    }
+                    catch { _powerRequestBroken = true; }
+                }
+                if (!_powerRequestBroken)
+                {
+                    if (!PowerSetRequest(_powerRequest, POWER_REQUEST_TYPE.PowerRequestSystemRequired))
+                        _powerRequestBroken = true;
+                }
+                // Fallback when the request API is unavailable: one-shot
+                // ES_SYSTEM_REQUIRED pokes from the pump reset the idle timer
+                // each interval — thread-agnostic, nothing to clean up.
+                if (_powerRequestBroken)
+                    SetThreadExecutionState(ES_SYSTEM_REQUIRED);
+                _keepAwakeHeld = true;
+                Console.WriteLine("keep-awake: holding system awake while work runs (display may sleep; --allow-sleep to disable)");
+            }
+        }
+
+        static void KeepAwakeRelease()
+        {
+            lock (_keepAwakeLock)
+            {
+                if (!_keepAwakeHeld) return;
+                if (!_powerRequestBroken && _powerRequest != IntPtr.Zero)
+                {
+                    try { PowerClearRequest(_powerRequest, POWER_REQUEST_TYPE.PowerRequestSystemRequired); }
+                    catch { /* handle dies with the process anyway */ }
+                }
+                _keepAwakeHeld = false;
+            }
+        }
+
+        /// <summary>Throttled re-evaluation, called from per-item work loops.
+        /// Handles AC&lt;-&gt;battery transitions mid-run (console line each way)
+        /// and re-pokes the fallback path. Cheap: a ticks compare outside the
+        /// interval.</summary>
+        static void KeepAwakePump(bool workMode)
+        {
+            var now = DateTime.UtcNow.Ticks;
+            var last = Interlocked.Read(ref _lastPowerPumpTicks);
+            if (last != 0 && (now - last) < PowerPumpIntervalSecs * TimeSpan.TicksPerSecond) return;
+            if (Interlocked.CompareExchange(ref _lastPowerPumpTicks, now, last) != last) return;
+
+            TryGetAcLineStatus(out var ac);
+            bool want = ShouldKeepAwake(ac, _allowSleep, workMode);
+            bool held;
+            lock (_keepAwakeLock) held = _keepAwakeHeld;
+            if (want && !held)
+            {
+                KeepAwakeAssert();
+            }
+            else if (!want && held)
+            {
+                KeepAwakeRelease();
+                if (workMode && !_allowSleep)
+                    Console.WriteLine("keep-awake: on battery — normal sleep applies (plug in to keep the run going)");
+            }
+            else if (want && held && _powerRequestBroken)
+            {
+                SetThreadExecutionState(ES_SYSTEM_REQUIRED); // periodic poke
+            }
+        }
+
         /// <summary>
         /// Convert non-ASCII paths to 8.3 short form for Essentia compatibility.
         /// Essentia's C++ main() receives paths in the system ANSI code page, which
@@ -10192,6 +10350,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(missing.Count == 0,
                     "every flag in --help all is in KnownFlags" + (missing.Count > 0 ? " (missing: " + string.Join(", ", missing) + ")" : ""));
             }
+
+            // --- keep-awake gate ---------------------------------------------
+            // _allowSleep is wired by Task 2's flag parser (no assignment site exists
+            // yet in Task 1 alone); assign here only so this build stays 0W/0E ahead
+            // of that wiring. Does not touch the real power-request/ExecutionState APIs.
+            _allowSleep = false;
+            Assert(ShouldKeepAwake(1, false, true), "keep-awake: AC + work asserts");
+            Assert(ShouldKeepAwake(255, false, true), "keep-awake: unknown power counts as AC (desktop)");
+            Assert(!ShouldKeepAwake(0, false, true), "keep-awake: battery never asserts");
+            Assert(!ShouldKeepAwake(1, true, true), "keep-awake: --allow-sleep suppresses on AC");
+            Assert(!ShouldKeepAwake(1, false, false), "keep-awake: read-only modes never assert");
+            Assert(!ShouldKeepAwake(0, true, false), "keep-awake: all-off stays off");
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
