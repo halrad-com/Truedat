@@ -77,7 +77,8 @@ Output: `mbxmoods.json` (next to the XML file)
 
 `truedat --help` shows the short everyday page; `truedat --help all` lists every
 option. Unknown flags fail with a "did you mean" suggestion instead of being
-ignored. The full option reference below matches `--help all`.
+ignored. The reference below covers the commonly used options; `--help all` is
+the complete and authoritative list.
 
 ```
 truedat.exe <path-to-iTunes-Music-Library.xml> [options]
@@ -201,6 +202,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           enable this only if you compare whole-file MD5s with external tools.
   --pause                 Hold the console open at exit (press any key). For double-click
                           launches; no effect on redirected/scheduled runs.
+  --allow-sleep           Let the machine sleep during scans. By default, work-bearing
+                          runs (scan/verify/transcode) hold the system awake while on AC
+                          power — see "Power & sleep" below. Display sleep is unaffected
+                          either way.
   --exclusions <path>     Use this exclusion file instead of mbxmoods-exclude.json beside
                           the moods file.
   --no-exclusions         Ignore the exclusion file for this run. Prints a warning; for
