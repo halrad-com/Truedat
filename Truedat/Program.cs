@@ -498,10 +498,10 @@ namespace Truedat
             Console.WriteLine("Everything else: truedat --help all");
         }
 
-        /// <summary>The full --help text (truedat --help all). Shared by the two call sites
-        /// (explicit --help all, and the iTunes-XML-not-found fallback) so the blocks cannot
-        /// drift apart. Essentials first; specialist modes grouped under Maintenance /
-        /// Exclusions / Advanced.</summary>
+        /// <summary>The full flag listing, shown by `truedat --help all`. Essentials first;
+        /// specialist modes grouped under Maintenance / Exclusions / Advanced. The
+        /// iTunes-XML-not-found fallback deliberately does NOT call this — it shows the
+        /// PrintHelp() front page instead (see the comment at that call site).</summary>
         static void PrintHelpAll()
         {
             Console.WriteLine("Usage: truedat.exe [<path-to-iTunes-Music-Library.xml>] [options]");
@@ -3185,6 +3185,9 @@ namespace Truedat
             {
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
                 Console.WriteLine("Probed: exe-dir parent, exe-dir, current working directory.");
+                // Front page here is deliberate (changed from the full listing 2026-07-29,
+                // reviewer-flagged and ruled intended) — the front page points at
+                // --help all for the rest. Do not "fix" this back to PrintHelpAll().
                 PrintHelp();
                 return;
             }
