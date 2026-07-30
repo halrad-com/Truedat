@@ -1,5 +1,24 @@
 # Truedat Backlog
 
+## Extractor build detection (parked 2026-07-30)
+
+Truedat cannot tell which Essentia extractor build it is running — `.1`/`.2`/`.3`
+all report the same library version string, but they differ in the ChordsDetection
+length ceiling (~12,172 s small-buffer vs ~48,695 s large-buffer) and, since `.3`,
+in speed (-O2). With `--max-duration` defaulting to 48000, a box still carrying the
+old `.1` extractor silently feeds >200-min tracks to a binary that dies at ~12,172 s
+(per-track FAILED, sticky in the errors CSV).
+
+Proposed: hash the extractor exe once at scan start (~20 ms, MD5) and look it up in
+a small built-in table of known builds (`.1` `05c4c77b…`, `.2` `f52e166e…`, `.3`
+`6c6e2737…` — canonical list in `essentia-build/OUTPUT-BUILDS.md`); print the build
++ its real ceiling in the scan header; warn (or cap) when the effective
+`--max-duration` exceeds what the detected build survives. Unknown hash → say
+"unknown extractor build" and trust the flag. An explicit `--max-duration` always
+wins. Keep the table beside the version constants so a new build is a one-line add.
+
+Operator-parked; do not build without an explicit go.
+
 ## Scan policy — next items
 
 The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
