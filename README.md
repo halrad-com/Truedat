@@ -503,7 +503,7 @@ Scan preview (nothing was analyzed):
     genre=Podcast: 374 matched
     folder=\Old Shows\**: 0 matched   (stale rule?)
   To review:  1,204  (listing the first 500)
-  Ceiling:    200 min (default)   long-track prompt: 30 min
+  Ceiling:    800 min (default)   long-track prompt: 30 min
 ```
 
 (Illustrative numbers, not a measurement — a real run reports your own library's counts, and

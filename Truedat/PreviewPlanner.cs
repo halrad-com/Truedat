@@ -13,7 +13,9 @@ namespace Truedat
         public string XmlPath = "";
         public string MoodsPath = "";
         public string ExclusionsPath = "";
-        public int MaxDurationSecs = 12000;
+        // Mirrors the real default in Program.cs's _maxEssentiaDurationSecs; production
+        // always overwrites this from there, and tests set it explicitly. Keep the two in sync.
+        public int MaxDurationSecs = 48000;
         public string MaxDurationSource = "default";
         public int LongTrackSecs = 1800;
         public int ReviewCap = 500;

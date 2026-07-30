@@ -1695,10 +1695,12 @@ namespace Truedat
                     // Previously an unrecognized flag was silently IGNORED — a typo'd
                     // --refresh-featuers ran a plain full scan with no warning, which is
                     // the silent-wrong failure mode this repo keeps paying for. Fail loud.
-                    // A known value-taking flag reaching here means its value was missing
-                    // (its clause requires i+1 < args.Length) — say that precisely.
+                    // A known value-taking flag reaching here means its value was either missing
+                    // (its clause requires i+1 < args.Length) or present but invalid (the flag's
+                    // own clause rejected it, e.g. --cpu-limit 150 or --stats-detail -1) — the
+                    // two cases aren't distinguished here, so the message must cover both.
                     if (ValueFlags.Contains(canonical, StringComparer.OrdinalIgnoreCase))
-                        Console.Error.WriteLine($"Error: {arg} requires a value.");
+                        Console.Error.WriteLine($"Error: {arg} requires a valid value.");
                     else
                     {
                         Console.Error.WriteLine($"Error: unknown option {arg}");
