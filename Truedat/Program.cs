@@ -470,10 +470,39 @@ namespace Truedat
         static long _rtfAudioMs;        // matching audio-ms sum
         static long _rtfTrackCount;     // matching track count — lets the summary report average length
 
-        /// <summary>The --help text. Shared by the two call sites (explicit --help, and the
-        /// iTunes-XML-not-found fallback) so the blocks cannot drift apart. Essentials first;
-        /// specialist modes grouped under Maintenance / Exclusions / Advanced.</summary>
+        /// <summary>The default --help front page. The full flag listing lives in
+        /// PrintHelpAll (truedat --help all) — most flags are single-purpose
+        /// maintenance verbs the everyday scan never needs, and burying the
+        /// canonical zero-arg run under 140 lines of them was the complaint that
+        /// produced this split.</summary>
         static void PrintHelp()
+        {
+            Console.WriteLine("Usage: truedat.exe [<path-to-iTunes-Music-Library.xml>] [options]");
+            Console.WriteLine();
+            Console.WriteLine("Zero-arg is the canonical run: truedat auto-discovers the iTunes XML (exe-dir parent,");
+            Console.WriteLine("exe dir, then current directory) and runs the default full library scan, writing");
+            Console.WriteLine("mbxmoods.json next to the XML (Essentia analysis, cache-aware).");
+            Console.WriteLine();
+            Console.WriteLine("Everyday:");
+            Console.WriteLine("  (zero-arg)            scan the library");
+            Console.WriteLine("  --refresh-features    re-analyze entries missing the newest feature fields");
+            Console.WriteLine("                        (resumable; run in sessions until coverage completes)");
+            Console.WriteLine("  --stats [path]        read-only catalog summary + recommended next commands");
+            Console.WriteLine("  --verify --backfill   integrity check + fill missing fields (no re-analysis)");
+            Console.WriteLine("  --duplicates [path]   duplicates report + interactive review page");
+            Console.WriteLine("  --preview [path]      what a scan WOULD do (work plan + review candidates)");
+            Console.WriteLine();
+            Console.WriteLine($"Options: -p N|max (parallelism, default {Math.Max(1, Environment.ProcessorCount - 2)} = cores-2)   --audit (log to truedat.log)");
+            Console.WriteLine("         --pause (hold console open at exit)");
+            Console.WriteLine();
+            Console.WriteLine("Everything else: truedat --help all");
+        }
+
+        /// <summary>The full --help text (truedat --help all). Shared by the two call sites
+        /// (explicit --help all, and the iTunes-XML-not-found fallback) so the blocks cannot
+        /// drift apart. Essentials first; specialist modes grouped under Maintenance /
+        /// Exclusions / Advanced.</summary>
+        static void PrintHelpAll()
         {
             Console.WriteLine("Usage: truedat.exe [<path-to-iTunes-Music-Library.xml>] [options]");
             Console.WriteLine();
@@ -1396,6 +1425,7 @@ namespace Truedat
             string? hashOutputPath = null;
 
             bool showHelp = false;
+            bool showHelpAll = false;
             bool selfTest = false;
             int cpuLimit = 0; // 0 = no limit
 
@@ -1419,7 +1449,16 @@ namespace Truedat
                 else                            canonical = arg;
 
                 if (canonical == "?" || canonical == "h" || canonical == "help")
+                {
                     showHelp = true;
+                    // `--help all` shows the full flag listing. The token is consumed
+                    // here, inside the help path only — it is not a parsed option.
+                    if (i + 1 < args.Length && string.Equals(args[i + 1], "all", StringComparison.OrdinalIgnoreCase))
+                    {
+                        showHelpAll = true;
+                        i++;
+                    }
+                }
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
@@ -1676,7 +1715,7 @@ namespace Truedat
 
             if (showHelp)
             {
-                PrintHelp();
+                if (showHelpAll) PrintHelpAll(); else PrintHelp();
                 return;
             }
 
@@ -9990,6 +10029,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 RaiseEssentiaPeak(5);
                 Assert(TakeEssentiaPeak() == 5,
                     "ess-peak: a new window records fresh observations after reset");
+            }
+
+            // --- help presentation: front page short, full page complete ----------
+            {
+                string Capture(Action a)
+                {
+                    var prev = Console.Out;
+                    var sw = new System.IO.StringWriter();
+                    Console.SetOut(sw);
+                    try { a(); } finally { Console.SetOut(prev); }
+                    return sw.ToString();
+                }
+                var front = Capture(PrintHelp);
+                var full = Capture(PrintHelpAll);
+                var frontLines = front.Split('\n').Length;
+                Assert(frontLines <= 25, $"help front page stays short ({frontLines} lines <= 25)");
+                Assert(front.Contains("--refresh-features"), "front page names --refresh-features");
+                Assert(front.Contains("--help all"), "front page points at --help all");
+                Assert(!front.Contains("--synthesize"), "front page omits niche flags");
+                Assert(full.Contains("Maintenance:") && full.Contains("Exclusions:") && full.Contains("Advanced:"),
+                    "help all carries all sections");
+                Assert(full.Contains("--refresh-features") && full.Contains("--synthesize"),
+                    "help all still lists everyday and niche flags");
             }
 
             Console.WriteLine(failures == 0
