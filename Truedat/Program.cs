@@ -1988,6 +1988,25 @@ namespace Truedat
                 }
             }
 
+            if (showHelp)
+            {
+                if (showHelpAll) PrintHelpAll(); else PrintHelp();
+                return;
+            }
+
+            // cpuLimit / EcoQoS must be set up before any mode that spawns child
+            // processes (including --transcode below) so --transcode inherits the
+            // job-object cap and the --cpu-limit/--background yield exception the
+            // same as every other mode.
+            if (cpuLimit > 0)
+            {
+                _yieldMode = true;
+                InitCpuLimitJob(cpuLimit);
+                if (_jobHandle != IntPtr.Zero)
+                    Console.Error.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
+            }
+            DisableEcoQos(Process.GetCurrentProcess().Handle);
+
             if (transcodeMode)
             {
                 if (string.IsNullOrEmpty(transcodeInput) || !File.Exists(transcodeInput))
@@ -2009,21 +2028,6 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunTranscode(transcodeInput!, transcodeOutput!, transcodeSampleRate, transcodeBitDepth);
-                return;
-            }
-
-            if (cpuLimit > 0)
-            {
-                _yieldMode = true;
-                InitCpuLimitJob(cpuLimit);
-                if (_jobHandle != IntPtr.Zero)
-                    Console.Error.WriteLine($"CPU limit: {cpuLimit}% (child processes capped via Job Object)");
-            }
-            DisableEcoQos(Process.GetCurrentProcess().Handle);
-
-            if (showHelp)
-            {
-                if (showHelpAll) PrintHelpAll(); else PrintHelp();
                 return;
             }
 
