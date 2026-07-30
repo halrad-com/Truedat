@@ -5,6 +5,15 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--max-duration` default raised 12000 → 48000 seconds (200 → 800 min).**
+  Paired with dist shipping the `output-x64.3` large-buffer Essentia extractor
+  (which also carries the new `-O2` optimization fix — roughly 3× faster
+  analysis). Long tracks (podcasts, DJ sets, up to ~13.3 h) now analyze by
+  default; pass `--max-duration 12000` only if running the old small-buffer
+  `.1` extractor.
+
 ### Added
 
 - **Preview page: searchable genre-rule picker.** The `--preview` review page's genre

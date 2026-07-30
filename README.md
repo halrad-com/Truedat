@@ -177,8 +177,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           multi-channel downmixes (default %TEMP%\.truedat-stage). Also the
                           isolation lever if you ever need two truedats on one machine —
                           see "Run one truedat at a time" below.
-  --max-duration <secs>   Max track length for Essentia analysis (default 12000 = 200 min —
-                          the stock extractor's ChordsDetection buffer limit). Longer tracks
+  --max-duration <secs>   Max track length for Essentia analysis (default 48000 = 800 min —
+                          the large-buffer extractor's ChordsDetection ceiling; pass 12000
+                          if running the old small-buffer .1 extractor). Longer tracks
                           are a structural skip: ledgered to mbxmoods-skipped.csv, NOT
                           counted as failures. (They used to land in the errors CSV, which
                           made the next run skip them as previous errors — a legitimate

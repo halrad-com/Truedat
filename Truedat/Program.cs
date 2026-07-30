@@ -598,9 +598,9 @@ namespace Truedat
             Console.WriteLine("  --hash-only         Identity-only mode (no Essentia). Requires --level, --file-list, --output");
             Console.WriteLine("  --level <name>      With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)");
             Console.WriteLine("  --output <path>     --hash-only mode: append identity envelopes as NDJSON to <path> (offline manifest)");
-            Console.WriteLine("  --max-duration <s>  Max track length in seconds for Essentia analysis (default 12000 = 200 min,");
-            Console.WriteLine("                      the stock extractor's ChordsDetection buffer limit; pass 48000 when using");
-            Console.WriteLine("                      the large-buffer extractor build — see essentia-build/OUTPUT-BUILDS.md)");
+            Console.WriteLine("  --max-duration <s>  Max track length in seconds for Essentia analysis (default 48000 = 800 min,");
+            Console.WriteLine("                      the large-buffer extractor's ChordsDetection ceiling; pass 12000 if running");
+            Console.WriteLine("                      the old small-buffer .1 extractor — see essentia-build/OUTPUT-BUILDS.md)");
             Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
             Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
             Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
@@ -835,13 +835,16 @@ namespace Truedat
 
 
         // Essentia streaming ChordsDetection buffer limit caps analyzable track length.
-        // Unpatched extractor (essentia-build/output-x64.1): 262144-element buffer
+        // Patched extractor (output-x64.2/.3, forLargeAudioStream = 1048576 elements):
+        // ceiling ~48695s -> default 48000s (800 min) leaves margin. This default pairs
+        // with dist shipping a .2-lineage extractor (operator flipped it 2026-07-29 with
+        // the .3 rollout).
+        // Old unpatched extractor (essentia-build/output-x64.1): 262144-element buffer
         // (forMultipleFrames) -> at 44100 Hz / 2048 hop = ~21.53 frames/sec the buffer
-        // overflows at ~12172s; default 12000s (200 min) leaves margin.
-        // Patched extractor (output-x64.2, forLargeAudioStream = 1048576 elements):
-        // ceiling ~48695s -> pass --max-duration 48000 (~13.3 h) when running against it.
+        // overflows at ~12172s; pass --max-duration 12000 if running against that build
+        // (over-limit tracks otherwise fail per-track and the scan continues).
         // See essentia-build/OUTPUT-BUILDS.md. Overridable via --max-duration <secs>.
-        static int _maxEssentiaDurationSecs = 12000;
+        static int _maxEssentiaDurationSecs = 48000;
         // True once --max-duration is passed explicitly, so --preview's manifest can report
         // whether the ceiling came from a flag or the built-in default rather than guessing.
         internal static bool _maxDurationExplicit;
