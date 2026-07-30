@@ -59,8 +59,10 @@ python3 waf configure \
     --pkg-config-path="$DEPS_DIR/lib/pkgconfig" \
     --prefix="$OUTPUT_DIR"
 
-# Build
-python3 waf
+# Build. Cap parallelism: WAF defaults to -j$(nproc) (22 on this box) and
+# mingw g++ peaks ~1GB/process — uncapped OOM-kills the build on a 15GB WSL VM
+# (and -O2 raises per-process memory further). Matches resume-build.sh.
+python3 waf -j6
 
 # Copy extractor to output
 mkdir -p "$OUTPUT_DIR"

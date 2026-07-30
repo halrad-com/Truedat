@@ -294,7 +294,14 @@ def configure(ctx):
         ctx.find_program('x86_64-w64-mingw32-ar', var='AR')
 
         # compile libgcc and libstd statically when using MinGW
-        ctx.env.CXXFLAGS = ['-static-libgcc', '-static-libstdc++']
+        # NOTE: this assignment (upstream code) clobbers every flag configure set
+        # earlier — including release-mode '-O2' from ~line 150 — which is how the
+        # .1/.2 builds shipped at -O0. Re-add optimization here. '-ffp-contract=off'
+        # locks out FMA contraction so feature values stay bit-identical to plain
+        # generic-x86-64 -O2 semantics (locked schema / calibrated thresholds
+        # downstream consume these numbers).
+        ctx.env.CXXFLAGS = ['-static-libgcc', '-static-libstdc++',
+                            '-O2', '-ffp-contract=off']
 
 
     ctx.load('compiler_cxx compiler_c')
