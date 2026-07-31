@@ -4308,6 +4308,38 @@ namespace Truedat
                             return;
                         }
 
+                        // Scan-health gate (2026-07-30): Essentia decoded the file, but a
+                        // file we cannot hash/identify — or one decoded far short of its
+                        // claimed length (corrupt MP3 claiming 224s decoded 62s; its
+                        // features describe the first minute) — is not a success. Note
+                        // exactly what failed and write NO phantom entry: an identity-less
+                        // entry is what MBXHub can't index and re-queues forever, and the
+                        // error list is what stops truedat re-analyzing it every scan
+                        // (--retry-errors re-attempts after the operator fixes the file).
+                        {
+                            var (healthPass, healthFailed) = ClassifyTrackHealth(
+                                essentiaOk: true,
+                                decodedSec: feat.AnalyzedLengthSec,
+                                claimedSec: t.TotalTimeMs > 0 ? t.TotalTimeMs / 1000.0 : 0.0,
+                                decodeMinFraction: 0.95,
+                                fingerprintOk: fingerprintV1 != null,
+                                shaOk: !string.IsNullOrEmpty(audioStreamSha256),
+                                tagsExpected: false, tagsOk: true,   // MoodsMode: XML supplies metadata
+                                bitUsageApplicable: !msResults.BitUsageNotApplicable, bitUsageOk: bitUsageResult != null,
+                                hfApplicable: !msResults.HfNotApplicable, hfOk: msResults.HfEnergyRatio.HasValue);
+                            if (!healthPass)
+                            {
+                                var comps = string.Join(";", healthFailed);
+                                var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
+                                AppendError(errorsPath, t.Location, t.Artist, t.Name,
+                                    $"analysis incomplete: {comps}", sizeMb, analyzeDuration.TotalSeconds, comps, errorsCsvLock);
+                                Console.WriteLine($"  FAILED: {comps}");
+                                Interlocked.Increment(ref failed);
+                                trackClass = "skip·failed";
+                                return;
+                            }
+                        }
+
                         feat.TrackId = t.TrackId;
                         feat.Artist = t.Artist;
                         feat.Title = t.Name;
@@ -4348,6 +4380,11 @@ namespace Truedat
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
                         };
+                        // Duration throughput: numerator is what was ACTUALLY decoded
+                        // (Essentia's reported length), falling back to the claimed
+                        // duration when the extractor didn't emit it.
+                        RecordAnalyzedAudioMs(sw.Elapsed.TotalSeconds,
+                            feat.AnalyzedLengthSec.HasValue ? (long)(feat.AnalyzedLengthSec.Value * 1000.0) : t.TotalTimeMs);
                         trackClass = "analyzed";
                         var newAnalyzed = Interlocked.Increment(ref analyzed);
 
@@ -7681,9 +7718,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             public string AudioStreamSha256Source = "";
             public FileTags? Tags;
             public BitUsageSummary? BitUsage;
+            public bool BitUsageNotApplicable;    // true = absent by design (never a health fail)
             public double? HfEnergyRatio;
             public string? HfEnergyMethod;
             public HfSpectralStructure? HfSpectralStructure;
+            public bool HfNotApplicable;          // true = absent by design (never a health fail)
             public SmfmReader.SmfmResult? Smfm;
             public TimeSpan AnalyzeDuration;
             public long AnalyzeTicks;
@@ -7759,18 +7798,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var tagsTask = extractTags
                 ? Task.Run(() => (FileTags?)ExtractFileTags(readPath))
                 : Task.FromResult<FileTags?>(null);
-            var bitUsageTask = ConditionalTask<BitUsageSummary?>(stageOpts.NoBitUsage, () =>
+            // Both optional signals report notApplicable so the scan-health gate can
+            // tell "absent by design" (opt-out flag, no ffmpeg, wrong codec/rate,
+            // pure silence) from "attempted and failed" — only the latter fails a track.
+            var bitUsageTask = ConditionalTask<(BitUsageSummary? Summary, bool NotApplicable)>(stageOpts.NoBitUsage, () =>
             {
                 double dur = knownDurationSec;
                 if (dur <= 0)
                 {
                     try { using var tf = TagLib.File.Create(readPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                 }
-                return ComputeBitUsage(readPath, dur, _ffmpegPath.Value);
-            }, null);
-            var hfEnergyTask = ConditionalTask(stageOpts.NoHfAnalysis,
-                () => ComputeHfAnalysis(readPath, _ffmpegPath.Value),
-                ((double?)null, (string?)null, (HfSpectralStructure?)null));
+                var summary = ComputeBitUsage(readPath, dur, _ffmpegPath.Value, out var buNa);
+                return (summary, buNa);
+            }, (null, true));
+            var hfEnergyTask = ConditionalTask(stageOpts.NoHfAnalysis, () =>
+            {
+                var (hr, hm, hs) = ComputeHfAnalysis(readPath, _ffmpegPath.Value, out var hfNa);
+                return (hr, hm, hs, hfNa);
+            }, ((double?)null, (string?)null, (HfSpectralStructure?)null, true));
             var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
 
             Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
@@ -7778,7 +7823,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             long ticks = Stopwatch.GetTimestamp() - analyzeStart;
             var (features, error) = essentiaTask.Result;
             var (sha, shaSource) = audioStreamSha256Task.Result;
-            var (hfRatio, hfMethod, hfStructure) = hfEnergyTask.Result;
+            var (hfRatio, hfMethod, hfStructure, hfNotApplicable) = hfEnergyTask.Result;
             return new WorkerResults
             {
                 Features = features,
@@ -7788,10 +7833,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 AudioStreamSha256 = sha,
                 AudioStreamSha256Source = shaSource,
                 Tags = tagsTask.Result,
-                BitUsage = bitUsageTask.Result,
+                BitUsage = bitUsageTask.Result.Summary,
+                BitUsageNotApplicable = bitUsageTask.Result.NotApplicable,
                 HfEnergyRatio = hfRatio,
                 HfEnergyMethod = hfMethod,
                 HfSpectralStructure = hfStructure,
+                HfNotApplicable = hfNotApplicable,
                 Smfm = smfmTask.Result,
                 AnalyzeDuration = StopwatchTicksToTimeSpan(ticks),
                 AnalyzeTicks = ticks,
@@ -7860,8 +7907,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Designed to run concurrently with Essentia (single ffmpeg child process,
         /// ~5.5 MB total decoded payload, typically completes in 1–3s warm).</summary>
         static BitUsageSummary? ComputeBitUsage(string filePath, double durationSec, string? ffmpegExe)
+            => ComputeBitUsage(filePath, durationSec, ffmpegExe, out _);
+
+        /// <summary>Overload for the scan-health gate (2026-07-30). A bare null is
+        /// ambiguous — <paramref name="notApplicable"/> disambiguates: true = the
+        /// measurement doesn't apply (no ffmpeg, lossy/sub-24-bit codec, or a
+        /// pure-silence window — a CONTENT limitation, not a defect), so its absence
+        /// must never fail a track. False + null return = attempted and FAILED
+        /// (process wouldn't start, timeout, died without data).</summary>
+        static BitUsageSummary? ComputeBitUsage(string filePath, double durationSec, string? ffmpegExe, out bool notApplicable)
         {
-            if (string.IsNullOrEmpty(ffmpegExe)) return null;
+            notApplicable = false;
+            if (string.IsNullOrEmpty(ffmpegExe)) { notApplicable = true; return null; }
 
             // Applicability peek — TagLib-only, ~5ms. Skip lossy / sub-24-bit files
             // BEFORE spending 30s on an ffmpeg decode whose output would be meaningless
@@ -7875,7 +7932,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var (peekCodec, _) = NormalizeCodec(peek);
                 int peekBitDepth = peek.Properties?.BitsPerSample ?? 0;
                 bool applicable = IsLosslessCodecForHiresCheck(peekCodec) && peekBitDepth >= 24;
-                if (!applicable) return null;
+                if (!applicable) { notApplicable = true; return null; }
             }
             catch
             {
@@ -7953,7 +8010,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 if (proc.ExitCode != 0 && count == 0) return null;  // tolerate non-zero exit if we got data
 
-                if (count == 0 || countNonZero == 0) return null;   // pure silence — can't infer bit depth
+                // Pure silence — can't infer bit depth. A content limitation, not a
+                // defect: must read as not-applicable, or the health gate would fail
+                // (and drop the entry of) a legitimate silence-heavy 24-bit file.
+                if (count == 0 || countNonZero == 0) { notApplicable = true; return null; }
 
                 // Lowest non-zero bit across the 30s window.
                 int lowestNonZeroBit = 0;
@@ -8020,8 +8080,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// required); all return values are null on gate-miss or analysis failure.
         /// Window: 4096 samples Hann, 50 % overlap, mean aggregation across windows.</summary>
         static (double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure) ComputeHfAnalysis(string filePath, string? ffmpegExe)
+            => ComputeHfAnalysis(filePath, ffmpegExe, out _);
+
+        /// <summary>Overload for the scan-health gate (2026-07-30). notApplicable=true
+        /// covers the by-design absences: no ffmpeg, source at/below 44.1 kHz (no
+        /// Nyquist headroom), or TagLib refusing the file (no sample rate to read —
+        /// and identity fails the track on its own in that case; counting hf too
+        /// would double-report one root cause). False + null = attempted, FAILED.</summary>
+        static (double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure) ComputeHfAnalysis(string filePath, string? ffmpegExe, out bool notApplicable)
         {
-            if (string.IsNullOrEmpty(ffmpegExe)) return (null, null, null);
+            notApplicable = false;
+            if (string.IsNullOrEmpty(ffmpegExe)) { notApplicable = true; return (null, null, null); }
 
             int sourceSampleRate = 0;
             double durationSec = 0;
@@ -8031,9 +8100,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 sourceSampleRate = tf.Properties?.AudioSampleRate ?? 0;
                 durationSec = tf.Properties?.Duration.TotalSeconds ?? 0;
             }
-            catch { return (null, null, null); }
+            catch { notApplicable = true; return (null, null, null); }
 
-            if (sourceSampleRate <= 44100) return (null, null, null);   // no Nyquist headroom above 22 kHz
+            if (sourceSampleRate <= 44100) { notApplicable = true; return (null, null, null); }   // no Nyquist headroom above 22 kHz
 
             double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
             string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
@@ -8050,7 +8119,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             int hfStart = (int)Math.Ceiling(22050.0 / binHz);
             int origNyqBin = (int)Math.Round(22050.0 / binHz); // mirror axis
             int mirrorEnd = Math.Min(2 * origNyqBin, halfBins); // upper end of bins with a source-band partner
-            if (hfStart >= halfBins) return (null, null, null);  // shouldn't happen given the >44.1k gate
+            if (hfStart >= halfBins) { notApplicable = true; return (null, null, null); }  // shouldn't happen given the >44.1k gate
 
             var hann = Fft.Hann(FftSize);
             var real = new double[FftSize];
