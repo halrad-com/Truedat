@@ -3,6 +3,38 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Added
+
+- **Scan health: incomplete analysis is now a FAIL, not a silent success.** A track
+  that Essentia decodes but that fails any component it should have produced — audio
+  hash / fingerprint (TagLib refuses a corrupt header), tags (per-file modes), an
+  applicable bitUsage/HF signal — or whose decode covered less than 95% of its claimed
+  duration (truncated file: a corrupt MP3 claiming 224 s decoded only 62 s, so its
+  features described the first minute) is recorded in `mbxmoods-errors.csv` with a new
+  `FailedComponents` column naming exactly what failed (e.g.
+  `decode-27%;fingerprint;sha`), and **no catalog entry is written**. Failed files are
+  skipped on subsequent scans (`--retry-errors` re-attempts after the file is fixed) —
+  previously such files were re-analyzed every run and produced identity-less entries
+  downstream consumers could never index. Absent-by-design is never a failure: bitUsage
+  on lossy/sub-24-bit files or pure-silence windows, HF analysis at 44.1 kHz, either
+  without ffmpeg, SMFM, and `fileMd5` without `--file-md5` are all exempt.
+
+### Changed
+
+- **Throughput is now duration-normalized.** The progress line and end-of-scan summary
+  lead with `Nx realtime` (audio-seconds analyzed per wall-second — the honest unit:
+  a FLAC and a low-bitrate MP3 of the same content cost the same to scan) with MB/s
+  demoted to a footnote for IO overhead. The numerator is the length Essentia actually
+  decoded, not the claimed duration.
+- **Scan-loop perf (T1/T2/T6):** workers no longer queue behind the 5-minute periodic
+  catalog save (TryEnter + skip; error-CSV appends also stop serializing against
+  saves); a cache-miss track no longer pays a second whole-file hash pass when the
+  cache-tier walk already read the body; the whole-file MD5 half of the single-pass
+  hash is skipped entirely when `--file-md5` is off; the bitUsage/HF ffmpeg
+  subprocesses are now attached to the `--cpu-limit` job object like every other child.
+
 ## [5.4.5] — 2026-07-30
 
 ### Changed

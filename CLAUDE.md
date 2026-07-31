@@ -75,6 +75,30 @@ Re-extract (cache miss → full Essentia) when any of these are missing:
 
 When adding a new always-extracted field, decide whether to add it to the canary. Avoid canary conditions that depend on optional external tools — those caused infinite re-extraction loops on installs without the tool, which is why the old `audioMd5`-presence canary was removed when the binary left the default codepath.
 
+## Scan health (pass/fail, 2026-07-30)
+
+**No silent failures.** After the Essentia gate, every analyzed track passes through
+`ClassifyTrackHealth` (pure, self-tested): a track **fails** when any component that
+should have produced a value came back empty — fingerprint / `audioStreamSha256`
+(TagLib refused the file), tags (per-file modes only; `DurationMs == 0` is the refusal
+signature since `ExtractFileTags` swallows into an empty object), or an **applicable**
+bitUsage / HF signal — or when Essentia's decoded length (`metadata.audio_properties.length`,
+read into the **transient, never-persisted** `TrackFeatures.AnalyzedLengthSec`) covers
+< 95% of the claimed duration (truncated file: features describe a fraction of the track).
+On fail: row in `mbxmoods-errors.csv` with the `FailedComponents` column
+(`decode-27%;fingerprint;sha`), **no catalog entry written** (an identity-less phantom is
+what MBXHub can't index and re-queues forever), and the existing error-list skip stops
+re-analysis (`--retry-errors` re-attempts). The applicability rule is what keeps the fail
+list meaningful: `ComputeBitUsage`/`ComputeHfAnalysis` report `notApplicable` (no ffmpeg,
+lossy/sub-24-bit codec, ≤ 44.1 kHz, **pure-silence window** — a content limitation) and
+those absences never fail a track; `fileMd5` is never considered; SMFM has its own report.
+Do not "simplify" the gate to plain null-checks — the tri-state exists because a silent
+30 s window on a healthy 24-bit FLAC would otherwise cost the file its entry.
+
+Throughput reporting is duration-normalized (operator ruling): progress line + summary
+lead with `Nx realtime` (audio-seconds per wall-second; numerator = decoded length), MB/s
+is the IO footnote. The ETA model was already RTF-based; only the display rate changed.
+
 ## Scan exclusions
 
 `mbxmoods-exclude.json` beside the moods file is the **only** authority over what a scan
