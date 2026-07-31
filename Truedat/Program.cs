@@ -8602,6 +8602,68 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "essentia length: absent key returns null");
             }
 
+            // --- scan health: ClassifyTrackHealth (pass/fail heart) ---
+            {
+                // healthy file -> pass, empty component list
+                {
+                    var (pass, failed) = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, false, true, false, true, false, true);
+                    Assert(pass && failed.Count == 0, "classify: fully healthy track passes");
+                }
+                // ABBA shape: truncated (62.4/224.4 = 27.8%) + no identity
+                {
+                    var (pass, failed) = ClassifyTrackHealth(true, 62.4065, 224.4133, 0.95, false, false, false, true, false, true, false, true);
+                    Assert(!pass, "classify: ABBA-shape fails");
+                    Assert(failed.Contains("decode-27%") && failed.Contains("fingerprint") && failed.Contains("sha"),
+                        "classify: ABBA-shape lists decode-27%, fingerprint, sha");
+                }
+                // XTC shape: 215.902/227.9028 = 94.7% (< 95%) + no identity
+                {
+                    var (pass, failed) = ClassifyTrackHealth(true, 215.902, 227.9028, 0.95, false, false, false, true, false, true, false, true);
+                    Assert(!pass && failed.Contains("decode-94%") && failed.Contains("fingerprint") && failed.Contains("sha"),
+                        "classify: XTC-shape fails on decode-94% + fingerprint + sha");
+                }
+                // decode boundary: 94.9% fails, 95.1% clears
+                {
+                    var below = ClassifyTrackHealth(true, 94.9, 100.0, 0.95, true, true, false, true, false, true, false, true);
+                    var above = ClassifyTrackHealth(true, 95.1, 100.0, 0.95, true, true, false, true, false, true, false, true);
+                    Assert(!below.Pass && below.Failed.Contains("decode-94%"), "classify: 94.9% trips the decode gate");
+                    Assert(above.Pass, "classify: 95.1% clears the decode gate");
+                }
+                // unknown claimed duration (0) -> decode gate cannot fire
+                {
+                    var (pass, _) = ClassifyTrackHealth(true, 30.0, 0.0, 0.95, true, true, false, true, false, true, false, true);
+                    Assert(pass, "classify: claimed=0 skips the decode gate");
+                }
+                // unknown decoded length (extractor didn't emit) -> decode gate cannot fire
+                {
+                    var (pass, _) = ClassifyTrackHealth(true, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
+                    Assert(pass, "classify: decoded=null skips the decode gate");
+                }
+                // applicability negatives: not-applicable bitUsage/hf are NOT failures
+                {
+                    var (pass, _) = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, false, true, false, false, false, false);
+                    Assert(pass, "classify: not-applicable bitUsage/hf never fail");
+                }
+                // applicable-but-empty bitUsage/hf ARE failures
+                {
+                    var (pass, failed) = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, false, true, true, false, true, false);
+                    Assert(!pass && failed.Contains("bitUsage") && failed.Contains("hf"),
+                        "classify: applicable-but-empty bitUsage/hf fail");
+                }
+                // tags: only a fail when the mode expects them (per-file modes)
+                {
+                    var moods = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, false, false, false, true, false, true);
+                    var perFile = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, true, false, false, true, false, true);
+                    Assert(moods.Pass, "classify: tags not expected (MoodsMode) -> tag null is not a fail");
+                    Assert(!perFile.Pass && perFile.Failed.Contains("tags"), "classify: tags expected + null -> fail");
+                }
+                // essentia failure is a fail on its own
+                {
+                    var (pass, failed) = ClassifyTrackHealth(false, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
+                    Assert(!pass && failed.Contains("essentia"), "classify: no Essentia features fails");
+                }
+            }
+
             // --- FLAC frame-offset walker (flac-frames hash anchor) ---
             {
                 // Synthetic chain: "fLaC" + STREAMINFO (34 bytes, not last) +
@@ -10858,6 +10920,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // seconds below a minute so a small --max-duration reads honestly.
             string Dur(int s) => s < 60 ? $"{s} s" : $"{s / 60.0:F0} min";
             return $"over max duration: {Dur(trackDurationSecs)} > {Dur(maxDurationSecs)} ceiling (--max-duration to override)";
+        }
+
+        /// <summary>Binary per-track health (2026-07-30, "no silent failures"). A track
+        /// FAILS when any component that SHOULD have produced a value came back empty,
+        /// or the decode covered less than <paramref name="decodeMinFraction"/> of the
+        /// claimed duration (a corrupt MP3 claiming 224s decoded 62s — its features
+        /// describe the first minute; Essentia alone called that a success).
+        /// The applicability rule keeps the fail list meaningful: absent-by-design is
+        /// NEVER a fail — the caller passes *Applicable=false (bitUsage on lossy/&lt;24-bit,
+        /// hf at 44.1k, either without ffmpeg) and tagsExpected=false (MoodsMode — XML
+        /// supplies metadata). fileMd5 is cut and never considered; SMFM has its own
+        /// report. Failed tokens are ordered, ;-joined by callers into the errors CSV.</summary>
+        internal static (bool Pass, List<string> Failed) ClassifyTrackHealth(
+            bool essentiaOk,
+            double? decodedSec, double claimedSec, double decodeMinFraction,
+            bool fingerprintOk, bool shaOk,
+            bool tagsExpected, bool tagsOk,
+            bool bitUsageApplicable, bool bitUsageOk,
+            bool hfApplicable, bool hfOk)
+        {
+            var failed = new List<string>();
+            if (!essentiaOk) failed.Add("essentia");
+            if (claimedSec > 0 && decodedSec.HasValue && decodedSec.Value < decodeMinFraction * claimedSec)
+            {
+                int pct = (int)Math.Floor(decodedSec.Value / claimedSec * 100.0);
+                failed.Add($"decode-{pct}%");
+            }
+            if (!fingerprintOk) failed.Add("fingerprint");
+            if (!shaOk) failed.Add("sha");
+            if (tagsExpected && !tagsOk) failed.Add("tags");
+            if (bitUsageApplicable && !bitUsageOk) failed.Add("bitUsage");
+            if (hfApplicable && !hfOk) failed.Add("hf");
+            return (failed.Count == 0, failed);
         }
 
         /// <summary>The `--preview` Estimate line for the no-ETA case. A negative EtaSecs means
