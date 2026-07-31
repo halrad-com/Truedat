@@ -443,6 +443,13 @@ namespace Truedat
         static long _analyzedBytesTotal;
         static readonly ConcurrentQueue<(double AtSecs, long Bytes)> _rateEvents = new ConcurrentQueue<(double, long)>();
         const double RateWindowSecs = 120.0;
+        // Audio-duration analyzed (decoded length when Essentia reports it, claimed
+        // otherwise) — total + trailing-window events for the Nx-realtime headline.
+        // Duration is the honest throughput unit: a FLAC and a low-bitrate MP3 of the
+        // same content cost the same to scan but differ wildly in MB, so MB/s is a
+        // relative number with no transform; audio-seconds per wall-second needs none.
+        static long _analyzedAudioMsTotal;
+        static readonly ConcurrentQueue<(double AtSecs, long AudioMs)> _audioRateEvents = new ConcurrentQueue<(double, long)>();
         // ETA model pre-flight (set by MoodsMode; -1 = model unavailable, naive ETA):
         // tracks absent from the existing catalog need the full Essentia pass; the
         // XML <Size> key supplies their byte total so remaining work is bytes-costed
@@ -747,6 +754,32 @@ namespace Truedat
             Interlocked.Add(ref _analyzedBytesTotal, bytes);
             _rateEvents.Enqueue((atSecs, bytes));
         }
+
+        static void RecordAnalyzedAudioMs(double atSecs, long audioMs)
+        {
+            if (audioMs <= 0) return;
+            Interlocked.Add(ref _analyzedAudioMsTotal, audioMs);
+            _audioRateEvents.Enqueue((atSecs, audioMs));
+        }
+
+        /// <summary>Audio-seconds analyzed per wall-second over the trailing window —
+        /// the live Nx-realtime figure. Same window/floor discipline as
+        /// CurrentRateMBps. 0 when no analysis completed recently.</summary>
+        static double CurrentRealtimeFactor(double nowSecs)
+        {
+            while (_audioRateEvents.TryPeek(out var head) && nowSecs - head.AtSecs > RateWindowSecs)
+                _audioRateEvents.TryDequeue(out _);
+            long ms = 0;
+            double oldest = nowSecs;
+            foreach (var e in _audioRateEvents) { ms += e.AudioMs; if (e.AtSecs < oldest) oldest = e.AtSecs; }
+            if (ms == 0) return 0;
+            var span = Math.Min(Math.Max(nowSecs - oldest, 10.0), RateWindowSecs);
+            return RealtimeFactorFrom(ms, span);
+        }
+
+        /// <summary>Pure arithmetic core: audio-ms over wall-seconds → Nx realtime.</summary>
+        internal static double RealtimeFactorFrom(long audioMs, double spanSecs)
+            => spanSecs <= 0 ? 0 : (audioMs / 1000.0) / spanSecs;
 
         /// <summary>Analyzed throughput over the trailing window, MB/s. 0 when no
         /// analysis completed recently (pure-cached stretches).</summary>
@@ -4485,7 +4518,18 @@ namespace Truedat
             {
                 var mb = _analyzedBytesTotal / (1024.0 * 1024.0);
                 var sizeTagStr = mb >= 1024 ? $"{mb / 1024.0:F1} GB" : $"{mb:F0} MB";
-                Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / Math.Max(sw.Elapsed.TotalSeconds, 1):F1} MB/s scan-wide");
+                double wallSecs = Math.Max(sw.Elapsed.TotalSeconds, 1);
+                // Duration-normalized headline (see the progress-line note): what was
+                // actually decoded, per wall-second of the whole scan. MB/s stays as
+                // the IO footnote — real for read overhead, meaningless across codecs.
+                long audioMsT = Interlocked.Read(ref _analyzedAudioMsTotal);
+                if (audioMsT > 0)
+                {
+                    var overallRtf = RealtimeFactorFrom(audioMsT, wallSecs);
+                    Console.WriteLine($"  Throughput: {overallRtf:F1}x realtime scan-wide  ({FormatTimeSpan(TimeSpan.FromMilliseconds(audioMsT))} of audio in {FormatTimeSpan(sw.Elapsed)}; {sizeTagStr} @ {mb / wallSecs:F1} MB/s)");
+                }
+                else
+                    Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / wallSecs:F1} MB/s scan-wide");
             }
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
@@ -8662,6 +8706,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var (pass, failed) = ClassifyTrackHealth(false, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
                     Assert(!pass && failed.Contains("essentia"), "classify: no Essentia features fails");
                 }
+            }
+
+            // --- duration throughput: Nx realtime arithmetic ---
+            {
+                Assert(Math.Abs(RealtimeFactorFrom(120_000, 10.0) - 12.0) < 1e-9,
+                    "throughput: 120s of audio in 10s wall = 12x realtime");
+                Assert(Math.Abs(RealtimeFactorFrom(5_000, 10.0) - 0.5) < 1e-9,
+                    "throughput: 5s of audio in 10s wall = 0.5x realtime");
+                Assert(RealtimeFactorFrom(120_000, 0.0) == 0,
+                    "throughput: zero wall span yields 0, not Infinity");
             }
 
             // --- FLAC frame-offset walker (flac-frames hash anchor) ---
@@ -13751,10 +13805,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var avg = elapsed.TotalSeconds / done;
                 avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
             }
-            // Live analyzed throughput (trailing window) — size-normalized, so it's
-            // comparable across libraries with different track lengths.
+            // Live analyzed throughput (trailing window). Headline is DURATION-
+            // normalized (Nx realtime = audio-seconds per wall-second): a FLAC and a
+            // low-bitrate MP3 of the same content cost the same to scan, so MB/s
+            // can't compare across libraries — it stays as the IO footnote.
             var rate = CurrentRateMBps(elapsed.TotalSeconds);
-            var rateTag = rate > 0 ? $" · {rate:F1} MB/s" : "";
+            var rtfLive = CurrentRealtimeFactor(elapsed.TotalSeconds);
+            var rateTag = rtfLive > 0
+                ? $" · {rtfLive:F1}x realtime ({rtfLive:F1} audio-s/s{(rate > 0 ? $", {rate:F1} MB/s" : "")})"
+                : (rate > 0 ? $" · {rate:F1} MB/s" : "");
             // Saturation gauge: running Essentia subprocesses vs the worker count.
             // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
             // "ess 8/14" well below full while new work remains = workers parked
