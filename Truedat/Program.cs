@@ -61,6 +61,12 @@ namespace Truedat
         public double? LoudnessShortTerm { get; set; }        // lowlevel.loudness_ebu128.short_term.mean
         public double? ReplayGain { get; set; }               // metadata.audio_properties.replay_gain
 
+        // TRANSIENT (2026-07-30): decoded audio length Essentia actually analysed
+        // (metadata.audio_properties.length). Feeds the scan-health decode gate and
+        // the duration-throughput numerator. NEVER persisted — do not add to
+        // WriteTrackEntry / ParseTrackFeaturesFromJson / RebuildCacheEntryCore.
+        public double? AnalyzedLengthSec { get; set; }
+
         // Silence profile
         public double? SilenceRate20dB { get; set; }          // lowlevel.silence_rate_20dB.mean
         public double? SilenceRate30dB { get; set; }          // lowlevel.silence_rate_30dB.mean
@@ -8586,6 +8592,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { File.Delete(tmp); } catch { } }
             }
 
+            // --- scan health: Essentia analysed-length parse (transient, never persisted) ---
+            {
+                using var lenDoc = JsonDocument.Parse("{\"metadata\":{\"audio_properties\":{\"length\":62.4065322876}}}");
+                Assert(ParseAnalyzedLengthSec(lenDoc.RootElement) == 62.407,
+                    "essentia length: reads audio_properties.length rounded to 3dp");
+                using var noLenDoc = JsonDocument.Parse("{\"metadata\":{\"audio_properties\":{\"replay_gain\":-10.3}}}");
+                Assert(ParseAnalyzedLengthSec(noLenDoc.RootElement) == null,
+                    "essentia length: absent key returns null");
+            }
+
             // --- FLAC frame-offset walker (flac-frames hash anchor) ---
             {
                 // Synthetic chain: "fLaC" + STREAMINFO (34 bytes, not last) +
@@ -12190,6 +12206,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 return new TrackFeatures
                 {
+                    AnalyzedLengthSec = ParseAnalyzedLengthSec(root),
                     Bpm = Math.Round(bpm, 1), Key = key, Mode = scale,
                     SpectralCentroid = Math.Round(spectralCentroidMean, 1),
                     SpectralFlux = Math.Round(spectralFluxMean, 4),
@@ -12290,6 +12307,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             var el = NavigatePath(root, path);
             return el.HasValue && el.Value.ValueKind == JsonValueKind.Number ? el.Value.GetDouble() : def;
+        }
+
+        /// <summary>Decoded audio length (seconds) Essentia actually analysed —
+        /// metadata.audio_properties.length. Class-level (not the parse loop's local
+        /// OptN) so the self-test can pin it. Null when the extractor didn't emit it.
+        /// Feeds the scan-health decode gate + duration-throughput numerator (transient,
+        /// never persisted).</summary>
+        static double? ParseAnalyzedLengthSec(JsonElement root)
+        {
+            var v = NavDbl(root, "metadata.audio_properties.length", double.NaN);
+            return double.IsNaN(v) ? (double?)null : Math.Round(v, 3);
         }
 
         static string NavStr(JsonElement root, string path)
