@@ -7823,6 +7823,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 using var proc = Process.Start(psi);
                 if (proc == null) return null;
+                ApplyCpuLimit(proc);
                 DisableEcoQos(proc.Handle);
                 // Drain stderr async so a chatty ffmpeg can't deadlock the pipe.
                 var stderrTask = proc.StandardError.ReadToEndAsync();
@@ -8095,6 +8096,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 using var proc = Process.Start(psi);
                 if (proc == null) return (null, null, null);
+                ApplyCpuLimit(proc);
                 DisableEcoQos(proc.Handle);
                 var stderrTask = proc.StandardError.ReadToEndAsync();
 
