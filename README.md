@@ -363,6 +363,23 @@ Truedat decides what to skip from one file: `mbxmoods-exclude.json`, beside `mbx
 Nothing else excludes a track for policy reasons — metadata signals like genre are evidence
 you can act on, never an instruction the scanner infers on its own.
 
+### Exclusion playlists — the easy way to author excludes
+
+The easiest way to build an exclusion list is in MusicBee itself: make a playlist named
+**`mbxmoods-exclude`** and put every track you don't want scanned into it. Every scan
+looks for `mbxmoods-exclude.m3u8` (or `.m3u`) beside the library XML, then in its
+`Playlists` folder, and treats every entry as a file exclude rule for that run — edit
+the playlist, rescan, the exclusions follow. Nothing is written to the JSON; the playlist
+itself is the durable list. The scan header names the playlist in force. You can also
+name one explicitly with `--exclude-playlist <path.m3u8>` (wins over discovery), or make
+the entries permanent JSON rules with `truedat --apply-exclusions <playlist.m3u8>`
+(entries become `file`/`exclude` rules, with backup and `apply-result.json` as usual).
+`include` rules in `mbxmoods-exclude.json` still win over playlist excludes, and
+`--no-exclusions` bypasses the playlist along with the file. Stream URLs in the playlist
+are skipped (they're never scannable); comment lines are ignored; relative entries
+resolve against the playlist's folder. A playlist that exists but yields no usable
+entries stops the scan rather than silently excluding nothing.
+
 ### Upgrading: speech (podcasts, talk) is no longer skipped automatically
 
 Older builds guessed which files were speech — podcasts, talk — and skipped them. Nothing guesses now —

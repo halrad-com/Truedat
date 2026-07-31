@@ -128,6 +128,20 @@ video / stream URL / non-audio / DSD / over `--max-duration`) are "cannot analyz
 of it filters anything by itself any more. The only way a track is kept out of analysis for
 a policy reason is a rule the operator wrote into `mbxmoods-exclude.json`.
 
+**Exclusion playlists (2026-07-30):** a playlist named `mbxmoods-exclude` (`.m3u8` then
+`.m3u`) is discovered beside the XML/moods file or in its `Playlists\` subfolder (or named
+explicitly via `--exclude-playlist`, which wins) and layered onto the loaded set per run via
+`ExclusionSet.Combine` — base set first, so an `include` rule in the JSON file still beats a
+playlist exclude. The playlist is the durable artifact (maintained in MusicBee; nothing is
+persisted to JSON); `--apply-exclusions` also accepts a `.m3u/.m3u8` directly and converts
+entries to permanent `file`/`exclude` rules through the same merge machinery. `PlaylistReader`
+parses (comments/URLs skipped, relative entries resolved against the playlist dir, deduped)
+and rule objects are built through `ExclusionSet.FromJson` so normalization cannot drift.
+Fail-closed: explicit-but-missing path, or any present-but-unusable playlist, refuses to
+scan. `--no-exclusions` bypasses the playlist along with the file. File rules use the JSON
+key `path` (genre uses `value`, folder uses `pattern`) — a `value`-keyed file rule silently
+parses as invalid.
+
 A **missing** file excludes nothing (not an error). A **present but unparseable** file makes
 truedat exit 1 rather than scan — analyzing everything while the operator believes rules are
 in force is the silent failure the whole design exists to remove. Invalid individual rules are

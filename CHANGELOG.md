@@ -7,6 +7,15 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
+- **Exclusion playlists.** Maintain your exclusion list as a MusicBee playlist named
+  `mbxmoods-exclude`: every scan discovers `mbxmoods-exclude.m3u8`/`.m3u` beside the
+  library XML (or in its `Playlists` folder) and excludes every entry for that run —
+  edit the playlist, rescan, exclusions follow. `--exclude-playlist <path>` names one
+  explicitly; `--apply-exclusions` now also accepts a `.m3u/.m3u8` directly, converting
+  entries into permanent `file`/`exclude` rules (backup + `apply-result.json` as usual).
+  `include` rules in `mbxmoods-exclude.json` still win; `--no-exclusions` bypasses the
+  playlist too; a present-but-unusable playlist stops the scan (fail closed).
+
 - **Scan health: incomplete analysis is now a FAIL, not a silent success.** A track
   that Essentia decodes but that fails any component it should have produced — audio
   hash / fingerprint (TagLib refuses a corrupt header), tags (per-file modes), an
