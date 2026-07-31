@@ -4268,7 +4268,7 @@ namespace Truedat
                         {
                             var err = msResults.EssentiaError ?? "Unknown error";
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                            AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, errorsCsvLock);
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, "essentia", errorsCsvLock);
                             Console.WriteLine($"  FAILED: {err}");
                             Interlocked.Increment(ref failed);
                             if (err.Contains("Timeout")) Interlocked.Increment(ref timedOut);
@@ -4359,7 +4359,7 @@ namespace Truedat
                         try
                         {
                             Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
-                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, errorsCsvLock);
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, "exception", errorsCsvLock);
                         }
                         catch { }
                         Interlocked.Increment(ref failed);
@@ -11055,7 +11055,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         }
 
         static void AppendError(string errorsPath, string filePath, string artist, string title,
-            string error, double sizeMb, double durationSecs, object lockObj)
+            string error, double sizeMb, double durationSecs, string failedComponents, object lockObj)
         {
             lock (lockObj)
             {
@@ -11067,8 +11067,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         using (var fs = new FileStream(errorsPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
                         using (var writer = new StreamWriter(fs, new UTF8Encoding(false)))
                         {
-                            if (needsHeader) writer.WriteLine("Error,Artist,Title,FilePath,SizeMB,Duration");
-                            writer.WriteLine($"{CsvEscape(error)},{CsvEscape(artist)},{CsvEscape(title)},{CsvEscape(filePath)},{sizeMb:F1},{durationSecs:F1}");
+                            // FailedComponents (2026-07-30): ;-joined tokens naming exactly what
+                            // failed (decode-NN%, fingerprint, sha, tags, bitUsage, hf, essentia,
+                            // exception) — "no silent failures". Old files lack the column;
+                            // readers key by header, and the loader only reads Error+FilePath.
+                            if (needsHeader) writer.WriteLine("Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents");
+                            writer.WriteLine($"{CsvEscape(error)},{CsvEscape(artist)},{CsvEscape(title)},{CsvEscape(filePath)},{sizeMb:F1},{durationSecs:F1},{CsvEscape(failedComponents)}");
                         }
                         return;
                     }
