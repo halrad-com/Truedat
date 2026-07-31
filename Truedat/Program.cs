@@ -2587,13 +2587,15 @@ namespace Truedat
                 // One body read serves tiers 2/3/4: all digests come from a single pass
                 // over the staged copy. Lazy — tier-1 hits never read the body.
                 // leg = legacy TagLib-region sha (FLAC transition compare).
-                (string? md5, string? sha, string? leg)? afBodyHashes = null;
-                (string? md5, string? sha, string? leg) EnsureBodyHashes()
+                // src rides along so a cache MISS can hand the already-computed
+                // hashes to RunSourceWorkers instead of re-reading the file (T2).
+                (string? md5, string? sha, string? leg, string src)? afBodyHashes = null;
+                (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                 {
                     if (afBodyHashes == null)
                     {
-                        var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, out _, out var leg);
-                        afBodyHashes = (m, s, leg);
+                        var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, _fileMd5Enabled, out _, out var leg);
+                        afBodyHashes = (m, s, leg, srcTag);
                     }
                     return afBodyHashes.Value;
                 }
@@ -2714,7 +2716,8 @@ namespace Truedat
                     EnsureStagedSrc();  // open if a no-moods scan skipped the cache hierarchy
                     var afResults = RunSourceWorkers(
                         afEssentiaExe, afStagedSrc!, afFileSize, analyzeFilePath!, knownDurationSec: 0,
-                        extractTags: true, _stageOpts, CancellationToken.None);
+                        extractTags: true, _stageOpts, CancellationToken.None,
+                        precomputedHashes: afBodyHashes);   // T2: reuse the tier walk's body read, if it happened
 
                     var features = afResults.Features;
                     var afFileMd5 = afResults.FileMd5;
@@ -3189,13 +3192,15 @@ namespace Truedat
 
                         // One body read serves tiers 2/3/4: both digests come from a single pass
                         // over the staged copy. Lazy — tier-1 hits never read the body.
-                        (string? md5, string? sha, string? leg)? flBodyHashes = null;
-                        (string? md5, string? sha, string? leg) EnsureBodyHashes()
+                        // src rides along so a cache MISS can hand the already-computed
+                        // hashes to RunSourceWorkers instead of re-reading the file (T2).
+                        (string? md5, string? sha, string? leg, string src)? flBodyHashes = null;
+                        (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                         {
                             if (flBodyHashes == null)
                             {
-                                var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, out _, out var leg);
-                                flBodyHashes = (m, s, leg);
+                                var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, _fileMd5Enabled, out _, out var leg);
+                                flBodyHashes = (m, s, leg, srcTag);
                             }
                             return flBodyHashes.Value;
                         }
@@ -3327,7 +3332,8 @@ namespace Truedat
                         EnsureStagedSrc();
                         var flResults = RunSourceWorkers(
                             flEssentiaExe, flStagedSrc!, flFileSize, filePath, knownDurationSec: 0,
-                            extractTags: true, _stageOpts, CancellationToken.None);
+                            extractTags: true, _stageOpts, CancellationToken.None,
+                            precomputedHashes: flBodyHashes);   // T2: reuse the tier walk's body read, if it happened
 
                         var features = flResults.Features;
                         var fileMd5 = flResults.FileMd5;
@@ -3889,15 +3895,17 @@ namespace Truedat
                     // it at call time rather than capturing a stale 0.
                     // leg = legacy TagLib-region sha (FLAC only) — recognizes stored
                     // pre-flac-frames values so the transition costs zero re-analysis.
-                    (string? md5, string? sha, string? leg)? msBodyHashes = null;
-                    (string? md5, string? sha, string? leg) EnsureBodyHashes()
+                    // src rides along so a cache MISS can hand the already-computed
+                    // hashes to RunSourceWorkers instead of re-reading the file (T2).
+                    (string? md5, string? sha, string? leg, string src)? msBodyHashes = null;
+                    (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                     {
                         if (msBodyHashes == null)
                         {
                             if (msSourceSize == 0)
                                 try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
-                            var (m, s, _) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, out _, out var leg);
-                            msBodyHashes = (m, s, leg);
+                            var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, _fileMd5Enabled, out _, out var leg);
+                            msBodyHashes = (m, s, leg, srcTag);
                         }
                         return msBodyHashes.Value;
                     }
@@ -4223,7 +4231,8 @@ namespace Truedat
                         var msResults = RunSourceWorkers(
                             essentiaExe, msStagedSrc!, fileSizeBytes, t.Location,
                             knownDurationSec: trackDurationSecs,
-                            extractTags: false, _stageOpts, cts.Token);
+                            extractTags: false, _stageOpts, cts.Token,
+                            precomputedHashes: msBodyHashes);   // T2: reuse the tier walk's body read, if it happened
                         Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
                         // Rate + ETA model: bytes were processed whether the analysis
@@ -7651,6 +7660,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// pulls it from the iTunes XML). 0 means "no known duration; probe inline".
         /// <paramref name="extractTags"/>: MoodsMode passes false (XML supplies
         /// metadata); --file-list / --analyze-file pass true.
+        /// <paramref name="precomputedHashes"/> (T2, 2026-07-30): the caller's memoized
+        /// EnsureBodyHashes result. When the cache-tier walk already paid the full body
+        /// read (tier-2/4 gate ran and MISSED), the fan-out reuses those digests instead
+        /// of hashing the same staged bytes a second time. Null (tiers never read the
+        /// body — e.g. a brand-new track) computes here exactly as before. Same file,
+        /// same algorithms — zero output difference.
         /// </summary>
         internal static WorkerResults RunSourceWorkers(
             string essentiaExe,
@@ -7660,14 +7675,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             double knownDurationSec,
             bool extractTags,
             StageOptions stageOpts,
-            CancellationToken ct)
+            CancellationToken ct,
+            (string? md5, string? sha, string? leg, string src)? precomputedHashes = null)
         {
             string readPath = src.Path;
             string auditName = Path.GetFileName(auditDisplayPath);
             var analyzeStart = Stopwatch.GetTimestamp();
 
             var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct));
-            var fileMd5Task = Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
+            var fileMd5Task = precomputedHashes != null
+                ? Task.FromResult(precomputedHashes.Value.md5)   // computed with wantMd5=_fileMd5Enabled — null when the flag is off
+                : Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
             var fingerprintTask = Task.Run(() =>
             {
                 var swFp = Stopwatch.StartNew();
@@ -7677,7 +7695,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{auditName}\"");
                 return fp;
             });
-            var audioStreamSha256Task = Task.Run(() =>
+            var audioStreamSha256Task = precomputedHashes != null
+                ? Task.FromResult((precomputedHashes.Value.sha, precomputedHashes.Value.src))
+                : Task.Run(() =>
             {
                 var swSha = Stopwatch.StartNew();
                 var r = ComputeAudioStreamSha256FromFile(readPath, fileSize, out _);
@@ -8523,18 +8543,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                     var expectMd5 = ComputeFileMd5(tmp);
                     var expectSha = ComputeAudioStreamSha256(tmp, invS, invE, out _);
-                    var (gotMd5, gotSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, invS, invE, out var cErr);
+                    var (gotMd5, gotSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, true, invS, invE, out var cErr);
                     Assert(cErr == null && gotMd5 == expectMd5, "single-pass fileMd5 matches ComputeFileMd5");
                     Assert(gotSha == expectSha, "single-pass audioSha matches ComputeAudioStreamSha256");
 
                     // Degenerate region (invEnd <= invStart) → sha null, md5 still produced.
-                    var (dMd5, dSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, 5000, 5000, out _);
+                    var (dMd5, dSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, true, 5000, 5000, out _);
                     Assert(dMd5 == expectMd5 && dSha == null, "single-pass degenerate region: md5 ok, sha null");
 
                     // Region at file tail (invEnd == fileSize).
                     var expTail = ComputeAudioStreamSha256(tmp, 0, data.Length, out _);
-                    var (_, tailSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, 0, data.Length, out _);
+                    var (_, tailSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, true, 0, data.Length, out _);
                     Assert(tailSha == expTail, "single-pass full-range sha matches");
+
+                    // T2: wantMd5=false — md5 skipped, sha IDENTICAL to the wantMd5 run.
+                    var (nMd5, nSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, false, invS, invE, out var nErr);
+                    Assert(nErr == null && nMd5 == null, "single-pass wantMd5=false: md5 skipped (null)");
+                    Assert(nSha == expectSha, "single-pass wantMd5=false: sha unchanged by md5 skip");
+                    // wantMd5=false + invalid region → nothing to hash, no error.
+                    var (zMd5, zSha) = ComputeFileMd5AndAudioShaCore(tmp, data.Length, false, 5000, 5000, out var zErr);
+                    Assert(zMd5 == null && zSha == null && zErr == null, "single-pass wantMd5=false + invalid region: nothing hashed, no error");
                 }
                 finally { try { File.Delete(tmp); } catch { } }
             }
@@ -8548,9 +8576,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     for (int i = 0; i < junk.Length; i++) junk[i] = (byte)(i * 31 + 7);
                     File.WriteAllBytes(tmp, junk);
                     var expectMd5 = ComputeFileMd5(tmp);
-                    var (wMd5, wSha, wSrc) = ComputeFileMd5AndAudioSha(tmp, junk.Length, out _);
+                    var (wMd5, wSha, wSrc) = ComputeFileMd5AndAudioSha(tmp, junk.Length, true, out _);
                     Assert(wMd5 == expectMd5 && wMd5 != null, "wrapper on TagLib-unparseable file still yields fileMd5");
                     Assert(wSha == null && wSrc == "", "wrapper on TagLib-unparseable file yields null sha, empty source");
+                    // T2: with the md5 half off too, the unparseable file yields nothing — silently.
+                    var (w2Md5, w2Sha, w2Src) = ComputeFileMd5AndAudioSha(tmp, junk.Length, false, out _);
+                    Assert(w2Md5 == null && w2Sha == null && w2Src == "", "wrapper wantMd5=false on TagLib-unparseable file yields all-null");
                 }
                 finally { try { File.Delete(tmp); } catch { } }
             }
@@ -13020,12 +13051,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// the whole file, source "whole-file".
         /// TagLib parse failure degrades to md5-only (sha null) — never loses the MD5.
         /// </summary>
-        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error)
-            => ComputeFileMd5AndAudioSha(filePath, fileSize, out error, out _);
+        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, bool wantMd5, out string? error)
+            => ComputeFileMd5AndAudioSha(filePath, fileSize, wantMd5, out error, out _);
 
         /// <summary>Overload that also returns the LEGACY-region sha for FLAC (see the
-        /// ComputeAudioStreamSha256FromFile overload) — computed in the SAME read pass.</summary>
-        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, out string? error, out string? legacySha)
+        /// ComputeAudioStreamSha256FromFile overload) — computed in the SAME read pass.
+        /// T2 (2026-07-30): <paramref name="wantMd5"/> — pass _fileMd5Enabled. The MD5
+        /// half used to be computed unconditionally and then discarded at every consumer
+        /// when --file-md5 is off; hashing ~10 MB per track for a field nothing stores
+        /// was pure waste.</summary>
+        static (string? fileMd5, string? audioSha, string shaSource) ComputeFileMd5AndAudioSha(string filePath, long fileSize, bool wantMd5, out string? error, out string? legacySha)
         {
             error = null;
             legacySha = null;
@@ -13051,7 +13086,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // TagLib parse failure. Parity with the split helpers this replaced:
                 // ComputeAudioStreamSha256FromFile returned a null sha here, while
                 // ComputeFileMd5 (pure FileStream, no TagLib) still produced the MD5.
-                // Leave the bounds invalid so Core hashes md5-only (non-FLAC).
+                // Leave the bounds invalid so Core hashes md5-only (non-FLAC) —
+                // or, when wantMd5 is false too, skips the read entirely.
                 error = ex.Message;
                 invStart = 0;
                 invEnd = 0;
@@ -13060,26 +13096,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 // FLAC: primary sha = frame-anchored; legacy TagLib-region sha rides
                 // the same pass so cache tiers can match stored old-style values.
-                var (md5F, shaF, shaLeg) = ComputeMd5AndTwoShas(filePath, fileSize, true,
+                var (md5F, shaF, shaLeg) = ComputeMd5AndTwoShas(filePath, fileSize, wantMd5,
                     flacStart, fileSize, invStart, invEnd, out var flacErr);
                 if (flacErr != null) error = flacErr;
                 legacySha = shaLeg;
                 return (md5F, shaF, shaF != null ? "flac-frames" : "");
             }
-            var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, invStart, invEnd, out var coreErr);
+            var (md5Hex, shaHex) = ComputeFileMd5AndAudioShaCore(filePath, fileSize, wantMd5, invStart, invEnd, out var coreErr);
             if (coreErr != null) error = coreErr;
             return (md5Hex, shaHex, shaHex != null ? source : "");
         }
 
         /// <summary>Core of the single-pass dual hash; separated from the TagLib
-        /// bounds lookup so the self-test can drive arbitrary regions.</summary>
-        static (string? fileMd5, string? audioSha) ComputeFileMd5AndAudioShaCore(string filePath, long fileSize, long invariantStart, long invariantEnd, out string? error)
+        /// bounds lookup so the self-test can drive arbitrary regions.
+        /// wantMd5=false skips the MD5 half (T2); with an invalid sha region too,
+        /// there is nothing to hash and the file is not read at all.</summary>
+        static (string? fileMd5, string? audioSha) ComputeFileMd5AndAudioShaCore(string filePath, long fileSize, bool wantMd5, long invariantStart, long invariantEnd, out string? error)
         {
             error = null;
             try
             {
                 bool shaValid = invariantEnd > invariantStart && invariantStart >= 0 && invariantEnd <= fileSize;
-                using var md5 = MD5.Create();
+                if (!wantMd5 && !shaValid) return (null, null);   // nothing wanted — skip the read
+                using var md5 = wantMd5 ? MD5.Create() : null;
                 // SHA256Cng: SHA-NI hardware accel; SHA256.Create() is managed-only on net48.
                 using var sha = new SHA256Cng();
                 using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
@@ -13088,7 +13127,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 int r;
                 while ((r = fs.Read(buf, 0, buf.Length)) > 0)
                 {
-                    md5.TransformBlock(buf, 0, r, null, 0);
+                    md5?.TransformBlock(buf, 0, r, null, 0);
                     if (shaValid)
                     {
                         // Overlap of [pos, pos+r) with [invariantStart, invariantEnd).
@@ -13099,8 +13138,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     }
                     pos += r;
                 }
-                md5.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                string md5Hex = HexLower(md5.Hash!);
+                string? md5Hex = null;
+                if (md5 != null)
+                {
+                    md5.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    md5Hex = HexLower(md5.Hash!);
+                }
                 string? shaHex = null;
                 if (shaValid)
                 {
