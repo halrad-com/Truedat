@@ -1,44 +1,19 @@
 # Truedat Backlog
 
-## Queued work (2026-07-30) — operator-approved order of play
+## Queued work — next sprint
 
-The three perf items are from `docs/reviews/2026-07-29-scan-performance-review.md`
-(local). T1/T2 are scan-loop changes → real mostly-cached-scan proof required, not
-just self-test. Items 1–4 are ordered by implementation dependency (ascending
-size/risk; T2 reshapes the `RunSourceWorkers` plumbing that item 4 then gates, so
-the big change lands last on a settled base; one real-scan run proves T1+T2
-together).
+1. **Mood diff engine** (deferred from the 2026-07-30 sprint by operator call) —
+   early design. Answer "what is actually different between two machines'
+   libraries" (dir vs MusicBee vs iTunes XML vs mbxmoods.json all disagree on
+   counts). Possibly a Python diag script first, possibly Beyond Compare
+   integration; productize later if it earns it.
 
-1. **T6 — ffmpeg ride-alongs escape the `--cpu-limit` job object.** Essentia is
-   capped, the bitUsage/hf ffmpeg spawns aren't. Fix: one-line `ApplyCpuLimit(proc)`
-   at each site, matching DownmixToStereo/RunTranscode.
-2. **T1 — saveLock held across the full serialization.** The periodic save holds
-   `saveLock` for the whole catalog serialize; every worker finishing in that window
-   blocks (~150 worker-seconds lost per save; also the ess-gauge 13/14 dip). Fix:
-   `Monitor.TryEnter` + skip (next completion retries). Also unshare `AppendError`
-   from `saveLock` so CSV appends stop serializing against catalog saves.
-3. **T2 — duplicate whole-file hash per cache-miss track.** Tier-4's
-   `EnsureBodyHashes()` full-reads MD5+SHA, then the fan-out's sha task re-hashes
-   the same bytes. Fix: pass the memoized hashes into `RunSourceWorkers`; also stop
-   computing the MD5 half when `--file-md5` is off (non-FLAC core needs the
-   computeMd5 flag its FLAC sibling already has). Zero output risk — identical
-   bytes/algorithm.
-4. **Scan health (pass/fail) + duration throughput** — plan READY:
-   `docs/superpowers/plans/2026-07-30-scan-health-and-duration-reporting.md` (local).
-   A track that analyses but fails any applicable hash/tag/feature — or decodes
-   < 95% of its claimed duration — becomes a FAIL: noted in `mbxmoods-errors.csv`
-   with a `FailedComponents` column, no phantom entry written, skipped on rescan
-   (`--retry-errors` re-attempts). Plus `Nx realtime` + duration/s throughput
-   headline with MB/s footnote. Spec:
-   `docs/superpowers/specs/2026-07-30-identity-failure-is-an-error-design.md` (local).
-5. **Exclude playlist** — design in progress. Use an `.m3u/.m3u8` as an exclusion
-   source: converter to the exclude-JSON format (inspectable, merged via
-   `--apply-exclusions`) AND a one-shot `--exclude-playlist <file>` overlay for a
-   single run ("Both" chosen by operator).
-6. **Mood diff engine** — early design. Answer "what is actually different between
-   two machines' libraries" (dir vs MusicBee vs iTunes XML vs mbxmoods.json all
-   disagree on counts). Possibly a Python diag script first, possibly Beyond
-   Compare integration; productize later if it earns it.
+The rest of the 2026-07-30 queue shipped (pushed through `562d09c`): T6 ffmpeg
+`ApplyCpuLimit`, T1 `Monitor.TryEnter` periodic save + separate errors-CSV lock,
+T2 memoized-hash handoff into `RunSourceWorkers` + `--file-md5`-gated MD5, scan
+health pass/fail with `FailedComponents`, duration-normalized `Nx realtime`
+throughput, and exclusion playlists (`mbxmoods-exclude` discovery +
+`--exclude-playlist` + playlist input to `--apply-exclusions`).
 
 ## Extractor build detection (parked 2026-07-30)
 
