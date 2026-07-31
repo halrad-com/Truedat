@@ -2774,6 +2774,31 @@ namespace Truedat
                         return;
                     }
 
+                    // Scan-health gate (2026-07-30) — same rule as MoodsMode/--file-list:
+                    // analyzed but unidentifiable/short-decoded is a FAIL; do not write
+                    // the entry. tagsOk via DurationMs (TagLib refusal => empty FileTags).
+                    {
+                        double afClaimedSec = afTags.DurationMs > 0 ? afTags.DurationMs / 1000.0
+                            : (afFingerprintV1?.DurationMs ?? 0) / 1000.0;
+                        var (healthPass, healthFailed) = ClassifyTrackHealth(
+                            essentiaOk: true,
+                            decodedSec: features.AnalyzedLengthSec,
+                            claimedSec: afClaimedSec,
+                            decodeMinFraction: 0.95,
+                            fingerprintOk: afFingerprintV1 != null,
+                            shaOk: !string.IsNullOrEmpty(afAudioStreamSha256),
+                            tagsExpected: true, tagsOk: afTags.DurationMs > 0,
+                            bitUsageApplicable: !afResults.BitUsageNotApplicable, bitUsageOk: afBitUsage != null,
+                            hfApplicable: !afResults.HfNotApplicable, hfOk: afResults.HfEnergyRatio.HasValue);
+                        if (!healthPass)
+                        {
+                            var comps = string.Join(";", healthFailed);
+                            Console.Error.WriteLine($"FAILED: analysis incomplete: {comps}");
+                            Environment.ExitCode = 1;
+                            return;
+                        }
+                    }
+
                     features.Artist = afTags.Artist;
                     features.Title = afTags.Title;
                     features.Album = afTags.Album;
@@ -3389,6 +3414,34 @@ namespace Truedat
                             flErrors.Add($"{filePath}: {flResults.EssentiaError}");
                             Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {flResults.EssentiaError}");
                             return;
+                        }
+
+                        // Scan-health gate (2026-07-30) — same rule as MoodsMode: analyzed
+                        // but unidentifiable/short-decoded is a FAIL, no phantom entry.
+                        // tagsOk: ExtractFileTags never returns null — TagLib refusal
+                        // yields an EMPTY FileTags, and readable audio always has a
+                        // duration, so DurationMs==0 is the refusal signature.
+                        {
+                            double flClaimedSec = tags.DurationMs > 0 ? tags.DurationMs / 1000.0
+                                : (fingerprintV1?.DurationMs ?? 0) / 1000.0;
+                            var (healthPass, healthFailed) = ClassifyTrackHealth(
+                                essentiaOk: true,
+                                decodedSec: features.AnalyzedLengthSec,
+                                claimedSec: flClaimedSec,
+                                decodeMinFraction: 0.95,
+                                fingerprintOk: fingerprintV1 != null,
+                                shaOk: !string.IsNullOrEmpty(audioStreamSha256),
+                                tagsExpected: true, tagsOk: tags.DurationMs > 0,
+                                bitUsageApplicable: !flResults.BitUsageNotApplicable, bitUsageOk: bitUsage != null,
+                                hfApplicable: !flResults.HfNotApplicable, hfOk: flResults.HfEnergyRatio.HasValue);
+                            if (!healthPass)
+                            {
+                                var comps = string.Join(";", healthFailed);
+                                Interlocked.Increment(ref flFailed);
+                                flErrors.Add($"{filePath}: analysis incomplete: {comps}");
+                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: analysis incomplete: {comps}");
+                                return;
+                            }
                         }
 
                         features.Artist = tags.Artist;
