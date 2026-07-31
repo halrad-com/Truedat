@@ -3795,6 +3795,11 @@ namespace Truedat
             int total = tracks.Count;
             long lastSaveElapsedTicks = 0;   // sw ticks at the end of the last periodic save
             var saveLock = new object();
+            // T1 (2026-07-30): errors-CSV appends get their own lock. They used to share
+            // saveLock, so a worker logging a failure blocked for the full multi-second
+            // catalog serialization of any in-flight periodic save. Different files,
+            // no shared state — sharing was incidental.
+            var errorsCsvLock = new object();
 
             var startTime = DateTime.Now;
             var sw = Stopwatch.StartNew();
@@ -4248,7 +4253,7 @@ namespace Truedat
                         {
                             var err = msResults.EssentiaError ?? "Unknown error";
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                            AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, saveLock);
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, errorsCsvLock);
                             Console.WriteLine($"  FAILED: {err}");
                             Interlocked.Increment(ref failed);
                             if (err.Contains("Timeout")) Interlocked.Increment(ref timedOut);
@@ -4305,20 +4310,32 @@ namespace Truedat
                         long savePeriodTicks = (long)(SavePeriodSecs * Stopwatch.Frequency);
                         if (sw.ElapsedTicks - Interlocked.Read(ref lastSaveElapsedTicks) >= savePeriodTicks)
                         {
-                            lock (saveLock)
+                            // T1 (2026-07-30): TryEnter + skip, not lock. A save serializes
+                            // the whole catalog (multi-second on a 70k library); any worker
+                            // that finished a track in that window used to queue here doing
+                            // nothing — ~150 worker-seconds lost per save at 14 workers, and
+                            // the ess gauge dipped to P-1. If a save is in flight, this
+                            // worker just returns to analysis; the next completion retries.
+                            // Crash-resilience unchanged: the save still happens, workers
+                            // merely stop watching it happen.
+                            if (Monitor.TryEnter(saveLock))
                             {
-                                if (sw.ElapsedTicks - lastSaveElapsedTicks >= savePeriodTicks)
+                                try
                                 {
-                                    var saveSw = Stopwatch.StartNew();
-                                    SaveResults(moodsPath, allTracks);
-                                    saveSw.Stop();
-                                    Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
-                                    Interlocked.Increment(ref _saveCount);
-                                    // Period measures save-end to save-start: a slow save
-                                    // must not eat its own next interval.
-                                    Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
-                                    Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
+                                    if (sw.ElapsedTicks - lastSaveElapsedTicks >= savePeriodTicks)
+                                    {
+                                        var saveSw = Stopwatch.StartNew();
+                                        SaveResults(moodsPath, allTracks);
+                                        saveSw.Stop();
+                                        Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                                        Interlocked.Increment(ref _saveCount);
+                                        // Period measures save-end to save-start: a slow save
+                                        // must not eat its own next interval.
+                                        Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
+                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
+                                    }
                                 }
+                                finally { Monitor.Exit(saveLock); }
                             }
                         }
                     }
@@ -4327,7 +4344,7 @@ namespace Truedat
                         try
                         {
                             Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
-                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, saveLock);
+                            AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, errorsCsvLock);
                         }
                         catch { }
                         Interlocked.Increment(ref failed);
