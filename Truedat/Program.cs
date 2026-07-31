@@ -586,8 +586,13 @@ namespace Truedat
             Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the");
             Console.WriteLine("                      moods file");
             Console.WriteLine("  --no-exclusions     Ignore the exclusion file for this run (diagnostic; prints a warning)");
+            Console.WriteLine("  --exclude-playlist <path.m3u8>  Also exclude every file listed in this playlist. Without");
+            Console.WriteLine("                      the flag, a playlist named mbxmoods-exclude.m3u8/.m3u beside the");
+            Console.WriteLine("                      library XML (or in its Playlists folder) is picked up automatically —");
+            Console.WriteLine("                      maintain it in MusicBee and every scan follows it");
             Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up");
-            Console.WriteLine("                      first, reports changes)");
+            Console.WriteLine("                      first, reports changes). Also accepts a .m3u/.m3u8 playlist —");
+            Console.WriteLine("                      entries become permanent file/exclude rules");
             Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes ->");
             Console.WriteLine("                      mbxmoods-speech.csv (candidates for an exclusion rule via a decisions");
             Console.WriteLine("                      delta + --apply-exclusions; audio files untouched)");
@@ -679,7 +684,7 @@ namespace Truedat
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
-            "long-track-mins", "exclusions", "no-exclusions",
+            "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "refresh-features", "pause", "allow-sleep",
             "stage-dir", "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
@@ -695,7 +700,7 @@ namespace Truedat
             "merge-output", "analyze-file", "file-list", "folder", "level",
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
             "output", "chunk", "apply-exclusions", "long-track-mins",
-            "exclusions", "stage-dir", "max-duration", "cpu-limit",
+            "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -901,6 +906,11 @@ namespace Truedat
         // --exclusions overrides it, --no-exclusions ignores it for one run.
         internal static string? _exclusionsPath;
         internal static bool _noExclusions;
+        // Exclusion playlist (2026-07-30): explicit path via --exclude-playlist, or
+        // discovered by convention (mbxmoods-exclude.m3u8/.m3u beside the XML/moods
+        // file or in its Playlists\ subfolder). Layered onto the exclusion set per
+        // run — the playlist itself is the durable artifact, maintained in MusicBee.
+        internal static string? _excludePlaylistPath;
 
         /// <summary>The loaded exclusion rules — the ONLY authority over what a scan skips
         /// for policy reasons. Empty until a scan mode loads it, so every other mode and
@@ -1517,6 +1527,57 @@ namespace Truedat
             return true;
         }
 
+        /// <summary>Exclude-playlist overlay (2026-07-30). Resolves the playlist —
+        /// explicit --exclude-playlist path first, else convention discovery
+        /// (mbxmoods-exclude.m3u8/.m3u in <paramref name="baseDir"/> or its
+        /// Playlists\ subfolder) — parses it, and returns the combined set.
+        /// Fail-closed like the exclusion file itself: an explicit path that is
+        /// missing, or ANY present-but-unusable playlist, is an error (scanning
+        /// while the operator believes exclusions are in force is the silent
+        /// failure this system exists to remove). No playlist found by
+        /// convention → the base set unchanged, sourcePath null.
+        /// --no-exclusions bypasses the playlist along with the file.</summary>
+        static ExclusionSet ApplyExcludePlaylist(ExclusionSet baseSet, string baseDir,
+            out string? sourcePath, out int entryCount, out int urlSkipped, out string? error)
+        {
+            sourcePath = null; entryCount = 0; urlSkipped = 0; error = null;
+            if (_noExclusions) return baseSet;
+
+            var path = _excludePlaylistPath;
+            if (path != null && !File.Exists(path))
+            {
+                error = $"--exclude-playlist path not found: {path}";
+                return baseSet;
+            }
+            path ??= PlaylistReader.Discover(baseDir);
+            if (path == null) return baseSet;
+
+            var read = PlaylistReader.Read(path);
+            if (read.Error != null) { error = read.Error; return baseSet; }
+
+            // Build the rules through the SAME parser the exclusion file uses so
+            // normalization (separators, casing, fragment detection) cannot drift.
+            var sb = new StringBuilder();
+            sb.Append("{\"schemaVersion\":1,\"rules\":[");
+            for (int i = 0; i < read.Paths.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"kind\":\"file\",\"action\":\"exclude\",\"path\":");
+                sb.Append(System.Text.Json.JsonSerializer.Serialize(read.Paths[i]));
+                sb.Append('}');
+            }
+            sb.Append("]}");
+            var playlistSet = ExclusionSet.FromJson(sb.ToString(), out var parseErr);
+            if (parseErr != null) { error = $"playlist {path}: {parseErr}"; return baseSet; }
+
+            sourcePath = path;
+            entryCount = read.Paths.Count;
+            urlSkipped = read.UrlSkipped;
+            // Base set first: an include rule in the exclusion FILE wins over the
+            // playlist's excludes (include-wins evaluates over the combined list).
+            return ExclusionSet.Combine(baseSet, playlistSet);
+        }
+
         /// <summary>Re-extract canary, single source of truth for every cache tier.
         /// Base: DynamicRange + LoudnessMomentary present (pre-LRA / pre-extended
         /// builds re-analyze). Under --refresh-features, entries lacking the
@@ -1903,6 +1964,7 @@ namespace Truedat
                     }
                 }
                 else if (canonical == "exclusions" && i + 1 < args.Length) _exclusionsPath = args[++i];
+                else if (canonical == "exclude-playlist" && i + 1 < args.Length) _excludePlaylistPath = args[++i];
                 else if (canonical == "no-exclusions") _noExclusions = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "refresh-features") _refreshFeatures = true;
@@ -2279,6 +2341,24 @@ namespace Truedat
                     return;
                 }
                 string decisionsJson;
+                if (PlaylistReader.IsPlaylistPath(applyExclusionsPath))
+                {
+                    // Playlist → permanent rules (2026-07-30): entries become file/exclude
+                    // rules through the SAME merge machinery (lock, backup, atomic write,
+                    // apply-result on every path) — no second merge implementation.
+                    var plRead = PlaylistReader.Read(applyExclusionsPath!);
+                    if (plRead.Error != null)
+                    {
+                        var plResultPath = ExclusionStore.WriteApplyResult(canonicalExcl, new MergeReport(), plRead.Error);
+                        Console.Error.WriteLine($"Error: {plRead.Error}");
+                        Console.Error.WriteLine($"  Result:     {plResultPath}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    Console.WriteLine($"Playlist:   {applyExclusionsPath} ({plRead.Paths.Count} file(s){(plRead.UrlSkipped > 0 ? $", {plRead.UrlSkipped} URL(s) skipped" : "")})");
+                    decisionsJson = PlaylistReader.ToDecisionsJson(plRead.Paths);
+                }
+                else
                 try { decisionsJson = File.ReadAllText(applyExclusionsPath!); }
                 catch (Exception ex)
                 {
@@ -2365,6 +2445,19 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    // Preview shows the same picture a scan would act on, so the
+                    // playlist overlay applies here too.
+                    pvExclusions = ApplyExcludePlaylist(pvExclusions, Path.GetDirectoryName(pvExclPath) ?? ".",
+                        out var pvPlPath, out var pvPlCount, out _, out var pvPlError);
+                    if (pvPlError != null)
+                    {
+                        Console.Error.WriteLine($"Error: {pvPlError}");
+                        Console.Error.WriteLine("Refusing to preview: fix the playlist, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    if (pvPlPath != null)
+                        Console.WriteLine($"Exclude playlist: {pvPlPath} ({pvPlCount} file(s))");
                     foreach (var diag in pvExclusions.Diagnostics)
                         Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
                 }
@@ -2555,6 +2648,17 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    _exclusions = ApplyExcludePlaylist(_exclusions, afExclDir,
+                        out var afPlPath, out var afPlCount, out _, out var afPlError);
+                    if (afPlError != null)
+                    {
+                        Console.Error.WriteLine($"Error: {afPlError}");
+                        Console.Error.WriteLine("Refusing to scan: fix the playlist, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    if (afPlPath != null)
+                        Console.Error.WriteLine($"Exclude playlist: {afPlPath} ({afPlCount} file(s))");
                     foreach (var afDiag in _exclusions.Diagnostics)
                         Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {afDiag}");
                 }
@@ -3079,6 +3183,17 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    _exclusions = ApplyExcludePlaylist(_exclusions, flSkippedDir,
+                        out var flPlPath, out var flPlCount, out _, out var flPlError);
+                    if (flPlError != null)
+                    {
+                        Console.Error.WriteLine($"Error: {flPlError}");
+                        Console.Error.WriteLine("Refusing to scan: fix the playlist, or pass --no-exclusions.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    if (flPlPath != null)
+                        Console.Error.WriteLine($"Exclude playlist: {flPlPath} ({flPlCount} file(s))");
                     foreach (var flDiag in _exclusions.Diagnostics)
                         Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {flDiag}");
                 }
@@ -3753,6 +3868,25 @@ namespace Truedat
                     Console.WriteLine($"  Exclusions: {exclusionsFile} (not present — nothing excluded)");
                 else
                     Console.WriteLine($"  Exclusions: {exclusionsFile} ({_exclusions.Rules.Count} rule(s))");
+
+                // Exclude-playlist overlay — explicit --exclude-playlist or the
+                // convention playlist beside the XML / in Playlists\. Same header
+                // discipline as the exclusion file: name what's in force.
+                _exclusions = ApplyExcludePlaylist(_exclusions, Path.GetDirectoryName(exclusionsFile) ?? ".",
+                    out var msPlaylistPath, out var msPlaylistCount, out var msPlaylistUrls, out var msPlaylistError);
+                if (msPlaylistError != null)
+                {
+                    Console.Error.WriteLine($"Error: {msPlaylistError}");
+                    Console.Error.WriteLine("Refusing to scan: fix the playlist, or pass --no-exclusions to ignore exclusions deliberately.");
+                    Environment.ExitCode = 1;
+                    tee?.Dispose();
+                    return;
+                }
+                if (msPlaylistPath != null)
+                    Console.WriteLine($"  Exclude playlist: {msPlaylistPath} ({msPlaylistCount} file(s){(msPlaylistUrls > 0 ? $", {msPlaylistUrls} URL(s) skipped" : "")})");
+                else
+                    Console.WriteLine($"  Exclude playlist: none found ({PlaylistReader.ConventionName}.m3u8/.m3u)");
+
                 foreach (var diag in _exclusions.Diagnostics)
                     Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
             }
@@ -8838,6 +8972,79 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "throughput: 5s of audio in 10s wall = 0.5x realtime");
                 Assert(RealtimeFactorFrom(120_000, 0.0) == 0,
                     "throughput: zero wall span yields 0, not Infinity");
+            }
+
+            // --- exclude playlist: parser, discovery, combine layering ---
+            {
+                var plDir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-pl-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(plDir);
+                try
+                {
+                    // Parser: comments/blank skipped, URLs counted, relative resolved, dupes folded.
+                    var plPath = Path.Combine(plDir, "test.m3u8");
+                    File.WriteAllLines(plPath, new[]
+                    {
+                        "#EXTM3U",
+                        "",
+                        "#EXTINF:123,Artist - Title",
+                        @"D:\Music\a.mp3",
+                        @"relative\b.flac",
+                        "https://example.com/stream.mp3",
+                        @"d:\music\A.MP3",   // dupe of the first, case/sep-insensitive
+                    });
+                    var plRead = PlaylistReader.Read(plPath);
+                    Assert(plRead.Error == null, "playlist: parses clean");
+                    Assert(plRead.Paths.Count == 2, $"playlist: 2 unique file entries (got {plRead.Paths.Count})");
+                    Assert(plRead.UrlSkipped == 1, "playlist: URL entry counted as skipped, not a rule");
+                    Assert(plRead.Paths[1].Equals(Path.Combine(plDir, @"relative\b.flac"), StringComparison.OrdinalIgnoreCase),
+                        "playlist: relative entry resolves against the playlist's directory");
+
+                    // Empty / URL-only playlists are errors (fail closed).
+                    var urlOnly = Path.Combine(plDir, "urls.m3u");
+                    File.WriteAllLines(urlOnly, new[] { "#EXTM3U", "https://example.com/a.mp3" });
+                    Assert(PlaylistReader.Read(urlOnly).Error != null, "playlist: URL-only playlist is an error");
+                    var emptyPl = Path.Combine(plDir, "empty.m3u");
+                    File.WriteAllLines(emptyPl, new[] { "#EXTM3U" });
+                    Assert(PlaylistReader.Read(emptyPl).Error != null, "playlist: empty playlist is an error");
+
+                    // Discovery: convention name, base dir first, then Playlists\, m3u8 before m3u.
+                    Assert(PlaylistReader.Discover(plDir) == null, "playlist discover: nothing until the convention name exists");
+                    var subDir = Path.Combine(plDir, "Playlists");
+                    Directory.CreateDirectory(subDir);
+                    var subM3u = Path.Combine(subDir, "mbxmoods-exclude.m3u");
+                    File.WriteAllLines(subM3u, new[] { @"D:\Music\x.mp3" });
+                    Assert(PlaylistReader.Discover(plDir) == subM3u, "playlist discover: falls through to Playlists\\ subfolder");
+                    var baseM3u8 = Path.Combine(plDir, "mbxmoods-exclude.m3u8");
+                    File.WriteAllLines(baseM3u8, new[] { @"D:\Music\y.mp3" });
+                    Assert(PlaylistReader.Discover(plDir) == baseM3u8, "playlist discover: base dir beats Playlists\\ subfolder");
+
+                    // IsPlaylistPath extension detection.
+                    Assert(PlaylistReader.IsPlaylistPath("a.m3u") && PlaylistReader.IsPlaylistPath("A.M3U8")
+                        && !PlaylistReader.IsPlaylistPath("delta.json") && !PlaylistReader.IsPlaylistPath(null),
+                        "playlist: extension detection m3u/m3u8 only");
+
+                    // Combine: include in the FILE set overrides exclude in the playlist set.
+                    var fileSet = ExclusionSet.FromJson(
+                        "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"file\",\"action\":\"include\",\"path\":\"D:\\\\Music\\\\a.mp3\"}]}", out var fsErr);
+                    Assert(fsErr == null, "playlist combine: file set parses");
+                    var plSet = ExclusionSet.FromJson(
+                        "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"D:\\\\Music\\\\a.mp3\"},{\"kind\":\"file\",\"action\":\"exclude\",\"path\":\"D:\\\\Music\\\\b.mp3\"}]}", out var psErr);
+                    Assert(psErr == null, "playlist combine: playlist set parses");
+                    var combined = ExclusionSet.Combine(fileSet, plSet);
+                    Assert(combined.Rules.Count == 3, "playlist combine: rule lists concatenate");
+                    Assert(!combined.IsExcluded(@"D:\Music\a.mp3", null, out _),
+                        "playlist combine: include in the exclusion FILE beats playlist exclude");
+                    Assert(combined.IsExcluded(@"D:\Music\b.mp3", null, out var combReason),
+                        "playlist combine: playlist exclude applies to non-included path");
+                    Assert(ExclusionSet.Combine(fileSet, ExclusionSet.Empty).Rules.Count == fileSet.Rules.Count,
+                        "playlist combine: empty overlay is a no-op");
+
+                    // ToDecisionsJson round-trips through the real decisions parser shape.
+                    var delta = PlaylistReader.ToDecisionsJson(new[] { @"D:\Music\a.mp3", @"D:\Mu\u0308sic\b.mp3" });
+                    Assert(delta.StartsWith("{\"add\":[") && delta.Contains("\"kind\":\"file\"") && delta.Contains("\"action\":\"exclude\"") && delta.Contains("\"path\":"),
+                        "playlist: decisions delta has add-side file/exclude rules keyed by path");
+                }
+                finally { try { Directory.Delete(plDir, true); } catch { } }
             }
 
             // --- FLAC frame-offset walker (flac-frames hash anchor) ---

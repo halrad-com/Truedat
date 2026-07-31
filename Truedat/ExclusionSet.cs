@@ -113,6 +113,23 @@ namespace Truedat
         /// written with either slash on either machine behaves identically.</summary>
         internal static string NormalizePath(string s) => s.Replace('/', '\\').ToUpperInvariant();
 
+        /// <summary>Layer two rule sets into one (2026-07-30, exclude-playlist overlay).
+        /// Order preserved (a's rules then b's); include-wins semantics are evaluated
+        /// over the whole combined list by IsExcluded, so an `include` rule in the
+        /// exclusion FILE still overrides an `exclude` from the playlist overlay.</summary>
+        public static ExclusionSet Combine(ExclusionSet a, ExclusionSet b)
+        {
+            if (b.IsEmpty && b.InvalidRuleCount == 0) return a;
+            if (a.IsEmpty && a.InvalidRuleCount == 0) return b;
+            var rules = new ExclusionRule[a._rules.Length + b._rules.Length];
+            a._rules.CopyTo(rules, 0);
+            b._rules.CopyTo(rules, a._rules.Length);
+            var diags = new string[a._diagnostics.Length + b._diagnostics.Length];
+            a._diagnostics.CopyTo(diags, 0);
+            b._diagnostics.CopyTo(diags, a._diagnostics.Length);
+            return new ExclusionSet(rules, a.InvalidRuleCount + b.InvalidRuleCount, diags);
+        }
+
         public static ExclusionSet FromJson(string json, out string? fatalError)
         {
             fatalError = null;
