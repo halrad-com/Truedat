@@ -417,6 +417,10 @@ namespace Truedat
         // such observer bias: if all P ran together at any point in the window,
         // the gauge says P.
         static int _essentiaPeak;
+        // In-flight worker count: incremented past the pause gate, decremented in the
+        // per-track finally. The Ctrl+C handler drains this to 0 before it prints the
+        // summary and prompts, so the summary reflects a settled (idle) state.
+        static int _inFlight;
 
         /// <summary>CAS-max: record a newly observed concurrent-essentia count into
         /// the trailing peak. Monotonic within a window — a lower observation never
@@ -4039,8 +4043,9 @@ namespace Truedat
             var cts = new CancellationTokenSource();
             var cancelRequested = 0;
             // Ctrl+C pause gate. Signaled = running. The first Ctrl+C resets it so
-            // workers park at the top of their next track (in-flight analyses finish),
-            // then prompts Exit/Continue; a second Ctrl+C at the prompt aborts now.
+            // workers park at the top of their next track, drains the in-flight ones,
+            // prints the summary on a settled state, then prompts Exit/Continue; a
+            // second Ctrl+C during the drain or the prompt aborts now.
             var pauseEvent = new ManualResetEventSlim(true);
             Console.CancelKeyPress += (_, e) =>
             {
@@ -4064,14 +4069,38 @@ namespace Truedat
                     return;
                 }
 
-                // Interactive: stop starting new tracks; in-flight ones drain behind the prompt.
+                // Interactive: stop feeding new tracks, drain the in-flight ones, print
+                // the summary on a settled state, THEN ask exit/continue.
                 pauseEvent.Reset();
                 Console.WriteLine();
-                Console.WriteLine("-- Paused. In-flight tracks finish; no new ones start. --");
                 bool prevTreat = Console.TreatControlCAsInput;
                 Console.TreatControlCAsInput = true;   // route a 2nd Ctrl+C to ReadKey as abort
                 try
                 {
+                    // Drain in-flight workers so the summary reflects a settled state. A
+                    // 2nd Ctrl+C during the drain aborts now; the count ticks down so a
+                    // slow in-flight analysis doesn't look like a hang.
+                    int remaining;
+                    while ((remaining = Volatile.Read(ref _inFlight)) > 0)
+                    {
+                        Console.Write($"\r-- Pausing: draining {remaining} in-flight track(s)...   ");
+                        if (Console.KeyAvailable)
+                        {
+                            var dk = Console.ReadKey(intercept: true);
+                            if (dk.Key == ConsoleKey.C && (dk.Modifiers & ConsoleModifiers.Control) != 0)
+                            {
+                                Console.WriteLine();
+                                Console.WriteLine("Aborting now (no save).");
+                                Environment.Exit(130);
+                            }
+                        }
+                        Thread.Sleep(200);
+                    }
+                    Console.WriteLine("\r-- Paused --                                             ");
+
+                    // Summary on the drained state, before the choice.
+                    PrintScanTallies();
+
                     while (true)
                     {
                         Console.Write("[E]xit & save    [C]ontinue    (Ctrl+C = abort now) > ");
@@ -4093,8 +4122,6 @@ namespace Truedat
                         }
                         if (k.Key == ConsoleKey.C || k.Key == ConsoleKey.Enter)
                         {
-                            Console.WriteLine("-- Progress so far --");
-                            PrintScanTallies();
                             Console.WriteLine("-- Resuming --");
                             Volatile.Write(ref cancelRequested, 0);   // a later Ctrl+C re-enters the prompt
                             return;
@@ -4128,6 +4155,7 @@ namespace Truedat
                     pauseEvent.Wait();   // Ctrl+C prompt parks new-track starts here; in-flight tracks finish
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
+                    Interlocked.Increment(ref _inFlight);   // committed past the pause gate; drained by the Ctrl+C handler
                     // Outcome telemetry: thread-time + class per track, recorded in the
                     // finally below. Default "failed" covers exception paths.
                     var trackSw = Stopwatch.StartNew();
@@ -4680,6 +4708,7 @@ namespace Truedat
                     }
                     finally
                     {
+                        Interlocked.Decrement(ref _inFlight);   // paired with the increment past the pause gate
                         msStagedSrc?.Dispose();
                         RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
                         KeepAwakePump(workMode: true);   // throttled internally; handles AC<->battery mid-run
@@ -4814,6 +4843,7 @@ namespace Truedat
                 else
                     Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / wallSecs:F1} MB/s scan-wide");
             }
+            EmitStagingSummary();
             }
             PrintScanTallies();
             if (finalSaveSw != null)
@@ -4825,7 +4855,6 @@ namespace Truedat
                 Console.WriteLine($"  Peak mem:   {peakMb:F0} MB");
             }
             catch { }
-            EmitStagingSummary();
             // The FILTERED work list = exactly what a rescan re-analyzes. Wave-missing
             // entries outside it (video/URL/non-audio/exclusion-rule filtered) can't be
             // reached by --refresh-features, so the advisor must not point there for them.
@@ -6602,7 +6631,7 @@ namespace Truedat
             catch (Exception ex)
             {
                 sw.Stop();
-                Console.Error.WriteLine($"  Warning: stage failed: {sourcePath} -> {dest}: {ex.Message}; falling back to direct read");
+                Console.WriteLine($"[stage-fallback] {sourcePath}: {ex.Message} — reading direct from source (slower)");
                 try { if (dest.Length > 0) File.Delete(dest); } catch { }
                 try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
                 Interlocked.Increment(ref _stageFallbackCount);
@@ -6618,21 +6647,24 @@ namespace Truedat
         /// </summary>
         static void EmitStagingSummary()
         {
-            int success = Interlocked.Exchange(ref _stageSuccessCount, 0);
-            int fallback = Interlocked.Exchange(ref _stageFallbackCount, 0);
+            // Peek (no reset): the MoodsMode summary prints on every Ctrl+C break as
+            // well as at end-of-run, so resetting here would zero the count mid-scan.
+            // Counters are per-process and one scan mode runs per invocation, so there
+            // is nothing to reset for. stdout (not stderr) so it lands in the run log —
+            // a fallback is exactly the kind of thing worth keeping a record of.
+            int success = Volatile.Read(ref _stageSuccessCount);
+            int fallback = Volatile.Read(ref _stageFallbackCount);
             int total = success + fallback;
             if (total == 0) return;
             if (fallback == 0)
             {
-                Console.WriteLine($"  staging:    {success} staged");
+                Console.WriteLine($"  Staging:    {success} staged (one local copy per track)");
                 return;
             }
-            Console.WriteLine($"  staging:    {success} staged, {fallback} direct-fallback");
+            Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback");
             if ((double)fallback / total > 0.05)
-            {
-                Console.Error.WriteLine(
-                    $"WARNING: staging degraded ({fallback} of {total} tracks fell back to direct read) — check stage-dir disk space / permissions");
-            }
+                Console.WriteLine(
+                    $"              {fallback} of {total} tracks fell back to direct source reads — source link slow or unstable");
         }
 
         /// <summary>Per-entry presence flags for the catalog summary. Computed once
