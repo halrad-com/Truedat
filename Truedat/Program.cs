@@ -4038,18 +4038,74 @@ namespace Truedat
 
             var cts = new CancellationTokenSource();
             var cancelRequested = 0;
+            // Ctrl+C pause gate. Signaled = running. The first Ctrl+C resets it so
+            // workers park at the top of their next track (in-flight analyses finish),
+            // then prompts Exit/Continue; a second Ctrl+C at the prompt aborts now.
+            var pauseEvent = new ManualResetEventSlim(true);
             Console.CancelKeyPress += (_, e) =>
             {
-                if (Interlocked.Exchange(ref cancelRequested, 1) == 0)
+                // Second Ctrl+C outside the prompt (e.g. a headless drain in progress) —
+                // abort now, unchanged: leaving e.Cancel false lets the runtime terminate.
+                if (Interlocked.Exchange(ref cancelRequested, 1) != 0)
                 {
-                    e.Cancel = true;
+                    Console.WriteLine("Force exit.");
+                    return;
+                }
+
+                e.Cancel = true;
+
+                // Headless (scheduler / piped): no human to answer, and ReadKey would
+                // throw. Keep the original behaviour — finish in-flight tracks and save.
+                if (Console.IsInputRedirected)
+                {
                     Console.WriteLine();
                     Console.WriteLine("Ctrl+C received - finishing current tracks and saving...");
                     cts.Cancel();
+                    return;
                 }
-                else
+
+                // Interactive: stop starting new tracks; in-flight ones drain behind the prompt.
+                pauseEvent.Reset();
+                Console.WriteLine();
+                Console.WriteLine("-- Paused. In-flight tracks finish; no new ones start. --");
+                bool prevTreat = Console.TreatControlCAsInput;
+                Console.TreatControlCAsInput = true;   // route a 2nd Ctrl+C to ReadKey as abort
+                try
                 {
-                    Console.WriteLine("Force exit.");
+                    while (true)
+                    {
+                        Console.Write("[E]xit & save    [C]ontinue    (Ctrl+C = abort now) > ");
+                        ConsoleKeyInfo k;
+                        try { k = Console.ReadKey(intercept: true); }
+                        catch { Console.WriteLine(); cts.Cancel(); return; }   // can't read -> graceful stop
+                        Console.WriteLine();
+                        bool ctrl = (k.Modifiers & ConsoleModifiers.Control) != 0;
+                        if (k.Key == ConsoleKey.C && ctrl)
+                        {
+                            Console.WriteLine("Aborting now (no save).");
+                            Environment.Exit(130);   // 2nd Ctrl+C -> abort without saving (unchanged intent)
+                        }
+                        if (k.Key == ConsoleKey.E)
+                        {
+                            Console.WriteLine("Exiting - saving progress...");
+                            cts.Cancel();
+                            return;
+                        }
+                        if (k.Key == ConsoleKey.C || k.Key == ConsoleKey.Enter)
+                        {
+                            Console.WriteLine("-- Progress so far --");
+                            PrintScanTallies();
+                            Console.WriteLine("-- Resuming --");
+                            Volatile.Write(ref cancelRequested, 0);   // a later Ctrl+C re-enters the prompt
+                            return;
+                        }
+                        // any other key -> reprompt
+                    }
+                }
+                finally
+                {
+                    Console.TreatControlCAsInput = prevTreat;
+                    pauseEvent.Set();   // Continue resumes; Exit unblocks parked workers to see the cancel
                 }
             };
 
@@ -4069,6 +4125,7 @@ namespace Truedat
                 // this lambda.
                 Action<ITunesTrack> processTrack = t =>
                 {
+                    pauseEvent.Wait();   // Ctrl+C prompt parks new-track starts here; in-flight tracks finish
                     if (cts.IsCancellationRequested) return;
                     var current = Interlocked.Increment(ref processed);
                     // Outcome telemetry: thread-time + class per track, recorded in the
@@ -4674,6 +4731,8 @@ namespace Truedat
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
             Console.WriteLine();
+            void PrintScanTallies()
+            {
             Console.WriteLine($"  Cached:     {cachedCount}");
             if (cachedByHeadPath > 0)
                 Console.WriteLine($"  Head-quick: {cachedByHeadPath}  (of {cachedCount} cached: tags-only via audioHead64kMd5)");
@@ -4755,6 +4814,8 @@ namespace Truedat
                 else
                     Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / wallSecs:F1} MB/s scan-wide");
             }
+            }
+            PrintScanTallies();
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
             try
