@@ -12508,17 +12508,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
-            // Unsupported codec (e.g. .opus — essentia's AudioLoader lacks libopus):
-            // transcode to WAV via ffmpeg and retry. Same pattern as the multi-channel
-            // branch; DownmixToStereo writes a clean stereo WAV which essentia can read.
-            if (result.Features == null && result.Error != null && result.Error.Contains("Unsupported codec"))
+            // Essentia can't read the source: transcode to WAV via ffmpeg and retry. Same
+            // pattern as the multi-channel branch; DownmixToStereo writes a clean stereo WAV
+            // which essentia reads natively. Two signatures reach here:
+            //   - "Unsupported codec" — essentia's AudioLoader lacks the codec (e.g. .opus,
+            //     no libopus in this build).
+            //   - "pcmMetadata" ("… neither wav nor aiff") — essentia's MetadataReader
+            //     failed to identify the container and fell through to the wav/aiff-only PCM
+            //     metadata reader, which rejects it. Seen on some hi-res FLAC and odd
+            //     .mpa/.aac files that ffmpeg decodes fine. The file already passed the
+            //     File.Exists gate at the top, so the "File does not exist" half of that
+            //     message can't apply — the transcode is the right remedy either way.
+            if (result.Features == null && result.Error != null
+                && (result.Error.Contains("Unsupported codec") || result.Error.Contains("pcmMetadata")))
             {
                 var wavPath = DownmixToStereo(audioPath);
                 if (wavPath != null)
                 {
                     try
                     {
-                        Console.WriteLine($"  Transcoding via ffmpeg (unsupported codec detected)");
+                        Console.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)");
                         var wavSize = new FileInfo(wavPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, wavPath, wavSize, ct);
                     }
