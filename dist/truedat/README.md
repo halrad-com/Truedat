@@ -758,7 +758,7 @@ Shape statistics over perceptually-spaced filterbanks. Same five statistics acro
 
 ### Extended — Tonal/rhythm wave (2026-07-22)
 
-All nullable, populated on fresh analysis only (legacy entries lack them until re-analyzed). To fill an existing catalog, run scans with **`--refresh-features`** — entries missing these fields re-analyze, everything else stays cached; resumable (progress saves every 25 tracks), so run it in sessions until coverage is complete.
+All nullable, populated on fresh analysis only (legacy entries lack them until re-analyzed). To fill an existing catalog, run scans with **`--refresh`** — entries missing these fields re-analyze, everything else stays cached; resumable (progress saves every 25 tracks), so run it in sessions until coverage is complete.
 
 | field                                                                                      | Essentia source                        | meaning                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
