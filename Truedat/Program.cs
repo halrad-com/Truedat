@@ -453,6 +453,12 @@ namespace Truedat
         // same content cost the same to scan but differ wildly in MB, so MB/s is a
         // relative number with no transform; audio-seconds per wall-second needs none.
         static long _analyzedAudioMsTotal;
+        // Duration-based progress: total audio in the scan's work list (set at preflight)
+        // and audio processed so far (accumulated per completed track). The progress % is
+        // audio-time through the library, not track position — a 3h podcast and a 3m song
+        // move the bar very differently, so count% and duration% legitimately disagree.
+        static long _scanAudioMsTotal;
+        static long _processedAudioMsTotal;
         static readonly ConcurrentQueue<(double AtSecs, long AudioMs)> _audioRateEvents = new ConcurrentQueue<(double, long)>();
         // ETA model pre-flight (set by MoodsMode; -1 = model unavailable, naive ETA):
         // tracks absent from the existing catalog need the full Essentia pass; the
@@ -3952,10 +3958,11 @@ namespace Truedat
             // no file IO. The XML <Size> key supplies the byte total so remaining
             // analysis work is bytes-costed at the measured MB/s.
             {
-                int etaNew = 0; long etaNewBytes = 0; long etaNewAudioMs = 0;
+                int etaNew = 0; long etaNewBytes = 0; long etaNewAudioMs = 0; long allAudioMs = 0;
                 foreach (var tt in tracks)
                 {
                     if (string.IsNullOrEmpty(tt.Location)) continue;
+                    allAudioMs += tt.TotalTimeMs;   // whole work list — the duration-progress denominator
                     // Count only what the scan will actually analyze, so this estimate does not
                     // diverge from the loop the way it used to (I1): a current-features entry is
                     // a cache hit, and a structural skip (DSD) or over-max-duration track is
@@ -3971,6 +3978,7 @@ namespace Truedat
                 _etaNewTotal = etaNew;
                 _etaNewBytesTotal = etaNewBytes;
                 _etaNewAudioMsTotal = etaNewAudioMs;
+                _scanAudioMsTotal = allAudioMs;
                 _scanParallelism = parallelism;
                 if (etaNew > 0)
                 {
@@ -4225,7 +4233,13 @@ namespace Truedat
                     }
                     try
                     {
-                        var pct = (current * 100) / total;
+                        // Progress % is audio-DURATION through the work list (the real
+                        // measure — track position over-weights short songs), falling back
+                        // to track count when the XML carries no durations.
+                        long msTotForPct = Volatile.Read(ref _scanAudioMsTotal);
+                        var pct = msTotForPct > 0
+                            ? (int)(Interlocked.Read(ref _processedAudioMsTotal) * 100 / msTotForPct)
+                            : (current * 100) / total;
                         var eta = FormatEta(sw.Elapsed, current, total);
 
                         // Phase 5.1 — structural skip (DSD, video, playlist/redirector):
@@ -4692,7 +4706,7 @@ namespace Truedat
                                         // Period measures save-end to save-start: a slow save
                                         // must not eat its own next interval.
                                         Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
-                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s]");
+                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
                                     }
                                 }
                                 finally { Monitor.Exit(saveLock); }
@@ -4712,6 +4726,7 @@ namespace Truedat
                     finally
                     {
                         Interlocked.Decrement(ref _inFlight);   // paired with the increment past the pause gate
+                        Interlocked.Add(ref _processedAudioMsTotal, t.TotalTimeMs);   // duration-progress numerator
                         msStagedSrc?.Dispose();
                         RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
                         KeepAwakePump(workMode: true);   // throttled internally; handles AC<->battery mid-run
@@ -14262,7 +14277,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var rate = CurrentRateMBps(elapsed.TotalSeconds);
             var rtfLive = CurrentRealtimeFactor(elapsed.TotalSeconds);
             var rateTag = rtfLive > 0
-                ? $" · {rtfLive:F1}x realtime ({rtfLive:F1} audio-s/s{(rate > 0 ? $", {rate:F1} MB/s" : "")})"
+                ? $" · {rtfLive:F1}x realtime{(rate > 0 ? $" ({rate:F1} MB/s)" : "")}"
                 : (rate > 0 ? $" · {rate:F1} MB/s" : "");
             // Saturation gauge: running Essentia subprocesses vs the worker count.
             // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
@@ -14275,9 +14290,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var essTag = _scanParallelism > 0
                 ? $" · ess {Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive))}/{_scanParallelism}"
                 : "";
+            // Duration progress: audio processed / total audio in the work list — the
+            // honest "how far through the library" (see the pct note). Leads the suffix.
+            long totMs = Volatile.Read(ref _scanAudioMsTotal);
+            var audioTag = totMs > 0
+                ? $"{FormatTimeSpan(TimeSpan.FromMilliseconds(Interlocked.Read(ref _processedAudioMsTotal)))}/{FormatTimeSpan(TimeSpan.FromMilliseconds(totMs))} audio · "
+                : "";
             // Negative = no honest estimate yet; show the measured bits without an ETA.
             var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
-            return $" {etaTag}{avgTag}{rateTag}{essTag}";
+            return $" {audioTag}{etaTag}{avgTag}{rateTag}{essTag}";
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>
@@ -14325,6 +14346,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         static string FormatTimeSpan(TimeSpan ts)
         {
+            if (ts.TotalHours >= 24) return $"{ts.Days}d{ts.Hours:D2}h";
             if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h{ts.Minutes:D2}m";
             if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m{ts.Seconds:D2}s";
             return $"{ts.TotalSeconds:F1}s";
