@@ -502,7 +502,7 @@ namespace Truedat
             Console.WriteLine();
             Console.WriteLine("Everyday:");
             Console.WriteLine("  (zero-arg)            scan the library");
-            Console.WriteLine("  --refresh-features    re-analyze entries missing the newest feature fields");
+            Console.WriteLine("  --refresh             re-analyze entries missing the newest feature fields");
             Console.WriteLine("                        (resumable; run in sessions until coverage completes)");
             Console.WriteLine("  --stats [path]        read-only catalog summary + recommended next commands");
             Console.WriteLine("  --verify --backfill   integrity check + fill missing fields (no re-analysis)");
@@ -635,7 +635,7 @@ namespace Truedat
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-            Console.WriteLine("  --refresh-features  Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
+            Console.WriteLine("  --refresh           Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
             Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
             Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
             Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
@@ -689,7 +689,7 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
-            "accept-flac-tag-drift", "refresh-features", "pause", "allow-sleep",
+            "accept-flac-tag-drift", "refresh", "refresh-features", "pause", "allow-sleep",
             "stage-dir", "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
         };
@@ -1974,7 +1974,7 @@ namespace Truedat
                 else if (canonical == "exclude-playlist" && i + 1 < args.Length) _excludePlaylistPath = args[++i];
                 else if (canonical == "no-exclusions") _noExclusions = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
-                else if (canonical == "refresh-features") _refreshFeatures = true;
+                else if (canonical == "refresh" || canonical == "refresh-features") _refreshFeatures = true;   // --refresh-features kept as an undocumented alias
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
@@ -3996,7 +3996,7 @@ namespace Truedat
                             && e.Features.AverageLoudness == null)
                             waveMissing++;
                     if (waveMissing > 0)
-                        Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh-features");
+                        Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh");
                 }
             }
             int flacRekeyed = 0;       // tier 2.5: FLAC transition rescue (pre-flac-frames sha + tag rewrite; props-gated re-key)
@@ -7016,8 +7016,8 @@ namespace Truedat
                     waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: exclusion-rule/video/URL/non-audio)");
                 if (waveStale > 0)
                     waveBreakdown.Add(scanWorkList == null
-                        ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh-features  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
-                        : $"{waveStale,6:N0}  analyzable, just stale   ->  truedat --refresh-features");
+                        ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
+                        : $"{waveStale,6:N0}  analyzable, just stale   ->  truedat --refresh");
             }
             if (s.MissingFingerprint > 0)
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
@@ -11005,12 +11005,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var full = Capture(PrintHelpAll);
                 var frontLines = front.Split('\n').Length;
                 Assert(frontLines <= 25, $"help front page stays short ({frontLines} lines <= 25)");
-                Assert(front.Contains("--refresh-features"), "front page names --refresh-features");
+                Assert(front.Contains("--refresh"), "front page names --refresh");
                 Assert(front.Contains("--help all"), "front page points at --help all");
                 Assert(!front.Contains("--synthesize"), "front page omits niche flags");
                 Assert(full.Contains("Maintenance:") && full.Contains("Exclusions:") && full.Contains("Advanced:"),
                     "help all carries all sections");
-                Assert(full.Contains("--refresh-features") && full.Contains("--synthesize"),
+                Assert(full.Contains("--refresh") && full.Contains("--synthesize"),
                     "help all still lists everyday and niche flags");
             }
 

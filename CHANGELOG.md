@@ -5,6 +5,12 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--refresh` is now the verb** for the feature-refresh scan (was `--refresh-features`).
+  The old `--refresh-features` still works as an undocumented alias, so existing scripts
+  and in-flight passes keep running.
+
 ### Added
 
 - **Exclusion playlists.** Maintain your exclusion list as a MusicBee playlist named
