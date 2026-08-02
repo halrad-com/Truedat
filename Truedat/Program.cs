@@ -6661,10 +6661,11 @@ namespace Truedat
                 Console.WriteLine($"  Staging:    {success} staged (one local copy per track)");
                 return;
             }
-            Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback");
-            if ((double)fallback / total > 0.05)
+            double fallbackPct = 100.0 * fallback / total;
+            Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback ({fallbackPct:F1}% fell back)");
+            if (fallbackPct > 5.0)
                 Console.WriteLine(
-                    $"              {fallback} of {total} tracks fell back to direct source reads — source link slow or unstable");
+                    $"              source link slow or unstable — {fallback} of {total} reads bypassed staging");
         }
 
         /// <summary>Per-entry presence flags for the catalog summary. Computed once
