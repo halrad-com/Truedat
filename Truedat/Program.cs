@@ -969,6 +969,9 @@ namespace Truedat
         // at end-of-scan. Reset at start of each scan mode.
         internal static int _stageSuccessCount;
         internal static int _stageFallbackCount;
+        internal static long _stageBytesTotal;   // bytes copied over the source link (successful stages)
+        internal static long _stageFirstStamp;   // Stopwatch ts of the first staging copy start (0 = none yet)
+        internal static long _stageLastStamp;    // Stopwatch ts of the last staging copy end
 
 
         // Essentia streaming ChordsDetection buffer limit caps analyzable track length.
@@ -6611,7 +6614,9 @@ namespace Truedat
                     ext = ".bin";
                 dest = Path.Combine(opts.StageDir, $"{Guid.NewGuid():N}{ext}");
                 Directory.CreateDirectory(opts.StageDir);
+                long copyStart = Stopwatch.GetTimestamp();
                 File.Copy(sourcePath, dest, overwrite: false);
+                long copyEnd = Stopwatch.GetTimestamp();
                 // Capture mtime IMMEDIATELY after the copy completes. If the file
                 // is tag-touched between now and end-of-work, the snapshot still
                 // matches the bytes we just copied — preventing TrackEntry from
@@ -6626,6 +6631,13 @@ namespace Truedat
                 if (_audit)
                     Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {(bytes / 1024.0 / 1024.0):F1}MB)");
                 Interlocked.Increment(ref _stageSuccessCount);
+                // Link throughput: total bytes + the wall span (earliest copy start ..
+                // latest copy end) so the summary reports aggregate MB/s over the source
+                // link. Aggregate, not per-copy — concurrent copies share the link, so a
+                // per-copy average would understate a shared WiFi link by the worker count.
+                Interlocked.Add(ref _stageBytesTotal, bytes);
+                long f; do { f = Volatile.Read(ref _stageFirstStamp); if (f != 0 && copyStart >= f) break; } while (Interlocked.CompareExchange(ref _stageFirstStamp, copyStart, f) != f);
+                long l; do { l = Volatile.Read(ref _stageLastStamp); if (copyEnd <= l) break; } while (Interlocked.CompareExchange(ref _stageLastStamp, copyEnd, l) != l);
                 return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest, mtime);
             }
             catch (Exception ex)
@@ -6657,15 +6669,30 @@ namespace Truedat
             int total = success + fallback;
             if (total == 0) return;
             if (fallback == 0)
-            {
                 Console.WriteLine($"  Staging:    {success} staged (one local copy per track)");
-                return;
+            else
+            {
+                double fallbackPct = 100.0 * fallback / total;
+                Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback ({fallbackPct:F1}% fell back)");
+                if (fallbackPct > 5.0)
+                    Console.WriteLine(
+                        $"              source link slow or unstable — {fallback} of {total} reads bypassed staging");
             }
-            double fallbackPct = 100.0 * fallback / total;
-            Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback ({fallbackPct:F1}% fell back)");
-            if (fallbackPct > 5.0)
-                Console.WriteLine(
-                    $"              source link slow or unstable — {fallback} of {total} reads bypassed staging");
+            // Aggregate link throughput: bytes pulled over the source link across the wall
+            // span (first copy start .. last copy end). Read this against the analysis MB/s
+            // — a link far below it means the scan is link-bound (workers waiting on copies),
+            // not CPU-bound. Understates when staging is sparse (cache-only stretches sit
+            // inside the span); it never overstates, so a low number is trustworthy.
+            long bytesT = Volatile.Read(ref _stageBytesTotal);
+            long first = Volatile.Read(ref _stageFirstStamp);
+            long last = Volatile.Read(ref _stageLastStamp);
+            double spanSecs = (first != 0 && last > first) ? (double)(last - first) / Stopwatch.Frequency : 0;
+            if (bytesT > 0 && spanSecs > 0)
+            {
+                double mbTotal = bytesT / (1024.0 * 1024.0);
+                string vol = mbTotal >= 1024 ? $"{mbTotal / 1024.0:F1} GB" : $"{mbTotal:F0} MB";
+                Console.WriteLine($"              {vol} pulled over the source link @ {mbTotal / spanSecs:F1} MB/s");
+            }
         }
 
         /// <summary>Per-entry presence flags for the catalog summary. Computed once
