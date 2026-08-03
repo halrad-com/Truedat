@@ -651,6 +651,11 @@ namespace Truedat
             Console.WriteLine("  --transcode-out <p> Output FLAC path for --transcode mode.");
             Console.WriteLine("  --sample-rate <hz>  With --transcode: override output sample rate (default: match source).");
             Console.WriteLine("  --bit-depth <16|24> With --transcode: override output bit depth (default: match source).");
+            Console.WriteLine("  --convert-dir <d>   Standalone: recursively convert lossless non-FLAC files (WMA Lossless,");
+            Console.WriteLine("                      ALAC, WavPack, APE, TAK, WAV/AIFF) to a sibling .flac, preserving tags +");
+            Console.WriteLine("                      art. Originals untouched; existing .flac skipped; lossy skipped.");
+            Console.WriteLine("  --compression-level <0-8>  FLAC compression for --convert-dir (default 8) / --transcode (default 0).");
+            Console.WriteLine("  --dry-run           With --convert-dir: print the plan, write nothing.");
             Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
             Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
             Console.WriteLine("  --allow-sleep       Let the machine sleep during scans. Default: work-bearing runs");
@@ -692,6 +697,7 @@ namespace Truedat
             "seed-target", "merge-moods", "merge-source", "merge-output",
             "analyze-file", "file-list", "folder", "hash-only", "level",
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
+            "convert-dir", "compression-level",
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
@@ -709,6 +715,7 @@ namespace Truedat
             "seed", "seed-catalog", "seed-target", "merge-source",
             "merge-output", "analyze-file", "file-list", "folder", "level",
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
+            "convert-dir", "compression-level",
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
         };
@@ -1815,6 +1822,16 @@ namespace Truedat
             int transcodeSampleRate = 0; // 0 = match source
             int transcodeBitDepth = 0;   // 0 = match source
 
+            // --convert-dir <folder> [--compression-level 0-8] [--dry-run]
+            // Standalone: recursively convert lossless non-FLAC sources (WMA Lossless,
+            // ALAC, WavPack, APE, TAK, WAV/AIFF) to a sibling <name>.flac, preserving all
+            // tags + embedded art. Originals untouched; existing .flac siblings skipped;
+            // lossy sources skipped. --dry-run prints the plan and writes nothing.
+            bool convertDirMode = false;
+            string? convertDirPath = null;
+            int? compressionLevelOpt = null; // convert-dir defaults to 8, --transcode to 0
+            bool dryRun = false;
+
             // hashOutputPath: --hash-only mode only — NDJSON manifest file the
             // identity envelopes are appended to. Enables offline determinism rigs
             // without standing up a fake HTTP server.
@@ -1921,7 +1938,7 @@ namespace Truedat
                 else if (canonical == "synth-moods" && i + 1 < args.Length) synthMoods = args[++i];
                 else if (canonical == "seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
                     { synthSeed = sd; i++; }
-                else if (canonical == "dry-run") synthDryRun = true;
+                else if (canonical == "dry-run") { synthDryRun = true; dryRun = true; }   // shared: --synthesize and --convert-dir are mutually exclusive
                 else if (canonical == "seed-moods") seedMoods = true;
                 else if (canonical == "seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
                 else if (canonical == "seed-target" && i + 1 < args.Length) seedTarget = args[++i];
@@ -1937,6 +1954,8 @@ namespace Truedat
                 else if (canonical == "transcode-out" && i + 1 < args.Length) transcodeOutput = args[++i];
                 else if (canonical == "sample-rate" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tsr) && tsr > 0) { transcodeSampleRate = tsr; i++; }
                 else if (canonical == "bit-depth" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tbd) && (tbd == 16 || tbd == 24)) { transcodeBitDepth = tbd; i++; }
+                else if (canonical == "convert-dir" && i + 1 < args.Length) { convertDirMode = true; convertDirPath = args[++i]; }
+                else if (canonical == "compression-level" && i + 1 < args.Length && int.TryParse(args[i + 1], out var clvl) && clvl >= 0 && clvl <= 8) { compressionLevelOpt = clvl; i++; }
                 else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (canonical == "json-output") jsonOutput = true;
                 else if (canonical == "output" && i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/"))
@@ -2141,7 +2160,19 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunTranscode(transcodeInput!, transcodeOutput!, transcodeSampleRate, transcodeBitDepth);
+                Environment.ExitCode = RunTranscode(transcodeInput!, transcodeOutput!, transcodeSampleRate, transcodeBitDepth, compressionLevelOpt ?? 0);
+                return;
+            }
+
+            if (convertDirMode)
+            {
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode)
+                {
+                    Console.Error.WriteLine("Error: --convert-dir is a standalone mode (mutually exclusive with scan/hash/transcode/etc).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunConvertDir(convertDirPath!, compressionLevelOpt ?? 8, dryRun);
                 return;
             }
 
@@ -9122,6 +9153,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(ShouldRetryUnderDecode(283.0, 299.24, 0.95), "retry: 283s (<95%) retries");
                     Assert(!ShouldRetryUnderDecode(285.0, 299.24, 0.95), "retry: 285s (>95%) does not retry");
                 }
+                // --convert-dir codec classifier: lossless-non-FLAC converts, FLAC + lossy do not
+                {
+                    Assert(IsLosslessConvertibleToFlac("wmalossless"), "convert: WMA Lossless converts");
+                    Assert(IsLosslessConvertibleToFlac("alac") && IsLosslessConvertibleToFlac("wavpack"), "convert: ALAC + WavPack convert");
+                    Assert(IsLosslessConvertibleToFlac("pcm_s24le"), "convert: 24-bit PCM (WAV/AIFF) converts");
+                    Assert(!IsLosslessConvertibleToFlac("flac"), "convert: FLAC is not re-converted");
+                    Assert(!IsLosslessConvertibleToFlac("mp3") && !IsLosslessConvertibleToFlac("aac") && !IsLosslessConvertibleToFlac("wmav2"),
+                        "convert: lossy codecs are not converted");
+                    Assert(!IsLosslessConvertibleToFlac(null), "convert: unreadable codec is not converted");
+                }
                 // applicability negatives: not-applicable bitUsage/hf are NOT failures
                 {
                     var (pass, _) = ClassifyTrackHealth(true, 224.0, 224.4, 0.95, true, true, false, true, false, false, false, false);
@@ -11209,7 +11250,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Defaults to source sample rate / bit depth; overrides supplied via CLI.
         /// Returns process exit code (0 = success).
         /// </summary>
-        static int RunTranscode(string inputPath, string outputPath, int overrideRate, int overrideDepth)
+        static int RunTranscode(string inputPath, string outputPath, int overrideRate, int overrideDepth, int compressionLevel = 0)
         {
             var ffmpeg = _ffmpegPath.Value;
             if (ffmpeg == null)
@@ -11253,12 +11294,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             Console.WriteLine($"Transcoding: {inputPath}");
             Console.WriteLine($"  -> {outputPath}");
-            Console.WriteLine($"  rate={rate} Hz, depth={depth} bits, codec=flac (compression_level 0)");
+            Console.WriteLine($"  rate={rate} Hz, depth={depth} bits, codec=flac (compression_level {compressionLevel})");
 
             var psi = new ProcessStartInfo
             {
                 FileName = ffmpeg,
-                Arguments = $"-i {PathHelper.QuoteArg(inputPath)} -c:a flac -compression_level 0 -ar {rate} -sample_fmt {sampleFmt} {bitsArg}-y {PathHelper.QuoteArg(outputPath)}",
+                Arguments = $"-i {PathHelper.QuoteArg(inputPath)} -c:a flac -compression_level {compressionLevel} -ar {rate} -sample_fmt {sampleFmt} {bitsArg}-y {PathHelper.QuoteArg(outputPath)}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -11302,6 +11343,156 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return 1;
             }
             finally { KeepAwakeRelease(); }
+        }
+
+        /// <summary>ffprobe codec_name values that are lossless and worth re-encoding to FLAC
+        /// (a lossless, universally-decodable replacement). Deliberately excludes "flac" (already
+        /// FLAC) and every lossy codec (mp3/aac/wmav2/vorbis/opus…). ALAC and WMA Lossless are the
+        /// common cases; WMA Lossless is the one Essentia's internal decoder can't read at all.</summary>
+        static readonly HashSet<string> LosslessConvertibleCodecs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "alac", "wmalossless", "wavpack", "ape", "tak",
+            "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_s16be", "pcm_s24be",
+        };
+
+        internal static bool IsLosslessConvertibleToFlac(string? codec)
+            => codec != null && LosslessConvertibleCodecs.Contains(codec);
+
+        /// <summary>Lossless convert of one file to FLAC via ffmpeg, preserving the source rate/
+        /// depth AND all metadata + embedded cover art (-map_metadata 0, -c:v copy). The full
+        /// ffmpeg on PATH decodes codecs Essentia can't (WMA Lossless), so this is bit-lossless
+        /// audio in a universal container. Returns the ffmpeg exit code (0 = success). Never
+        /// touches the input.</summary>
+        static int ConvertToFlac(string ffmpeg, string input, string output, int compressionLevel)
+        {
+            try { var d = Path.GetDirectoryName(output); if (!string.IsNullOrEmpty(d)) Directory.CreateDirectory(d); } catch { }
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpeg,
+                // -map 0:a keeps the audio; -map 0:v? keeps embedded art when present (optional,
+                // so art-less files don't error); -c:v copy passes the art through unchanged;
+                // -map_metadata 0 carries every tag. No -ar/-sample_fmt override => source rate
+                // and bit depth are preserved (bit-lossless).
+                Arguments = $"-i {PathHelper.QuoteArg(input)} -map 0:a -map 0:v? -c:a flac -compression_level {compressionLevel} -c:v copy -map_metadata 0 -y {PathHelper.QuoteArg(output)}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            try
+            {
+                using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
+                var so = proc.StandardOutput.ReadToEndAsync();
+                var se = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(600000)) // 10 min — level-8 on a big lossless file
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    Console.Error.WriteLine("    ffmpeg convert timed out (600s)");
+                    try { File.Delete(output); } catch { }
+                    return 1;
+                }
+                proc.WaitForExit();
+                so.Wait(5000);
+                var err = se.Wait(5000) ? se.Result : "";
+                if (proc.ExitCode != 0)
+                {
+                    var tail = err.Trim();
+                    if (tail.Length > 400) tail = "…" + tail.Substring(tail.Length - 400);
+                    Console.Error.WriteLine($"    ffmpeg exit {proc.ExitCode}: {tail}");
+                    try { File.Delete(output); } catch { }   // no half-written sibling
+                    return proc.ExitCode == 0 ? 1 : proc.ExitCode;
+                }
+                return File.Exists(output) ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"    convert failed: {ex.Message}");
+                return 1;
+            }
+        }
+
+        /// <summary>--convert-dir: recursively convert lossless non-FLAC sources under a folder to
+        /// a sibling &lt;name&gt;.flac, preserving tags + art. Originals are never touched, existing
+        /// .flac siblings are skipped (idempotent), lossy sources are reported and skipped. --dry-run
+        /// prints the plan and writes nothing. Returns 0 unless a conversion errored.</summary>
+        static int RunConvertDir(string folder, int compressionLevel, bool dryRun)
+        {
+            if (!Directory.Exists(folder))
+            {
+                Console.Error.WriteLine($"Error: --convert-dir folder not found: {folder}");
+                return 1;
+            }
+            var ffprobe = FindFfprobe();
+            if (ffprobe == null)
+            {
+                Console.Error.WriteLine("Error: ffprobe not found on PATH (required for --convert-dir).");
+                return 1;
+            }
+            var ffmpeg = _ffmpegPath.Value;
+            if (ffmpeg == null && !dryRun)
+            {
+                Console.Error.WriteLine("Error: ffmpeg not found on PATH (required for --convert-dir).");
+                return 1;
+            }
+
+            // Extension pre-filter: only probe containers that can carry lossless audio, so we
+            // don't ffprobe every mp3. .m4a/.mp4 can be ALAC (lossless) or AAC (lossy) — the
+            // codec probe below decides.
+            var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { ".wma", ".m4a", ".mp4", ".m4b", ".ape", ".wv", ".tak", ".wav", ".aif", ".aiff" };
+
+            Console.WriteLine($"Convert-dir: {folder}");
+            Console.WriteLine($"  compression_level {compressionLevel}{(dryRun ? "  (DRY RUN — nothing is written)" : "")}");
+
+            List<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(folder, "*.*", SearchOption.AllDirectories)
+                    .Where(f => exts.Contains(Path.GetExtension(f))).ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error walking folder: {ex.Message}");
+                return 1;
+            }
+
+            int converted = 0, plan = 0, skipExisting = 0, skipLossy = 0, errors = 0;
+            KeepAwakePump(workMode: true);
+            try
+            {
+                foreach (var f in files)
+                {
+                    var codec = ProbeAudio(ffprobe, f)?.Codec;
+                    if (string.Equals(codec, "flac", StringComparison.OrdinalIgnoreCase)) continue; // already FLAC
+                    if (!IsLosslessConvertibleToFlac(codec))
+                    {
+                        skipLossy++;
+                        if (_audit) Console.WriteLine($"  [skip {codec ?? "unreadable"}] {f}");
+                        continue;
+                    }
+                    var outPath = Path.ChangeExtension(f, ".flac");
+                    if (File.Exists(outPath)) { skipExisting++; Console.WriteLine($"  [exists] {outPath}"); continue; }
+                    if (dryRun) { plan++; Console.WriteLine($"  [would convert] ({codec}) {f}"); continue; }
+
+                    Console.WriteLine($"  Converting ({codec}): {f}");
+                    var rc = ConvertToFlac(ffmpeg!, f, outPath, compressionLevel);
+                    if (rc == 0)
+                    {
+                        converted++;
+                        Console.WriteLine($"    -> {Path.GetFileName(outPath)} ({new FileInfo(outPath).Length / 1024} KB)");
+                    }
+                    else { errors++; }
+                }
+            }
+            finally { KeepAwakeRelease(); }
+
+            Console.WriteLine();
+            Console.WriteLine(dryRun
+                ? $"Dry run: {plan} would convert, {skipExisting} already have .flac, {skipLossy} lossy/other skipped."
+                : $"Done: {converted} converted, {skipExisting} already had .flac, {skipLossy} lossy/other skipped, {errors} errors.");
+            return errors > 0 ? 1 : 0;
         }
 
         static AudioDetails? ProbeAudio(string ffprobe, string audioPath)
