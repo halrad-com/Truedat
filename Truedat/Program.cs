@@ -654,6 +654,10 @@ namespace Truedat
             Console.WriteLine("  --convert-dir <d>   Standalone: recursively convert lossless non-FLAC files (WMA Lossless,");
             Console.WriteLine("                      ALAC, WavPack, APE, TAK, WAV/AIFF) to a sibling .flac, preserving tags +");
             Console.WriteLine("                      art. Originals untouched; existing .flac skipped; lossy skipped.");
+            Console.WriteLine("  --wma-lossless-only With --convert-dir: target WMA Lossless only (leaves WAV/ALAC/etc. alone).");
+            Console.WriteLine("  --wma-only          With --convert-dir: target ALL WMA (lossless + lossy) — full off-ramp;");
+            Console.WriteLine("                      lossy WMA -> FLAC is larger but no worse, and escapes the format.");
+            Console.WriteLine("  --convert-codecs <list>  With --convert-dir: comma list of ffprobe codecs to target (advanced).");
             Console.WriteLine("  --compression-level <0-8>  FLAC compression for --convert-dir (default 8) / --transcode (default 0).");
             Console.WriteLine("  --dry-run           With --convert-dir: print the plan, write nothing.");
             Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
@@ -697,7 +701,7 @@ namespace Truedat
             "seed-target", "merge-moods", "merge-source", "merge-output",
             "analyze-file", "file-list", "folder", "hash-only", "level",
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
-            "convert-dir", "compression-level",
+            "convert-dir", "compression-level", "convert-codecs", "wma-only", "wma-lossless-only",
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
@@ -1829,6 +1833,9 @@ namespace Truedat
             // lossy sources skipped. --dry-run prints the plan and writes nothing.
             bool convertDirMode = false;
             string? convertDirPath = null;
+            string? convertCodecs = null;    // --convert-codecs: comma list; null = all lossless
+            bool wmaOnly = false;            // --wma-only: ALL wma variants (lossless + lossy) — full off-ramp
+            bool wmaLosslessOnly = false;    // --wma-lossless-only: wmalossless only
             int? compressionLevelOpt = null; // convert-dir defaults to 8, --transcode to 0
             bool dryRun = false;
 
@@ -1955,6 +1962,9 @@ namespace Truedat
                 else if (canonical == "sample-rate" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tsr) && tsr > 0) { transcodeSampleRate = tsr; i++; }
                 else if (canonical == "bit-depth" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tbd) && (tbd == 16 || tbd == 24)) { transcodeBitDepth = tbd; i++; }
                 else if (canonical == "convert-dir" && i + 1 < args.Length) { convertDirMode = true; convertDirPath = args[++i]; }
+                else if (canonical == "convert-codecs" && i + 1 < args.Length) convertCodecs = args[++i];
+                else if (canonical == "wma-only") wmaOnly = true;
+                else if (canonical == "wma-lossless-only") wmaLosslessOnly = true;
                 else if (canonical == "compression-level" && i + 1 < args.Length && int.TryParse(args[i + 1], out var clvl) && clvl >= 0 && clvl <= 8) { compressionLevelOpt = clvl; i++; }
                 else if (canonical == "moods" && i + 1 < args.Length) analyzeFileMoods = args[++i];
                 else if (canonical == "json-output") jsonOutput = true;
@@ -2172,7 +2182,31 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunConvertDir(convertDirPath!, compressionLevelOpt ?? 8, dryRun);
+                // WMA shorthands seed --convert-codecs; explicit --convert-codecs wins if given.
+                // --wma-lossless-only = wmalossless; --wma-only = every WMA variant (off-ramp).
+                if (string.IsNullOrWhiteSpace(convertCodecs))
+                {
+                    if (wmaLosslessOnly) convertCodecs = "wmalossless";
+                    else if (wmaOnly) convertCodecs = "wmalossless,wmav2,wmapro,wmavoice";
+                }
+                HashSet<string>? codecFilter = null;
+                if (!string.IsNullOrWhiteSpace(convertCodecs))
+                {
+                    codecFilter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var c in convertCodecs.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0))
+                    {
+                        codecFilter.Add(c);
+                        if (!IsLosslessConvertibleToFlac(c))
+                            Console.Error.WriteLine($"Note: '{c}' is lossy — the FLAC will be LARGER than the source with no quality gain (it only escapes the {c} format).");
+                    }
+                    if (codecFilter.Count == 0)
+                    {
+                        Console.Error.WriteLine("Error: --convert-codecs listed no codecs.");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                }
+                Environment.ExitCode = RunConvertDir(convertDirPath!, compressionLevelOpt ?? 8, dryRun, codecFilter);
                 return;
             }
 
@@ -11417,7 +11451,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// a sibling &lt;name&gt;.flac, preserving tags + art. Originals are never touched, existing
         /// .flac siblings are skipped (idempotent), lossy sources are reported and skipped. --dry-run
         /// prints the plan and writes nothing. Returns 0 unless a conversion errored.</summary>
-        static int RunConvertDir(string folder, int compressionLevel, bool dryRun)
+        static int RunConvertDir(string folder, int compressionLevel, bool dryRun, HashSet<string>? codecFilter = null)
         {
             if (!Directory.Exists(folder))
             {
@@ -11439,12 +11473,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // Extension pre-filter: only probe containers that can carry lossless audio, so we
             // don't ffprobe every mp3. .m4a/.mp4 can be ALAC (lossless) or AAC (lossy) — the
-            // codec probe below decides.
-            var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".wma", ".m4a", ".mp4", ".m4b", ".ape", ".wv", ".tak", ".wav", ".aif", ".aiff" };
+            // codec probe below decides. When a codec filter is set (e.g. --wma-only), narrow the
+            // extensions to just those that can hold the targeted codecs, so a big library isn't
+            // probed for containers we'd skip anyway.
+            var codecExtHints = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["wmalossless"] = new[] { ".wma" },
+                ["wmav2"] = new[] { ".wma" },       // lossy WMA (opt-in via --convert-codecs, for a WMA off-ramp)
+                ["wmapro"] = new[] { ".wma" },
+                ["wmavoice"] = new[] { ".wma" },
+                ["alac"] = new[] { ".m4a", ".mp4", ".m4b" },
+                ["wavpack"] = new[] { ".wv" },
+                ["ape"] = new[] { ".ape" },
+                ["tak"] = new[] { ".tak" },
+                ["pcm_s16le"] = new[] { ".wav", ".aif", ".aiff" },
+                ["pcm_s24le"] = new[] { ".wav", ".aif", ".aiff" },
+                ["pcm_s32le"] = new[] { ".wav", ".aif", ".aiff" },
+                ["pcm_s16be"] = new[] { ".aif", ".aiff" },
+                ["pcm_s24be"] = new[] { ".aif", ".aiff" },
+            };
+            var fullExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { ".wma", ".m4a", ".mp4", ".m4b", ".ape", ".wv", ".tak", ".wav", ".aif", ".aiff" };
+            HashSet<string> exts;
+            if (codecFilter != null && codecFilter.All(c => codecExtHints.ContainsKey(c)))
+            {
+                // Narrow only when every targeted codec has a known container, so an unmapped
+                // codec can never silently exclude files it lives in.
+                exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var c in codecFilter) foreach (var e in codecExtHints[c]) exts.Add(e);
+            }
+            else exts = fullExts;
 
             Console.WriteLine($"Convert-dir: {folder}");
             Console.WriteLine($"  compression_level {compressionLevel}{(dryRun ? "  (DRY RUN — nothing is written)" : "")}");
+            Console.WriteLine($"  targeting: {(codecFilter == null ? "all lossless non-FLAC" : string.Join(", ", codecFilter.OrderBy(c => c)))}");
 
             List<string> files;
             try
@@ -11466,7 +11528,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     var codec = ProbeAudio(ffprobe, f)?.Codec;
                     if (string.Equals(codec, "flac", StringComparison.OrdinalIgnoreCase)) continue; // already FLAC
-                    if (!IsLosslessConvertibleToFlac(codec))
+                    // Default (no filter): lossless non-FLAC only. Explicit --convert-codecs:
+                    // convert exactly what was named (the user opted into any lossy entries).
+                    bool convertThis = codec != null &&
+                        (codecFilter != null ? codecFilter.Contains(codec) : IsLosslessConvertibleToFlac(codec));
+                    if (!convertThis)
                     {
                         skipLossy++;
                         if (_audit) Console.WriteLine($"  [skip {codec ?? "unreadable"}] {f}");
