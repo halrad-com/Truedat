@@ -2901,7 +2901,7 @@ namespace Truedat
                             essentiaOk: true,
                             decodedSec: features.AnalyzedLengthSec,
                             claimedSec: afClaimedSec,
-                            decodeMinFraction: 0.95,
+                            decodeMinFraction: DecodeCoverageMinFraction,
                             fingerprintOk: afFingerprintV1 != null,
                             shaOk: !string.IsNullOrEmpty(afAudioStreamSha256),
                             tagsExpected: true, tagsOk: afTags.DurationMs > 0,
@@ -3556,7 +3556,7 @@ namespace Truedat
                                 essentiaOk: true,
                                 decodedSec: features.AnalyzedLengthSec,
                                 claimedSec: flClaimedSec,
-                                decodeMinFraction: 0.95,
+                                decodeMinFraction: DecodeCoverageMinFraction,
                                 fingerprintOk: fingerprintV1 != null,
                                 shaOk: !string.IsNullOrEmpty(audioStreamSha256),
                                 tagsExpected: true, tagsOk: tags.DurationMs > 0,
@@ -4610,7 +4610,7 @@ namespace Truedat
                                 essentiaOk: true,
                                 decodedSec: feat.AnalyzedLengthSec,
                                 claimedSec: t.TotalTimeMs > 0 ? t.TotalTimeMs / 1000.0 : 0.0,
-                                decodeMinFraction: 0.95,
+                                decodeMinFraction: DecodeCoverageMinFraction,
                                 fingerprintOk: fingerprintV1 != null,
                                 shaOk: !string.IsNullOrEmpty(audioStreamSha256),
                                 tagsExpected: false, tagsOk: true,   // MoodsMode: XML supplies metadata
@@ -8143,8 +8143,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
 
-            long ticks = Stopwatch.GetTimestamp() - analyzeStart;
             var (features, error) = essentiaTask.Result;
+
+            // Under-decode recovery. Essentia produced features but its internal libav
+            // decoded only a fraction of the track (WMA Lossless: rejects every packet as
+            // "Invalid data" and bails after ~15%; the full ffmpeg on PATH decodes it whole).
+            // Left alone, the scan-health gate below fails it as "truncated" and drops the
+            // entry — even though the file is fine. Reference duration = the caller's known
+            // (iTunes-XML) duration when present, else TagLib's from the fingerprint (reliable
+            // in every scan mode). Transcode to WAV and re-analyze; keep the retry only if it
+            // decoded materially more, so a genuinely truncated source (whose transcode is
+            // also short) still fails the gate downstream rather than being papered over.
+            {
+                double refDurSec = knownDurationSec > 0
+                    ? knownDurationSec
+                    : (fingerprintTask.Result?.DurationMs ?? 0) / 1000.0;
+                if (ShouldRetryUnderDecode(features?.AnalyzedLengthSec, refDurSec, DecodeCoverageMinFraction)
+                    && _ffmpegPath.Value != null)
+                {
+                    var wavPath = DownmixToStereo(readPath);
+                    if (wavPath != null)
+                    {
+                        try
+                        {
+                            Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {features!.AnalyzedLengthSec:F0}s of {refDurSec:F0}s)");
+                            var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length, ct);
+                            if (retry.Features?.AnalyzedLengthSec is double got
+                                && got > features!.AnalyzedLengthSec)
+                                (features, error) = retry;
+                        }
+                        finally { try { File.Delete(wavPath); } catch { } }
+                    }
+                }
+            }
+
+            long ticks = Stopwatch.GetTimestamp() - analyzeStart;
             var (sha, shaSource) = audioStreamSha256Task.Result;
             var (hfRatio, hfMethod, hfStructure, hfNotApplicable) = hfEnergyTask.Result;
             return new WorkerResults
@@ -9074,6 +9107,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     var (pass, _) = ClassifyTrackHealth(true, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
                     Assert(pass, "classify: decoded=null skips the decode gate");
+                }
+                // under-decode retry decision (mirrors the decode gate; the transcode itself is
+                // integration-proven on a real WMA-Lossless file, not unit-tested here)
+                {
+                    // WMA-Lossless shape: essentia read 46s of a 299s file -> retry
+                    Assert(ShouldRetryUnderDecode(46.2, 299.24, 0.95), "retry: 46s of 299s triggers a transcode-retry");
+                    // full decode -> no retry
+                    Assert(!ShouldRetryUnderDecode(299.24, 299.24, 0.95), "retry: full decode does not retry");
+                    // no decoded length / no reference -> no basis to retry
+                    Assert(!ShouldRetryUnderDecode(null, 299.24, 0.95), "retry: null decoded length never retries");
+                    Assert(!ShouldRetryUnderDecode(46.2, 0.0, 0.95), "retry: no reference duration never retries");
+                    // boundary: 0.95 * 299.24 = 284.278 — just under retries, just over does not
+                    Assert(ShouldRetryUnderDecode(283.0, 299.24, 0.95), "retry: 283s (<95%) retries");
+                    Assert(!ShouldRetryUnderDecode(285.0, 299.24, 0.95), "retry: 285s (>95%) does not retry");
                 }
                 // applicability negatives: not-applicable bitUsage/hf are NOT failures
                 {
@@ -11473,6 +11520,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (hfApplicable && !hfOk) failed.Add("hf");
             return (failed.Count == 0, failed);
         }
+
+        /// <summary>Shared decode-coverage threshold. A track whose Essentia decoded length
+        /// covers less than this fraction of its real duration is treated as under-decoded:
+        /// the scan-health gate fails it, and the worker fan-out retries it via an ffmpeg
+        /// transcode first. Both use this one value so every gate-failing file gets a retry.</summary>
+        internal const double DecodeCoverageMinFraction = 0.95;
+
+        /// <summary>True when Essentia's decoded length falls short of the reference duration by
+        /// more than the coverage threshold — the signal to transcode the source to WAV and
+        /// re-analyze. Some codecs (e.g. WMA Lossless) defeat Essentia's internal libav — it
+        /// rejects the packets as "Invalid data" and bails after a fraction — yet decode fully
+        /// through the full ffmpeg on PATH. A null decoded length or non-positive reference means
+        /// "no basis to judge" → false (never retry blindly).</summary>
+        internal static bool ShouldRetryUnderDecode(double? decodedSec, double refDurationSec, double minFraction)
+            => decodedSec is double d && refDurationSec > 0 && d < minFraction * refDurationSec;
 
         /// <summary>The `--preview` Estimate line for the no-ETA case. A negative EtaSecs means
         /// two very different things and must not share one message (I3): when there is no new
