@@ -2,11 +2,22 @@
 
 ## Queued work — next sprint
 
-1. **Mood diff engine** (deferred from the 2026-07-30 sprint by operator call) —
-   early design. Answer "what is actually different between two machines'
-   libraries" (dir vs MusicBee vs iTunes XML vs mbxmoods.json all disagree on
-   counts). Possibly a Python diag script first, possibly Beyond Compare
-   integration; productize later if it earns it.
+1. **diffycat — cross-copy Library Reconcile** (was "mood diff engine"; **spec-ready,
+   queued for next sprint**). Answer "what is actually different between the 5–6
+   `robocopy /MIR` mirror libraries" whose counts disagree (filesystem vs MusicBee vs
+   iTunes XML vs `mbxmoods.json`). Read-only `truedat --inventory` + `--reconcile`: a
+   **single ledger that explains every count gap**, filesystem-anchored (canonical relpath
+   + `audioStreamSha256`), audio-identity + SMFM-from-catalog **drift explainer**
+   (audio-identical metadata drift → transplant, SMFM outranks tags; vs real audio
+   divergence), and a `reconcile-decisions.json` (exclude-file idiom) that converges the
+   ledger to zero. Sync stays **outside** the binary (robocopy + SMFM transplant), proven
+   by re-reconcile-to-zero. Guardrail: single ledger, offline/static files, no DB/federation
+   (the 2026-05-04 decouple lesson). **L0 filesystem + SMFM/audio drift explainer = MVP;**
+   L1 tag-content diff deferred. Spec:
+   `docs/superpowers/specs/2026-08-02-library-reconcile-design.md`; resume:
+   `docs/SESSION-RESUME-2026-08-03-diffycat.md`. **Next step:** invoke writing-plans at
+   sprint start (Beyond Compare / Python-diag options considered and set aside — it's a
+   truedat mode).
 
 The rest of the 2026-07-30 queue shipped (pushed through `562d09c`): T6 ffmpeg
 `ApplyCpuLimit`, T1 `Monitor.TryEnter` periodic save + separate errors-CSV lock,

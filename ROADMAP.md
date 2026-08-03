@@ -38,6 +38,19 @@ reconciliation across library copies (e.g. treating enriched tags like SMFM as a
 syncable field) rather than re-copying audio — read/detect in Truedat, apply outside
 the read-only binary.
 
+*Now (5.4.x) — **diffycat**.* The concrete build of this direction (productizes the
+BACKLOG "mood diff engine" item): a read-only **cross-copy reconcile** for the operator's
+5–6 `robocopy /MIR` mirror libraries whose counts disagree. Inventory each copy, diff them
+into a **single ledger** that explains every count gap (filesystem vs MusicBee vs iTunes XML
+vs `mbxmoods.json`), bucket the differences, and drive the copies back into agreement.
+Filesystem is the anchor (canonical relpath + `audioStreamSha256`); the drift explainer splits
+audio-identical metadata drift (transplant, e.g. SMFM — which outranks a tag change) from real
+audio divergence. Sync stays outside the binary (robocopy + the SMFM block transplant), proven
+by re-reconcile-to-zero. Single ledger, offline/static files, no DB/federation — the discipline
+the 2026-05-04 decouple cut enforced. L0 filesystem + SMFM/audio drift explainer is the MVP;
+L1 tag-content diff is deferred. Spec:
+`docs/superpowers/specs/2026-08-02-library-reconcile-design.md`.
+
 **5. Scan policy — shipped, expanding.**
 Truedat used to guess which files not to analyse: a podcast label, an embedded marker,
 a genre string. Every guess was wrong for someone, and two of them were walked back
