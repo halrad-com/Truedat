@@ -629,6 +629,8 @@ namespace Truedat
             Console.WriteLine("  --max-duration <s>  Max track length in seconds for Essentia analysis (default 48000 = 800 min,");
             Console.WriteLine("                      the large-buffer extractor's ChordsDetection ceiling; pass 12000 if running");
             Console.WriteLine("                      the old small-buffer .1 extractor — see essentia-build/OUTPUT-BUILDS.md)");
+            Console.WriteLine($"  --enableshortfiles  Scan very short files too. By default files under {ShortFileMaxSecs}s are skipped");
+            Console.WriteLine("                      (silent spacers / sub-second junk), ledgered to mbxmoods-skipped.csv.");
             Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
             Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
             Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
@@ -706,7 +708,7 @@ namespace Truedat
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "refresh", "refresh-features", "pause", "allow-sleep",
-            "stage-dir", "max-duration", "no-bitusage", "no-hf-analysis", "version", "v",
+            "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
         };
 
@@ -945,6 +947,11 @@ namespace Truedat
         // caches stay valid. Opt in per session to chew through coverage
         // incrementally (resumable: progress saves every 25 analyzed tracks).
         internal static bool _refreshFeatures;
+
+        // --enableshortfiles: scan very short files that are skipped by default. Off by
+        // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
+        // skipped structurally so they don't churn Essentia or clutter mbxmoods-errors.csv.
+        internal static bool _enableShortFiles;
 
         // --accept-flac-tag-drift (--verify --backfill only): re-key FLAC entries
         // whose stored sha predates the flac-frames algorithm AND whose tags were
@@ -2012,6 +2019,7 @@ namespace Truedat
                 else if (canonical == "refresh" || canonical == "refresh-features") _refreshFeatures = true;   // --refresh-features kept as an undocumented alias
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "allow-sleep") _allowSleep = true;
+                else if (canonical == "enableshortfiles") _enableShortFiles = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -4039,7 +4047,7 @@ namespace Truedat
                     // Still an upper bound — the sha/head cache tiers catch more hits at scan
                     // time, which needs IO this pre-flight avoids (hence "up to" in the print).
                     bool current = allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentFeatures(etaEntry.Features);
-                    if (!IsAnalysisCandidate(current, StructuralSkipReason(tt.Location), OverLengthSkipReason(tt.TotalTimeMs / 1000, _maxEssentiaDurationSecs)))
+                    if (!IsAnalysisCandidate(current, StructuralSkipReason(tt.Location), OverLengthSkipReason(tt.TotalTimeMs / 1000, _maxEssentiaDurationSecs) ?? ShortFileSkipReason(tt.TotalTimeMs / 1000, _enableShortFiles, ShortFileMaxSecs)))
                         continue;
                     etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs;
                 }
@@ -4103,6 +4111,7 @@ namespace Truedat
             int skipped = 0;
             int dsdSkipped = 0;
             int overLengthSkipped = 0;
+            int shortSkipped = 0;
             int missingSkipped = 0;
             int failed = 0;
             int timedOut = 0;
@@ -4619,6 +4628,19 @@ namespace Truedat
                             return;
                         }
 
+                        // Very short files (silent spacers, sub-second junk) are skipped by
+                        // default; --enableshortfiles includes them. Structural, like over-length.
+                        var shortReason = ShortFileSkipReason(trackDurationSecs, _enableShortFiles, ShortFileMaxSecs);
+                        if (shortReason != null)
+                        {
+                            AppendSkipped(skippedPath, t.Location, GetExtensionSafe(t.Location), shortReason);
+                            Console.WriteLine($"[skipped short-file] {t.Location} ({shortReason})");
+                            Interlocked.Increment(ref shortSkipped);
+                            EtaDrainNewPool();
+                            trackClass = "skip·short";
+                            return;
+                        }
+
                         // Cache miss — full Essentia + ride-along, all reads through the
                         // staged copy (FIX 4 / FIX 7). Wall-clock per track ≈ max(analysis,
                         // slowest-task).
@@ -4865,6 +4887,8 @@ namespace Truedat
                 Console.WriteLine($"  Skipped (structural): {dsdSkipped}  (DSD / video / playlist — see mbxmoods-skipped.csv)");
             if (overLengthSkipped > 0)
                 Console.WriteLine($"  Over-length: {overLengthSkipped}  (exceeds --max-duration ceiling — see mbxmoods-skipped.csv)");
+            if (shortSkipped > 0)
+                Console.WriteLine($"  Short files: {shortSkipped}  (under {ShortFileMaxSecs}s — see mbxmoods-skipped.csv; --enableshortfiles to include)");
             if (missingSkipped > 0)
                 Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
@@ -11099,6 +11123,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(OverLengthSkipReason(90, 30)!.Contains("30 s"), "overlength: sub-minute ceiling shows seconds, not '0 min' (M8)");
             }
 
+            // --- very short files are skipped by default; --enableshortfiles includes them ---
+            {
+                Assert(ShortFileSkipReason(3, false, 5) != null, "shortfile: a 3s track (< 5s) is skipped by default");
+                Assert(ShortFileSkipReason(3, false, 5)!.Contains("--enableshortfiles"), "shortfile: reason names the override flag");
+                Assert(ShortFileSkipReason(5, false, 5) == null, "shortfile: exactly at the threshold scans (strict <)");
+                Assert(ShortFileSkipReason(10, false, 5) == null, "shortfile: a 10s track (>= 5s) scans");
+                Assert(ShortFileSkipReason(3, true, 5) == null, "shortfile: --enableshortfiles scans short files");
+                Assert(ShortFileSkipReason(0, false, 5) == null, "shortfile: unknown duration (0) is not assumed short");
+            }
+
             // --- --preview no-ETA line distinguishes "nothing new" from "no history" (I3) ---
             {
                 Assert(PreviewNoEtaReason(0) == "nothing new to analyze", "preview-eta: New:0 says nothing new to analyze, not 'not estimable' (I3)");
@@ -11772,6 +11806,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // seconds below a minute so a small --max-duration reads honestly.
             string Dur(int s) => s < 60 ? $"{s} s" : $"{s / 60.0:F0} min";
             return $"over max duration: {Dur(trackDurationSecs)} > {Dur(maxDurationSecs)} ceiling (--max-duration to override)";
+        }
+
+        /// <summary>Default threshold for the short-file skip: tracks strictly shorter than
+        /// this many seconds are skipped unless --enableshortfiles is set.</summary>
+        internal const int ShortFileMaxSecs = 5;
+
+        /// <summary>Reason string for a very short track skipped by default, or null when it
+        /// should be scanned. A file under <paramref name="minSecs"/> seconds (silent spacers,
+        /// sub-second junk) is skipped unless <paramref name="enableShortFiles"/> is set
+        /// (--enableshortfiles). Like the over-length skip this is STRUCTURAL — ledgered to
+        /// mbxmoods-skipped.csv, never mbxmoods-errors.csv, so a later --enableshortfiles run
+        /// re-evaluates it. A 0/unknown duration is NOT treated as short (only a known,
+        /// positive, sub-threshold duration skips). Strict &lt;: exactly at the threshold scans.</summary>
+        internal static string? ShortFileSkipReason(int trackDurationSecs, bool enableShortFiles, int minSecs)
+        {
+            if (enableShortFiles || minSecs <= 0) return null;
+            if (trackDurationSecs > 0 && trackDurationSecs < minSecs)
+                return $"short file: {trackDurationSecs} s < {minSecs} s min (--enableshortfiles to include)";
+            return null;
         }
 
         /// <summary>Binary per-track health (2026-07-30, "no silent failures"). A track
