@@ -164,8 +164,10 @@ namespace Truedat
         // as HfEnergyRatio (sourceSampleRate > 44100 + ffmpeg present).
         public HfSpectralStructure? HfSpectralStructure { get; set; }
 
-        // Sony SMFM (12-TONE) — read fresh on every scan (MC analyses files progressively).
-        // Not stored in the Essentia cache; never copied in RebuildCacheEntryCore.
+        // Sony SMFM (12-TONE). Read fresh on a cache MISS (from the staged copy); on a cache
+        // HIT it is carried forward by RebuildCacheEntryCore (2026-08-04) rather than re-read,
+        // since an unchanged mtime means the SMFM tag is unchanged too — saves a per-file
+        // network header open. --refresh-smfm forces a re-read on hits to backfill.
         public int[]?   SmfmScores;         // raw STMO slot scores 0-255, null when no MC analysis
         public int?     SmfmChannel;        // dominant raw STMO slot index (argmax) — NOT a mood channel
         public string?  SmfmChannelName;    // device-refuted slot label; always null now (see SmfmReader)
@@ -631,6 +633,8 @@ namespace Truedat
             Console.WriteLine("                      the old small-buffer .1 extractor — see essentia-build/OUTPUT-BUILDS.md)");
             Console.WriteLine($"  --enableshortfiles  Scan very short files too. By default files under {ShortFileMaxSecs}s are skipped");
             Console.WriteLine("                      (silent spacers / sub-second junk), ledgered to mbxmoods-skipped.csv.");
+            Console.WriteLine("  --refresh-smfm      Re-read Sony 12-TONE (SMFM) on cache hits. Default: hits reuse the stored");
+            Console.WriteLine("                      SMFM (no per-file read). Use after upgrading the reader / bulk-tagging.");
             Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
             Console.WriteLine("                      A review prompt only — it never excludes anything by itself.");
             Console.WriteLine("  --no-stage          Disable UNC source staging; workers read source directly");
@@ -707,7 +711,7 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
-            "accept-flac-tag-drift", "refresh", "refresh-features", "pause", "allow-sleep",
+            "accept-flac-tag-drift", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
         };
@@ -952,6 +956,12 @@ namespace Truedat
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
         // skipped structurally so they don't churn Essentia or clutter mbxmoods-errors.csv.
         internal static bool _enableShortFiles;
+
+        // --refresh-smfm: force SMFM to be re-read on cache hits (the pre-2026-08-04 behavior).
+        // Default off — cache hits carry the stored SMFM forward (RebuildCacheEntryCore) instead
+        // of a per-file network header open. Use once after upgrading the SMFM reader or
+        // bulk-tagging files, to backfill SMFM onto unchanged entries.
+        internal static bool _refreshSmfm;
 
         // --accept-flac-tag-drift (--verify --backfill only): re-key FLAC entries
         // whose stored sha predates the flac-frames algorithm AND whose tags were
@@ -2020,6 +2030,7 @@ namespace Truedat
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "enableshortfiles") _enableShortFiles = true;
+                else if (canonical == "refresh-smfm") _refreshSmfm = true;
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -3485,7 +3496,7 @@ namespace Truedat
                                     var flMtimeEntry = RebuildCacheEntryFromTags(
                                         fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                         freshTags.Genre, fullPath, currentLastMod, null, null);
-                                    var flMtimeSmfmTag = ApplySmfmInPlace(flMtimeEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                    var flMtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(flMtimeEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                     if (flMtimeSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flMtimeEntry;
                                     Interlocked.Increment(ref flProcessed);
@@ -3512,7 +3523,7 @@ namespace Truedat
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, null, flQuickFp);
                                         flHeadEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
-                                        var flHeadSmfmTag = ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                        var flHeadSmfmTag = _refreshSmfm && ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flHeadSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flHeadEntry;
                                         Interlocked.Increment(ref flProcessed);
@@ -3546,7 +3557,7 @@ namespace Truedat
                                                 fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                                 freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
                                         if (!_fileMd5Enabled) flShaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                        var flShaPathSmfmTag = ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
+                                        var flShaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
                                         Interlocked.Increment(ref flProcessed);
@@ -3581,7 +3592,7 @@ namespace Truedat
                                             xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
                                     if (!_fileMd5Enabled) flCrossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                    var flCrossShaSmfmTag = ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                    var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
                                     RemoveIfMoved(flMoodsTracks, xs.OldKey!);
@@ -4414,7 +4425,7 @@ namespace Truedat
                                             }
                                         }
                                         var mtimeEntry = RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, null, backfilledSha, backfilledShaSource);
-                                        var mtimeSmfmTag = ApplySmfmInPlace(mtimeEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
+                                        var mtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(mtimeEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                         if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
                                         Interlocked.Increment(ref cachedCount);
@@ -4448,7 +4459,7 @@ namespace Truedat
                                             {
                                                 var headEntry = RebuildCacheEntry(existing, t, currentLastMod, null, msQuickFp);
                                                 headEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
-                                                var headSmfmTag = ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                var headSmfmTag = _refreshSmfm && ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = headEntry;
                                                 Interlocked.Increment(ref cachedCount);
@@ -4492,7 +4503,7 @@ namespace Truedat
                                                     ? RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
                                                     : RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
                                                 if (!_fileMd5Enabled) shaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                                var shaPathSmfmTag = ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                var shaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
                                                 Interlocked.Increment(ref cachedCount);
@@ -4529,7 +4540,7 @@ namespace Truedat
                                                 {
                                                     var rekeyEntry = RebuildCacheEntry(existing, t, currentLastMod, bodyHashes.md5, rescueFp, recomputedSha, "flac-frames");
                                                     if (!_fileMd5Enabled) rekeyEntry.FileMd5 = null;
-                                                    var rekeySmfmTag = ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
+                                                    var rekeySmfmTag = _refreshSmfm && ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                     if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                     allTracks[t.Location] = rekeyEntry;
                                                     Interlocked.Increment(ref cachedCount);
@@ -4585,7 +4596,7 @@ namespace Truedat
                                             ? RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                             : RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
                                         if (!_fileMd5Enabled) crossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
-                                        var crossShaSmfmTag = ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                        var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
                                         RemoveIfMoved(allTracks, xs.OldKey!);
@@ -9273,6 +9284,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(GateClaimedSec(0, 224400) == 224.4, "gate-dur: zero fingerprint falls back to XML");
                 // neither available -> 0 so the caller's decode gate can't fire
                 Assert(GateClaimedSec(null, 0) == 0.0, "gate-dur: no duration at all -> 0 (gate cannot fire)");
+            }
+
+            // --- SMFM is carried across cache hits (so it needn't be re-read from the file) ---
+            {
+                var smfmSrc = new TrackEntry { Features = new TrackFeatures { SmfmScores = new[] { 10, 20, 30 }, SmfmChannel = 2, SmfmBpm = 128.5 } };
+                var rebuilt = RebuildCacheEntryCore(smfmSrc, 1, "A", "T", "Al", "G", "p", DateTime.UtcNow, null, null);
+                Assert(rebuilt.Features.SmfmScores != null && rebuilt.Features.SmfmScores.Length == 3 && rebuilt.Features.SmfmScores[1] == 20,
+                    "smfm-cache: RebuildCacheEntryCore carries SmfmScores forward");
+                Assert(rebuilt.Features.SmfmChannel == 2, "smfm-cache: carries SmfmChannel forward");
+                Assert(rebuilt.Features.SmfmBpm == 128.5, "smfm-cache: carries SmfmBpm forward");
             }
 
             // --- duration throughput: Nx realtime arithmetic ---
@@ -14657,6 +14678,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
                     HfEnergyMethod = sf.HfEnergyMethod,
                     HfSpectralStructure = sf.HfSpectralStructure,    // Phase 5 — preserve across cache hits
+                    // SMFM carried across cache hits (2026-08-04): a re-tag bumps the mtime so an
+                    // added SMFM tag lands as a cache MISS and is read fresh; on a HIT the file is
+                    // unchanged, so the stored SMFM is still current. Skips a per-file network
+                    // header open. --refresh-smfm forces a re-read on hits to backfill.
+                    SmfmScores = sf.SmfmScores,
+                    SmfmChannel = sf.SmfmChannel,
+                    SmfmChannelName = sf.SmfmChannelName,
+                    SmfmBpm = sf.SmfmBpm,
                 },
                 LastModified = newLastMod,
                 AnalysisDurationSecs = source.AnalysisDurationSecs,
