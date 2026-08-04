@@ -3768,9 +3768,12 @@ namespace Truedat
 
             // --fixup --remap "<old>=<new>" — wholesale prefix swap on mbxmoods.json keys,
             // no iTunes XML required. Positional arg is the moods file path directly
-            // (defaults to ./mbxmoods.json when omitted). Use case: library scanned at
-            // one path (e.g. local copy at D:\Music\) needs to be re-keyed to a different
-            // root (e.g. \\nas\share\Music\) so a downstream consumer reads the right paths.
+            // (defaults to ./mbxmoods.json when omitted) — point it at mbxmoods.json, NOT
+            // the iTunes XML. Handing it the XML is a usage error; RunFixupRemap refuses a
+            // non-JSON file with a clear message rather than crashing on the parse. Use case:
+            // library scanned at one path (e.g. local copy at D:\Music\) needs to be re-keyed
+            // to a different root (e.g. \\nas\share\Music\) so a downstream consumer reads the
+            // right paths.
             if (fixupMode && !string.IsNullOrEmpty(remapPrefix))
             {
                 var parts = remapPrefix!.Split(new[] { '=' }, 2);
@@ -3824,7 +3827,7 @@ namespace Truedat
             if (migrateMode) modeList.Add("migrate");
             if (fixupMode) modeList.Add("fixup");
             if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode)) modeList.Add("analyze");
-            Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}");
+            Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}{(_refreshFeatures ? " | Refresh" : "")}");
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
@@ -4674,7 +4677,7 @@ namespace Truedat
                             var (healthPass, healthFailed) = ClassifyTrackHealth(
                                 essentiaOk: true,
                                 decodedSec: feat.AnalyzedLengthSec,
-                                claimedSec: t.TotalTimeMs > 0 ? t.TotalTimeMs / 1000.0 : 0.0,
+                                claimedSec: GateClaimedSec(fingerprintV1?.DurationMs, t.TotalTimeMs),
                                 decodeMinFraction: DecodeCoverageMinFraction,
                                 fingerprintOk: fingerprintV1 != null,
                                 shaOk: !string.IsNullOrEmpty(audioStreamSha256),
@@ -5564,9 +5567,23 @@ namespace Truedat
             if (string.Equals(oldPrefix, newPrefix, StringComparison.Ordinal))
             { Console.WriteLine("Old prefix equals new prefix; nothing to do."); return; }
 
-            var json = File.ReadAllText(moodsPath);
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
-            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            JsonObject? root;
+            try
+            {
+                var json = File.ReadAllText(moodsPath);
+                root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            }
+            catch (JsonException)
+            {
+                // A non-JSON file (e.g. the iTunes XML mistakenly handed to remap) gets a
+                // clean message + exit 2, never an unhandled JsonReaderException.
+                Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
+                Console.WriteLine("  --remap operates on mbxmoods.json — point it at your mbxmoods.json file,");
+                Console.WriteLine("  not the iTunes XML.");
+                Environment.ExitCode = 2;
+                return;
+            }
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
@@ -9222,6 +9239,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
+            // --- scan health: gate reference duration prefers the file over the XML claim ---
+            {
+                // fingerprint (file) duration wins over a wrong/inflated XML Total Time — this
+                // is the fix for the decode-NN% false-fail flip-flop.
+                Assert(GateClaimedSec(224400, 999000) == 224.4, "gate-dur: uses fingerprint duration over the XML claim");
+                // no fingerprint -> fall back to the XML claim (entry already fails on missing fingerprint)
+                Assert(GateClaimedSec(null, 224400) == 224.4, "gate-dur: no fingerprint falls back to XML");
+                Assert(GateClaimedSec(0, 224400) == 224.4, "gate-dur: zero fingerprint falls back to XML");
+                // neither available -> 0 so the caller's decode gate can't fire
+                Assert(GateClaimedSec(null, 0) == 0.0, "gate-dur: no duration at all -> 0 (gate cannot fire)");
+            }
+
             // --- duration throughput: Nx realtime arithmetic ---
             {
                 Assert(Math.Abs(RealtimeFactorFrom(120_000, 10.0) - 12.0) < 1e-9,
@@ -11783,6 +11812,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// the scan-health gate fails it, and the worker fan-out retries it via an ffmpeg
         /// transcode first. Both use this one value so every gate-failing file gets a retry.</summary>
         internal const double DecodeCoverageMinFraction = 0.95;
+
+        /// <summary>Reference duration for the scan-health decode gate: the file's OWN
+        /// duration (its fingerprint / TagLib DurationMs), not the iTunes XML Total Time.
+        /// MusicBee's XML claim can be wrong or inflated, which false-failed correctly-decoded
+        /// files as decode-NN% — they then land in mbxmoods-errors.csv and never clear
+        /// (the retry-errors/refresh flip-flop). The fingerprint duration is read from the
+        /// file, so it matches what Essentia decodes; fall back to the XML claim only when no
+        /// fingerprint was produced (in which case the gate already fails the entry on the
+        /// missing fingerprint anyway). This aligns the gate with the under-decode retry,
+        /// which already references the fingerprint duration. Truncation detection is
+        /// preserved for the case that motivated the gate — a file whose header still claims
+        /// the full length while only part decodes (ABBA: 62s of a claimed 224s) — because the
+        /// fingerprint reads that same overstated header.</summary>
+        internal static double GateClaimedSec(int? fingerprintDurationMs, int xmlTotalTimeMs)
+        {
+            if (fingerprintDurationMs.HasValue && fingerprintDurationMs.Value > 0)
+                return fingerprintDurationMs.Value / 1000.0;
+            return xmlTotalTimeMs > 0 ? xmlTotalTimeMs / 1000.0 : 0.0;
+        }
 
         /// <summary>True when Essentia's decoded length falls short of the reference duration by
         /// more than the coverage threshold — the signal to transcode the source to WAV and
