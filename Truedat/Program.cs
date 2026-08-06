@@ -1549,6 +1549,50 @@ namespace Truedat
         }
 
         /// <summary>
+        /// A path a user typed can arrive already corrupted by the console code page: paste a
+        /// UTF-8 path into a CP437 cmd window and each byte is rendered as its CP437 glyph, so
+        /// "ΛΜΝ" (UTF-8 bytes CE 9B CE 9C CE 9D) reaches us as "╬¢╬£╬¥". We cannot recover the
+        /// original from GetCommandLineW — Windows already handed us the mangled string — but the
+        /// mangling is reversible: map each char back to its CP437 byte and decode the byte stream
+        /// as UTF-8. Returns false for anything that isn't cleanly CP437-single-byte + valid UTF-8
+        /// (which includes ordinary ASCII paths — they round-trip to themselves, and callers gate
+        /// on the reconstruction differing from the input).
+        /// </summary>
+        internal static bool TryReconstructFromCp437(string path, out string reconstructed)
+        {
+            reconstructed = path;
+            if (string.IsNullOrEmpty(path)) return false;
+            try
+            {
+                var cp437 = Encoding.GetEncoding(437, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+                byte[] bytes = cp437.GetBytes(path);                       // char -> its CP437 byte (throws if unmappable)
+                reconstructed = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes); // reinterpret as UTF-8 (throws if invalid)
+                return true;
+            }
+            catch { reconstructed = path; return false; }
+        }
+
+        /// <summary>
+        /// A stderr hint to append after a "path not found" for a user-supplied path, when the path
+        /// looks like console-code-page garble. If the CP437->UTF-8 reconstruction names a path that
+        /// actually EXISTS (per <paramref name="exists"/>), suggest it outright — that is almost
+        /// certainly what the operator meant. Otherwise, if the path carries any non-ASCII char,
+        /// point at the fix. Returns null when there is nothing useful to say (a plain ASCII typo),
+        /// so callers can guard with `if (h != null)`.
+        /// </summary>
+        internal static string? PathCodepageHint(string path, Func<string, bool> exists)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            if (TryReconstructFromCp437(path, out var fixedPath) && fixedPath != path && exists(fixedPath))
+                return $"  Did you mean: {fixedPath}\n" +
+                       "  The path looks garbled by the console code page. Run 'chcp 65001' (UTF-8) or use Windows Terminal, then retry.";
+            if (path.Any(c => c > (char)127))
+                return "  The path contains non-ASCII characters and may be garbled by the console code page.\n" +
+                       "  Run 'chcp 65001' (UTF-8) or use Windows Terminal / PowerShell, then retry.";
+            return null;
+        }
+
+        /// <summary>
         /// A missing exclusion file is only benign at the DEFAULT (beside-the-moods-file)
         /// location — that's a legitimate fresh install with nothing excluded yet. An
         /// operator-named path via --exclusions is a deliberate ask; if it doesn't exist
@@ -2114,6 +2158,8 @@ namespace Truedat
             if (folderMode && !Directory.Exists(folderPath!))
             {
                 Console.Error.WriteLine($"Error: Folder not found: {folderPath}");
+                var folderHint = PathCodepageHint(folderPath!, Directory.Exists);
+                if (folderHint != null) Console.Error.WriteLine(folderHint);
                 Environment.ExitCode = 1;
                 return;
             }
@@ -2695,6 +2741,8 @@ namespace Truedat
                     AppendSkipped(Path.Combine(afMissDir, "mbxmoods-skipped.csv"),
                         analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), afMissReason);
                     Console.Error.WriteLine($"[skipped missing] {analyzeFilePath} ({afMissReason})");
+                    var afHint = PathCodepageHint(analyzeFilePath!, File.Exists);
+                    if (afHint != null) Console.Error.WriteLine(afHint);
                     Environment.ExitCode = 0;
                     return;
                 }
@@ -3090,6 +3138,8 @@ namespace Truedat
                 if (!File.Exists(fileListPath!))
                 {
                     Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
+                    var flHint = PathCodepageHint(fileListPath!, File.Exists);
+                    if (flHint != null) Console.Error.WriteLine(flHint);
                     Environment.ExitCode = 1;
                     return;
                 }
@@ -3339,6 +3389,8 @@ namespace Truedat
                     if (!File.Exists(fileListPath!))
                     {
                         Console.Error.WriteLine($"Error: File list not found: {fileListPath}");
+                        var flHint2 = PathCodepageHint(fileListPath!, File.Exists);
+                        if (flHint2 != null) Console.Error.WriteLine(flHint2);
                         Environment.ExitCode = 1;
                         return;
                     }
@@ -3813,6 +3865,8 @@ namespace Truedat
             {
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
                 Console.WriteLine("Probed: exe-dir parent, exe-dir, current working directory.");
+                var xmlHint = PathCodepageHint(xmlPath, File.Exists);
+                if (xmlHint != null) Console.WriteLine(xmlHint);
                 // Front page here is deliberate (changed from the full listing 2026-07-29,
                 // reviewer-flagged and ruled intended) — the front page points at
                 // --help all for the rest. Do not "fix" this back to PrintHelpAll().
@@ -8824,6 +8878,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var h2 = Fft.Hann(4096);
             Assert(ReferenceEquals(h1, h2), "Hann(4096) cached by size");
             Assert(Math.Abs(h1[0]) < 1e-12 && Math.Abs(h1[4095]) < 1e-12, "Hann tapers to 0 at both ends");
+
+            // --- Console code-page path reconstruction (CP437 garble -> UTF-8) ---
+            // The exact failure a beta user hit: a Greek folder pasted into a CP437 cmd window
+            // arrived as its UTF-8 bytes rendered one-per-CP437-glyph.
+            Assert(TryReconstructFromCp437("╬¢╬£╬¥", out var recGreek) && recGreek == "ΛΜΝ",
+                "CP437 garble reconstructs to the Greek original");
+            // Plain ASCII round-trips to itself, so the caller's `fixed != path` gate stays quiet.
+            Assert(TryReconstructFromCp437(@"C:\music\rock", out var recAscii) && recAscii == @"C:\music\rock",
+                "ASCII path round-trips unchanged");
+            // A char with no CP437 single-byte mapping cannot be reconstructed.
+            Assert(!TryReconstructFromCp437("日本", out _),
+                "non-CP437 char is not reconstructable");
+            // CP437-mappable but invalid UTF-8 (lone lead byte 0xCE) is rejected, not mis-decoded.
+            Assert(!TryReconstructFromCp437("╬", out _),
+                "CP437-mappable but invalid-UTF-8 is rejected");
+            // Hint selection: reconstructs to an EXISTING path -> "Did you mean" naming it.
+            var cpHitHint = PathCodepageHint("╬¢╬£╬¥", p => p == "ΛΜΝ");
+            Assert(cpHitHint != null && cpHitHint.Contains("Did you mean") && cpHitHint.Contains("ΛΜΝ"),
+                "hint suggests the reconstructed existing path");
+            // Non-ASCII path whose reconstruction doesn't exist -> generic chcp hint, no suggestion.
+            var cpGenHint = PathCodepageHint("café", _ => false);
+            Assert(cpGenHint != null && cpGenHint.Contains("chcp 65001") && !cpGenHint.Contains("Did you mean"),
+                "non-ASCII no-match falls back to the chcp hint");
+            // Plain ASCII not-found -> no code-page hint at all, so ordinary errors stay quiet.
+            Assert(PathCodepageHint(@"C:\nope\missing.xml", _ => false) == null,
+                "ASCII path yields no code-page hint");
 
             // 1 kHz sine at 44.1 kHz over 4096 samples → energy in bin ~93.
             const int N = 4096;
