@@ -952,6 +952,13 @@ namespace Truedat
         // incrementally (resumable: progress saves every 25 analyzed tracks).
         internal static bool _refreshFeatures;
 
+        // Diagnostic error log (mbxmoods-errors.<host>.log): human-readable, always-on
+        // companion to the CSV, one block per failure carrying the reason the CSV omits
+        // (e.g. WHY a fingerprint returned null). Appends with a per-run header; rotates
+        // the whole file to <log>.old once it reaches the cap (single generation).
+        internal static long ErrorLogMaxBytes = 5 * 1024 * 1024;   // static (not const) so the self-test can lower it
+        static bool _errorLogHeaderWritten;   // per run: header + rotation happen on the first failure logged
+
         // --enableshortfiles: scan very short files that are skipped by default. Off by
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
         // skipped structurally so they don't churn Essentia or clutter mbxmoods-errors.csv.
@@ -3969,6 +3976,8 @@ namespace Truedat
             var errorsPath = Path.Combine(outputDir, "mbxmoods-errors.csv");
             if (chunkHostSuffix != null)
                 errorsPath = InsertFilenameSuffix(errorsPath, chunkHostSuffix);
+            // Human-readable diagnostic log, same stem/suffix as the CSV (…-errors.<host>.log).
+            var errorsLogPath = Path.ChangeExtension(errorsPath, ".log");
             // Phase 5.1 — DSD/DSF skip ledger. Same dir / chunk-suffix convention
             // as errors.csv so two-machine scans don't stomp each other.
             var skippedPath = Path.Combine(outputDir, "mbxmoods-skipped.csv");
@@ -4746,6 +4755,7 @@ namespace Truedat
                             var err = msResults.EssentiaError ?? "Unknown error";
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, "essentia", errorsCsvLock);
+                            AppendErrorLog(errorsLogPath, "scan", t.Location, "essentia", null, err, null, null, null, errorsCsvLock);
                             Console.WriteLine($"  FAILED: {err}");
                             Interlocked.Increment(ref failed);
                             if (err.Contains("Timeout")) Interlocked.Increment(ref timedOut);
@@ -4777,6 +4787,9 @@ namespace Truedat
                                 var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                                 AppendError(errorsPath, t.Location, t.Artist, t.Name,
                                     $"analysis incomplete: {comps}", sizeMb, analyzeDuration.TotalSeconds, comps, errorsCsvLock);
+                                AppendErrorLog(errorsLogPath, "scan", t.Location, comps,
+                                    msResults.FingerprintError, null, feat.AnalyzedLengthSec,
+                                    GateClaimedSec(fingerprintV1?.DurationMs, t.TotalTimeMs), null, errorsCsvLock);
                                 Console.WriteLine($"  FAILED: {comps}");
                                 Interlocked.Increment(ref failed);
                                 trackClass = "skip·failed";
@@ -4874,6 +4887,7 @@ namespace Truedat
                         {
                             Console.WriteLine($"Error: {t.Artist} - {t.Name}: {ex.Message}");
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, ex.Message, 0, 0, "exception", errorsCsvLock);
+                            AppendErrorLog(errorsLogPath, "scan", t.Location, "exception", null, null, null, null, ex.Message, errorsCsvLock);
                         }
                         catch { }
                         Interlocked.Increment(ref failed);
@@ -8208,6 +8222,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             public string? EssentiaError;
             public string? FileMd5;
             public FingerprintV1? FingerprintV1;
+            public string? FingerprintError;   // ComputeFingerprintV1's reason when it returned null (for the diagnostic error log)
             public string? AudioStreamSha256;
             public string AudioStreamSha256Source = "";
             public FileTags? Tags;
@@ -8272,11 +8287,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var fingerprintTask = Task.Run(() =>
             {
                 var swFp = Stopwatch.StartNew();
-                var fp = ComputeFingerprintV1(readPath, fileSize, out _);
+                var fp = ComputeFingerprintV1(readPath, fileSize, out var fpErr);
                 swFp.Stop();
                 if (_audit)
                     Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{auditName}\"");
-                return fp;
+                return (fp, fpErr);
             });
             var audioStreamSha256Task = precomputedHashes != null
                 ? Task.FromResult((precomputedHashes.Value.sha, precomputedHashes.Value.src))
@@ -8328,7 +8343,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 double refDurSec = knownDurationSec > 0
                     ? knownDurationSec
-                    : (fingerprintTask.Result?.DurationMs ?? 0) / 1000.0;
+                    : (fingerprintTask.Result.fp?.DurationMs ?? 0) / 1000.0;
                 if (ShouldRetryUnderDecode(features?.AnalyzedLengthSec, refDurSec, DecodeCoverageMinFraction)
                     && _ffmpegPath.Value != null)
                 {
@@ -8356,7 +8371,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Features = features,
                 EssentiaError = error,
                 FileMd5 = fileMd5Task.Result,
-                FingerprintV1 = fingerprintTask.Result,
+                FingerprintV1 = fingerprintTask.Result.fp,
+                FingerprintError = fingerprintTask.Result.fpErr,
                 AudioStreamSha256 = sha,
                 AudioStreamSha256Source = shaSource,
                 Tags = tagsTask.Result,
@@ -8937,6 +8953,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "SaveResults (first save) writes and leaves no .bak");
             }
             finally { try { Directory.Delete(saveTestDir, true); } catch { } }
+
+            // --- diagnostic error log: format, reason capture, run-header-once, rotation ---
+            var elDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-errlog-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(elDir);
+            var elLock = new object();
+            try
+            {
+                // Format + fingerprint/essentia reason lines + exactly one run header for the run.
+                var elLog = Path.Combine(elDir, "mbxmoods-errors.log");
+                _errorLogHeaderWritten = false;
+                AppendErrorLog(elLog, "scan", @"C:\x\a.flac", "fingerprint;sha", "no audio properties", null, null, null, null, elLock);
+                AppendErrorLog(elLog, "scan", @"C:\x\b.flac", "essentia", null, "Timeout after 300s", null, null, null, elLock);
+                var elText = File.ReadAllText(elLog);
+                Assert(elText.Split(new[] { "=== run " }, StringSplitOptions.None).Length - 1 == 1,
+                    "errorlog: run header written once per run");
+                Assert(elText.Contains(@"FAIL  C:\x\a.flac") && elText.Contains("components: fingerprint;sha")
+                       && elText.Contains("fingerprint: no audio properties"),
+                    "errorlog: block carries file, components, and the fingerprint reason");
+                Assert(elText.Contains("essentia: Timeout after 300s"), "errorlog: essentia reason line emitted");
+
+                // Decode line appears only when the decode component actually fell short.
+                var elLog2 = Path.Combine(elDir, "dec.log");
+                _errorLogHeaderWritten = false;
+                AppendErrorLog(elLog2, "scan", @"C:\x\short.flac", "decode-27%", null, null, 62.4, 224.4, null, elLock);
+                AppendErrorLog(elLog2, "scan", @"C:\x\ok.flac", "sha", null, null, 224.0, 224.4, null, elLock);
+                var elText2 = File.ReadAllText(elLog2);
+                Assert(elText2.Contains("decode: 62.4s / 224.4s (27%)"), "errorlog: decode line shown when coverage is short");
+                Assert(elText2.Split(new[] { "decode:" }, StringSplitOptions.None).Length - 1 == 1,
+                    "errorlog: no decode line when coverage is fine");
+
+                // Size cap → rotate the whole file to .old (single generation), start fresh.
+                var elLog3 = Path.Combine(elDir, "rot.log");
+                File.WriteAllText(elLog3, new string('x', 4096));
+                var savedCap = ErrorLogMaxBytes;
+                ErrorLogMaxBytes = 100;
+                _errorLogHeaderWritten = false;
+                try { AppendErrorLog(elLog3, "scan", @"C:\x\c.flac", "fingerprint", "boom", null, null, null, null, elLock); }
+                finally { ErrorLogMaxBytes = savedCap; }
+                Assert(File.Exists(elLog3 + ".old") && File.ReadAllText(elLog3 + ".old").StartsWith("xxxx"),
+                    "errorlog: over-cap rotates old content to .old");
+                var rotText = File.ReadAllText(elLog3);
+                Assert(rotText.Contains("=== run ") && rotText.Contains(@"FAIL  C:\x\c.flac") && !rotText.Contains("xxxx"),
+                    "errorlog: fresh .log after rotation (header + new block, old content gone)");
+            }
+            finally { _errorLogHeaderWritten = false; try { Directory.Delete(elDir, true); } catch { } }
 
             // 1 kHz sine at 44.1 kHz over 4096 samples → energy in bin ~93.
             const int N = 4096;
@@ -12156,6 +12217,61 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     }
                     catch (Exception ex) { Console.WriteLine($"  Warning: Could not write to errors CSV: {ex.Message}"); return; }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Human-readable companion to <see cref="AppendError"/>: appends one diagnostic block per
+        /// failure to <c>mbxmoods-errors.&lt;host&gt;.log</c>, carrying the reason the CSV omits
+        /// (the fingerprint error, the Essentia error, the decode shortfall). On the first failure
+        /// of a run it writes a run header and, if the log is already at/over the cap, rotates the
+        /// whole file to <c>&lt;log&gt;.old</c> (single generation) and starts fresh. Best-effort:
+        /// a logging failure is swallowed — it must never break a scan. Only sub-lines with a value
+        /// are emitted; the decode line appears only when the decode component actually fell short.
+        /// </summary>
+        static void AppendErrorLog(string logPath, string mode, string filePath, string components,
+            string? fingerprintError, string? essentiaError, double? decodedSec, double? claimedSec,
+            string? detail, object lockObj)
+        {
+            lock (lockObj)
+            {
+                try
+                {
+                    if (!_errorLogHeaderWritten)
+                    {
+                        try
+                        {
+                            if (File.Exists(logPath) && new FileInfo(logPath).Length >= ErrorLogMaxBytes)
+                            {
+                                var old = logPath + ".old";
+                                try { File.Delete(old); } catch { }
+                                File.Move(logPath, old);
+                            }
+                        }
+                        catch { }
+                        _errorLogHeaderWritten = true;
+                        using (var hs = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                        using (var hw = new StreamWriter(hs, new UTF8Encoding(false)))
+                            hw.WriteLine($"=== run {DateTime.UtcNow:o} | mode: {mode} ===");
+                    }
+
+                    using (var fs = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                    using (var w = new StreamWriter(fs, new UTF8Encoding(false)))
+                    {
+                        w.WriteLine($"{DateTime.UtcNow:o}  FAIL  {filePath}");
+                        w.WriteLine($"    components: {components}");
+                        if (!string.IsNullOrEmpty(fingerprintError)) w.WriteLine($"    fingerprint: {fingerprintError}");
+                        if (!string.IsNullOrEmpty(essentiaError)) w.WriteLine($"    essentia: {essentiaError}");
+                        if (!string.IsNullOrEmpty(detail)) w.WriteLine($"    detail: {detail}");
+                        if (decodedSec.HasValue && claimedSec.HasValue && claimedSec.Value > 0)
+                        {
+                            int pct = (int)Math.Floor(decodedSec.Value / claimedSec.Value * 100.0);
+                            if (decodedSec.Value < DecodeCoverageMinFraction * claimedSec.Value)
+                                w.WriteLine($"    decode: {decodedSec.Value:F1}s / {claimedSec.Value:F1}s ({pct}%)");
+                        }
+                    }
+                }
+                catch { /* diagnostic log is best-effort; never break a scan over it */ }
             }
         }
 
