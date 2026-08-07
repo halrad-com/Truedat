@@ -8905,6 +8905,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Assert(PathCodepageHint(@"C:\nope\missing.xml", _ => false) == null,
                 "ASCII path yields no code-page hint");
 
+            // --- Crash-safe save: one transient .bak across the swap, cleaned up on success ---
+            var saveTestDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-save-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(saveTestDir);
+            try
+            {
+                // AtomicReplace with a backup slot: target becomes NEW, old content survives in .bak.
+                var arTgt = Path.Combine(saveTestDir, "t.txt");
+                var arTmp = arTgt + ".tmp";
+                var arBak = arTgt + ".bak";
+                File.WriteAllText(arTgt, "OLD");
+                File.WriteAllText(arTmp, "NEW");
+                AtomicReplace(arTmp, arTgt, arBak);
+                Assert(File.ReadAllText(arTgt) == "NEW" && File.Exists(arBak) && File.ReadAllText(arBak) == "OLD",
+                    "AtomicReplace(backup): target=new, old preserved in .bak");
+
+                // SaveResults over an existing catalog: replaced, and BOTH .tmp and .bak cleaned up.
+                var srMoods = Path.Combine(saveTestDir, "mbxmoods.json");
+                File.WriteAllText(srMoods, "{\"stale\":true}");
+                SaveResults(srMoods, new ConcurrentDictionary<string, TrackEntry>());
+                Assert(File.Exists(srMoods) && File.ReadAllText(srMoods).Contains("\"trackCount\": 0"),
+                    "SaveResults replaced the existing catalog");
+                Assert(!File.Exists(srMoods + ".tmp") && !File.Exists(srMoods + ".bak"),
+                    "SaveResults leaves no .tmp or .bak on success");
+
+                // SaveResults with no prior file (File.Move branch) also leaves no .bak.
+                var srFresh = Path.Combine(saveTestDir, "fresh", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(srFresh)!);
+                SaveResults(srFresh, new ConcurrentDictionary<string, TrackEntry>());
+                Assert(File.Exists(srFresh) && !File.Exists(srFresh + ".bak"),
+                    "SaveResults (first save) writes and leaves no .bak");
+            }
+            finally { try { Directory.Delete(saveTestDir, true); } catch { } }
+
             // 1 kHz sine at 44.1 kHz over 4096 samples → energy in bin ~93.
             const int N = 4096;
             const int Sr = 44100;
@@ -12133,24 +12166,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
             var tmpPath = moodsPath + ".tmp";
+            var bakPath = moodsPath + ".bak";
             try { File.Delete(tmpPath); } catch { }
 
             using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-            using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
             {
-                jw.WriteStartObject();
-                jw.WriteString("version", "1.0");
-                jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
-                jw.WriteNumber("trackCount", allTracks.Count);
-                jw.WritePropertyName("tracks");
-                jw.WriteStartObject();
-                foreach (var kvp in allTracks)
-                    WriteTrackEntry(jw, kvp.Key, kvp.Value);
-                jw.WriteEndObject();
-                jw.WriteEndObject();
+                using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+                {
+                    jw.WriteStartObject();
+                    jw.WriteString("version", "1.0");
+                    jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
+                    jw.WriteNumber("trackCount", allTracks.Count);
+                    jw.WritePropertyName("tracks");
+                    jw.WriteStartObject();
+                    foreach (var kvp in allTracks)
+                        WriteTrackEntry(jw, kvp.Key, kvp.Value);
+                    jw.WriteEndObject();
+                    jw.WriteEndObject();
+                }
+                // Force the new catalog to stable storage BEFORE the swap unlinks the old one.
+                // Without this, the rename can commit while the new file's tail is still in the
+                // OS write cache, so a power loss could leave a valid-length mbxmoods.json with a
+                // zeroed tail — and a scan save keeps no timestamped .bak to fall back to.
+                fs.Flush(flushToDisk: true);
             }
 
-            AtomicReplace(tmpPath, moodsPath);
+            // One transient backup across the swap window: ReplaceFile moves the OLD catalog to
+            // .bak (a rename, not a 374 MB copy) as it installs the new one, so a crash mid-swap
+            // still leaves a complete catalog under either mbxmoods.json or mbxmoods.json.bak. On
+            // success we delete it (no accumulation). A crash between the swap and this delete just
+            // leaves a stale .bak that the next save's pre-delete clears — and at that point the
+            // live file is already the new good catalog, so the leftover is redundant.
+            try { File.Delete(bakPath); } catch { }
+            AtomicReplace(tmpPath, moodsPath, bakPath);
+            try { File.Delete(bakPath); } catch { }
+
             if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {allTracks.Count} tracks)"); } catch { } }
         }
 
@@ -14910,12 +14960,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         /// <summary>
         /// Atomic file replacement — uses File.Replace on Windows (ReplaceFile API) which
-        /// ensures either the old or new file exists, never neither.
+        /// ensures either the old or new file exists, never neither. When <paramref name="backupPath"/>
+        /// is supplied and the target exists, ReplaceFile moves the OLD target aside to that path
+        /// as part of the swap (a rename, not a copy — free even for a large catalog), so the
+        /// previous contents survive a crash mid-replace; the caller is responsible for deleting
+        /// it once the swap has succeeded. With no target yet, there is nothing to back up.
         /// </summary>
-        internal static void AtomicReplace(string tmpPath, string targetPath)
+        internal static void AtomicReplace(string tmpPath, string targetPath, string? backupPath = null)
         {
             if (File.Exists(targetPath))
-                File.Replace(tmpPath, targetPath, null);
+                File.Replace(tmpPath, targetPath, backupPath);
             else
                 File.Move(tmpPath, targetPath);
         }
