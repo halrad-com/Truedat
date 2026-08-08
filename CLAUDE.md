@@ -317,8 +317,24 @@ local tidy-up:
 - **There is no `purge` mode, and there must not be one.** Nothing in truedat removes a catalog
   entry on a classification — that whole class was deleted in the Heuristics → Evidence arc.
   `--fixup` is the only mode that can cost an operator an entry, and it does so on ground truth
-  (`File.Exists` says the file is gone), not inference. Their contract briefly listed a `purge`
-  mode for truedat; it was removed on our correction. Do not implement one to satisfy a doc.
+  (`File.Exists` says the file is gone), not inference — and only once it has proven the file's
+  *volume* is reachable. A bare `File.Exists`/`Directory.Exists` false cannot tell "file deleted"
+  from "share offline", so before reconciling, `--fixup` probes each distinct library root once
+  with `ProbeRootReachable` (`File.GetAttributes`, which surfaces the OS error a downed share
+  throws instead of swallowing it to false) and **refuses the whole run** (exit 3, nothing written,
+  no backup churned) if any root is unreachable — an unmounted NAS must never read as a mass
+  deletion. The probe is **root-level, not file-level, on purpose**: network-down is a volume-wide
+  condition, so one probe of the share answers "is the NAS up right now" for every file on it, and
+  a healthy root always answers (so *any* error = unreachable, free of the file-level
+  deleted-vs-offline ambiguity). It also **re-probes the root at each gone-decision** so a NAS that
+  drops *mid-reconcile* aborts on the first file it touches after the drop, not just one that was
+  offline at start. A `MassOrphanImplausible` backstop refuses when a run would orphan more than
+  `MassOrphanFraction` (0.20) of the catalog above a floor (50) — the flaky-link / bulk-delete case
+  a per-volume probe can't see. `--force-clean` is the sole, deliberate override for all three
+  (unreachable-at-start, unreachable-mid-run, mass-orphan), for purging entries on a volume the
+  operator KNOWS is gone. Their contract briefly listed a `purge` mode for truedat; it was removed
+  on our correction. Do not implement one to satisfy a doc — `--force-clean` acts on ground truth
+  (the volume is unreachable *and* the operator asserted it), not on a classification.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 

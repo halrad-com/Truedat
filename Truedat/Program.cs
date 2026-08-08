@@ -573,6 +573,11 @@ namespace Truedat
             Console.WriteLine("                      (sensme*->smfm*). Creates a backup; never removes entries.");
             Console.WriteLine("  --fixup             Validate and remap paths in mbxmoods.json without re-analyzing.");
             Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
+            Console.WriteLine("                      Refuses if a library volume is unreachable (offline NAS) so an");
+            Console.WriteLine("                      unmounted share can't read as a mass deletion and gut the catalog.");
+            Console.WriteLine("  --force-clean       With --fixup: proceed even when a library root is unreachable or a");
+            Console.WriteLine("                      run would orphan most of the catalog. Purges entries for a volume you");
+            Console.WriteLine("                      KNOW is gone. Disables the offline-volume safety net — use deliberately.");
             Console.WriteLine("  --remap <old>=<new> With --fixup: wholesale prefix swap on mbxmoods.json keys. Pass the");
             Console.WriteLine("                      moods file as the positional arg (no iTunes XML needed). Example:");
             Console.WriteLine("                      truedat --fixup --remap \"D:\\Music\\=\\\\nas\\share\\Music\\\" mbxmoods.json");
@@ -711,7 +716,7 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
-            "accept-flac-tag-drift", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
+            "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit",
         };
@@ -977,6 +982,23 @@ namespace Truedat
         // the stored fingerprint. Opt-in because it trades certainty for avoiding a
         // mass re-analysis: a genuine same-props audio swap would slip through.
         internal static bool _acceptFlacTagDrift;
+
+        // --force-clean: opt out of the --fixup reachability safety net. By default a
+        // --fixup refuses when any library root is unreachable (probed up front AND
+        // re-probed at each gone-decision, so a NAS that drops mid-run is caught) or
+        // when a run would orphan an implausible share of the catalog — an offline
+        // volume must never read as a mass deletion. --force-clean asserts the operator
+        // WANTS those entries cleaned (a genuinely-removed drive), so it proceeds
+        // regardless. It disables the whole net; use only for a volume you know is gone.
+        internal static bool _forceClean;
+
+        // Fixup mass-orphan backstop: refuse (unless --force-clean) when a run would
+        // orphan more than MassOrphanFraction of the catalog AND more than the floor —
+        // the signature of a flaky link or an unintended bulk delete even when every
+        // volume root answered. Resolved-by-hash removals are SAFE (the audio survives
+        // elsewhere) and don't count; only orphaned entries drive it.
+        internal const double MassOrphanFraction = 0.20;
+        internal const int MassOrphanFloor = 50;
 
         // Whole-file MD5 maintenance. Default OFF: truedat never WRITES fileMd5 —
         // the worker fan-out task, tier-1 null backfill, tier-2/4 refreshes, and
@@ -2077,6 +2099,7 @@ namespace Truedat
                 else if (canonical == "exclude-playlist" && i + 1 < args.Length) _excludePlaylistPath = args[++i];
                 else if (canonical == "no-exclusions") _noExclusions = true;
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
+                else if (canonical == "force-clean") _forceClean = true;
                 else if (canonical == "refresh" || canonical == "refresh-features") _refreshFeatures = true;   // --refresh-features kept as an undocumented alias
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "allow-sleep") _allowSleep = true;
@@ -4991,13 +5014,20 @@ namespace Truedat
             {
                 long rtfMs = Interlocked.Read(ref _rtfAudioMs);
                 var avgLen = TimeSpan.FromMilliseconds((double)rtfMs / rtfTracks);
-                double rtfAudioSecs = rtfMs / 1000.0;
-                double rtf = rtfAudioSecs > 0
-                    ? (double)Interlocked.Read(ref _rtfAnalyzeTicks) / Stopwatch.Frequency / rtfAudioSecs
-                    : 0;
-                var sampledTag = rtfTracks == analyzed ? "" : $", {rtfTracks} of {analyzed} sampled";
+                // Express this in the SAME "x realtime" sense as the scan-wide throughput
+                // line below (audio per time, bigger = faster) — not its inverse. This is a
+                // single-core figure (analysis thread-time), so it reads ~parallelism× lower
+                // than the aggregate scan-wide number; "per core" says why.
+                double analyzeSecs = (double)Interlocked.Read(ref _rtfAnalyzeTicks) / Stopwatch.Frequency;
+                double rtf = RealtimeFactorFrom(rtfMs, analyzeSecs);
+                // Denominator is the Essentia-run population (_analyzeCount), NOT `analyzed`:
+                // a track that ran Essentia but then failed the health gate is counted here
+                // (it was sampled) yet excluded from `analyzed`, so `analyzed` produced a
+                // sample count LARGER than its own denominator ("27325 of 27323 sampled").
+                long analyzeRuns = Volatile.Read(ref _analyzeCount);
+                var sampledTag = rtfTracks == analyzeRuns ? "" : $", {rtfTracks} of {analyzeRuns} sampled";
                 Console.WriteLine($"  Avg length: {FormatTimeSpan(avgLen)} of audio per analyzed track"
-                    + (rtf > 0 ? $"  ({rtf:F3}x realtime{sampledTag})" : sampledTag.Length > 0 ? $"  ({rtfTracks} sampled)" : ""));
+                    + (rtf > 0 ? $"  ({rtf:F1}x realtime per core{sampledTag})" : sampledTag.Length > 0 ? $"  ({rtfTracks} sampled)" : ""));
             }
             // Per-outcome cost breakdown: what each track-handling class actually
             // cost this run (thread-time, so per-track, not wall). Makes the
@@ -5499,6 +5529,52 @@ namespace Truedat
             RunDuplicates(moodsPath, tracks);
         }
 
+        /// <summary>The volume/share root used to probe library reachability before a
+        /// --fixup reconcile: the drive root ("C:\") or UNC share root
+        /// ("\\server\share\"). Empty when the path has no determinable root
+        /// (relative/malformed) — such an entry can't prove a volume is offline, so it
+        /// never triggers the reachability refusal.</summary>
+        internal static string ReachabilityRoot(string path)
+            => string.IsNullOrEmpty(path) ? "" : (Path.GetPathRoot(PathHelper.NormalizeSeparators(path)) ?? "");
+
+        /// <summary>Probe a library root by forcing a filesystem call that SURFACES the
+        /// OS error instead of swallowing it — File.Exists / Directory.Exists both
+        /// return a bare false on a downed share, indistinguishable from a deleted
+        /// file. A healthy root returns its attributes; an offline volume throws
+        /// (IOException: network path not found / device not ready — or
+        /// UnauthorizedAccessException). Returns true iff the root answered.</summary>
+        internal static bool ProbeRootReachable(string root, out string error)
+        {
+            error = "";
+            if (string.IsNullOrEmpty(root)) return true;  // undeterminable → can't prove offline
+            try { _ = File.GetAttributes(root); return true; }
+            catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        /// <summary>Pure refuse-decision for the fixup reachability guard: refuse when
+        /// any probed root is unreachable, naming which and how many catalog entries
+        /// ride on it. Split from the IO probe so the decision is self-testable without
+        /// a real offline share.</summary>
+        internal static (bool Refuse, string Summary) EvaluateReachability(
+            IReadOnlyList<(string Root, int EntryCount, bool Reachable)> roots)
+        {
+            var down = roots.Where(r => !r.Reachable).ToList();
+            if (down.Count == 0) return (false, "");
+            long total = down.Sum(r => (long)r.EntryCount);
+            var names = string.Join(", ", down.Select(r => $"{r.Root} [{r.EntryCount:N0} entries]"));
+            return (true, $"{total:N0} entries on unreachable root(s): {names}");
+        }
+
+        /// <summary>Backstop for the case a per-volume probe can't catch: a flaky link
+        /// (root answers, yet many individual files read as gone) or an unintended bulk
+        /// delete. Refuse when a run would orphan more than <see cref="MassOrphanFraction"/>
+        /// of the catalog AND more than <see cref="MassOrphanFloor"/> entries (so a small
+        /// catalog's routine cleanup doesn't trip it). --force-clean overrides.</summary>
+        internal static bool MassOrphanImplausible(int orphaned, int totalEntries)
+            => totalEntries > 0
+               && orphaned > MassOrphanFloor
+               && orphaned > totalEntries * MassOrphanFraction;
+
         static void RunFixup(string xmlPath, string moodsPath)
         {
             Console.WriteLine("=== Fixup Mode ===");
@@ -5513,11 +5589,57 @@ namespace Truedat
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+            int totalEntries = tracks.Count;  // captured before the loop drains `tracks`
             Console.WriteLine($"Moods entries: {tracks.Count}");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var library = ITunesParser.Parse(xmlPath, out _);
             Console.WriteLine($"Library tracks: {library.Count}");
+
+            // --- Library reachability guard (before any orphan decision) ---
+            // A fixup decides "this file is gone" from the filesystem, and both
+            // File.Exists and Directory.Exists collapse "the file was deleted" and
+            // "the whole volume is offline" into the same bare false. Left unguarded,
+            // an unmounted NAS reads as a mass deletion and the reconcile writes a
+            // gutted catalog — the pre-write .bak survives, but only if you notice
+            // before a second run backs the gutted file up over it.
+            //
+            // So probe each distinct library root ONCE, up front (before the 168k
+            // File.Exists calls below, so a downed share refuses instantly instead of
+            // grinding through SMB timeouts). ProbeRootReachable forces a call that
+            // SURFACES the OS error: a healthy root returns its attributes, an offline
+            // share throws. If any root is unreachable we refuse the whole run — a
+            // reconcile is only trustworthy against a complete view of the library —
+            // writing nothing and churning no backup. Re-run with the library mounted.
+            var rootCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in tracks.Select(kv => kv.Key))
+            {
+                var r = ReachabilityRoot(key);
+                if (r.Length > 0) rootCounts[r] = rootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+            }
+            var probedRoots = rootCounts
+                .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _)))
+                .ToList();
+            var (refuseReach, downSummary) = EvaluateReachability(probedRoots);
+            if (refuseReach && !_forceClean)
+            {
+                Console.WriteLine();
+                Console.WriteLine("REFUSING: part of the library is unreachable — this reads as an offline");
+                Console.WriteLine("volume (NAS unmounted / network down), not as deleted files. Reconciling");
+                Console.WriteLine("now would orphan every entry on that volume and gut the catalog.");
+                Console.WriteLine($"  {downSummary}");
+                Console.WriteLine("Nothing was written, no backup made. Re-run with the library mounted,");
+                Console.WriteLine("or pass --force-clean to purge entries for a volume you know is gone.");
+                Environment.ExitCode = 3;
+                return;
+            }
+            if (refuseReach && _forceClean)
+            {
+                Console.WriteLine();
+                Console.WriteLine("WARNING: --force-clean — proceeding despite unreachable library root(s):");
+                Console.WriteLine($"  {downSummary}");
+                Console.WriteLine("Entries on those volumes will be treated as deleted and cleaned.");
+            }
 
             var byFilename = new Dictionary<string, List<ITunesTrack>>(StringComparer.OrdinalIgnoreCase);
             foreach (var t in library)
@@ -5555,6 +5677,26 @@ namespace Truedat
                 var normalizedOldPath = PathHelper.NormalizeSeparators(oldPath);
 
                 if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
+
+                // The file reads gone — but the up-front guard only proved the volume was
+                // up when the run STARTED. A NAS can drop mid-reconcile, and from that
+                // point File.Exists reports every remaining file as gone. So re-probe this
+                // file's ROOT before treating the absence as a deletion: a healthy root
+                // always answers, so if it now throws, the volume dropped and this file is
+                // not really deleted — abort rather than orphan it. Root probe (not file
+                // probe): at the root level any error is unambiguously "unreachable". The
+                // probe runs per gone-decision, so a mid-run drop aborts on the first file
+                // it touches after the drop — writing nothing, churning no backup.
+                if (!_forceClean && !ProbeRootReachable(ReachabilityRoot(normalizedOldPath), out var midRunErr))
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("REFUSING: the library became unreachable mid-reconcile.");
+                    Console.WriteLine($"  at:   {oldPath}");
+                    Console.WriteLine($"  root: {ReachabilityRoot(normalizedOldPath)} stopped answering ({midRunErr})");
+                    Console.WriteLine("Nothing was written, no backup made. Re-run with the library mounted.");
+                    Environment.ExitCode = 3;
+                    return;
+                }
 
                 var filename = Path.GetFileName(normalizedOldPath);
                 var moodArtist = trackData["artist"]?.GetValue<string>() ?? "";
@@ -5629,6 +5771,24 @@ namespace Truedat
                 Console.WriteLine(); Console.WriteLine($"Orphaned entries ({orphanedEntries.Count} total, showing first 20):");
                 foreach (var (path, artist, title) in orphanedEntries.Take(20)) Console.WriteLine($"  {artist} - {title}: {path}");
                 Console.WriteLine($"  ... and {orphanedEntries.Count - 20} more");
+            }
+
+            // Mass-orphan backstop: catches what a per-volume probe can't — a flaky link
+            // where the root answered yet many files spuriously read gone, or an
+            // unintended bulk delete. Orphaning a large share of the catalog in one run
+            // is never routine; refuse and make the operator confirm. Resolved-by-hash
+            // removals are safe (a copy survives) so they don't count. --force-clean
+            // (already warned above) opts out for a volume the operator knows is gone.
+            if (!_forceClean && MassOrphanImplausible(orphaned, totalEntries))
+            {
+                Console.WriteLine();
+                Console.WriteLine($"REFUSING: this run would orphan {orphaned:N0} of {totalEntries:N0} entries " +
+                    $"({(double)orphaned / totalEntries:P0}) — an implausible mass disappearance,");
+                Console.WriteLine("more like a flaky link or an unintended bulk delete than routine cleanup.");
+                Console.WriteLine("Nothing was written, no backup made. Verify the library, then re-run —");
+                Console.WriteLine("or pass --force-clean if you really intend to remove these entries.");
+                Environment.ExitCode = 3;
+                return;
             }
 
             if (remapped > 0 || orphaned > 0 || resolvedByHash > 0)
@@ -9478,6 +9638,52 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "throughput: 5s of audio in 10s wall = 0.5x realtime");
                 Assert(RealtimeFactorFrom(120_000, 0.0) == 0,
                     "throughput: zero wall span yields 0, not Infinity");
+                // The per-track "Avg length" line reports this same audio-per-time factor
+                // (bigger = faster), NOT its inverse: 5m39s of audio analyzed in 24.7s of
+                // single-core time is ~13.7x realtime, never 0.068x (the pre-fix bug).
+                Assert(Math.Abs(RealtimeFactorFrom(339_000, 24.7) - 13.72) < 0.05,
+                    "per-core: 5m39s of audio in 24.7s single-core = ~13.7x realtime, not its inverse");
+            }
+
+            // --- fixup reachability guard: refuse when a library volume is offline ---
+            {
+                // Root extraction groups entries by the volume/share that can go down.
+                Assert(ReachabilityRoot(@"\\nas\share\a\b.flac").StartsWith(@"\\nas\share", StringComparison.OrdinalIgnoreCase),
+                    "reachability: UNC path resolves to its \\\\server\\share root");
+                Assert(ReachabilityRoot(@"\\nas\share\a\b.flac") == ReachabilityRoot(@"\\nas\share\c\d.flac"),
+                    "reachability: two files under one share share one root (grouped together)");
+                Assert(ReachabilityRoot(@"Z:\music\t.flac").StartsWith(@"Z:", StringComparison.OrdinalIgnoreCase),
+                    "reachability: drive path resolves to its drive root");
+                Assert(ReachabilityRoot(@"C:\a\b.flac") != ReachabilityRoot(@"\\nas\share\a\b.flac"),
+                    "reachability: local drive and UNC share are distinct roots");
+                Assert(ReachabilityRoot("") == "" && ReachabilityRoot(@"relative\t.flac") == "",
+                    "reachability: undeterminable root is empty (never triggers refusal)");
+
+                // Cheap IO smoke test: the running exe's own drive root answers (no
+                // network path — a bogus UNC would block on the SMB timeout).
+                var liveRoot = ReachabilityRoot(System.Reflection.Assembly.GetExecutingAssembly().Location);
+                Assert(ProbeRootReachable(liveRoot, out _), $"reachability: the running exe's own root is reachable ({liveRoot})");
+
+                // Pure decision: all roots up -> proceed; any root down -> refuse, and
+                // the summary names the down root plus its entry count (the NAS-down case).
+                var allUp = new List<(string, int, bool)> { (@"C:\", 100, true), (@"\\nas\share\", 5000, true) };
+                Assert(!EvaluateReachability(allUp).Refuse, "reachability: all roots reachable -> proceed");
+                var oneDown = new List<(string, int, bool)> { (@"C:\", 100, true), (@"\\nas\share\", 5000, false) };
+                var dec = EvaluateReachability(oneDown);
+                Assert(dec.Refuse, "reachability: an unreachable root -> refuse the whole run");
+                Assert(dec.Summary.Contains(@"\\nas\share\") && dec.Summary.Contains("5,000"),
+                    "reachability: refusal summary names the down root and its entry count");
+
+                // Mass-orphan backstop (root answered, yet many files vanished).
+                Assert(!MassOrphanImplausible(0, 168_770), "mass-orphan: zero orphans -> proceed");
+                Assert(!MassOrphanImplausible(500, 168_770),
+                    "mass-orphan: 500 of 168,770 (~0.3%) is routine cleanup -> proceed");
+                Assert(!MassOrphanImplausible(40, 100),
+                    "mass-orphan: below the floor never trips, even at 40% of a tiny catalog -> proceed");
+                Assert(MassOrphanImplausible(60, 100),
+                    "mass-orphan: 60 of 100 (over floor AND >20%) -> refuse");
+                Assert(MassOrphanImplausible(120_000, 168_770),
+                    "mass-orphan: most of the catalog vanished -> refuse (the NAS-flaky / bulk-delete case)");
             }
 
             // --- exclude playlist: parser, discovery, combine layering ---
