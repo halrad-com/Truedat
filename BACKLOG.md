@@ -69,6 +69,41 @@ verify becomes a felt requirement, not speculatively.
 
 Operator-parked; do not build without an explicit go.
 
+## Catalog backup compression + snapshot (proposed 2026-08-08)
+
+`mbxmoods.json` is ~900 MB at 156K entries. It's repetitive text (~85 field names +
+numeric strings repeated per track), so it gzips ~8–10× → ~100–130 MB. That single fact
+makes compression the right lever and makes anything fancier unnecessary.
+
+Constraints (pin the choices):
+- **Live `mbxmoods.json` stays plain JSON** — MBXHub's tolerant reader consumes it as
+  plain JSON; compressing the live file breaks the contract. Compress backups/snapshots
+  only, never the hot file.
+- **Zero new dependencies** — net48 ships `System.IO.Compression.GZipStream`/`DeflateStream`.
+  Brotli/zstd are not in net48 without a NuGet → out. GZip is plenty.
+- Streaming (`Utf8JsonWriter → GZipStream → FileStream`) keeps it O(1) memory like
+  `SaveResults`.
+
+Two surfaces:
+1. **Backup (automatic, now compressed + rotated).** The mutating modes (`--fixup`,
+   `--remap`, `--merge-moods`, `--migrate`) each drop a permanent `mbxmoods.json.bak.<ts>`
+   full copy that ACCUMULATES — the footprint pain. Write them as `.bak.<ts>.gz` (~120 MB
+   vs 900 MB) and add keep-last-N rotation (`--keep-backups N`, default ~5). Rotation,
+   **never silent truncation** (same ruling as `mbxmoods-skipped.csv`).
+2. **Snapshot (deliberate).** New `--snapshot [path]`: streams the current catalog through
+   GZip to `mbxmoods.<ts>.json.gz`, read-only over the live file — for use before a risky
+   op or as a periodic archive. Optional sidecar manifest (`trackCount`, `generatedAt`,
+   content hash) so an archive self-verifies.
+
+Restore: a `--restore <archive.gz>` mode, or just document `gunzip → rename`.
+
+Deliberately NOT: delta/diff archives (fragile, complex; full gzip is already ~90%
+smaller — KISS); compressing the live file (contract break); zstd/brotli on net48.
+
+Footprint: one shared `WriteGzipCatalog` helper wired into the 4 backup sites + a new
+`--snapshot` arg (+ optional `--restore`) + the rotation sweep. No schema change, no
+MBXHub-contract change, no new dependency.
+
 ## Scan policy — next items
 
 The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
