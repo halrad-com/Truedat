@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory)][string]$OutputSummary,
     [string]$TruedatExe   = "",
-    [string]$MbxRepoRoot  = "C:\Users\scott\source\repos\MBX",
+    [string]$MbxRepoRoot  = "$env:USERPROFILE\source\repos\MBX",
     [string]$MbxCheckExe  = ""
 )
 $ErrorActionPreference = "Stop"

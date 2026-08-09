@@ -45,6 +45,30 @@ wins. Keep the table beside the version constants so a new build is a one-line a
 
 Operator-parked; do not build without an explicit go.
 
+## Resumable / incremental verify (PARKED 2026-08-08)
+
+`--verify` is a whole-catalog one-shot: it re-reads every file's audio region to
+recompute `audioStreamSha256`, holds results in memory, and writes
+`mbxmoods-verify.csv` (and, under `--backfill`, the moods file) only at the end. Kill
+it or lose power mid-run and all progress is lost — the next run starts from zero. On a
+large library over the wire that's a 2 hr (72K local-tested) to 24 hr (156K, field
+report) pass that saturates the link the whole time and can't be paused. It's also
+mutually exclusive with `--chunk`, so it can't be sharded for restartability either.
+
+Proposed: a per-entry `lastVerified` timestamp, written on an OK result, so verify can
+(a) skip entries verified within the last N days and (b) resume an interrupted run by
+continuing over the un-verified remainder — turning the multi-hour wall into resumable
+slices runnable in quiet windows.
+
+Why parked (operator ruling 2026-08-08): this changes the **schema**, which is locked
+(2026-07-11 rule — no field churn without an explicit ask), and it would make *plain*
+verify a **writer** (it must save the ~900 MB catalog to record the timestamps), turning
+a read-only audit into a full write. Operator does not want to churn the schema more on a
+guess. The value is real but unproven against a concrete need; revisit only if resumable
+verify becomes a felt requirement, not speculatively.
+
+Operator-parked; do not build without an explicit go.
+
 ## Scan policy — next items
 
 The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
@@ -160,7 +184,7 @@ threshold, codec-aware applicability gates, inline emission at write time so
 threshold changes don't require rescans, `--audit` per-signal vote+weight trace.
 
 **Corpus-validated** against a 23-file hand-built test set at
-`C:\Users\scott\Music\_truedat-corpus\` covering real hi-res (Pink Floyd Animals
+`%USERPROFILE%\Music\_truedat-corpus\` covering real hi-res (Pink Floyd Animals
 24/192, Pink Floyd The Wall 24/96, Foo Fighters 24/96 with shaped dither, NIN
 24/96, Sleepy Lagoon 24/48), genre-diverse CD-rate FLACs + WAV, ffmpeg-upsampled
 fake hi-res, real-LAME 320 originals (via standalone `lame.exe 3.100`),

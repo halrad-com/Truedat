@@ -5,7 +5,7 @@
 # Tested under: Python 3.12+
 #
 # Setup (one-time per machine):
-#   cd C:\Users\scott\source\repos\MBX\restfulbee
+#   cd %USERPROFILE%\source\repos\MBX\restfulbee
 #   python -m venv .venv-trainer
 #   .venv-trainer\Scripts\activate
 #   pip install -r tools/requirements.txt
