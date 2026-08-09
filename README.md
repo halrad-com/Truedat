@@ -53,6 +53,22 @@ MBXHub consumes the whole record: mood features drive AutoQ vibe selection; iden
 
 Walks an existing `mbxmoods.json` and either reports drift (read-only) or repairs missing fields in place (no Essentia re-run). Two backfill tiers — identity (TagLib + cheap IO) and features (ffmpeg-driven `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure`) — both gated by an SHA drift check so drifted entries are flagged for re-analysis rather than touched. See [Verify & Backfill](#large-libraries) for tier scoping via `--backfill-level`.
 
+### Backups & snapshots (`--snapshot`, `--restore`, `--keep-backups`)
+
+The mutating modes (`--fixup`, `--remap`, `--merge-moods`, `--migrate`) drop a timestamped
+backup before they rewrite the catalog. Those backups are now **compressed ZIPs**
+(`mbxmoods.json.bak.<ts>.zip`) — `mbxmoods.json` is repetitive text and shrinks ~8–10×, so
+keeping several is cheap — and they **rotate**: `--keep-backups N` keeps the newest N
+(default 5, `0` keeps everything; rotation never silently truncates).
+
+`--snapshot [path]` is a deliberate, read-only capture: it bundles the current catalog, a
+manifest (track count + content SHA-256 for verification), and the `mbxmoods-exclude.json`
+policy file into one restorable, double-clickable `mbxmoods-snapshot-<ts>.zip`. `--restore
+<archive>` rebuilds `mbxmoods.json` from a snapshot, a compressed backup, a `.gz`, or a plain
+catalog — the format is auto-detected, so older plain-copy backups restore too — and it backs
+up whatever it's about to overwrite first, so a restore is itself reversible. (The live
+`mbxmoods.json` MBXHub reads stays plain JSON; only backups and snapshots are compressed.)
+
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
@@ -90,7 +106,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           Pass the moods file as the positional arg (no iTunes XML
                           needed). Case-insensitive prefix match; entries that don't
                           start with the old prefix pass through unchanged. Writes a
-                          .bak.<timestamp> before atomic replace. Example:
+                          compressed .bak.<timestamp>.zip before atomic replace. Example:
                           truedat --fixup --remap "D:\Music\=\\nas\share\Music\" mbxmoods.json
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
                           (read-only; writes mbxmoods-verify.csv next to the moods file)
@@ -160,8 +176,21 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5), rename
-                          SMFM keys (sensme*->smfm*) (creates backup). Field cleanup only —
-                          never removes a catalog entry, on any verdict.
+                          SMFM keys (sensme*->smfm*) (creates a compressed backup). Field
+                          cleanup only — never removes a catalog entry, on any verdict.
+  --snapshot [path]       Read-only: bundle the current catalog into a restorable, double-
+                          clickable ZIP — mbxmoods.json + a manifest (trackCount, content
+                          SHA-256, byte size) + mbxmoods-exclude.json when present. Default
+                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog.
+  --restore <archive>     Rebuild mbxmoods.json from a snapshot, a compressed backup, a .gz,
+                          or a plain catalog (format is auto-detected). Backs up any existing
+                          catalog first, then atomically swaps. Restores the catalog only — a
+                          bundled exclusion file is left in the archive (extract it by hand to
+                          roll policy back too).
+  --keep-backups N        How many timestamped catalog backups to keep after --fixup / --remap
+                          / --merge-moods / --migrate (rotation, never truncation; 0 = keep
+                          all; default 5). Backups are compressed .zip — mbxmoods.json is
+                          repetitive text and shrinks ~8-10x, so keeping several costs little.
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)

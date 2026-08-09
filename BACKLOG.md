@@ -71,6 +71,13 @@ Operator-parked; do not build without an explicit go.
 
 ## Catalog backup compression + snapshot (proposed 2026-08-08)
 
+**Status (2026-08-09): the safe half SHIPPED.** `CatalogArchive` (own file) is the shared
+compress/decompress helper (ZIP-on-write, sniffing read for zip/gz/plain). Backups at the four
+mutating sites are now compressed + rotated (`--keep-backups N`, default 5); `--snapshot [path]`
+and `--restore <archive>` are implemented; `+System.IO.Compression` framework reference added
+(no new NuGet dep). See `CLAUDE.md` "Catalog backups & snapshots". The **compressed-live-catalog
+stretch below remains unbuilt** — still gated on restfulbee/MBXHub consumer-first sequencing.
+
 `mbxmoods.json` is ~900 MB at 156K entries. It's repetitive text (~85 field names +
 numeric strings repeated per track), so it gzips ~8–10× → ~100–130 MB. That single fact
 makes compression the right lever and makes anything fancier unnecessary.

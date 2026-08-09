@@ -275,6 +275,45 @@ Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migra
 
 Backfill is idempotent (re-runs do zero IO) and atomic (single `SaveResults` at end, only when any entry actually changed). The `bitDepth` spec's `IsPresent` is codec-aware via `CodecLacksBitDepth` — lossy formats (mp3/aac/opus/vorbis/ogg/wma/mpc) count as "complete at 0" so backfill doesn't loop. Same pattern applies to any future field that's structurally absent for some codecs. CSV gains a fourth column `backfilledFields` listing which fields were filled per entry. Status set: OK / BACKFILLED / REANALYZE_NEEDED / MISSING / ERROR.
 
+## Catalog backups & snapshots
+
+`mbxmoods.json` is ~900 MB of repetitive text and DEFLATE-compresses ~8–10× (~120 MB),
+so the accumulating full-copy backups the mutating modes drop were the real footprint pain.
+`CatalogArchive` (own file) is the one compress/decompress helper: **ZIP on write** (Windows
+opens `.zip` natively; a ZIP is a container so a snapshot bundles multiple files) and a
+**format-sniffing read** that accepts zip (`PK`), gz (`1F 8B`) and plain (`{`, tolerating a
+leading BOM) so older plain backups still restore. Streaming throughout (`ZipArchive` entry
+stream ↔ `FileStream`), O(1) memory like `SaveResults`; net48 ships `ZipArchive`/`GZipStream`
+so **zero new dependencies** (only a framework `<Reference Include="System.IO.Compression" />` —
+`GZipStream` lives in `System.dll` and already worked, but the ZIP container types don't).
+
+- **The live `mbxmoods.json` stays PLAIN JSON.** MBXHub's tolerant reader consumes it as plain
+  JSON, so a compressed live catalog is a cross-repo contract change — the BACKLOG stretch,
+  gated on restfulbee, consumer-first. This half is backups + snapshots only. Do not compress
+  the live file here.
+- **Backups (automatic).** The four mutating modes (`--fixup`, `--remap`, `--merge-moods`,
+  `--migrate`) call `BackupCatalogCompressed` instead of `File.Copy`: it writes
+  `mbxmoods.json.bak.<ts>.zip` and rotates to keep the newest `--keep-backups N` (default 5,
+  **rotation never truncation** — `0` keeps all; same ruling as `mbxmoods-skipped.csv`).
+  Rotation matches `<name>.bak.` (trailing dot), so it never touches the transient
+  `SaveResults` `.bak` swap file or the live catalog.
+- **`--snapshot [path]`** (read-only over the live catalog) streams the catalog into
+  `mbxmoods-snapshot-<ts>.zip` bundling `mbxmoods.json` + `manifest.json` (`trackCount`,
+  `generatedAt`, `contentSha256`, `catalogBytes`) + `mbxmoods-exclude.json` when it sits beside
+  the catalog — a complete, self-verifying, restorable state in one file. The SHA-256 is
+  computed in the same single read pass that streams the catalog into the entry; `trackCount`
+  comes from a bounded streaming read of the leading window (`TryReadTrackCountFromPrefix`),
+  not a full-DOM load.
+- **`--restore <archive>`** rebuilds `mbxmoods.json` from a snapshot / backup / `.gz` / plain
+  catalog (sniffed). It backs up any existing destination (compressed + rotated) **before** the
+  atomic swap, so a restore is itself reversible, and it restores the **catalog only** — a
+  snapshot's bundled exclusion file is left in the archive (blast radius = one file; extract by
+  hand to roll policy back too). Path resolution mirrors `--stats`/`--verify` (`--moods`/positional/
+  cwd via `ResolveMoodsCatalog`).
+
+Deliberately NOT built: delta/diff archives, zstd/brotli (not in net48), and the compressed
+live catalog (needs restfulbee coordination — see BACKLOG).
+
 ## Duplicates report
 
 `--duplicates [path]` (read-only, JSON-only — works on metadata mirrors) groups mbxmoods.json entries in two tiers: `exact` (byte-identical `audioStreamSha256`) and `probable` (quantized-feature candidate key over mfcc/bpm/key/mode/duration — cross-encode candidates, human confirms). Each group marks one recommended `keeper` — lossless > bitDepth > sampleRate > bitrate > **HasSmfm** > size > shortest path. The SMFM tiebreaker means when audio quality ties (typical for exact dupes), the Sony 12-TONE-tagged copy wins over an untagged duplicate — e.g. the newly-named Sony-organized file beats the old historical one. Per-member JSON fields: `path, artist, title, album, codec, bitrate, sampleRate, bitDepth` (omit-when-0/empty) + `smfm` (bool, `TrackFeatures.HasSmfm`) + `keeper` (true on the recommended). Console dump flags SMFM members with `[smfm]`.

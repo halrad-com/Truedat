@@ -599,6 +599,17 @@ namespace Truedat
             Console.WriteLine("  --merge-source <path> Source moods file (repeatable, at least 2)");
             Console.WriteLine("  --merge-output <path> Output moods file path");
             Console.WriteLine();
+            Console.WriteLine("Backup & snapshot:");
+            Console.WriteLine("  --snapshot [path]   Read-only: bundle the current catalog + a manifest (trackCount,");
+            Console.WriteLine("                      content SHA-256) + mbxmoods-exclude.json into a restorable, double-");
+            Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip beside the catalog).");
+            Console.WriteLine("  --restore <archive> Rebuild mbxmoods.json from a snapshot / backup / .gz / plain catalog");
+            Console.WriteLine("                      (format is sniffed). Backs up any existing catalog first; restores the");
+            Console.WriteLine("                      catalog only (a bundled exclusion file is left in the archive).");
+            Console.WriteLine("  --keep-backups N    Keep the newest N timestamped catalog backups after --fixup / --remap /");
+            Console.WriteLine("                      --merge-moods / --migrate (rotation, never truncation; 0 = keep all,");
+            Console.WriteLine("                      default 5). Backups are compressed .zip (~8-10x smaller than a plain copy).");
+            Console.WriteLine();
             Console.WriteLine("Exclusions:");
             Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the");
             Console.WriteLine("                      moods file");
@@ -718,7 +729,7 @@ namespace Truedat
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
-            "background", "cpu-limit",
+            "background", "cpu-limit", "snapshot", "restore", "keep-backups",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -733,6 +744,7 @@ namespace Truedat
             "convert-dir", "compression-level",
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
+            "restore", "keep-backups",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -1006,6 +1018,11 @@ namespace Truedat
         // Nothing consumes fileMd5 (MBXHub indexes audioStreamSha256 only);
         // --file-md5 restores full maintenance for external-interop use.
         internal static bool _fileMd5Enabled = false;
+
+        // --keep-backups N: how many timestamped catalog backups to keep after a
+        // mutating mode (--fixup / --remap / --merge-moods / --migrate) writes one.
+        // Rotation, never truncation — 0 keeps everything. Default 5.
+        internal static int _keepBackups = 5;
 
         static bool _losersM3u = false;
         static string? _losersM3uPath = null;
@@ -1872,6 +1889,14 @@ namespace Truedat
             bool checkFilenames = false;
             bool duplicatesMode = false;
             bool analyzeMode = false;
+            // --snapshot [path]: bundle the current catalog + manifest + exclude file
+            // into a compressed, restorable mbxmoods-snapshot-<ts>.zip (read-only over
+            // the live catalog). --restore <archive>: rebuild mbxmoods.json from a
+            // snapshot / backup / plain catalog (sniffs zip/gz/plain).
+            bool snapshotMode = false;
+            string? snapshotOutPath = null;
+            bool restoreMode = false;
+            string? restoreArchivePath = null;
 
             bool synthesize = false;
             string? synthCatalog = null;
@@ -1990,6 +2015,20 @@ namespace Truedat
                 }
                 else if (canonical == "retry-errors") retryErrors = true;
                 else if (canonical == "migrate") migrateMode = true;
+                else if (canonical == "snapshot")
+                {
+                    snapshotMode = true;
+                    // Optional OUTPUT path, claimed with the same restraint as --preview /
+                    // --manifest: only when the token looks like a path of the right kind
+                    // (directory separator, or a .zip suffix) — otherwise it's the positional
+                    // library/moods arg every read-only mode takes.
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-") && !args[i + 1].StartsWith("/")
+                        && (args[i + 1].IndexOf(Path.DirectorySeparatorChar) >= 0
+                            || args[i + 1].EndsWith(".zip", StringComparison.OrdinalIgnoreCase)))
+                    { snapshotOutPath = args[i + 1]; i++; }
+                }
+                else if (canonical == "restore" && i + 1 < args.Length) { restoreMode = true; restoreArchivePath = args[++i]; }
+                else if (canonical == "keep-backups" && i + 1 < args.Length && int.TryParse(args[i + 1], out var kb) && kb >= 0) { _keepBackups = kb; i++; }
                 else if (canonical == "analyze") analyzeMode = true;
                 else if (canonical == "audit") auditLog = true;
                 else if (canonical == "check-filenames") checkFilenames = true;
@@ -2173,7 +2212,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -2259,7 +2298,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -2271,7 +2310,7 @@ namespace Truedat
 
             if (convertDirMode)
             {
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode)
                 {
                     Console.Error.WriteLine("Error: --convert-dir is a standalone mode (mutually exclusive with scan/hash/transcode/etc).");
                     Environment.ExitCode = 1;
@@ -2368,6 +2407,47 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel);
+                return;
+            }
+
+            // --restore <archive>: rebuild mbxmoods.json from a snapshot / backup / plain
+            // catalog. Sniffs zip/gz/plain; backs up any existing catalog (compressed +
+            // rotated) before the swap so a restore can never silently overwrite. Checked
+            // before --snapshot because a run naming both should restore, not snapshot.
+            if (restoreMode)
+            {
+                string? destCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var restoreRefusal);
+                if (restoreRefusal != null)
+                {
+                    Console.Error.WriteLine(restoreRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunRestore(restoreArchivePath!, destCatalog!);
+                return;
+            }
+
+            // --snapshot [path]: bundle the current catalog + manifest + exclusion file
+            // into a restorable ZIP. Read-only over the live catalog. Path resolution for
+            // the SOURCE catalog mirrors --stats / --verify; the snapshot lands beside it
+            // as mbxmoods-snapshot-<ts>.zip unless an explicit output path was given.
+            if (snapshotMode)
+            {
+                string? srcCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var snapRefusal);
+                if (snapRefusal != null)
+                {
+                    Console.Error.WriteLine(snapRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (!File.Exists(srcCatalog))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {srcCatalog}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunSnapshot(srcCatalog!, snapshotOutPath);
                 return;
             }
 
@@ -5793,9 +5873,7 @@ namespace Truedat
 
             if (remapped > 0 || orphaned > 0 || resolvedByHash > 0)
             {
-                var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-                var bakPath = $"{moodsPath}.bak.{timestamp}";
-                File.Copy(moodsPath, bakPath);
+                var bakPath = BackupCatalogCompressed(moodsPath);
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
                 root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; root["generatedAt"] = DateTime.UtcNow.ToString("o");
                 var tmpPath = moodsPath + ".tmp";
@@ -5907,9 +5985,7 @@ namespace Truedat
                 return;
             }
 
-            var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-            var bakPath = $"{moodsPath}.bak.{timestamp}";
-            File.Copy(moodsPath, bakPath);
+            var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine();
             Console.WriteLine($"Backup: {bakPath}");
             root["tracks"] = newTracks;
@@ -6453,9 +6529,7 @@ namespace Truedat
             // Backup if output already exists
             if (File.Exists(outputPath))
             {
-                var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-                var bakPath = $"{outputPath}.bak.{timestamp}";
-                File.Copy(outputPath, bakPath);
+                var bakPath = BackupCatalogCompressed(outputPath);
                 Console.WriteLine($"Backup: {bakPath}");
             }
 
@@ -6608,15 +6682,155 @@ namespace Truedat
             }
 
             root["trackCount"] = tracks.Count;
-            var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-            var bakPath = $"{moodsPath}.bak.{timestamp}";
-            File.Copy(moodsPath, bakPath);
+            var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             root["generatedAt"] = DateTime.UtcNow.ToString("o");
             var tmpPath = moodsPath + ".tmp";
             File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             AtomicReplace(tmpPath, moodsPath);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count} tracks)");
+        }
+
+        // -- Catalog backup compression + snapshot/restore ---------------------
+
+        /// <summary>Write a compressed (.zip) backup of the current catalog before an
+        /// in-place rewrite, then rotate to keep the last <see cref="_keepBackups"/>.
+        /// Returns the backup path for the caller's "Backup:" line. This replaces the
+        /// old plain File.Copy at the four mutating sites (--fixup / --remap /
+        /// --merge-moods / --migrate): mbxmoods.json is ~900 MB of repetitive text and
+        /// DEFLATE-compresses ~8-10x, so accumulating plain copies was the footprint
+        /// pain this closes. Backups are self-describing on read (sniffed), so a plain
+        /// copy from an older build still restores.</summary>
+        static string BackupCatalogCompressed(string catalogPath)
+        {
+            var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+            var bakPath = $"{catalogPath}.bak.{timestamp}.zip";
+            CatalogArchive.WriteZipBackup(catalogPath, bakPath);
+            var removed = CatalogArchive.RotateBackups(catalogPath, _keepBackups);
+            if (removed > 0)
+                Console.WriteLine($"Rotated: removed {removed} old backup(s), keeping the newest {_keepBackups}.");
+            return bakPath;
+        }
+
+        /// <summary>
+        /// --snapshot [path]: stream the current catalog into a restorable ZIP bundling
+        /// the catalog (entry mbxmoods.json) + a manifest (trackCount, generatedAt,
+        /// content SHA-256, byte size) + mbxmoods-exclude.json when present. Read-only
+        /// over the live catalog — the archive is a complete, self-verifying state in one
+        /// double-clickable file. Default output is mbxmoods-snapshot-&lt;ts&gt;.zip next
+        /// to the catalog.
+        /// </summary>
+        static int RunSnapshot(string catalogPath, string? outPath)
+        {
+            Console.WriteLine("=== Snapshot Mode ===");
+            Console.WriteLine($"  Catalog: {catalogPath}");
+
+            var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
+            if (string.IsNullOrEmpty(outPath))
+            {
+                var ts = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+                outPath = Path.Combine(dir, $"mbxmoods-snapshot-{ts}.zip");
+            }
+            // The exclusion file, if it sits beside the catalog, rides along so the
+            // snapshot is a complete policy+data state.
+            var excludePath = Path.Combine(dir, ExclusionStore.FileName);
+            bool haveExclude = File.Exists(excludePath);
+
+            try
+            {
+                var info = CatalogArchive.WriteSnapshot(catalogPath, haveExclude ? excludePath : null, outPath!, VersionInfo.Display);
+                Console.WriteLine();
+                Console.WriteLine($"Snapshot: {outPath}");
+                Console.WriteLine($"  Tracks:   {(info.TrackCount.HasValue ? info.TrackCount.Value.ToString("N0") : "unknown")}");
+                Console.WriteLine($"  Catalog:  {info.CatalogBytes / (1024.0 * 1024.0):F1} MB uncompressed");
+                Console.WriteLine($"  Archive:  {new FileInfo(outPath!).Length / (1024.0 * 1024.0):F1} MB");
+                Console.WriteLine($"  SHA-256:  {info.ContentSha256}");
+                Console.WriteLine($"  Exclude:  {(haveExclude ? "bundled" : "none beside catalog")}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: snapshot failed: {ex.Message}");
+                try { File.Delete(outPath! + ".tmp"); } catch { }
+                return 1;
+            }
+        }
+
+        /// <summary>
+        /// --restore &lt;archive&gt;: rebuild mbxmoods.json from a snapshot ZIP, a
+        /// compressed backup, a .gz, or a plain catalog (format is sniffed). Any existing
+        /// catalog at the destination is backed up (compressed + rotated) before the
+        /// swap, so restore can never silently overwrite. Restores the catalog ONLY — a
+        /// snapshot's bundled mbxmoods-exclude.json is left in the archive (extract it by
+        /// hand if you mean to roll policy back too), so restore's blast radius is one
+        /// file.
+        /// </summary>
+        static int RunRestore(string archivePath, string destCatalog)
+        {
+            Console.WriteLine("=== Restore Mode ===");
+            Console.WriteLine($"  Archive:     {archivePath}");
+            Console.WriteLine($"  Destination: {destCatalog}");
+
+            if (!File.Exists(archivePath))
+            {
+                Console.Error.WriteLine($"Error: archive not found: {archivePath}");
+                return 2;
+            }
+
+            CatalogArchive.CatalogFormat fmt;
+            try { fmt = CatalogArchive.SniffFile(archivePath); }
+            catch (Exception ex) { Console.Error.WriteLine($"Error: cannot read archive: {ex.Message}"); return 1; }
+            Console.WriteLine($"  Format:      {fmt.ToString().ToLowerInvariant()}");
+
+            var destDir = Path.GetDirectoryName(Path.GetFullPath(destCatalog));
+            if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir!);
+
+            var tmp = destCatalog + ".restore.tmp";
+            try { File.Delete(tmp); } catch { }
+            try
+            {
+                using (var dst = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+                    CatalogArchive.ExtractCatalogTo(archivePath, dst);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: restore failed while extracting: {ex.Message}");
+                try { File.Delete(tmp); } catch { }
+                return 1;
+            }
+
+            // Back up the catalog we are about to replace (compressed + rotated), so a
+            // restore is itself reversible.
+            if (File.Exists(destCatalog))
+            {
+                var bak = BackupCatalogCompressed(destCatalog);
+                Console.WriteLine($"Backup: {bak}");
+            }
+
+            try { Program.AtomicReplace(tmp, destCatalog); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: restore failed while installing the catalog: {ex.Message}");
+                try { File.Delete(tmp); } catch { }
+                return 1;
+            }
+
+            int? tc = null;
+            try
+            {
+                var prefix = new byte[64 * 1024];
+                using var fs = new FileStream(destCatalog, FileMode.Open, FileAccess.Read, FileShare.Read);
+                int n = fs.Read(prefix, 0, prefix.Length);
+                tc = CatalogArchive.TryReadTrackCountFromPrefix(prefix, n);
+            }
+            catch { }
+
+            Console.WriteLine();
+            Console.WriteLine($"Restored: {destCatalog}" + (tc.HasValue ? $" ({tc.Value:N0} tracks)" : ""));
+            if (CatalogArchive.SniffFile(archivePath) == CatalogArchive.CatalogFormat.Zip
+                && CatalogArchive.ArchiveContainsExclude(archivePath))
+                Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
+            return 0;
         }
 
         // -- Tool discovery ----------------------------------------------------
@@ -9113,6 +9327,147 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "SaveResults (first save) writes and leaves no .bak");
             }
             finally { try { Directory.Delete(saveTestDir, true); } catch { } }
+
+            // --- Catalog backup compression + snapshot/restore (BACKLOG 2026-08-08) ---
+            // The safe half: backups/snapshots compress to ZIP; the live catalog stays
+            // plain JSON. Read side sniffs zip/gz/plain so nothing old stops loading.
+            var caDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-archive-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(caDir);
+            try
+            {
+                string Hex(byte[] b) => BitConverter.ToString(b).Replace("-", "").ToLowerInvariant();
+                byte[] bomPlainConcat(byte[] body) => new byte[] { 0xEF, 0xBB, 0xBF }.Concat(body).ToArray();
+
+                // --- format sniff ---
+                var zipMagic = new MemoryStream(new byte[] { 0x50, 0x4B, 0x03, 0x04, 0x00 });
+                Assert(CatalogArchive.SniffStream(zipMagic) == CatalogArchive.CatalogFormat.Zip, "sniff: PK -> Zip");
+                Assert(zipMagic.Position == 0, "sniff: seekable stream is rewound after sniff");
+                Assert(CatalogArchive.SniffStream(new MemoryStream(new byte[] { 0x1F, 0x8B, 0x08 })) == CatalogArchive.CatalogFormat.Gzip, "sniff: 1F 8B -> Gzip");
+                Assert(CatalogArchive.SniffStream(new MemoryStream(Encoding.UTF8.GetBytes("{\"a\":1}"))) == CatalogArchive.CatalogFormat.Plain, "sniff: { -> Plain");
+                var bomPlain = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'{' };
+                Assert(CatalogArchive.SniffStream(new MemoryStream(bomPlain)) == CatalogArchive.CatalogFormat.Plain, "sniff: UTF-8 BOM + { -> Plain (not Zip/Gzip)");
+
+                // --- sample catalog (plain JSON, no BOM) ---
+                var catalogJson = "{\"version\":\"1.0\",\"generatedAt\":\"2026-08-09T00:00:00Z\",\"trackCount\":3,\"tracks\":{\"A\":{\"bpm\":120},\"B\":{\"bpm\":90},\"C\":{\"bpm\":60}}}";
+                var catalogBytes = Encoding.UTF8.GetBytes(catalogJson);
+                var caCatalog = Path.Combine(caDir, "mbxmoods.json");
+                File.WriteAllBytes(caCatalog, catalogBytes);
+
+                // --- ZIP backup round-trips the exact bytes ---
+                var caBak = caCatalog + ".bak.20260809.120000.zip";
+                CatalogArchive.WriteZipBackup(caCatalog, caBak);
+                Assert(File.Exists(caBak), "backup: zip file written");
+                Assert(CatalogArchive.SniffFile(caBak) == CatalogArchive.CatalogFormat.Zip, "backup: written file sniffs as Zip");
+                Assert(new FileInfo(caBak).Length < catalogBytes.Length + 512, "backup: zip is not larger than a plain copy (compressed)");
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(caBak, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "backup: zip extracts byte-identical to the original catalog");
+                }
+
+                // --- gz and plain also read back (self-describing) ---
+                var caGz = Path.Combine(caDir, "cat.json.gz");
+                using (var gfs = new FileStream(caGz, FileMode.Create, FileAccess.Write))
+                using (var gz = new System.IO.Compression.GZipStream(gfs, System.IO.Compression.CompressionMode.Compress))
+                    gz.Write(catalogBytes, 0, catalogBytes.Length);
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(caGz, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "read: gzip extracts byte-identical");
+                }
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(caCatalog, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "read: plain extracts byte-identical (pass-through)");
+                }
+
+                // --- rotation keeps newest N, spares the transient .bak and the live file ---
+                var rotDir = Path.Combine(caDir, "rot");
+                Directory.CreateDirectory(rotDir);
+                var rotLive = Path.Combine(rotDir, "mbxmoods.json");
+                File.WriteAllText(rotLive, "{}");
+                File.WriteAllText(rotLive + ".bak", "transient");                       // SaveResults swap backup, no timestamp
+                foreach (var ts in new[] { "20260101.000000", "20260102.000000", "20260103.000000", "20260104.000000" })
+                    File.WriteAllText($"{rotLive}.bak.{ts}.zip", "x");
+                var deleted = CatalogArchive.RotateBackups(rotLive, 2);
+                Assert(deleted == 2, $"rotate: keep-2 of 4 deletes 2 (got {deleted})");
+                Assert(File.Exists($"{rotLive}.bak.20260104.000000.zip") && File.Exists($"{rotLive}.bak.20260103.000000.zip"), "rotate: newest two survive");
+                Assert(!File.Exists($"{rotLive}.bak.20260101.000000.zip") && !File.Exists($"{rotLive}.bak.20260102.000000.zip"), "rotate: oldest two removed");
+                Assert(File.Exists(rotLive + ".bak"), "rotate: transient .bak (no timestamp) is never rotated");
+                Assert(File.Exists(rotLive), "rotate: the live catalog is never rotated");
+                Assert(CatalogArchive.RotateBackups(rotLive, 0) == 0 && File.Exists($"{rotLive}.bak.20260104.000000.zip"), "rotate: keepN<=0 keeps everything (never truncate)");
+
+                // --- streaming trackCount from a prefix window ---
+                Assert(CatalogArchive.TryReadTrackCountFromPrefix(catalogBytes, catalogBytes.Length) == 3, "trackCount: reads top-level trackCount");
+                var withBom = bomPlainConcat(catalogBytes);
+                Assert(CatalogArchive.TryReadTrackCountFromPrefix(withBom, withBom.Length) == 3, "trackCount: tolerates a leading UTF-8 BOM");
+                var nested = Encoding.UTF8.GetBytes("{\"tracks\":{\"x\":{\"trackCount\":9}}}");
+                Assert(CatalogArchive.TryReadTrackCountFromPrefix(nested, nested.Length) == null, "trackCount: ignores a nested (depth>1) trackCount");
+                var noCount = Encoding.UTF8.GetBytes("{\"version\":\"1.0\",\"tracks\":{}}");
+                Assert(CatalogArchive.TryReadTrackCountFromPrefix(noCount, noCount.Length) == null, "trackCount: null when absent from the window");
+
+                // --- snapshot bundles catalog + manifest (+ exclude) and self-verifies ---
+                var caExclude = Path.Combine(caDir, "mbxmoods-exclude.json");
+                File.WriteAllText(caExclude, "{\"schemaVersion\":1,\"rules\":[]}");
+                var snapOut = Path.Combine(caDir, "snap.zip");
+                var info = CatalogArchive.WriteSnapshot(caCatalog, caExclude, snapOut, "truedat-selftest");
+                var expectSha = Hex(SHA256.Create().ComputeHash(catalogBytes));
+                Assert(info.TrackCount == 3, "snapshot: manifest trackCount matches the catalog");
+                Assert(info.ContentSha256 == expectSha, "snapshot: manifest content SHA-256 matches an independent hash of the catalog bytes");
+                Assert(info.CatalogBytes == catalogBytes.Length, "snapshot: manifest records the catalog byte size");
+                Assert(CatalogArchive.SniffFile(snapOut) == CatalogArchive.CatalogFormat.Zip, "snapshot: output is a ZIP");
+                Assert(CatalogArchive.ArchiveContainsExclude(snapOut), "snapshot: bundles the exclusion file when present");
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(snapOut, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "snapshot: catalog entry extracts byte-identical");
+                }
+                // manifest.json entry is present and carries the same facts
+                using (var zfs = new FileStream(snapOut, FileMode.Open, FileAccess.Read))
+                using (var zip = new System.IO.Compression.ZipArchive(zfs, System.IO.Compression.ZipArchiveMode.Read))
+                {
+                    var mEntry = zip.GetEntry(CatalogArchive.ManifestEntryName);
+                    Assert(mEntry != null, "snapshot: manifest.json entry present");
+                    using var mr = new StreamReader(mEntry!.Open());
+                    var manifest = JsonNode.Parse(mr.ReadToEnd())!.AsObject();
+                    Assert(manifest["contentSha256"]!.GetValue<string>() == expectSha, "snapshot: manifest.json contentSha256 field matches");
+                    Assert(manifest["trackCount"]!.GetValue<int>() == 3, "snapshot: manifest.json trackCount field matches");
+                }
+
+                var snapNoExcl = Path.Combine(caDir, "snap-noexcl.zip");
+                CatalogArchive.WriteSnapshot(caCatalog, null, snapNoExcl, "truedat-selftest");
+                Assert(!CatalogArchive.ArchiveContainsExclude(snapNoExcl), "snapshot: no exclusion entry when none is provided");
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(snapNoExcl, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "snapshot: still round-trips the catalog with no exclude file");
+                }
+
+                // --- integration: BackupCatalogCompressed writes a rotating .zip backup ---
+                var bcbDir = Path.Combine(caDir, "bcb");
+                Directory.CreateDirectory(bcbDir);
+                var bcbCatalog = Path.Combine(bcbDir, "mbxmoods.json");
+                File.WriteAllBytes(bcbCatalog, catalogBytes);
+                var bcbBak = BackupCatalogCompressed(bcbCatalog);
+                Assert(bcbBak.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && File.Exists(bcbBak), "backup helper: writes a .zip backup path");
+                Assert(CatalogArchive.SniffFile(bcbBak) == CatalogArchive.CatalogFormat.Zip, "backup helper: the backup is a ZIP");
+                using (var ms = new MemoryStream())
+                {
+                    CatalogArchive.ExtractCatalogTo(bcbBak, ms);
+                    Assert(ms.ToArray().SequenceEqual(catalogBytes), "backup helper: backup round-trips the catalog");
+                }
+
+                // --- integration: RunRestore rebuilds the catalog and backs up the old one ---
+                var restDestDir = Path.Combine(caDir, "restore-dest");
+                Directory.CreateDirectory(restDestDir);
+                var restDest = Path.Combine(restDestDir, "mbxmoods.json");
+                File.WriteAllText(restDest, "{\"trackCount\":0,\"tracks\":{}}");   // pre-existing catalog to be backed up
+                var rc = RunRestore(snapOut, restDest);
+                Assert(rc == 0, "restore: returns 0 on success");
+                Assert(File.ReadAllBytes(restDest).SequenceEqual(catalogBytes), "restore: destination catalog matches the snapshot content");
+                Assert(Directory.GetFiles(restDestDir, "mbxmoods.json.bak.*.zip").Length == 1, "restore: the pre-existing catalog was backed up (compressed) before the swap");
+            }
+            finally { try { Directory.Delete(caDir, true); } catch { } }
 
             // --- diagnostic error log: format, reason capture, run-header-once, rotation ---
             var elDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-errlog-" + Guid.NewGuid().ToString("N"));

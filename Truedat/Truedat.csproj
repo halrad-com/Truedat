@@ -104,6 +104,10 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
 
   <ItemGroup>
     <Reference Include="System.Net.Http" />
+    <!-- ZipArchive/ZipArchiveMode for catalog backup compression + snapshots. net48
+         framework assembly (not a NuGet dep) — GZipStream lives in System.dll and is
+         already used, but the ZIP container types are in System.IO.Compression.dll. -->
+    <Reference Include="System.IO.Compression" />
   </ItemGroup>
 
   <ItemGroup>
