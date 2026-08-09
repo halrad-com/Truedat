@@ -1,6 +1,8 @@
 # truedat-deps
 
-Third-party binary dependencies for [Truedat](https://dev.azure.com/halrad/MBX). Place these alongside `truedat.exe`.
+Third-party binary dependencies for [Truedat](https://github.com/halrad-com/Truedat). Place these alongside `truedat.exe`.
+
+This is the `truedat-deps` branch of the Truedat repo (binaries via Git LFS), kept out of `main`'s history and checked out locally as a sibling folder of the source checkout.
 
 These are pre-built binaries downloaded from their respective projects — not built by Truedat.
 
