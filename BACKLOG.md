@@ -76,33 +76,51 @@ numeric strings repeated per track), so it gzips ~8–10× → ~100–130 MB. Th
 makes compression the right lever and makes anything fancier unnecessary.
 
 Constraints (pin the choices):
-- **Live `mbxmoods.json` stays plain JSON** — MBXHub's tolerant reader consumes it as
-  plain JSON; compressing the live file breaks the contract. Compress backups/snapshots
-  only, never the hot file.
-- **Zero new dependencies** — net48 ships `System.IO.Compression.GZipStream`/`DeflateStream`.
-  Brotli/zstd are not in net48 without a NuGet → out. GZip is plenty.
-- Streaming (`Utf8JsonWriter → GZipStream → FileStream`) keeps it O(1) memory like
-  `SaveResults`.
+- **Live `mbxmoods.json` stays plain JSON** for the base feature — MBXHub's tolerant reader
+  consumes it as plain JSON; compressing the live file is the stretch below, gated on MBXHub.
+  Base feature compresses backups/snapshots only.
+- **Zero new dependencies** — net48 ships both `System.IO.Compression.ZipArchive`/`ZipFile`
+  and `GZipStream`/`DeflateStream`. Brotli/zstd are not in net48 without a NuGet → out.
+- **Prefer ZIP over gz on write (Windows-first rationale).** Both use DEFLATE (same ratio),
+  both zero-dep, but Windows Explorer opens `.zip` natively while `.gz` needs a third-party
+  tool. ZIP is also a container, so a snapshot can bundle catalog + manifest + exclude file
+  in one double-clickable archive.
+- **Self-describing on read — accept zip, gz, and plain.** Sniff first bytes: `PK` (`50 4B`)
+  → ZIP (read entry `mbxmoods.json`), `1F 8B` → gz, `{` → plain. Backward-compatible and
+  reversible; the same sniff serves the stretch (MBXHub uses it too).
+- Streaming (`Utf8JsonWriter → ZipArchive entry stream / GZipStream → FileStream`) keeps it
+  O(1) memory like `SaveResults`; atomic write is unchanged (stage `.tmp`, `ReplaceFile` swap).
 
 Two surfaces:
 1. **Backup (automatic, now compressed + rotated).** The mutating modes (`--fixup`,
    `--remap`, `--merge-moods`, `--migrate`) each drop a permanent `mbxmoods.json.bak.<ts>`
-   full copy that ACCUMULATES — the footprint pain. Write them as `.bak.<ts>.gz` (~120 MB
-   vs 900 MB) and add keep-last-N rotation (`--keep-backups N`, default ~5). Rotation,
-   **never silent truncation** (same ruling as `mbxmoods-skipped.csv`).
-2. **Snapshot (deliberate).** New `--snapshot [path]`: streams the current catalog through
-   GZip to `mbxmoods.<ts>.json.gz`, read-only over the live file — for use before a risky
-   op or as a periodic archive. Optional sidecar manifest (`trackCount`, `generatedAt`,
-   content hash) so an archive self-verifies.
+   full copy that ACCUMULATES — the footprint pain. Write them compressed (~120 MB vs 900 MB)
+   and add keep-last-N rotation (`--keep-backups N`, default ~5). Rotation, **never silent
+   truncation** (same ruling as `mbxmoods-skipped.csv`).
+2. **Snapshot (deliberate).** New `--snapshot [path]`: streams the current catalog into a
+   `mbxmoods-snapshot-<ts>.zip` (read-only over the live file) — bundling the catalog + a
+   manifest (`trackCount`, `generatedAt`, content hash) + `mbxmoods-exclude.json`, so the
+   archive is a complete, self-verifying, restorable state in one file.
 
-Restore: a `--restore <archive.gz>` mode, or just document `gunzip → rename`.
+Restore: a `--restore <archive>` mode (sniffs zip/gz/plain), or just document extract → rename.
 
-Deliberately NOT: delta/diff archives (fragile, complex; full gzip is already ~90%
-smaller — KISS); compressing the live file (contract break); zstd/brotli on net48.
+Deliberately NOT: delta/diff archives (fragile, complex; full DEFLATE is already ~90%
+smaller — KISS); zstd/brotli on net48.
 
-Footprint: one shared `WriteGzipCatalog` helper wired into the 4 backup sites + a new
-`--snapshot` arg (+ optional `--restore`) + the rotation sweep. No schema change, no
-MBXHub-contract change, no new dependency.
+Footprint: one shared compress/decompress helper (format-sniffing read + ZIP-default write)
+wired into the 4 backup sites + a new `--snapshot` arg (+ optional `--restore`) + the
+rotation sweep. No schema change, no new dependency.
+
+**Stretch — compressed live catalog.** Could replace the live `mbxmoods.json` with a
+compressed form (ZIP entry `mbxmoods.json`, or `.json.gz`). Over a share-hosted catalog this
+is a net win (load ~120 MB + inflate beats reading 900 MB); locally on NVMe it's ~a wash
+(disk traded for CPU). **Blocker: MBXHub also reads this file**, so it's a cross-repo
+contract change — needs a heads-up to restfulbee and must be **consumer-first** (MBXHub adds
+the format-sniffing read *before* truedat ever writes compressed), using the same magic-byte
+sniff so old plain catalogs still load and the change is reversible. Costs: the catalog stops
+being greppable/jq-able without extracting, and forecloses any future streaming/mmap read
+(everything loads it whole today, so no loss now). Do not build the stretch without an
+explicit go AND restfulbee coordination.
 
 ## Scan policy — next items
 
