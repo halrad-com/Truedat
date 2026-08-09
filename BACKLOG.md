@@ -122,6 +122,30 @@ being greppable/jq-able without extracting, and forecloses any future streaming/
 (everything loads it whole today, so no loss now). Do not build the stretch without an
 explicit go AND restfulbee coordination.
 
+**restfulbee ACK + consumer-side constraints (2026-08-09).** MBXHub:architect approved the
+sniff-reader and ZIP-over-gz direction and consumer-first sequencing, and added four
+constraints the stretch spec must honor:
+1. **ALL consumers, not just the hub.** MBXHub's reader is not the only plain-JSON consumer
+   of `mbxmoods.json` — the AutoQ model tooling reads it directly (`restfulbee/tools/
+   calibrate-valence-arousal.py` and friends). Compressed-live would break those silently at
+   the next retrain. The consumer-first gate must count the python tooling too, not only the
+   hub reader.
+2. **Sniff must tolerate BOM + leading whitespace.** Don't test the first byte for `{` —
+   catalogs appear with a UTF-8 BOM (`EF BB BF`) and occasional leading whitespace. Order:
+   `PK` → ZIP; `1F 8B` → gz; else skip optional BOM + whitespace, then expect `{`.
+3. **Decompress as a Stream, not a string/byte[].** MBXHub parses with a streaming
+   `Utf8JsonReader` to avoid materializing ~900 MB in a net48 plugin sharing MusicBee's
+   process. The sniff must hand the JSON layer a `Stream` (`ZipArchiveEntry.Open()` /
+   `GZipStream`) with the streaming parse behind it — a decompress-to-string would trade the
+   disk win for a multi-hundred-MB allocation spike. Same discipline applies on truedat's read.
+4. **Atomicity becomes load-bearing, not just good practice.** A truncated ZIP fails at the
+   container layer with a poor error and no partial-data fallback, worse than a half-written
+   plain JSON. temp-file + atomic replace is mandatory for compressed-live; state it in the spec.
+
+When greenlit, ping restfulbee:architect — they'll spec the reader change against MoodCache's
+actual read path (the same tolerant reader that handles the `sensme*`→`smfm*` rename) so the
+sniff lands in one place, not at every call site.
+
 ## Scan policy — next items
 
 The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
