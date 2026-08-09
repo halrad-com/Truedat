@@ -142,6 +142,14 @@ namespace Truedat
         public double? TuningNontemperedEnergyRatio { get; set; } // tonal.tuning_nontempered_energy_ratio
         public double? AverageLoudness { get; set; }          // lowlevel.average_loudness (0..1)
 
+        // 2026-08-09 harmonic-texture term (v0.5.4.7). Both Essentia-derived:
+        // populated on fresh analysis only, NOT in the re-extract canary, not
+        // backfillable — existing entries gain them only on a deliberate re-scan
+        // (--refresh-features). Consumer: MBXHub AutoQ harmonic-texture continuity
+        // (hpcp12 cross-track cosine) + a dynamics term (dynamicComplexity delta).
+        public double[]? Hpcp12 { get; set; }                 // tonal.hpcp.mean folded 36->12 semitones, unit-max, 4dp
+        public double? DynamicComplexity { get; set; }        // lowlevel.dynamic_complexity, 4dp
+
         // Phase 2.5 — bottom-bit analysis. Populated during fresh analysis via ffmpeg
         // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
         // Detects bit-depth fakery (16-bit content padded to 24-bit container).
@@ -12011,6 +12019,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Assert(!ShouldKeepAwake(1, false, false), "keep-awake: read-only modes never assert");
             Assert(!ShouldKeepAwake(0, true, false), "keep-awake: all-off stays off");
 
+            // --- hpcp12 fold (v0.5.4.7 harmonic-texture term) -----------
+            // 36-bin extractor HPCP -> 12 semitones: sum each 3-bin triplet,
+            // normalize to unit max, round 4dp; absence -> null, never all-zero.
+            {
+                var h36 = new double[36];
+                var triSums = new[] { 2.0, 4, 6, 8, 10, 12, 10, 8, 6, 4, 2, 1 }; // peak 12 at semitone 5
+                for (int t = 0; t < 12; t++) h36[3 * t] = triSums[t];
+                var folded = FoldHpcp36To12(h36);
+                var expect = new[] { 0.1667, 0.3333, 0.5, 0.6667, 0.8333, 1.0, 0.8333, 0.6667, 0.5, 0.3333, 0.1667, 0.0833 };
+                Assert(folded != null && folded.Length == 12, "hpcp12: folds 36 bins to 12 semitones");
+                Assert(folded != null && folded.SequenceEqual(expect), "hpcp12: sum-triplets, unit-max normalized, 4dp");
+                var h36b = new double[36];
+                h36b[0] = 1; h36b[1] = 2; h36b[2] = 3; // triplet 0 sums to 6 = its peak
+                var foldedB = FoldHpcp36To12(h36b);
+                Assert(foldedB != null && foldedB[0] == 1.0 && foldedB[1] == 0.0, "hpcp12: sums all three bins of a triplet");
+                Assert(FoldHpcp36To12(null) == null, "hpcp12: null input -> null");
+                Assert(FoldHpcp36To12(new double[35]) == null, "hpcp12: non-36-length -> null");
+                Assert(FoldHpcp36To12(new double[36]) == null, "hpcp12: all-zero chroma -> null");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -13334,6 +13362,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             WriteOpt(jw, "tuningDiatonicStrength", f.TuningDiatonicStrength);
             WriteOpt(jw, "tuningNontemperedEnergyRatio", f.TuningNontemperedEnergyRatio);
             WriteOpt(jw, "averageLoudness", f.AverageLoudness);
+            if (f.Hpcp12 != null)
+            {
+                jw.WritePropertyName("hpcp12");
+                jw.WriteStartArray();
+                foreach (var v in f.Hpcp12) jw.WriteNumberValue(Math.Round(v, 4));
+                jw.WriteEndArray();
+            }
+            WriteOpt(jw, "dynamicComplexity", f.DynamicComplexity);
             // Phase 2.5 — bottom-bit analysis; omit-when-null.
             if (f.BitUsage != null)
             {
@@ -13623,6 +13659,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 ChordsHistogram = track.TryGetProperty("chordsHistogram", out var chArr) && chArr.ValueKind == JsonValueKind.Array
                     ? chArr.EnumerateArray().Select(e => e.GetDouble()).ToArray()
                     : null,
+                Hpcp12 = track.TryGetProperty("hpcp12", out var hpArr) && hpArr.ValueKind == JsonValueKind.Array
+                    ? hpArr.EnumerateArray().Select(e => e.GetDouble()).ToArray()
+                    : null,
+                DynamicComplexity = GetNullableDbl(track, "dynamicComplexity"),
                 ChordsNumberRate = GetNullableDbl(track, "chordsNumberRate"),
                 TuningFrequency = GetNullableDbl(track, "tuningFrequency"),
                 TuningEqualTemperedDeviation = GetNullableDbl(track, "tuningEqualTemperedDeviation"),
@@ -13939,6 +13979,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
         }
 
+        /// <summary>Fold the extractor's 36-bin HPCP chroma (tonal.hpcp.mean) into
+        /// a 12-semitone vector: sum each consecutive 3-bin triplet, normalize so the
+        /// peak semitone = 1.0, round to 4 dp. Returns null when the input is missing,
+        /// not 36-long, or carries no chroma energy (all-zero) — absence must read as
+        /// null, never a fake all-zero similarity vector. Consumed by MBXHub AutoQ's
+        /// harmonic-texture continuity term (cross-track chroma cosine).</summary>
+        static double[]? FoldHpcp36To12(double[]? hpcp36)
+        {
+            if (hpcp36 == null || hpcp36.Length != 36) return null;
+            var folded = new double[12];
+            for (int t = 0; t < 12; t++)
+                folded[t] = hpcp36[3 * t] + hpcp36[3 * t + 1] + hpcp36[3 * t + 2];
+            var max = folded.Max();
+            if (max <= 0) return null;   // silent / no-chroma track: null, not a fake all-zero vector
+            for (int i = 0; i < 12; i++)
+                folded[i] = Math.Round(folded[i] / max, 4);
+            return folded;
+        }
+
         static TrackFeatures? ParseEssentiaOutput(string json)
         {
             try
@@ -14055,6 +14114,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var tuningDiatonicStrength = OptN(root, "tonal.tuning_diatonic_strength");
                 var tuningNontemperedEnergyRatio = OptN(root, "tonal.tuning_nontempered_energy_ratio");
                 var averageLoudness = OptN(root, "lowlevel.average_loudness");
+                double[]? hpcp12 = null;
+                var hpcpEl = NavigatePath(root, "tonal.hpcp.mean");
+                if (hpcpEl.HasValue && hpcpEl.Value.ValueKind == JsonValueKind.Array)
+                    hpcp12 = FoldHpcp36To12(hpcpEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray());
+                var dynamicComplexity = OptN(root, "lowlevel.dynamic_complexity");
 
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
@@ -14153,7 +14217,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     TuningEqualTemperedDeviation = tuningEqualTemperedDeviation,
                     TuningDiatonicStrength = tuningDiatonicStrength,
                     TuningNontemperedEnergyRatio = tuningNontemperedEnergyRatio,
-                    AverageLoudness = averageLoudness
+                    AverageLoudness = averageLoudness,
+                    Hpcp12 = hpcp12,
+                    DynamicComplexity = dynamicComplexity
                 };
             }
             catch (Exception ex)
@@ -15481,6 +15547,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     TuningDiatonicStrength = sf.TuningDiatonicStrength,
                     TuningNontemperedEnergyRatio = sf.TuningNontemperedEnergyRatio,
                     AverageLoudness = sf.AverageLoudness,
+                    Hpcp12 = sf.Hpcp12,                  // 2026-08-09 harmonic-texture — preserve across cache hits
+                    DynamicComplexity = sf.DynamicComplexity,
                     BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
                     HfEnergyMethod = sf.HfEnergyMethod,

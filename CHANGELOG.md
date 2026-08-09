@@ -13,6 +13,20 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
+- **Harmonic-texture fields (`hpcp12`, `dynamicComplexity`).** Each analyzed track now
+  retains a 12-semitone chroma vector (`hpcp12` — the track's pitch-class energy
+  profile, from the extractor's 36-bin `tonal.hpcp.mean` folded to 12 semitones,
+  unit-max normalized, 4dp) and `dynamicComplexity`, a loudness-dynamics scalar.
+  **What gets better:** AutoQ can now judge how much two tracks' harmonic content
+  actually overlaps — the whole pitch profile, not just the one Camelot key it reads
+  today — so it can pick a next track that blends more smoothly, and use the dynamics
+  scalar to keep energy steady across a transition. **Not a breaking change** —
+  existing `mbxmoods.json` files read exactly as before and nothing re-analyzes on its
+  own. **To populate the new properties on an already-scanned library, run a refresh
+  scan (`--refresh-features`)**: they are Essentia-derived with no parse-only backfill
+  (the raw extractor output is discarded at parse), so existing tracks gain them only
+  on re-analysis; new or changed tracks pick them up automatically on any normal scan.
+
 - **Exclusion playlists.** Maintain your exclusion list as a MusicBee playlist named
   `mbxmoods-exclude`: every scan discovers `mbxmoods-exclude.m3u8`/`.m3u` beside the
   library XML (or in its `Playlists` folder) and excludes every entry for that run —
