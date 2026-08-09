@@ -142,13 +142,28 @@ namespace Truedat
         public double? TuningNontemperedEnergyRatio { get; set; } // tonal.tuning_nontempered_energy_ratio
         public double? AverageLoudness { get; set; }          // lowlevel.average_loudness (0..1)
 
-        // 2026-08-09 harmonic-texture term (v0.5.4.7). Both Essentia-derived:
-        // populated on fresh analysis only, NOT in the re-extract canary, not
-        // backfillable — existing entries gain them only on a deliberate re-scan
-        // (--refresh-features). Consumer: MBXHub AutoQ harmonic-texture continuity
-        // (hpcp12 cross-track cosine) + a dynamics term (dynamicComplexity delta).
+        // 2026-08-09 harmonic-texture + capture-once wave (v0.5.4.7). All Essentia-derived,
+        // nullable/omit-when-null, and NOT in the BASE re-extract canary (a normal scan
+        // never force-re-analyzes for them). dynamicComplexity is the --refresh-features
+        // staleness marker for this wave, so one refresh pass populates the whole set in a
+        // single catalog re-read ("capture once"). Consumers: MBXHub AutoQ harmonic-texture
+        // continuity (hpcp12 cosine) + dynamics (dynamicComplexity); thpcp12/beats/frame
+        // stdevs are captured now, wired into picking later (.8+ hub-side); mfccStdev +
+        // zeroCrossingRateStdev + the frame stdevs also feed speech/transcription work.
         public double[]? Hpcp12 { get; set; }                 // tonal.hpcp.mean folded 36->12 semitones, unit-max, 4dp
         public double? DynamicComplexity { get; set; }        // lowlevel.dynamic_complexity, 4dp
+        public double[]? Thpcp12 { get; set; }                // tonal.thpcp folded 36->12 (key-invariant), unit-max, 4dp
+        public double? BeatsIntervalMean { get; set; }        // inter-beat interval mean (s), from rhythm.beats_position
+        public double? BeatsIntervalStdev { get; set; }       // inter-beat interval stdev (s) — beatgrid steadiness
+        public double? BeatsIntervalMin { get; set; }         // shortest inter-beat interval (s)
+        public double? BeatsIntervalMax { get; set; }         // longest inter-beat interval (s)
+        public double? SpectralCentroidStdev { get; set; }    // lowlevel.spectral_centroid.stdev
+        public double? SpectralEnergyStdev { get; set; }      // lowlevel.spectral_energy.stdev
+        public double? DissonanceStdev { get; set; }          // lowlevel.dissonance.stdev
+        public double? PitchSalienceStdev { get; set; }       // lowlevel.pitch_salience.stdev
+        public double? HpcpEntropyStdev { get; set; }         // tonal.hpcp_entropy.stdev
+        public double? ZeroCrossingRateStdev { get; set; }    // lowlevel.zerocrossingrate.stdev (speech discriminator)
+        public double[]? MfccStdev { get; set; }              // sqrt(diag(lowlevel.mfcc.cov)) — MFCC variability (speech/ASR)
 
         // Phase 2.5 — bottom-bit analysis. Populated during fresh analysis via ffmpeg
         // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
@@ -1719,12 +1734,14 @@ namespace Truedat
 
         /// <summary>Re-extract canary, single source of truth for every cache tier.
         /// Base: DynamicRange + LoudnessMomentary present (pre-LRA / pre-extended
-        /// builds re-analyze). Under --refresh-features, entries lacking the
-        /// 2026-07-22 tonal/rhythm wave also count as stale — averageLoudness is
-        /// the marker because the extractor emits it unconditionally.</summary>
+        /// builds re-analyze). Under --refresh-features, entries lacking a later
+        /// wave also count as stale: averageLoudness marks the 2026-07-22 tonal wave,
+        /// dynamicComplexity marks the 2026-08-09 harmonic-texture wave. Both are
+        /// markers because the extractor emits them unconditionally for any decodable
+        /// track (unlike hpcp12, which is null on silence and would loop forever).</summary>
         static bool HasCurrentFeatures(TrackFeatures? f)
             => f != null && f.DynamicRange.HasValue && f.LoudnessMomentary.HasValue
-               && (!_refreshFeatures || f.AverageLoudness.HasValue);
+               && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue));
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
         /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
@@ -12039,6 +12056,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(FoldHpcp36To12(new double[36]) == null, "hpcp12: all-zero chroma -> null");
             }
 
+            // --- refresh-features gate must re-analyze pre-harmonic entries ---
+            // The release-blocker: a July-22-era entry has averageLoudness but no
+            // harmonic fields, so gating refresh on averageLoudness alone marks it
+            // current and --refresh-features never populates hpcp12/dynamicComplexity.
+            {
+                var preHarmonic = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5 };
+                var complete = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0 };
+                var savedRf = _refreshFeatures;
+                _refreshFeatures = false;
+                Assert(HasCurrentFeatures(preHarmonic), "gate: normal scan leaves a pre-harmonic entry current (no forced re-scan)");
+                _refreshFeatures = true;
+                Assert(!HasCurrentFeatures(preHarmonic), "gate: --refresh-features marks a pre-harmonic entry (no dynamicComplexity) STALE");
+                Assert(HasCurrentFeatures(complete), "gate: --refresh-features leaves a harmonic-complete entry current (no re-analysis loop)");
+                _refreshFeatures = savedRf;
+            }
+
+            // --- beats interval summary (capture-once, free from beats_position) ---
+            {
+                var steady = BeatIntervalStats(new[] { 0.0, 0.5, 1.0, 1.5 });
+                Assert(steady.HasValue && steady.Value.Mean == 0.5 && steady.Value.Stdev == 0.0
+                       && steady.Value.Min == 0.5 && steady.Value.Max == 0.5, "beats: steady 0.5s -> mean 0.5, stdev 0");
+                var swung = BeatIntervalStats(new[] { 0.0, 0.4, 1.0, 1.4, 2.0 });
+                Assert(swung.HasValue && swung.Value.Mean == 0.5 && swung.Value.Stdev == 0.1
+                       && swung.Value.Min == 0.4 && swung.Value.Max == 0.6, "beats: alternating -> mean 0.5, stdev 0.1, min 0.4, max 0.6");
+                Assert(BeatIntervalStats(null) == null, "beats: null -> null");
+                Assert(BeatIntervalStats(new[] { 0.0, 1.0 }) == null, "beats: <3 beats -> null");
+            }
+
+            // --- mfcc stdev from covariance diagonal (capture-once, speech) --------
+            {
+                var sd = MfccStdevFromCov(new[] { new[] { 4.0, 1.0, 1.0 }, new[] { 1.0, 9.0, 1.0 }, new[] { 1.0, 1.0, 16.0 } });
+                Assert(sd != null && sd.SequenceEqual(new[] { 2.0, 3.0, 4.0 }), "mfccStdev: sqrt of covariance diagonal");
+                Assert(MfccStdevFromCov(null) == null, "mfccStdev: null cov -> null");
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -13370,6 +13422,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "dynamicComplexity", f.DynamicComplexity);
+            if (f.Thpcp12 != null)
+            {
+                jw.WritePropertyName("thpcp12");
+                jw.WriteStartArray();
+                foreach (var v in f.Thpcp12) jw.WriteNumberValue(Math.Round(v, 4));
+                jw.WriteEndArray();
+            }
+            WriteOpt(jw, "beatsIntervalMean", f.BeatsIntervalMean);
+            WriteOpt(jw, "beatsIntervalStdev", f.BeatsIntervalStdev);
+            WriteOpt(jw, "beatsIntervalMin", f.BeatsIntervalMin);
+            WriteOpt(jw, "beatsIntervalMax", f.BeatsIntervalMax);
+            WriteOpt(jw, "spectralCentroidStdev", f.SpectralCentroidStdev);
+            WriteOpt(jw, "spectralEnergyStdev", f.SpectralEnergyStdev);
+            WriteOpt(jw, "dissonanceStdev", f.DissonanceStdev);
+            WriteOpt(jw, "pitchSalienceStdev", f.PitchSalienceStdev);
+            WriteOpt(jw, "hpcpEntropyStdev", f.HpcpEntropyStdev);
+            WriteOpt(jw, "zeroCrossingRateStdev", f.ZeroCrossingRateStdev);
+            if (f.MfccStdev != null)
+            {
+                jw.WritePropertyName("mfccStdev");
+                jw.WriteStartArray();
+                foreach (var v in f.MfccStdev) jw.WriteNumberValue(Math.Round(v, 4));
+                jw.WriteEndArray();
+            }
             // Phase 2.5 — bottom-bit analysis; omit-when-null.
             if (f.BitUsage != null)
             {
@@ -13663,6 +13739,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ? hpArr.EnumerateArray().Select(e => e.GetDouble()).ToArray()
                     : null,
                 DynamicComplexity = GetNullableDbl(track, "dynamicComplexity"),
+                Thpcp12 = track.TryGetProperty("thpcp12", out var thArr) && thArr.ValueKind == JsonValueKind.Array
+                    ? thArr.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                BeatsIntervalMean = GetNullableDbl(track, "beatsIntervalMean"),
+                BeatsIntervalStdev = GetNullableDbl(track, "beatsIntervalStdev"),
+                BeatsIntervalMin = GetNullableDbl(track, "beatsIntervalMin"),
+                BeatsIntervalMax = GetNullableDbl(track, "beatsIntervalMax"),
+                SpectralCentroidStdev = GetNullableDbl(track, "spectralCentroidStdev"),
+                SpectralEnergyStdev = GetNullableDbl(track, "spectralEnergyStdev"),
+                DissonanceStdev = GetNullableDbl(track, "dissonanceStdev"),
+                PitchSalienceStdev = GetNullableDbl(track, "pitchSalienceStdev"),
+                HpcpEntropyStdev = GetNullableDbl(track, "hpcpEntropyStdev"),
+                ZeroCrossingRateStdev = GetNullableDbl(track, "zeroCrossingRateStdev"),
+                MfccStdev = track.TryGetProperty("mfccStdev", out var msArr) && msArr.ValueKind == JsonValueKind.Array
+                    ? msArr.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
                 ChordsNumberRate = GetNullableDbl(track, "chordsNumberRate"),
                 TuningFrequency = GetNullableDbl(track, "tuningFrequency"),
                 TuningEqualTemperedDeviation = GetNullableDbl(track, "tuningEqualTemperedDeviation"),
@@ -13998,6 +14088,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return folded;
         }
 
+        /// <summary>Summarize a beat-onset track (rhythm.beats_position, seconds) into a
+        /// compact inter-beat-interval stat block — mean, population stdev, min, max of
+        /// the consecutive differences, 4dp. Stored instead of the raw tick array:
+        /// beatgrid steadiness/phrase awareness without the size. Null with fewer than
+        /// two intervals (needs >= 3 beats).</summary>
+        static (double Mean, double Stdev, double Min, double Max)? BeatIntervalStats(double[]? beats)
+        {
+            if (beats == null || beats.Length < 3) return null;
+            var iv = new double[beats.Length - 1];
+            for (int i = 1; i < beats.Length; i++) iv[i - 1] = beats[i] - beats[i - 1];
+            double mean = iv.Average();
+            double varSum = 0;
+            foreach (var v in iv) varSum += (v - mean) * (v - mean);
+            return (Math.Round(mean, 4), Math.Round(Math.Sqrt(varSum / iv.Length), 4),
+                    Math.Round(iv.Min(), 4), Math.Round(iv.Max(), 4));
+        }
+
+        /// <summary>Per-coefficient MFCC standard deviation from the extractor's already-
+        /// emitted covariance matrix (lowlevel.mfcc.cov): stdev[i] = sqrt(cov[i][i]).
+        /// Free (no new compute) — the within-track MFCC variability that separates
+        /// speech from music and feeds future transcription selection. Null on a
+        /// missing / degenerate matrix.</summary>
+        static double[]? MfccStdevFromCov(double[][]? cov)
+        {
+            if (cov == null || cov.Length == 0) return null;
+            var sd = new double[cov.Length];
+            for (int i = 0; i < cov.Length; i++)
+            {
+                if (cov[i] == null || cov[i].Length <= i) return null;
+                var d = cov[i][i];
+                sd[i] = Math.Round(d > 0 ? Math.Sqrt(d) : 0, 4);
+            }
+            return sd;
+        }
+
         static TrackFeatures? ParseEssentiaOutput(string json)
         {
             try
@@ -14119,6 +14244,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (hpcpEl.HasValue && hpcpEl.Value.ValueKind == JsonValueKind.Array)
                     hpcp12 = FoldHpcp36To12(hpcpEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray());
                 var dynamicComplexity = OptN(root, "lowlevel.dynamic_complexity");
+                double[]? thpcp12 = null;
+                var thpcpEl = NavigatePath(root, "tonal.thpcp");
+                if (thpcpEl.HasValue && thpcpEl.Value.ValueKind == JsonValueKind.Array)
+                    thpcp12 = FoldHpcp36To12(thpcpEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray());
+                double[]? beatsPos = null;
+                var beatsEl = NavigatePath(root, "rhythm.beats_position");
+                if (beatsEl.HasValue && beatsEl.Value.ValueKind == JsonValueKind.Array)
+                    beatsPos = beatsEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray();
+                var beatIv = BeatIntervalStats(beatsPos);
+                var spectralCentroidStdev = OptN(root, "lowlevel.spectral_centroid.stdev", 1);
+                var spectralEnergyStdev = OptN(root, "lowlevel.spectral_energy.stdev", 6);
+                var dissonanceStdev = OptN(root, "lowlevel.dissonance.stdev");
+                var pitchSalienceStdev = OptN(root, "lowlevel.pitch_salience.stdev");
+                var hpcpEntropyStdev = OptN(root, "tonal.hpcp_entropy.stdev");
+                var zeroCrossingRateStdev = OptN(root, "lowlevel.zerocrossingrate.stdev");
+                double[][]? mfccCov = null;
+                var mfccCovEl = NavigatePath(root, "lowlevel.mfcc.cov");
+                if (mfccCovEl.HasValue && mfccCovEl.Value.ValueKind == JsonValueKind.Array)
+                {
+                    var covRows = new List<double[]>();
+                    foreach (var row in mfccCovEl.Value.EnumerateArray())
+                        if (row.ValueKind == JsonValueKind.Array)
+                            covRows.Add(row.EnumerateArray().Select(x => x.GetDouble()).ToArray());
+                    mfccCov = covRows.ToArray();
+                }
+                var mfccStdev = MfccStdevFromCov(mfccCov);
 
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
@@ -14219,7 +14370,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     TuningNontemperedEnergyRatio = tuningNontemperedEnergyRatio,
                     AverageLoudness = averageLoudness,
                     Hpcp12 = hpcp12,
-                    DynamicComplexity = dynamicComplexity
+                    DynamicComplexity = dynamicComplexity,
+                    Thpcp12 = thpcp12,
+                    BeatsIntervalMean = beatIv?.Mean,
+                    BeatsIntervalStdev = beatIv?.Stdev,
+                    BeatsIntervalMin = beatIv?.Min,
+                    BeatsIntervalMax = beatIv?.Max,
+                    SpectralCentroidStdev = spectralCentroidStdev,
+                    SpectralEnergyStdev = spectralEnergyStdev,
+                    DissonanceStdev = dissonanceStdev,
+                    PitchSalienceStdev = pitchSalienceStdev,
+                    HpcpEntropyStdev = hpcpEntropyStdev,
+                    ZeroCrossingRateStdev = zeroCrossingRateStdev,
+                    MfccStdev = mfccStdev
                 };
             }
             catch (Exception ex)
@@ -15549,6 +15712,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     AverageLoudness = sf.AverageLoudness,
                     Hpcp12 = sf.Hpcp12,                  // 2026-08-09 harmonic-texture — preserve across cache hits
                     DynamicComplexity = sf.DynamicComplexity,
+                    Thpcp12 = sf.Thpcp12,
+                    BeatsIntervalMean = sf.BeatsIntervalMean,
+                    BeatsIntervalStdev = sf.BeatsIntervalStdev,
+                    BeatsIntervalMin = sf.BeatsIntervalMin,
+                    BeatsIntervalMax = sf.BeatsIntervalMax,
+                    SpectralCentroidStdev = sf.SpectralCentroidStdev,
+                    SpectralEnergyStdev = sf.SpectralEnergyStdev,
+                    DissonanceStdev = sf.DissonanceStdev,
+                    PitchSalienceStdev = sf.PitchSalienceStdev,
+                    HpcpEntropyStdev = sf.HpcpEntropyStdev,
+                    ZeroCrossingRateStdev = sf.ZeroCrossingRateStdev,
+                    MfccStdev = sf.MfccStdev,
                     BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
                     HfEnergyMethod = sf.HfEnergyMethod,
