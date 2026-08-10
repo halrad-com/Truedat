@@ -4100,6 +4100,7 @@ namespace Truedat
                 Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf}");
             }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
+            if (essentiaExe != null) ReportExtractorBuild(essentiaExe);
             Console.WriteLine();
 
             if (essentiaExe == null)
@@ -6897,6 +6898,42 @@ namespace Truedat
         /// <summary>
         /// Find a tool exe by checking: app base directory, output/library directory, working directory.
         /// </summary>
+        // Known Essentia extractor builds by MD5, newest first. .4 is current; older builds
+        // run but lack fixes/speed. Capabilities tracked: optimized (-O2), accurate bpm
+        // (first-peak key-collision fixed), 13-hour file support (large-buffer chords).
+        internal const string LatestExtractorMd5 = "c6a436d0fe9a33a4c8eac120d9e6243f";
+        static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support (current)",
+            ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3 — optimized, 13-hour file support; INACCURATE bpm (first-peak key-collision bug)",
+            ["f52e166e9063b23cdda538cdf8530ed4"] = "output-x64.2 — 13-hour file support; NOT optimized (~3x slower), inaccurate bpm",
+            ["05c4c77bb204026e87b3a593e0d0ed2e"] = "output-x64.1 — 200-min cap only; NOT optimized (~3x slower), inaccurate bpm",
+        };
+
+        /// <summary>Hash the resolved extractor, name its build, and warn if it isn't the
+        /// current .4. Best-effort — never blocks a scan.</summary>
+        static void ReportExtractorBuild(string exePath)
+        {
+            try
+            {
+                string md5;
+                using (var m = System.Security.Cryptography.MD5.Create())
+                using (var fs = File.OpenRead(exePath))
+                    md5 = BitConverter.ToString(m.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+                if (KnownExtractors.TryGetValue(md5, out var desc))
+                {
+                    Console.WriteLine($"  Extractor:  {desc}");
+                    if (!string.Equals(md5, LatestExtractorMd5, StringComparison.OrdinalIgnoreCase))
+                        Console.WriteLine("  WARNING:    a newer extractor is available (output-x64.4: optimized, accurate bpm, 13-hour file support) — you should be using .4. Update dist/truedat/essentia_streaming_extractor_music.exe.");
+                }
+                else
+                {
+                    Console.WriteLine($"  Extractor:  unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...) — current is output-x64.4 (optimized, accurate bpm, 13-hour file support)");
+                }
+            }
+            catch { /* extractor-build detection is best-effort */ }
+        }
+
         static string? FindTool(string exeName, params string[] searchDirs)
         {
             foreach (var dir in searchDirs)

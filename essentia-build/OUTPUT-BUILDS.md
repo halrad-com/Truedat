@@ -87,3 +87,23 @@ scanning with `.2`-lineage extractors (`.3` included).
 Build log for `.3`: `build-o2.log` (417 steps, 19m20s; launched via
 `run-o2-build.sh` one-shot).
 `essentia_streaming_extractor_music.exe`: MD5 `6c6e2737d97c146fdedf13fb4832183e`
+
+## output-x64.4 — bpm-peak key-collision fix (2026-08-10)
+
+Identical to `.3` (`-O2` + `forLargeAudioStream` 13-hour cap) plus a one-line fix to
+`MusicRhythmDescriptors.cpp`: `firstPeakSpread` was connected to the **same** pool key as
+`firstPeakWeight` (`bpm_histogram_first_peak_weight`), so the spread silently clobbered the
+weight and no `..._first_peak_spread` key was ever emitted. Rekeyed to
+`bpm_histogram_first_peak_spread` (matching the correct second-peak block in the same file +
+the sibling `FreesoundRhythmDescriptors`). **Confirmed on a real file:** `.3` reported
+`first_peak_weight = 0.598086` (which is actually the SPREAD); `.4` correctly gives
+`first_peak_weight = 0.074733` + `first_peak_spread = 0.598086`. So every catalog scanned with
+`.1`/`.2`/`.3` holds a **wrong** `bpmFirstPeakWeight` (it's the spread) — a rescan on `.4`
+corrects it and populates `bpmFirstPeakSpread`.
+
+Incremental build (reused `.3`'s object cache; recompiled only the one file + relinked): 417
+steps, 7m13s. `essentia_streaming_extractor_music.exe`: MD5 `c6a436d0fe9a33a4c8eac120d9e6243f`.
+
+Capabilities: optimized (`-O2`), accurate bpm, 13-hour file support. **This is the current
+build.** truedat's startup detector (`ReportExtractorBuild`) hashes the resolved extractor
+against these MD5s and warns when an older one is in use.
