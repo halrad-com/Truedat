@@ -129,6 +129,7 @@ namespace Truedat
         public KeyVote? KeyVoteEdma { get; set; }             // tonal.key_edma (the profile Key/Mode come from)
         public double? BpmFirstPeak { get; set; }             // rhythm.bpm_histogram_first_peak_bpm
         public double? BpmFirstPeakWeight { get; set; }       // rhythm.bpm_histogram_first_peak_weight
+        public double? BpmFirstPeakSpread { get; set; }       // rhythm.bpm_histogram_first_peak_spread (only emitted by the bug-fixed extractor)
         public double? BpmSecondPeak { get; set; }            // rhythm.bpm_histogram_second_peak_bpm
         public double? BpmSecondPeakWeight { get; set; }      // rhythm.bpm_histogram_second_peak_weight
         public double? BpmSecondPeakSpread { get; set; }      // rhythm.bpm_histogram_second_peak_spread
@@ -164,6 +165,15 @@ namespace Truedat
         public double? HpcpEntropyStdev { get; set; }         // tonal.hpcp_entropy.stdev
         public double? ZeroCrossingRateStdev { get; set; }    // lowlevel.zerocrossingrate.stdev (speech discriminator)
         public double[]? MfccStdev { get; set; }              // sqrt(diag(lowlevel.mfcc.cov)) — MFCC variability (speech/ASR)
+
+        // 2026-08-10 capture batch 2 (labs ESSENTIA-DROP-SURVEY audit). All Essentia-derived,
+        // nullable/omit-when-null, computed by the current extractor (no rebuild) and dropped at
+        // parse until now. Consumers (hub-side, .8+): AutoQ timbre / EQ-pocket + drop/segue continuity.
+        public double[]? SpectralContrastCoeffs { get; set; } // lowlevel.spectral_contrast_coeffs.mean (timbre texture)
+        public double[]? SpectralContrastValleys { get; set; }// lowlevel.spectral_contrast_valleys.mean
+        public double[]? BeatsLoudnessBandRatio { get; set; } // rhythm.beats_loudness_band_ratio.mean (per-beat band placement)
+        public double[]? BpmHistogram { get; set; }           // rhythm.bpm_histogram (half/double/triple-time resolution)
+        public double[]? Gfcc { get; set; }                   // lowlevel.gfcc.mean (MFCC complement)
 
         // Phase 2.5 — bottom-bit analysis. Populated during fresh analysis via ffmpeg
         // PCM walk; null on legacy entries / ffmpeg-absent installs / non-decodable files.
@@ -13466,6 +13476,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             WriteOpt(jw, "bpmFirstPeak", f.BpmFirstPeak);
             WriteOpt(jw, "bpmFirstPeakWeight", f.BpmFirstPeakWeight);
+            WriteOpt(jw, "bpmFirstPeakSpread", f.BpmFirstPeakSpread);
             WriteOpt(jw, "bpmSecondPeak", f.BpmSecondPeak);
             WriteOpt(jw, "bpmSecondPeakWeight", f.BpmSecondPeakWeight);
             WriteOpt(jw, "bpmSecondPeakSpread", f.BpmSecondPeakSpread);
@@ -13516,6 +13527,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 foreach (var v in f.MfccStdev) jw.WriteNumberValue(Math.Round(v, 4));
                 jw.WriteEndArray();
             }
+            void WriteArr(string name, double[]? a)
+            {
+                if (a == null) return;
+                jw.WritePropertyName(name);
+                jw.WriteStartArray();
+                foreach (var v in a) jw.WriteNumberValue(Math.Round(v, 4));
+                jw.WriteEndArray();
+            }
+            WriteArr("spectralContrastCoeffs", f.SpectralContrastCoeffs);
+            WriteArr("spectralContrastValleys", f.SpectralContrastValleys);
+            WriteArr("beatsLoudnessBandRatio", f.BeatsLoudnessBandRatio);
+            WriteArr("bpmHistogram", f.BpmHistogram);
+            WriteArr("gfcc", f.Gfcc);
             // Phase 2.5 — bottom-bit analysis; omit-when-null.
             if (f.BitUsage != null)
             {
@@ -13797,6 +13821,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 KeyVoteEdma = ParseKeyVoteFromJson(track, "edma"),
                 BpmFirstPeak = GetNullableDbl(track, "bpmFirstPeak"),
                 BpmFirstPeakWeight = GetNullableDbl(track, "bpmFirstPeakWeight"),
+                BpmFirstPeakSpread = GetNullableDbl(track, "bpmFirstPeakSpread"),
                 BpmSecondPeak = GetNullableDbl(track, "bpmSecondPeak"),
                 BpmSecondPeakWeight = GetNullableDbl(track, "bpmSecondPeakWeight"),
                 BpmSecondPeakSpread = GetNullableDbl(track, "bpmSecondPeakSpread"),
@@ -13823,6 +13848,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 ZeroCrossingRateStdev = GetNullableDbl(track, "zeroCrossingRateStdev"),
                 MfccStdev = track.TryGetProperty("mfccStdev", out var msArr) && msArr.ValueKind == JsonValueKind.Array
                     ? msArr.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                SpectralContrastCoeffs = track.TryGetProperty("spectralContrastCoeffs", out var sccA) && sccA.ValueKind == JsonValueKind.Array
+                    ? sccA.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                SpectralContrastValleys = track.TryGetProperty("spectralContrastValleys", out var scvA) && scvA.ValueKind == JsonValueKind.Array
+                    ? scvA.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                BeatsLoudnessBandRatio = track.TryGetProperty("beatsLoudnessBandRatio", out var blbA) && blbA.ValueKind == JsonValueKind.Array
+                    ? blbA.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                BpmHistogram = track.TryGetProperty("bpmHistogram", out var bhA) && bhA.ValueKind == JsonValueKind.Array
+                    ? bhA.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
+                Gfcc = track.TryGetProperty("gfcc", out var gfA) && gfA.ValueKind == JsonValueKind.Array
+                    ? gfA.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
                 ChordsNumberRate = GetNullableDbl(track, "chordsNumberRate"),
                 TuningFrequency = GetNullableDbl(track, "tuningFrequency"),
                 TuningEqualTemperedDeviation = GetNullableDbl(track, "tuningEqualTemperedDeviation"),
@@ -14291,6 +14326,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var keyVoteEdma = Vote("key_edma");
                 var bpmFirstPeak = OptN(root, "rhythm.bpm_histogram_first_peak_bpm", 1);
                 var bpmFirstPeakWeight = OptN(root, "rhythm.bpm_histogram_first_peak_weight");
+                var bpmFirstPeakSpread = OptN(root, "rhythm.bpm_histogram_first_peak_spread");
                 var bpmSecondPeak = OptN(root, "rhythm.bpm_histogram_second_peak_bpm", 1);
                 var bpmSecondPeakWeight = OptN(root, "rhythm.bpm_histogram_second_peak_weight");
                 var bpmSecondPeakSpread = OptN(root, "rhythm.bpm_histogram_second_peak_spread");
@@ -14340,6 +14376,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     mfccCov = covRows.ToArray();
                 }
                 var mfccStdev = MfccStdevFromCov(mfccCov);
+                double[]? Arr(string path)
+                {
+                    var el = NavigatePath(root, path);
+                    if (!el.HasValue || el.Value.ValueKind != JsonValueKind.Array) return null;
+                    var list = new List<double>();
+                    foreach (var v in el.Value.EnumerateArray())
+                        if (v.ValueKind == JsonValueKind.Number) list.Add(Math.Round(v.GetDouble(), 4));
+                    return list.Count > 0 ? list.ToArray() : null;
+                }
+                var spectralContrastCoeffs = Arr("lowlevel.spectral_contrast_coeffs.mean");
+                var spectralContrastValleys = Arr("lowlevel.spectral_contrast_valleys.mean");
+                var beatsLoudnessBandRatio = Arr("rhythm.beats_loudness_band_ratio.mean");
+                var bpmHistogram = Arr("rhythm.bpm_histogram");
+                var gfcc = Arr("lowlevel.gfcc.mean");
 
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
@@ -14427,6 +14477,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     KeyVoteEdma = keyVoteEdma,
                     BpmFirstPeak = bpmFirstPeak,
                     BpmFirstPeakWeight = bpmFirstPeakWeight,
+                    BpmFirstPeakSpread = bpmFirstPeakSpread,
                     BpmSecondPeak = bpmSecondPeak,
                     BpmSecondPeakWeight = bpmSecondPeakWeight,
                     BpmSecondPeakSpread = bpmSecondPeakSpread,
@@ -14452,7 +14503,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     PitchSalienceStdev = pitchSalienceStdev,
                     HpcpEntropyStdev = hpcpEntropyStdev,
                     ZeroCrossingRateStdev = zeroCrossingRateStdev,
-                    MfccStdev = mfccStdev
+                    MfccStdev = mfccStdev,
+                    SpectralContrastCoeffs = spectralContrastCoeffs,
+                    SpectralContrastValleys = spectralContrastValleys,
+                    BeatsLoudnessBandRatio = beatsLoudnessBandRatio,
+                    BpmHistogram = bpmHistogram,
+                    Gfcc = gfcc
                 };
             }
             catch (Exception ex)
@@ -15768,6 +15824,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     KeyVoteEdma = sf.KeyVoteEdma,
                     BpmFirstPeak = sf.BpmFirstPeak,
                     BpmFirstPeakWeight = sf.BpmFirstPeakWeight,
+                    BpmFirstPeakSpread = sf.BpmFirstPeakSpread,
                     BpmSecondPeak = sf.BpmSecondPeak,
                     BpmSecondPeakWeight = sf.BpmSecondPeakWeight,
                     BpmSecondPeakSpread = sf.BpmSecondPeakSpread,
@@ -15794,6 +15851,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     HpcpEntropyStdev = sf.HpcpEntropyStdev,
                     ZeroCrossingRateStdev = sf.ZeroCrossingRateStdev,
                     MfccStdev = sf.MfccStdev,
+                    SpectralContrastCoeffs = sf.SpectralContrastCoeffs,
+                    SpectralContrastValleys = sf.SpectralContrastValleys,
+                    BeatsLoudnessBandRatio = sf.BeatsLoudnessBandRatio,
+                    BpmHistogram = sf.BpmHistogram,
+                    Gfcc = sf.Gfcc,
                     BitUsage = sf.BitUsage,    // Phase 2.5 — preserve across cache hits
                     HfEnergyRatio = sf.HfEnergyRatio,    // Phase 3 — preserve across cache hits
                     HfEnergyMethod = sf.HfEnergyMethod,
