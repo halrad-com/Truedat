@@ -1751,7 +1751,7 @@ namespace Truedat
         /// track (unlike hpcp12, which is null on silence and would loop forever).</summary>
         static bool HasCurrentFeatures(TrackFeatures? f)
             => f != null && f.DynamicRange.HasValue && f.LoudnessMomentary.HasValue
-               && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue));
+               && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue && f.SpectralContrastCoeffs != null));
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
         /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
@@ -4290,7 +4290,7 @@ namespace Truedat
                     int waveMissing = 0;
                     foreach (var e in allTracks.Values)
                         if (e.Features != null && e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
-                            && (e.Features.AverageLoudness == null || e.Features.DynamicComplexity == null))
+                            && (e.Features.AverageLoudness == null || e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))
                             waveMissing++;
                     if (waveMissing > 0)
                         Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh");
@@ -7533,7 +7533,7 @@ namespace Truedat
                 // averageLoudness reported those as complete -> --stats showed a false zero
                 // gap. Flag-independent (HasCurrentFeatures widens only under
                 // --refresh-features; the advisor must see the gap regardless).
-                if (pr.Essentia && e.Features?.DynamicComplexity == null) s.MissingWave++;
+                if (pr.Essentia && (e.Features?.DynamicComplexity == null || e.Features?.SpectralContrastCoeffs == null)) s.MissingWave++;
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
                 if (e.Features != null)
                 {
@@ -7672,7 +7672,7 @@ namespace Truedat
                 {
                     if (e?.Features == null) continue;
                     if (!(e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
-                          && e.Features.DynamicComplexity == null)) continue;
+                          && (e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))) continue;
                     var key = e.Features.FilePath ?? "";
                     if (key.Length > 0 && errs.ContainsKey(key)) waveErrored++;
                     else if (libraryKeys != null && key.Length > 0 && !libraryKeys.Contains(key)) waveOrphan++;
@@ -12161,13 +12161,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // current and --refresh-features never populates hpcp12/dynamicComplexity.
             {
                 var preHarmonic = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5 };
-                var complete = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0 };
+                var batch2Missing = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0 };
+                var complete = new TrackFeatures { DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0, SpectralContrastCoeffs = new double[] { 1 } };
                 var savedRf = _refreshFeatures;
                 _refreshFeatures = false;
                 Assert(HasCurrentFeatures(preHarmonic), "gate: normal scan leaves a pre-harmonic entry current (no forced re-scan)");
+                Assert(HasCurrentFeatures(batch2Missing), "gate: normal scan leaves a batch-2-missing entry current (no forced re-scan)");
                 _refreshFeatures = true;
-                Assert(!HasCurrentFeatures(preHarmonic), "gate: --refresh-features marks a pre-harmonic entry (no dynamicComplexity) STALE");
-                Assert(HasCurrentFeatures(complete), "gate: --refresh-features leaves a harmonic-complete entry current (no re-analysis loop)");
+                Assert(!HasCurrentFeatures(preHarmonic), "gate: --refresh-features marks a pre-harmonic entry STALE");
+                Assert(!HasCurrentFeatures(batch2Missing), "gate: --refresh-features marks a batch-2-missing entry (no spectralContrastCoeffs) STALE");
+                Assert(HasCurrentFeatures(complete), "gate: --refresh-features leaves a batch-2-complete entry current (no re-analysis loop)");
                 _refreshFeatures = savedRf;
             }
 
@@ -12197,7 +12200,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 var mfcc1 = new double[] { 1 };
                 var julyOnly = new TrackEntry { Features = new TrackFeatures { Mfcc = mfcc1, DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5 } };
-                var harmonicComplete = new TrackEntry { Features = new TrackFeatures { Mfcc = mfcc1, DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0 } };
+                var harmonicComplete = new TrackEntry { Features = new TrackFeatures { Mfcc = mfcc1, DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0, SpectralContrastCoeffs = new double[] { 1 } } };
                 var notAnalyzed = new TrackEntry { Features = new TrackFeatures() };
                 var cs = ComputeCatalogStats(new[] { julyOnly, harmonicComplete, notAnalyzed });
                 Assert(cs.MissingWave == 1, "stats: MissingWave counts a July-complete entry lacking the harmonic wave");
