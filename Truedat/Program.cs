@@ -12215,38 +12215,68 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(CatalogSidecar.KeyCode("", "") == -1, "sidecar: KeyCode absent = -1");
                 Assert(CatalogSidecar.KeyCode("Z", "major") == -1, "sidecar: KeyCode unknown = -1");
 
-                TrackEntry Mk(double bpm, string key, string mode, double? dc, double[]? hp, double[]? th) =>
-                    new TrackEntry { Features = new TrackFeatures { Bpm = bpm, Key = key, Mode = mode, DynamicComplexity = dc, Hpcp12 = hp, Thpcp12 = th } };
+                KeyVote Kv(string k, string s) => new KeyVote { Key = k, Scale = s };
                 var hp1 = new double[12]; for (int i = 0; i < 12; i++) hp1[i] = i / 11.0;
                 var th1 = new double[12]; for (int i = 0; i < 12; i++) th1[i] = 1.0 - i / 11.0;
+                // Track a: full scoring set — bpm alt, 3 key votes (2 agree with edma=C major), all
+                // acoustic scalars, genre, both chroma. Track b: hpcp only, 1 vote. Track c: empty.
+                var fa = new TrackFeatures
+                {
+                    Bpm = 120, Key = "C", Mode = "major", DynamicComplexity = 5.5, Hpcp12 = hp1, Thpcp12 = th1,
+                    BpmSecondPeak = 60, BpmSecondPeakWeight = 0.3, Genre = "Techno",
+                    KeyVoteKrumhansl = Kv("C", "major"), KeyVoteTemperley = Kv("A", "minor"), KeyVoteEdma = Kv("C", "major"),
+                    SpectralCentroid = 1500, SpectralFlux = 0.11, Loudness = 0.8, Danceability = 1.2,
+                    OnsetRate = 3.3, ZeroCrossingRate = 0.07, SpectralRms = 0.05, SpectralFlatness = 0.02,
+                    Dissonance = 0.45, PitchSalience = 0.6, ChordsChangesRate = 0.25,
+                    SmfmBpm = 128.0, SmfmScores = new[] { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120 },
+                };
                 var cat = new Dictionary<string, TrackEntry>
                 {
-                    ["C:/m/a.flac"] = Mk(120, "C", "major", 5.5, hp1, th1),
-                    ["C:/m/b.flac"] = Mk(90, "A", "minor", null, hp1, null),  // hpcp only
-                    ["C:/m/c.flac"] = Mk(0, "", "", null, null, null),         // neither chroma
+                    ["C:/m/a.flac"] = new TrackEntry { Features = fa },
+                    ["C:/m/b.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 90, Key = "A", Mode = "minor", Hpcp12 = hp1, KeyVoteEdma = Kv("A", "minor"), Genre = "Techno" } },
+                    ["C:/m/c.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 0, Key = "", Mode = "" } },
                 };
                 var scPath = Path.Combine(Path.GetTempPath(), ".truedat-selftest-mbxs-" + Guid.NewGuid().ToString("N") + ".mbxs");
                 try
                 {
                     CatalogSidecar.Write(scPath, cat);
                     var d = CatalogSidecar.Read(scPath);
-                    Assert(d.Version == 1 && d.TrackCount == 3, "sidecar: header version 1, 3 tracks");
+                    Assert(d.Version == 2 && d.TrackCount == 3, "sidecar: header version 2, 3 tracks");
                     bool sorted = true;
                     for (int i = 1; i < d.TrackCount; i++) if (d.PathHash[i] < d.PathHash[i - 1]) sorted = false;
                     Assert(sorted, "sidecar: records sorted ascending by PathHash");
                     int ia = d.IndexOf("C:/m/a.flac");
-                    Assert(ia >= 0 && Math.Abs(d.Bpm[ia] - 120f) < 1e-3 && Math.Abs(d.DynCx[ia] - 5.5f) < 1e-3
+                    Assert(ia >= 0 && Math.Abs(d.RawBpm[ia] - 120f) < 1e-3 && Math.Abs(d.DynCx[ia] - 5.5f) < 1e-3
                            && d.KeyCode[ia] == 0 && d.HasHpcp[ia] == 1 && d.HasThpcp[ia] == 1,
                            "sidecar: track a round-trips (bpm/dyncx/keyCode/flags)");
+                    Assert(Math.Abs(d.RawBpmAlt[ia] - 60f) < 1e-3 && Math.Abs(d.RawBpmAltWeight[ia] - 0.3f) < 1e-3,
+                           "sidecar: track a bpm-alt + weight round-trip");
+                    Assert(d.KeyVotesPresent[ia] == 3 && d.KeyAgreement[ia] == 2,
+                           "sidecar: track a key votes = 3 present, 2 agree with edma (C major)");
+                    Assert(Math.Abs(d.Centroid[ia] - 1500f) < 1e-2 && Math.Abs(d.Dance[ia] - 1.2f) < 1e-3
+                           && Math.Abs(d.Onset[ia] - 3.3f) < 1e-3 && Math.Abs(d.Rms[ia] - 0.05f) < 1e-4
+                           && Math.Abs(d.Flux[ia] - 0.11f) < 1e-4 && Math.Abs(d.PitchSalience[ia] - 0.6f) < 1e-4,
+                           "sidecar: track a acoustic + V/A-input scalars round-trip");
+                    Assert(d.Genre[ia] == "Techno", "sidecar: track a genre round-trips");
+                    Assert(d.HasSmfm[ia] == 1 && Math.Abs(d.SmfmBpm[ia] - 128f) < 1e-3
+                           && Math.Abs(d.Smfm[ia * 12 + 0] - 10f) < 1e-3 && Math.Abs(d.Smfm[ia * 12 + 11] - 120f) < 1e-3,
+                           "sidecar: track a SMFM (12 slots + bpm) round-trips when present");
                     Assert(Math.Abs(d.Chroma[ia * 24 + 0] - 0f) < 1e-3 && Math.Abs(d.Chroma[ia * 24 + 11] - 1f) < 1e-3
                            && Math.Abs(d.Chroma[ia * 24 + 12] - 1f) < 1e-3,
                            "sidecar: track a chroma = hpcp12 ++ thpcp12");
                     int ib = d.IndexOf("C:/m/b.flac");
                     Assert(ib >= 0 && d.HasHpcp[ib] == 1 && d.HasThpcp[ib] == 0 && float.IsNaN(d.Chroma[ib * 24 + 12]),
                            "sidecar: track b has hpcp, thpcp absent (NaN filler, flag 0)");
+                    Assert(d.KeyVotesPresent[ib] == 1 && d.KeyAgreement[ib] == 1 && d.Genre[ib] == "Techno",
+                           "sidecar: track b 1 vote agrees, genre dedups to same table entry");
+                    Assert(float.IsNaN(d.RawBpmAlt[ib]), "sidecar: track b bpm-alt absent -> NaN");
                     int ic = d.IndexOf("C:/m/c.flac");
                     Assert(ic >= 0 && d.HasHpcp[ic] == 0 && d.HasThpcp[ic] == 0 && d.KeyCode[ic] == -1 && float.IsNaN(d.DynCx[ic]),
                            "sidecar: track c has neither chroma, keyCode -1, dyncx NaN");
+                    Assert(d.KeyVotesPresent[ic] == 0 && d.KeyAgreement[ic] == -1 && d.Genre[ic] == null,
+                           "sidecar: track c no votes -> agreement -1, no genre");
+                    Assert(d.HasSmfm[ic] == 0 && float.IsNaN(d.SmfmBpm[ic]) && float.IsNaN(d.Smfm[ic * 12 + 0]),
+                           "sidecar: track c no SMFM -> flag 0, NaN filler (the common case)");
                     Assert(d.IndexOf("C:/m/nope.flac") == -1, "sidecar: unknown path -> -1");
                 }
                 finally { try { File.Delete(scPath); } catch { } }
