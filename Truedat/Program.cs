@@ -5112,6 +5112,30 @@ namespace Truedat
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
+            try
+            {
+                long catBytes = File.Exists(moodsPath) ? new FileInfo(moodsPath).Length : 0;
+                if (catBytes > 0)
+                {
+                    double catMb = catBytes / (1024.0 * 1024.0);
+                    Console.WriteLine($"  Catalog:    {catMb:F1} MB  (mbxmoods.json)");
+                    var scPath = Path.ChangeExtension(moodsPath, ".mbxs");
+                    if (File.Exists(scPath))
+                    {
+                        long scBytes = new FileInfo(scPath).Length;
+                        Console.WriteLine($"  Sidecar:    {scBytes / (1024.0 * 1024.0):F1} MB  (.mbxs binary index, {(double)catBytes / Math.Max(1, scBytes):F0}x smaller)");
+                    }
+                    var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    var baks = Directory.GetFiles(dir, Path.GetFileName(moodsPath) + ".bak.*.zip");
+                    if (baks.Length > 0)
+                    {
+                        long bakBytes = 0; foreach (var b in baks) bakBytes += new FileInfo(b).Length;
+                        double avgBak = (double)bakBytes / baks.Length;
+                        Console.WriteLine($"  Backups:    {baks.Length} compressed .zip, {bakBytes / (1024.0 * 1024.0):F1} MB total  (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
+                    }
+                }
+            }
+            catch { /* size/compression stats are best-effort */ }
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
@@ -7648,6 +7672,30 @@ namespace Truedat
                 }
                 foreach (var r in rec) Console.WriteLine($"    {r}");
             }
+            try
+            {
+                long catBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
+                if (catBytes > 0)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"  Catalog:  {catBytes / (1024.0 * 1024.0):F1} MB  (mbxmoods.json)");
+                    var scPath = Path.ChangeExtension(path, ".mbxs");
+                    if (File.Exists(scPath))
+                    {
+                        long scBytes = new FileInfo(scPath).Length;
+                        Console.WriteLine($"  Sidecar:  {scBytes / (1024.0 * 1024.0):F1} MB  (.mbxs binary index, {(double)catBytes / Math.Max(1, scBytes):F0}x smaller)");
+                    }
+                    var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+                    var baks = Directory.GetFiles(dir, Path.GetFileName(path) + ".bak.*.zip");
+                    if (baks.Length > 0)
+                    {
+                        long bakBytes = 0; foreach (var b in baks) bakBytes += new FileInfo(b).Length;
+                        double avgBak = (double)bakBytes / baks.Length;
+                        Console.WriteLine($"  Backups:  {baks.Length} compressed .zip, {bakBytes / (1024.0 * 1024.0):F1} MB total  (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
+                    }
+                }
+            }
+            catch { /* size/compression stats are best-effort */ }
         }
 
         // Cross-encode candidate-key buckets (spec §1). Sized so lossy re-encode
