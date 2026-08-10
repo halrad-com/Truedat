@@ -4089,7 +4089,7 @@ namespace Truedat
                 string hf = _noHfAnalysis ? "DISABLED" : "enabled";
                 Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf}");
             }
-            Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found (run: python src/catalog-prep.py --download --build)")}");
+            Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
             Console.WriteLine();
 
             if (essentiaExe == null)
@@ -12109,6 +12109,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(cs.EssentiaAnalyzed == 2, "stats: EssentiaAnalyzed counts both mfcc-bearing entries");
             }
 
+            // --- .mbxs binary sidecar: stable KeyCode + write/read round-trip (v0.5.4.7) ------
+            {
+                Assert(CatalogSidecar.KeyCode("C", "major") == 0, "sidecar: KeyCode C major = 0");
+                Assert(CatalogSidecar.KeyCode("A", "minor") == 19, "sidecar: KeyCode A minor = 19");
+                Assert(CatalogSidecar.KeyCode("Bb", "major") == 20, "sidecar: KeyCode Bb major = 20 (flat spelling)");
+                Assert(CatalogSidecar.KeyCode("", "") == -1, "sidecar: KeyCode absent = -1");
+                Assert(CatalogSidecar.KeyCode("Z", "major") == -1, "sidecar: KeyCode unknown = -1");
+
+                TrackEntry Mk(double bpm, string key, string mode, double? dc, double[]? hp, double[]? th) =>
+                    new TrackEntry { Features = new TrackFeatures { Bpm = bpm, Key = key, Mode = mode, DynamicComplexity = dc, Hpcp12 = hp, Thpcp12 = th } };
+                var hp1 = new double[12]; for (int i = 0; i < 12; i++) hp1[i] = i / 11.0;
+                var th1 = new double[12]; for (int i = 0; i < 12; i++) th1[i] = 1.0 - i / 11.0;
+                var cat = new Dictionary<string, TrackEntry>
+                {
+                    ["C:/m/a.flac"] = Mk(120, "C", "major", 5.5, hp1, th1),
+                    ["C:/m/b.flac"] = Mk(90, "A", "minor", null, hp1, null),  // hpcp only
+                    ["C:/m/c.flac"] = Mk(0, "", "", null, null, null),         // neither chroma
+                };
+                var scPath = Path.Combine(Path.GetTempPath(), ".truedat-selftest-mbxs-" + Guid.NewGuid().ToString("N") + ".mbxs");
+                try
+                {
+                    CatalogSidecar.Write(scPath, cat);
+                    var d = CatalogSidecar.Read(scPath);
+                    Assert(d.Version == 1 && d.TrackCount == 3, "sidecar: header version 1, 3 tracks");
+                    bool sorted = true;
+                    for (int i = 1; i < d.TrackCount; i++) if (d.PathHash[i] < d.PathHash[i - 1]) sorted = false;
+                    Assert(sorted, "sidecar: records sorted ascending by PathHash");
+                    int ia = d.IndexOf("C:/m/a.flac");
+                    Assert(ia >= 0 && Math.Abs(d.Bpm[ia] - 120f) < 1e-3 && Math.Abs(d.DynCx[ia] - 5.5f) < 1e-3
+                           && d.KeyCode[ia] == 0 && d.HasHpcp[ia] == 1 && d.HasThpcp[ia] == 1,
+                           "sidecar: track a round-trips (bpm/dyncx/keyCode/flags)");
+                    Assert(Math.Abs(d.Chroma[ia * 24 + 0] - 0f) < 1e-3 && Math.Abs(d.Chroma[ia * 24 + 11] - 1f) < 1e-3
+                           && Math.Abs(d.Chroma[ia * 24 + 12] - 1f) < 1e-3,
+                           "sidecar: track a chroma = hpcp12 ++ thpcp12");
+                    int ib = d.IndexOf("C:/m/b.flac");
+                    Assert(ib >= 0 && d.HasHpcp[ib] == 1 && d.HasThpcp[ib] == 0 && float.IsNaN(d.Chroma[ib * 24 + 12]),
+                           "sidecar: track b has hpcp, thpcp absent (NaN filler, flag 0)");
+                    int ic = d.IndexOf("C:/m/c.flac");
+                    Assert(ic >= 0 && d.HasHpcp[ic] == 0 && d.HasThpcp[ic] == 0 && d.KeyCode[ic] == -1 && float.IsNaN(d.DynCx[ic]),
+                           "sidecar: track c has neither chroma, keyCode -1, dyncx NaN");
+                    Assert(d.IndexOf("C:/m/nope.flac") == -1, "sidecar: unknown path -> -1");
+                }
+                finally { try { File.Delete(scPath); } catch { } }
+            }
+
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
                 : $"{failures} self-test(s) FAILED.");
@@ -12977,6 +13022,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             try { File.Delete(bakPath); } catch { }
 
             if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {allTracks.Count} tracks)"); } catch { } }
+
+            // Emit the .mbxs binary sidecar beside the catalog (MBXHub MoodCache fast-path,
+            // ~orders of magnitude faster to load than parsing the JSON). Best-effort: the sidecar
+            // is a rebuildable cache and the reader falls back to JSON, so a failure here must
+            // never fail the catalog save.
+            try { CatalogSidecar.Write(Path.ChangeExtension(moodsPath, ".mbxs"), allTracks); }
+            catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not written: {ex.Message}"); }
         }
 
         // ----------------------------------------------------------------------
