@@ -4279,7 +4279,7 @@ namespace Truedat
                     int waveMissing = 0;
                     foreach (var e in allTracks.Values)
                         if (e.Features != null && e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
-                            && e.Features.AverageLoudness == null)
+                            && (e.Features.AverageLoudness == null || e.Features.DynamicComplexity == null))
                             waveMissing++;
                     if (waveMissing > 0)
                         Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh");
@@ -7330,7 +7330,7 @@ namespace Truedat
             public int Smfm;
             public int DuplicateGroups;   // distinct audioStreamSha256 values shared by 2+ entries
             public int RedundantCopies;   // sum over groups of (members - 1)
-            public int MissingWave;       // Essentia-analyzed but lacking the 2026-07-22 tonal/rhythm wave
+            public int MissingWave;       // Essentia-analyzed but lacking the latest feature wave (marker: dynamicComplexity, 2026-08-09)
             // Speech splits into two disjoint counts so each summary line can point at a
             // surface that actually shows what it counted (the old union count pointed at
             // --list-speech, which lists only the acoustic subset — live: "Speech: 1" vs
@@ -7455,10 +7455,14 @@ namespace Truedat
                     shaCount.TryGetValue(e.AudioStreamSha256!, out var c);
                     shaCount[e.AudioStreamSha256!] = c + 1;
                 }
-                // Wave-missing: analyzed but lacking the 2026-07-22 tonal/rhythm wave.
-                // Deliberately flag-independent (HasCurrentFeatures widens only under
+                // Wave-missing: analyzed but lacking the LATEST feature wave. Marker is
+                // dynamicComplexity (2026-08-09 harmonic/capture-once wave — the newest
+                // always-emitted field; its presence implies the July averageLoudness too),
+                // so a July-complete-but-pre-harmonic entry still counts. Keying on
+                // averageLoudness reported those as complete -> --stats showed a false zero
+                // gap. Flag-independent (HasCurrentFeatures widens only under
                 // --refresh-features; the advisor must see the gap regardless).
-                if (pr.Essentia && e.Features?.AverageLoudness == null) s.MissingWave++;
+                if (pr.Essentia && e.Features?.DynamicComplexity == null) s.MissingWave++;
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
                 if (e.Features != null)
                 {
@@ -7597,7 +7601,7 @@ namespace Truedat
                 {
                     if (e?.Features == null) continue;
                     if (!(e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
-                          && e.Features.AverageLoudness == null)) continue;
+                          && e.Features.DynamicComplexity == null)) continue;
                     var key = e.Features.FilePath ?? "";
                     if (key.Length > 0 && errs.ContainsKey(key)) waveErrored++;
                     else if (libraryKeys != null && key.Length > 0 && !libraryKeys.Contains(key)) waveOrphan++;
@@ -12089,6 +12093,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var sd = MfccStdevFromCov(new[] { new[] { 4.0, 1.0, 1.0 }, new[] { 1.0, 9.0, 1.0 }, new[] { 1.0, 1.0, 16.0 } });
                 Assert(sd != null && sd.SequenceEqual(new[] { 2.0, 3.0, 4.0 }), "mfccStdev: sqrt of covariance diagonal");
                 Assert(MfccStdevFromCov(null) == null, "mfccStdev: null cov -> null");
+            }
+
+            // --- --stats MissingWave tracks the LATEST wave, not just July (labs/rb flag) ---
+            // An entry analyzed in the July-22 wave (has averageLoudness) but lacking the
+            // 2026-08-09 harmonic wave (no dynamicComplexity) MUST count as wave-missing so
+            // --stats nudges --refresh; keying on averageLoudness reported it as complete.
+            {
+                var mfcc1 = new double[] { 1 };
+                var julyOnly = new TrackEntry { Features = new TrackFeatures { Mfcc = mfcc1, DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5 } };
+                var harmonicComplete = new TrackEntry { Features = new TrackFeatures { Mfcc = mfcc1, DynamicRange = 1, LoudnessMomentary = 1, AverageLoudness = 0.5, DynamicComplexity = 3.0 } };
+                var notAnalyzed = new TrackEntry { Features = new TrackFeatures() };
+                var cs = ComputeCatalogStats(new[] { julyOnly, harmonicComplete, notAnalyzed });
+                Assert(cs.MissingWave == 1, "stats: MissingWave counts a July-complete entry lacking the harmonic wave");
+                Assert(cs.EssentiaAnalyzed == 2, "stats: EssentiaAnalyzed counts both mfcc-bearing entries");
             }
 
             Console.WriteLine(failures == 0
