@@ -1,7 +1,9 @@
 # Truedat dependency surface — what's needed, what breaks if missing
 
 Date: 2026-05-23 (updated 2026-07-11 — legacy fingerprint pipeline removed; updated 2026-07-26 —
-re-verified against `Program.cs`, including staging/sweep behavior changed the same day)
+re-verified against `Program.cs`, including staging/sweep behavior changed the same day; re-verified
+2026-08-09 for v0.5.4.7 — the harmonic + capture-once field wave added NO new runtime dependencies:
+every new field derives from the existing Essentia output, parsed in-process)
 Scope: runtime dependencies of `dist/truedat/truedat.exe` and what happens when each is absent. Authoritative source: `Truedat/Program.cs` + `dist/truedat/` contents.
 
 ## Lookup mechanism
@@ -75,7 +77,7 @@ Three categories:
 
 | `truedat library.xml` (default scan) | essentia ext. | ffmpeg | ffprobe | Result |
 |---|---|---|---|---|
-| All present | ✓ | ✓ | ✓ | Full feature set (70 named fields / 111 numbers / 74 scalar values — see README's *Extracted Features* section for the measured figures; don't repeat a hand-maintained count here) + verdict |
+| All present | ✓ | ✓ | ✓ | Full feature set (see README's *Extracted Features* section for the measured field counts — deliberately not repeated here, since a hand-maintained number goes stale the moment a field is added; the 2026-08-09 harmonic + capture-once wave is the most recent set) + verdict |
 | ffprobe missing | ✓ | ✓ | ✗ | Same (ffprobe not used here) |
 | ffmpeg missing | ✓ | ✗ | — | Core 15 + most extended; no Phase 2.5/3/5 fields, verdict mostly "unknown", multi-channel skipped |
 | Essentia missing | ✗ | — | — | Abort with error |

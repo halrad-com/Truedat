@@ -1,7 +1,9 @@
 # Truedat Scan Output Reference
 
 Date: 2026-05-23 (revised 2026-07-26 — re-verified every line against `Program.cs`; several
-console strings had drifted, including one relabelled the same day as this revision)
+console strings had drifted, including one relabelled the same day as this revision; re-verified
+2026-08-09 for v0.5.4.7 — console I/O is unchanged by the harmonic / capture-once field wave, which
+adds JSON fields only; documented the pre-scan "lack the latest features" refresh advisory)
 
 This document explains the input and output lines printed to the console when running a mood
 analysis scan. It is primarily written against the **default iTunes-XML scan** (the zero-arg /
@@ -24,6 +26,7 @@ When you run a default scan, truedat prints these lines while it loads:
 | `Existing errors: <N>` | Rows loaded from `mbxmoods-errors.csv` (tracks that failed on a prior run and are skipped again unless `--retry-errors`). |
 | `  New to catalog: up to <N> track(s) / <size> — full analysis expected (estimate; cache tiers may reduce this at scan time)` | Pre-flight estimate of tracks that will need full Essentia analysis, computed from cache membership alone (no file IO) — an upper bound, since the sha/head-64k cache tiers can still turn some of these into cache hits once the scan actually reads them. |
 | `  Estimated time: <duration> (<audio-duration> of new audio, <rtf>x realtime, <N> workers)` | Duration-based ETA from the catalog's own measured real-time factor. Omitted (`not estimable yet...`) when there's no analyzed history to learn a rate from. |
+| `  <N> entries lack the latest features — run: truedat --refresh` | A nudge printed after the pre-flight estimate when Essentia-analyzed catalog entries lack the newest feature wave (currently the 2026-08-09 harmonic / capture-once fields, detected via `dynamicComplexity`). Run a `--refresh-features` pass to populate them. Omitted when `--refresh-features` is already set or the count is zero. |
 
 `Cache: <N> tracks` and a bare `Scanning <path>...` line — as an earlier revision of this doc
 showed — do not appear anywhere in the current code for any scan mode. `Existing moods:` and
