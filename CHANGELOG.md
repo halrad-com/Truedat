@@ -13,6 +13,16 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
+- **Field-emission policy (`mbxmoods-schema.json`) + `bpmHistogram` dropped.** Catalog field
+  emission is now rule-driven by a small schema file read by both the scan writer and
+  `--fixup` (exclude-default: any field not listed is emitted unchanged). Its first and only
+  cut is `bpmHistogram` — a raw tempo histogram that was **~29% of the catalog file (~217 MB
+  on a 72k-track library)**, mostly zeros, and read by nothing (the usable tempo signal lives
+  in the separate `bpmFirstPeak`/`bpmSecondPeak` fields, which stay). New scans omit it;
+  existing catalogs shed it on the next `--fixup` pass — **no re-analysis** to remove it.
+  Everything else is unchanged, including every chord field (the raw `chordsHistogram` is
+  kept). Reinstating a cut Essentia field would cost a full re-scan, so cuts are deliberate.
+
 - **Harmonic-texture + capture-once fields.** Each analyzed track now retains a
   12-semitone chroma vector (`hpcp12` — the track's pitch-class energy profile, from the
   extractor's 36-bin `tonal.hpcp.mean` folded to 12 semitones, unit-max normalized, 4dp),

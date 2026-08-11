@@ -5803,7 +5803,7 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!)) survivingByHash[sha!] = kv.Key;
             }
 
-            int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0;
+            int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0, strippedEntries = 0;
             var newTracks = new JsonObject();
             var orphanedEntries = new List<(string OldPath, string Artist, string Title)>();
 
@@ -5814,6 +5814,13 @@ namespace Truedat
                 if (trackNode == null) continue;
                 tracks.Remove(oldPath); // detach from old parent so it can be re-parented
                 var trackData = trackNode.AsObject();
+                // Registry cut: strip any excluded field (e.g. bpmHistogram) so existing catalogs
+                // shed it on --fixup with no re-analysis. Runs on every entry; orphaned entries are
+                // dropped anyway, so stripping them first is harmless.
+                bool strippedThis = false;
+                foreach (var ex in FieldPolicy.ExcludedFieldNames)
+                    if (trackData.Remove(ex)) strippedThis = true;
+                if (strippedThis) strippedEntries++;
                 var normalizedOldPath = PathHelper.NormalizeSeparators(oldPath);
 
                 if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
@@ -5900,6 +5907,7 @@ namespace Truedat
             Console.WriteLine($"  Orphaned:    {orphaned}");
             Console.WriteLine($"  Unanalyzed:  {unanalyzed} (in library, no mood data)");
             Console.WriteLine($"  Total out:   {newTracks.Count}");
+            if (strippedEntries > 0) Console.WriteLine($"  Stripped:    {strippedEntries} (excluded field removed, e.g. bpmHistogram)");
 
             if (orphanedEntries.Count > 0 && orphanedEntries.Count <= 20)
             {
@@ -5931,7 +5939,7 @@ namespace Truedat
                 return;
             }
 
-            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0)
+            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0)
             {
                 var bakPath = BackupCatalogCompressed(moodsPath);
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
@@ -12239,6 +12247,43 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac" }) == WaveMissingBucket.Errored, "wave-bucket: errored beats skipped");
             }
 
+            // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
+            // The bpmHistogram cut (2026-08-10, registry-driven). OverrideForTest is the mutation
+            // seam: the writer gate must DROP a listed field and EMIT an unlisted one.
+            {
+                var savedExcluded = FieldPolicy.ExcludedFieldNames;   // restore after
+                var entry = new TrackEntry { Features = new TrackFeatures { BpmHistogram = new double[] { 1, 2, 3 } } };
+                string Serialize()
+                {
+                    using var ms = new MemoryStream();
+                    using (var jw = new Utf8JsonWriter(ms))
+                    {
+                        jw.WriteStartObject();
+                        WriteTrackEntry(jw, @"D:\m\t.flac", entry);
+                        jw.WriteEndObject();
+                    }
+                    return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                }
+
+                FieldPolicy.OverrideForTest(new[] { "bpmHistogram" });
+                Assert(FieldPolicy.IsExcluded("bpmHistogram"), "fieldpolicy: listed field is excluded");
+                Assert(!FieldPolicy.IsExcluded("chordsHistogram"), "fieldpolicy: unlisted field is NOT excluded");
+                Assert(!Serialize().Contains("bpmHistogram"), "fieldpolicy: writer OMITS an excluded field");
+
+                FieldPolicy.OverrideForTest(new string[0]);
+                Assert(Serialize().Contains("bpmHistogram"), "fieldpolicy: writer EMITS the field when NOT excluded (gate is real)");
+
+                // The --fixup strip path (JsonObject.Remove over the excluded set).
+                FieldPolicy.OverrideForTest(new[] { "bpmHistogram" });
+                var node = new JsonObject { ["bpm"] = 120, ["bpmHistogram"] = new JsonArray(1, 2, 3) };
+                bool strippedThis = false;
+                foreach (var ex in FieldPolicy.ExcludedFieldNames) if (node.Remove(ex)) strippedThis = true;
+                Assert(strippedThis && node["bpmHistogram"] == null && node["bpm"] != null,
+                    "fieldpolicy: --fixup strips the excluded field, keeps the rest");
+
+                FieldPolicy.OverrideForTest(savedExcluded);
+            }
+
             // --- .mbxs binary sidecar: stable KeyCode + write/read round-trip (v0.5.4.7) ------
             {
                 Assert(CatalogSidecar.KeyCode("C", "major") == 0, "sidecar: KeyCode C major = 0");
@@ -13736,7 +13781,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             WriteArr("spectralContrastCoeffs", f.SpectralContrastCoeffs);
             WriteArr("spectralContrastValleys", f.SpectralContrastValleys);
             WriteArr("beatsLoudnessBandRatio", f.BeatsLoudnessBandRatio);
-            WriteArr("bpmHistogram", f.BpmHistogram);
+            if (!FieldPolicy.IsExcluded("bpmHistogram")) WriteArr("bpmHistogram", f.BpmHistogram);
             WriteArr("gfcc", f.Gfcc);
             // Phase 2.5 — bottom-bit analysis; omit-when-null.
             if (f.BitUsage != null)

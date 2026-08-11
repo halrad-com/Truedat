@@ -76,6 +76,18 @@ if errorlevel 1 (
 )
 echo Done: SBOM.md
 
+REM mbxmoods-schema.json — the field-emission policy the writer + --fixup read at runtime
+REM (beside the exe). Absent it, truedat falls back to a built-in default that still cuts
+REM bpmHistogram, so shipping it is what lets the policy be edited without a rebuild.
+echo Copying mbxmoods-schema.json...
+copy /Y mbxmoods-schema.json "dist\truedat\" >nul
+if errorlevel 1 (
+    echo ERROR: mbxmoods-schema.json copy failed
+    pause
+    exit /b 1
+)
+echo Done: mbxmoods-schema.json
+
 echo.
 echo ========================================
 echo Build complete!
