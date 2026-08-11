@@ -12284,6 +12284,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 FieldPolicy.OverrideForTest(savedExcluded);
             }
 
+            // --- phantom-field fixes (2026-08-11): spectralFlatness repoint + spectralDecrease precision ---
+            {
+                // Flatness: derived from the present band flatnesses (the real signal), never the
+                // nonexistent global key that produced 0 on every track.
+                Assert(DeriveSpectralFlatness(0.10, 0.20, 0.30) == 0.20, "flatness: mean of three bands");
+                Assert(DeriveSpectralFlatness(0.10, null, 0.30) == 0.20, "flatness: mean of the present bands");
+                Assert(DeriveSpectralFlatness(0.4062, null, null) == 0.4062, "flatness: single present band");
+                Assert(DeriveSpectralFlatness(null, null, null) == 0.0, "flatness: none present -> 0 (core contract)");
+
+                // Decrease: real values are ~1e-9; 6 dp annihilated them to 0, 12 dp preserves them.
+                // Mirrors production Opt (NaN->null else Math.Round(v, dp)).
+                static double? Opt2(double v, int dp) => double.IsNaN(v) ? (double?)null : Math.Round(v, dp);
+                Assert(Opt2(-5.13925e-09, 6) == 0.0, "decrease: 6 dp rounds the e-9 signal to 0 (the bug)");
+                Assert(Opt2(-5.13925e-09, 12) != 0.0, "decrease: 12 dp preserves the e-9 signal (the fix)");
+                Assert(Opt2(-5.13925e-09, 12) != Opt2(-8.80901e-09, 12), "decrease: 12 dp keeps distinct e-9 values distinct");
+            }
+
             // --- .mbxs binary sidecar: stable KeyCode + write/read round-trip (v0.5.4.7) ------
             {
                 Assert(CatalogSidecar.KeyCode("C", "major") == 0, "sidecar: KeyCode C major = 0");
@@ -12895,6 +12912,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (scanWorkList != null && !scanWorkList.Contains(key)) return WaveMissingBucket.Filtered;
             if (skipped.Contains(key)) return WaveMissingBucket.Skipped;
             return WaveMissingBucket.Stale;
+        }
+
+        /// <summary>
+        /// Derive a global spectral-flatness scalar from the per-band flatnesses (bark/erb/mel).
+        /// The music extractor emits no global <c>lowlevel.spectral_flatness_db</c>, so the old direct
+        /// read was 0 on every track; the per-band flatnesses ARE emitted and carry the real
+        /// tonal-vs-noisy signal. Mean of whichever bands are present, 4 dp; 0.0 when none are present
+        /// (preserving the core always-present contract). The three band values are still emitted
+        /// separately for the consumer model — this scalar is for schema continuity.
+        /// </summary>
+        internal static double DeriveSpectralFlatness(double? bark, double? erb, double? mel)
+        {
+            double sum = 0; int n = 0;
+            if (bark.HasValue) { sum += bark.Value; n++; }
+            if (erb.HasValue) { sum += erb.Value; n++; }
+            if (mel.HasValue) { sum += mel.Value; n++; }
+            return n > 0 ? Math.Round(sum / n, 4) : 0.0;
         }
 
         static string[] ParseCsvLine(string line)
@@ -14498,7 +14532,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var onsetRate = NavDbl(root, "rhythm.onset_rate");
                 var zeroCrossingRate = NavDbl(root, "lowlevel.zerocrossingrate.mean");
                 var spectralRms = NavDbl(root, "lowlevel.spectral_rms.mean");
-                var spectralFlatness = NavDbl(root, "lowlevel.spectral_flatness_db.mean");
+                // spectralFlatness is DERIVED from the per-band flatnesses read below — the music
+                // extractor emits NO global lowlevel.spectral_flatness_db, so the old direct read was
+                // 0 on every track since 2026-02-13. See DeriveSpectralFlatness at the mel block.
                 var dissonance = NavDbl(root, "lowlevel.dissonance.mean");
                 var pitchSalience = NavDbl(root, "lowlevel.pitch_salience.mean");
                 var chordsChangesRate = NavDbl(root, "tonal.chords_changes_rate");
@@ -14526,7 +14562,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var spectralSkewness = OptN(root, "lowlevel.spectral_skewness.mean");
                 var spectralSpread = OptN(root, "lowlevel.spectral_spread.mean");
                 var spectralStrongPeak = OptN(root, "lowlevel.spectral_strongpeak.mean");
-                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean", 6);
+                // spectral_decrease values are ~1e-9 and REAL/varying; the old 6-dp rounding
+                // annihilated them to 0 on every track (a precision bug, not a missing key). 12 dp
+                // preserves the e-9 signal.
+                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean", 12);
                 var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean", 6);
                 var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean", 6);
                 var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean", 6);
@@ -14548,6 +14587,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var melKurtosis = OptN(root, "lowlevel.melbands_kurtosis.mean");
                 var melSkewness = OptN(root, "lowlevel.melbands_skewness.mean");
                 var melSpread = OptN(root, "lowlevel.melbands_spread.mean");
+                // Derive the global spectralFlatness scalar from the per-band flatnesses just read
+                // (the real tonal-vs-noisy signal). The three band values stay emitted separately —
+                // the consumer model uses those; this scalar is for schema continuity.
+                var spectralFlatness = DeriveSpectralFlatness(barkFlatness, erbFlatness, melFlatness);
                 var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean", 2);
                 var chordsStrength = OptN(root, "tonal.chords_strength.mean");
                 var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", 2);

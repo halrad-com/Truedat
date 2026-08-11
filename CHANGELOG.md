@@ -3,7 +3,7 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+## [0.5.4.7-RC5]
 
 ### Changed
 
@@ -66,6 +66,17 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   downstream consumers could never index. Absent-by-design is never a failure: bitUsage
   on lossy/sub-24-bit files or pure-silence windows, HF analysis at 44.1 kHz, either
   without ffmpeg, SMFM, and `fileMd5` without `--file-md5` are all exempt.
+
+### Fixed
+
+- **Two always-zero feature fields corrected (kept, not dropped).** `spectralFlatness` had read a
+  global Essentia key the music extractor never emits, so it was `0` on every track since
+  2026-02-13; it is now **derived** from the per-band flatnesses
+  (`barkbands`/`erbbands`/`melbands_flatness_db`) that were already captured — a real tonal-vs-noisy
+  value, and the three band values keep being emitted separately. `spectralDecrease` was a real
+  ~1e-9 signal being **rounded to `0.000000` by 6-dp precision**; it now keeps 12 dp. Existing
+  entries gain the corrected values on re-analysis; both were weight-0 in the consumer model, so no
+  pick behavior changes until it is retrained.
 
 ### Changed
 

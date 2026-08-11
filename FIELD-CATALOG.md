@@ -31,7 +31,7 @@ high level — what MBXHub uses it for.
 | `onsetRate` | `rhythm.onset_rate` | num | rhythm feature |
 | `zeroCrossingRate` | `lowlevel.zerocrossingrate.mean` | num | speech-detection input |
 | `spectralRms` | `lowlevel.spectral_rms.mean` | num | level feature |
-| `spectralFlatness` | `lowlevel.spectral_flatness_db.mean` | num | *(the music extractor does not emit this key — currently 0 in every entry; pending fix)* |
+| `spectralFlatness` | derived: mean of `{bark,erb,mel}bands_flatness_db.mean` | num | tonal-vs-noisy (flatness) feature |
 | `dissonance` | `lowlevel.dissonance.mean` | num | tonal-tension feature |
 | `pitchSalience` | `lowlevel.pitch_salience.mean` | num | tonal feature |
 | `chordsChangesRate` | `tonal.chords_changes_rate` | num | chord-density feature |
