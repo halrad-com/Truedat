@@ -7657,27 +7657,39 @@ namespace Truedat
             List<string>? waveBreakdown = null;
             if (s.MissingWave > 0)
             {
-                var errs = LoadExistingErrors(
-                    Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", "mbxmoods-errors.csv"));
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+                var errs = LoadExistingErrors(Path.Combine(dir, "mbxmoods-errors.csv"));
+                // Short-file / over-length entries are skipped MID-scan: they stay on the
+                // work list (so they are neither orphaned nor pre-scan-filtered) and land in
+                // mbxmoods-skipped.csv, NOT the error list. Without consulting it they fall
+                // through to "stale -> refresh" — but a refresh skips them every run, so the
+                // count never clears (the short-file guard shipped after these were analyzed,
+                // leaving them with old features nothing will re-derive). Give them their own
+                // bucket that points at the skipped ledger, not --refresh.
+                var skipped = LoadSkippedPaths(Path.Combine(dir, "mbxmoods-skipped.csv"));
                 // Only entries the scan actually re-analyzes can be cleared by
                 // --refresh-features. Precedence per entry:
-                //   errored (on the error list)          -> --retry-errors   (bad file)
-                //   orphan  (not in the library at all)  -> --fixup          (drop it)
-                //   filtered (in library, excluded from  -> unreachable by a rescan; a
-                //             the scan work list)            rule-excluded/video/URL entry
-                //   stale   (in the work list, no error) -> --refresh-features (the ONLY
+                //   errored (on the error list)           -> --retry-errors   (bad file)
+                //   orphan  (not in the library at all)   -> --fixup          (drop it)
+                //   filtered (pre-scan: video/URL/rule)   -> a rescan skips these
+                //   skipped (mid-scan: short/over-length) -> a rescan skips these too
+                //   stale   (in the work list, no error)  -> --refresh-features (the ONLY
                 //                                            bucket a rescan fixes)
-                int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveStale = 0;
+                int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveSkipped = 0, waveStale = 0;
                 foreach (var e in entries)
                 {
                     if (e?.Features == null) continue;
                     if (!(e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
                           && (e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))) continue;
                     var key = e.Features.FilePath ?? "";
-                    if (key.Length > 0 && errs.ContainsKey(key)) waveErrored++;
-                    else if (libraryKeys != null && key.Length > 0 && !libraryKeys.Contains(key)) waveOrphan++;
-                    else if (scanWorkList != null && key.Length > 0 && !scanWorkList.Contains(key)) waveFiltered++;
-                    else waveStale++;
+                    switch (ClassifyWaveMissing(key, errs, libraryKeys, scanWorkList, skipped))
+                    {
+                        case WaveMissingBucket.Errored:  waveErrored++;  break;
+                        case WaveMissingBucket.Orphan:   waveOrphan++;   break;
+                        case WaveMissingBucket.Filtered: waveFiltered++; break;
+                        case WaveMissingBucket.Skipped:  waveSkipped++;  break;
+                        default:                         waveStale++;    break;
+                    }
                 }
                 waveBreakdown = new List<string>();
                 // --retry-errors only surfaces when there ARE errored entries — it re-attempts
@@ -7688,6 +7700,8 @@ namespace Truedat
                     waveBreakdown.Add($"{waveOrphan,6:N0}  no longer in library    ->  truedat --fixup          (drops orphaned entries)");
                 if (waveFiltered > 0)
                     waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: exclusion-rule/video/URL/non-audio)");
+                if (waveSkipped > 0)
+                    waveBreakdown.Add($"{waveSkipped,6:N0}  skipped, not analyzable ->  see mbxmoods-skipped.csv (e.g. short files; a refresh will NOT clear these)");
                 if (waveStale > 0)
                     waveBreakdown.Add(scanWorkList == null
                         ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
@@ -12207,6 +12221,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(cs.EssentiaAnalyzed == 2, "stats: EssentiaAnalyzed counts both mfcc-bearing entries");
             }
 
+            // --- ClassifyWaveMissing precedence: a short-file / over-length entry lands in
+            // mbxmoods-skipped.csv (NOT the error list), stays on the work list, and a refresh
+            // skips it every run — so it must bucket as Skipped, never Stale, or the advisor
+            // nags "-> refresh" forever (the live 2026-08-10 X:\Library complaint). ----------
+            {
+                var errs = new Dictionary<string, string>(PathComparer.Instance) { [@"D:\m\bad.flac"] = "essentia" };
+                var lib  = (ISet<string>)new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac", @"D:\m\short.wav", @"D:\m\filtered.mkv", @"D:\m\stale.flac" };
+                var work = (ISet<string>)new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac", @"D:\m\short.wav", @"D:\m\stale.flac" }; // filtered.mkv dropped pre-scan
+                var skip = new HashSet<string>(PathComparer.Instance) { @"D:\m\short.wav" };
+                Assert(ClassifyWaveMissing(@"D:\m\bad.flac",     errs, lib, work, skip) == WaveMissingBucket.Errored,  "wave-bucket: on the error list -> Errored");
+                Assert(ClassifyWaveMissing(@"D:\m\orphan.flac",  errs, lib, work, skip) == WaveMissingBucket.Orphan,   "wave-bucket: not in library -> Orphan");
+                Assert(ClassifyWaveMissing(@"D:\m\filtered.mkv", errs, lib, work, skip) == WaveMissingBucket.Filtered, "wave-bucket: in library, off the work list -> Filtered");
+                Assert(ClassifyWaveMissing(@"D:\m\short.wav",    errs, lib, work, skip) == WaveMissingBucket.Skipped,  "wave-bucket: mid-scan skipped (short file) -> Skipped, NOT Stale");
+                Assert(ClassifyWaveMissing(@"D:\m\stale.flac",   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: in work list, not errored/skipped -> Stale (the only --refresh bucket)");
+                Assert(ClassifyWaveMissing("",                   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: empty key -> Stale (legacy fall-through)");
+                Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac" }) == WaveMissingBucket.Errored, "wave-bucket: errored beats skipped");
+            }
+
             // --- .mbxs binary sidecar: stable KeyCode + write/read round-trip (v0.5.4.7) ------
             {
                 Assert(CatalogSidecar.KeyCode("C", "major") == 0, "sidecar: KeyCode C major = 0");
@@ -12770,6 +12802,54 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             catch { }
             return result;
+        }
+
+        /// <summary>
+        /// Load the set of paths in mbxmoods-skipped.csv (columns: path,extension,reason,timestamp).
+        /// Cumulative across runs; membership means "a scan skipped this at least once" — used by
+        /// <see cref="ClassifyWaveMissing"/> to keep short-file / over-length entries out of the
+        /// "-> refresh" recommendation (a refresh skips them every run, so the count never clears).
+        /// </summary>
+        static HashSet<string> LoadSkippedPaths(string path)
+        {
+            var result = new HashSet<string>(PathComparer.Instance);
+            if (!File.Exists(path)) return result;
+            try
+            {
+                foreach (var line in File.ReadAllLines(path).Skip(1))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    var parts = ParseCsvLine(line);
+                    if (parts.Length >= 1 && parts[0].Length > 0) result.Add(parts[0]);
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        internal enum WaveMissingBucket { Errored, Orphan, Filtered, Skipped, Stale }
+
+        /// <summary>
+        /// Classify a wave-missing catalog entry (has Essentia features, lacks the latest wave
+        /// fields) into the disjoint bucket that determines which — if any — command clears it.
+        /// Precedence: errored beats orphan beats pre-scan-filtered beats mid-scan-skipped beats
+        /// genuinely-stale. Only <see cref="WaveMissingBucket.Stale"/> is cleared by a refresh;
+        /// the rest are surfaced so the advisor never recommends a rescan for an entry a rescan
+        /// structurally cannot reach (the short-file "-> refresh" nag that never clears).
+        /// </summary>
+        internal static WaveMissingBucket ClassifyWaveMissing(
+            string key,
+            Dictionary<string, string> errs,
+            ISet<string>? libraryKeys,
+            ISet<string>? scanWorkList,
+            HashSet<string> skipped)
+        {
+            if (key.Length == 0) return WaveMissingBucket.Stale;
+            if (errs.ContainsKey(key)) return WaveMissingBucket.Errored;
+            if (libraryKeys != null && !libraryKeys.Contains(key)) return WaveMissingBucket.Orphan;
+            if (scanWorkList != null && !scanWorkList.Contains(key)) return WaveMissingBucket.Filtered;
+            if (skipped.Contains(key)) return WaveMissingBucket.Skipped;
+            return WaveMissingBucket.Stale;
         }
 
         static string[] ParseCsvLine(string line)
