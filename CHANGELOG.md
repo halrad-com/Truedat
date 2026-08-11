@@ -77,6 +77,12 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   ~1e-9 signal being **rounded to `0.000000` by 6-dp precision**; it now keeps 12 dp. Existing
   entries gain the corrected values on re-analysis; both were weight-0 in the consumer model, so no
   pick behavior changes until it is retrained.
+- **Phantom-key detector (durable guard against the above).** During a scan truedat now records
+  every Essentia key it reads and whether that key ever resolved; at end of scan (and always under
+  `--audit`) it lists any key queried but **never** resolved on any track — the exact signature of a
+  wrong/absent key silently read as a default. This would have surfaced the `spectralFlatness` bug
+  in the first scan log instead of hiding for six months. Detection only — no field's default is
+  changed.
 
 ### Changed
 

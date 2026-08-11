@@ -439,6 +439,15 @@ namespace Truedat
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
+        // Phantom-key detector: every extractor path NavDbl/OptN looks up is recorded as queried,
+        // and (when it resolves to a number) as resolved. A path queried but NEVER resolved across a
+        // scan is a wrong/absent key read as a default — how spectralFlatness stayed 0 for six months.
+        // Distinct sets (bounded to the ~80 keys read), thread-safe for the parallel workers.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _navQueried
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _navResolved
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        static bool _phantomReported;
         // Live count of running Essentia subprocesses — the saturation gauge on the
         // progress line ("ess N/P"). Debugging aid: if this sits well below the
         // parallelism while new work remains, workers are parked on something other
@@ -5205,6 +5214,7 @@ namespace Truedat
             EmitStagingSummary();
             }
             PrintScanTallies();
+            ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
             try
@@ -12301,6 +12311,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(Opt2(-5.13925e-09, 12) != Opt2(-8.80901e-09, 12), "decrease: 12 dp keeps distinct e-9 values distinct");
             }
 
+            // --- phantom-key detector (2026-08-11): NavDbl flags a never-resolved extractor path ----
+            // Would have caught spectral_flatness_db on day one instead of hiding for six months.
+            {
+                ResetNavTrackingForTest();
+                using var doc = JsonDocument.Parse("{\"lowlevel\":{\"spectral_rms\":{\"mean\":0.5}}}");
+                var r = doc.RootElement;
+                NavDbl(r, "lowlevel.spectral_rms.mean");                     // resolves (present number)
+                NavDbl(r, "lowlevel.spectral_flatness_db.mean");             // the historical phantom (absent)
+                var phantoms = PhantomKeys();
+                Assert(phantoms.Contains("lowlevel.spectral_flatness_db.mean"),
+                    "phantom-detector: flags the never-resolved spectral_flatness_db key (the six-month bug)");
+                Assert(!phantoms.Contains("lowlevel.spectral_rms.mean"),
+                    "phantom-detector: does NOT flag a key that resolved");
+                ResetNavTrackingForTest();   // don't leak test lookups into a real scan
+            }
+
             // --- .mbxs binary sidecar: stable KeyCode + write/read round-trip (v0.5.4.7) ------
             {
                 Assert(CatalogSidecar.KeyCode("C", "major") == 0, "sidecar: KeyCode C major = 0");
@@ -14822,7 +14848,46 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static double NavDbl(JsonElement root, string path, double def = 0)
         {
             var el = NavigatePath(root, path);
-            return el.HasValue && el.Value.ValueKind == JsonValueKind.Number ? el.Value.GetDouble() : def;
+            bool resolved = el.HasValue && el.Value.ValueKind == JsonValueKind.Number;
+            _navQueried.TryAdd(path, 0);            // phantom-key detector (records, never changes the value)
+            if (resolved) _navResolved.TryAdd(path, 0);
+            return resolved ? el.Value.GetDouble() : def;
+        }
+
+        /// <summary>
+        /// Extractor paths queried by NavDbl/OptN that NEVER resolved to a number this scan. A
+        /// mis-keyed/absent field read as a default looks exactly like this (as spectralFlatness did
+        /// for six months). Legitimately-optional keys a given extractor build omits also appear, so
+        /// it is a review list, not an assertion of a bug. Ordered, distinct.
+        /// </summary>
+        internal static IReadOnlyList<string> PhantomKeys()
+        {
+            var list = new List<string>();
+            foreach (var k in _navQueried.Keys) if (!_navResolved.ContainsKey(k)) list.Add(k);
+            list.Sort(StringComparer.Ordinal);
+            return list;
+        }
+
+        /// <summary>Self-test seam: clear detector state so a test run doesn't leak into a real scan.</summary>
+        internal static void ResetNavTrackingForTest() { _navQueried.Clear(); _navResolved.Clear(); _phantomReported = false; }
+
+        // Only warn on a non-audit scan large enough that a legitimately-sometimes-absent key would
+        // have resolved on at least one track; --audit always lists them regardless of scan size.
+        const int PhantomReportMinTracks = 20;
+
+        static void ReportPhantomKeys(int analyzedCount, bool audit)
+        {
+            if (_phantomReported) return;
+            var phantoms = PhantomKeys();
+            if (phantoms.Count == 0) return;
+            if (analyzedCount < PhantomReportMinTracks && !audit) return;
+            _phantomReported = true;
+            Console.WriteLine();
+            Console.WriteLine($"  NOTE: {phantoms.Count} extractor key(s) were queried but NEVER resolved this scan.");
+            Console.WriteLine("  A mis-keyed / absent field is read as a default and looks exactly like this (how");
+            Console.WriteLine("  spectralFlatness stayed 0 for months). Review — a wrong key is a bug; a");
+            Console.WriteLine("  legitimately-optional block this extractor build omits is expected:");
+            foreach (var p in phantoms) Console.WriteLine($"    {p}");
         }
 
         /// <summary>Decoded audio length (seconds) Essentia actually analysed —
