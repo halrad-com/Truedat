@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "policy": "exclude-default",
+  "_about": "Field-emission policy for mbxmoods.json, read by BOTH the truedat scan writer and --fixup so scan-time emission and existing-catalog cleanup use one source of truth. Any field NOT listed here is Extended (emitted, pass-through). Only required + excluded + summarize need enumerating. Scope = 'what we have': only fields the current no-profile extractor computes. Reinstating a suppressed/dropped field costs a FULL library re-scan (raw extractor JSON is deleted at parse).",
+  "dispositions": {
+    "required": "a consumer depends on it (pick blend / V-A model / identity / exclude gate / truedat write-time verdict / re-extract canary). Always emitted; never stripped; missing => warning.",
+    "extended": "pass-through default (unlisted fields).",
+    "summarize": "drop the raw heavy array, keep write-time derived scalars. Currently unused.",
+    "excluded": "not emitted on scan; stripped by --fixup if found."
+  },
+  "required": {
+    "fields": [
+      "bpm", "key", "mode", "keyVotes", "spectralCentroid", "danceability", "onsetRate", "loudness", "spectralFlux",
+      "bpmFirstPeak", "bpmFirstPeakWeight", "bpmFirstPeakSpread", "bpmSecondPeak", "bpmSecondPeakWeight", "bpmSecondPeakSpread",
+      "chordsChangesRate", "chordsHistogram", "hpcp12", "dynamicComplexity", "speechLikely", "audioStreamSha256",
+      "zeroCrossingRate", "silenceRate30dB", "chordsStrength", "hpcpEntropy",
+      "bitUsage", "hfEnergyRatio", "hfSpectralStructure", "dynamicRange", "averageLoudness", "mfcc",
+      "fingerprint", "loudnessMomentary", "spectralContrastCoeffs",
+      "artist", "title", "album", "genre", "durationMs", "trackId", "lastModified"
+    ],
+    "_added_by_sanity_check_2026_08_10": {
+      "fingerprint": "fingerprint.v1 — hi-res + lossy-transcode verdicts read codec/bitDepth/bitrate/encoder/mp3LameTag (ComputeTruedatVerdict); also identity / dedupe / verify.",
+      "loudnessMomentary": "BASE re-extract canary in HasCurrentFeatures — if excluded, every entry reads as stale and re-analyzes on EVERY scan (infinite re-extract).",
+      "spectralContrastCoeffs": "--refresh-features / --stats wave marker, paired with dynamicComplexity in HasCurrentFeatures and the advisor."
+    }
+  },
+  "excluded": {
+    "fields": {
+      "bpmHistogram": { "availability": "suppressed", "reason": "217MB / ~29% of the catalog, ~94% zeros, no consumer (write-only; bpm peaks are separate extractor fields). GATE: writer/.mbxs/--fixup cut awaits operator greenlight." },
+      "melbands": { "availability": "dropped-at-parse" },
+      "erbbands": { "availability": "dropped-at-parse" },
+      "barkbands": { "availability": "dropped-at-parse" },
+      "melbands128": { "availability": "dropped-at-parse" },
+      "beatsCount": { "availability": "dropped-at-parse" },
+      "defaultStatsMinMaxMedian": { "availability": "dropped-at-parse" }
+    }
+  },
+  "summarize": {
+    "_note": "chordsHistogram is KEEP-RAW (extended), NOT summarized — bliss-style harmonic similarity (cross-track cosine) needs the raw [24] array. Summarize-in-place (chordsEntropy/chordsConcentration/major-minor mass) is a documented fallback only, if storage pressure ever appears.",
+    "fields": {}
+  }
+}
