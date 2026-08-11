@@ -3,13 +3,24 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [0.5.4.7-RC5]
+## [0.5.4.7-RC5] — 2026-08-11
 
 ### Changed
 
 - **`--refresh` is now the verb** for the feature-refresh scan (was `--refresh-features`).
   The old `--refresh-features` still works as an undocumented alias, so existing scripts
   and in-flight passes keep running.
+- **Throughput is now duration-normalized.** The progress line and end-of-scan summary
+  lead with `Nx realtime` (audio-seconds analyzed per wall-second — the honest unit:
+  a FLAC and a low-bitrate MP3 of the same content cost the same to scan) with MB/s
+  demoted to a footnote for IO overhead. The numerator is the length Essentia actually
+  decoded, not the claimed duration.
+- **Scan-loop perf (T1/T2/T6):** workers no longer queue behind the 5-minute periodic
+  catalog save (TryEnter + skip; error-CSV appends also stop serializing against
+  saves); a cache-miss track no longer pays a second whole-file hash pass when the
+  cache-tier walk already read the body; the whole-file MD5 half of the single-pass
+  hash is skipped entirely when `--file-md5` is off; the bitUsage/HF ffmpeg
+  subprocesses are now attached to the `--cpu-limit` job object like every other child.
 
 ### Added
 
@@ -83,20 +94,6 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   wrong/absent key silently read as a default. This would have surfaced the `spectralFlatness` bug
   in the first scan log instead of hiding for six months. Detection only — no field's default is
   changed.
-
-### Changed
-
-- **Throughput is now duration-normalized.** The progress line and end-of-scan summary
-  lead with `Nx realtime` (audio-seconds analyzed per wall-second — the honest unit:
-  a FLAC and a low-bitrate MP3 of the same content cost the same to scan) with MB/s
-  demoted to a footnote for IO overhead. The numerator is the length Essentia actually
-  decoded, not the claimed duration.
-- **Scan-loop perf (T1/T2/T6):** workers no longer queue behind the 5-minute periodic
-  catalog save (TryEnter + skip; error-CSV appends also stop serializing against
-  saves); a cache-miss track no longer pays a second whole-file hash pass when the
-  cache-tier walk already read the body; the whole-file MD5 half of the single-pass
-  hash is skipped entirely when `--file-md5` is off; the bitUsage/HF ffmpeg
-  subprocesses are now attached to the `--cpu-limit` job object like every other child.
 
 ## [5.4.5] — 2026-07-30
 
