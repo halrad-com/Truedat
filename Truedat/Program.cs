@@ -1018,6 +1018,17 @@ namespace Truedat
         internal static long ErrorLogMaxBytes = 5 * 1024 * 1024;   // static (not const) so the self-test can lower it
         static bool _errorLogHeaderWritten;   // per run: header + rotation happen on the first failure logged
 
+        // Catalog hard-limit guard. A catalog whose serialized size approaches ~2 GB can no
+        // longer be LOADED: LoadExistingMoods (JsonDocument.Parse) and every --fixup / --migrate /
+        // --remap / --merge-moods path materialize the whole file into one string / byte[], which
+        // caps at Int32.MaxValue (~2.1 GB). So SaveResults REFUSES to commit a catalog over this
+        // safety line (deliberate margin below the wall): the last-good file on disk stays
+        // readable, the scan shuts down, and the operator is told the library has outgrown a
+        // single catalog file. Static (not const) so the self-test can lower it. The real fix is
+        // reducing per-track weight and/or sharding the catalog below this ceiling.
+        internal static long CatalogMaxBytes = 1_900_000_000L;   // ~1.9 GB, ~200 MB under the ~2.1 GB .NET wall
+        internal static int _catalogLimitTripped;   // set once SaveResults refuses an over-limit write
+
         // --enableshortfiles: scan very short files that are skipped by default. Off by
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
         // skipped structurally so they don't churn Essentia or clutter mbxmoods-errors.csv.
@@ -5017,12 +5028,22 @@ namespace Truedat
                                         var saveSw = Stopwatch.StartNew();
                                         SaveResults(moodsPath, allTracks);
                                         saveSw.Stop();
-                                        Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
-                                        Interlocked.Increment(ref _saveCount);
-                                        // Period measures save-end to save-start: a slow save
-                                        // must not eat its own next interval.
-                                        Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
-                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
+                                        if (Volatile.Read(ref _catalogLimitTripped) != 0)
+                                        {
+                                            // Catalog hit the ~2 GB hard-limit guard: SaveResults refused the
+                                            // write and left the last-good catalog in place. Stop the scan —
+                                            // every further save would refuse too. (No "Saved" line: nothing was.)
+                                            try { cts.Cancel(); } catch { }
+                                        }
+                                        else
+                                        {
+                                            Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                                            Interlocked.Increment(ref _saveCount);
+                                            // Period measures save-end to save-start: a slow save
+                                            // must not eat its own next interval.
+                                            Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
+                                            Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
+                                        }
                                     }
                                 }
                                 finally { Monitor.Exit(saveLock); }
@@ -9481,6 +9502,43 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 SaveResults(srFresh, new ConcurrentDictionary<string, TrackEntry>());
                 Assert(File.Exists(srFresh) && !File.Exists(srFresh + ".bak"),
                     "SaveResults (first save) writes and leaves no .bak");
+
+                // --- Hard-limit guard: SaveResults refuses to commit a catalog over the wall ---
+                // (an over-limit catalog can no longer be LOADED — JsonDocument.Parse / ReadAllText
+                //  cap at Int32.MaxValue — so the guard keeps the last-good file readable instead.)
+                var hlMoods = Path.Combine(saveTestDir, "hardlimit", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(hlMoods)!);
+                var hlSavedMax = CatalogMaxBytes;
+                var hlSavedTrip = Volatile.Read(ref _catalogLimitTripped);
+                try
+                {
+                    // 1) Establish a last-good catalog under a generous limit.
+                    CatalogMaxBytes = 1_900_000_000L;
+                    Volatile.Write(ref _catalogLimitTripped, 0);
+                    SaveResults(hlMoods, new ConcurrentDictionary<string, TrackEntry>());
+                    Assert(File.Exists(hlMoods), "hard-limit: baseline catalog written under a generous limit");
+                    var hlGoodBytes = File.ReadAllBytes(hlMoods);
+
+                    // 2) Force the limit tiny so the next save would exceed it: refuse the swap,
+                    //    leave the last-good file byte-identical, trip the flag, leave no .tmp.
+                    CatalogMaxBytes = 10;   // any real catalog exceeds 10 bytes
+                    var hlBigger = new ConcurrentDictionary<string, TrackEntry>();
+                    hlBigger["C:/x.flac"] = new TrackEntry { Features = new TrackFeatures { FilePath = "C:/x.flac" } };
+                    SaveResults(hlMoods, hlBigger);
+                    Assert(Volatile.Read(ref _catalogLimitTripped) != 0,
+                        "hard-limit: SaveResults trips the guard when the catalog would exceed the limit");
+                    Assert(File.ReadAllBytes(hlMoods).SequenceEqual(hlGoodBytes),
+                        "hard-limit: over-limit save is refused; last-good catalog left byte-identical");
+                    Assert(!File.Exists(hlMoods + ".tmp"),
+                        "hard-limit: refused save leaves no .tmp behind");
+
+                    // 3) Once tripped, further saves are no-ops even under a generous limit.
+                    CatalogMaxBytes = 1_900_000_000L;
+                    SaveResults(hlMoods, hlBigger);
+                    Assert(File.ReadAllBytes(hlMoods).SequenceEqual(hlGoodBytes),
+                        "hard-limit: once tripped, SaveResults stays a no-op until the flag is cleared");
+                }
+                finally { CatalogMaxBytes = hlSavedMax; Volatile.Write(ref _catalogLimitTripped, hlSavedTrip); }
             }
             finally { try { Directory.Delete(saveTestDir, true); } catch { } }
 
@@ -13298,6 +13356,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// </summary>
         static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
+            // Once the hard-limit guard has tripped, never attempt another (doomed, huge) temp
+            // write: the last-good, under-limit catalog already on disk is authoritative until the
+            // library is pruned or sharded below CatalogMaxBytes.
+            if (Volatile.Read(ref _catalogLimitTripped) != 0) return;
+
             var tmpPath = moodsPath + ".tmp";
             var bakPath = moodsPath + ".bak";
             try { File.Delete(tmpPath); } catch { }
@@ -13322,6 +13385,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // OS write cache, so a power loss could leave a valid-length mbxmoods.json with a
                 // zeroed tail — and a scan save keeps no timestamped .bak to fall back to.
                 fs.Flush(flushToDisk: true);
+            }
+
+            // Hard-limit guard. The temp is a complete, fsynced file now, so its byte length is
+            // the exact size the live catalog would become. Refuse to swap in a catalog that can
+            // no longer be loaded (see CatalogMaxBytes) — leave the existing, readable catalog
+            // untouched, trip the flag so the scan stops and later saves no-op, and say why.
+            var candidateBytes = new FileInfo(tmpPath).Length;
+            if (candidateBytes > CatalogMaxBytes)
+            {
+                Volatile.Write(ref _catalogLimitTripped, 1);
+                try { File.Delete(tmpPath); } catch { }
+                Console.Error.WriteLine(
+                    $"  ERROR: catalog would be {candidateBytes / (1024 * 1024)} MB, over the " +
+                    $"{CatalogMaxBytes / (1024 * 1024)} MB safety limit (~2 GB hard wall). NOT written — " +
+                    $"the existing catalog is unchanged and still readable. The library has outgrown a " +
+                    $"single catalog file; the scan is stopping. Reduce per-track fields or shard the catalog.");
+                return;   // do NOT swap: last-good catalog preserved, .mbxs left untouched
             }
 
             // One transient backup across the swap window: ReplaceFile moves the OLD catalog to
