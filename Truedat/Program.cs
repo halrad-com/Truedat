@@ -772,6 +772,7 @@ namespace Truedat
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
+            "compact", "prettify",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1952,6 +1953,14 @@ namespace Truedat
             string? snapshotOutPath = null;
             bool restoreMode = false;
             string? restoreArchivePath = null;
+            // --compact <catalog>: rewrite the catalog compact in place. --prettify
+            // <catalog> [out]: write a pretty (indented) copy; with an explicit out the
+            // source is untouched, without it the source is rewritten in place. Both
+            // reformat at the JSON level (JsonDocument round-trip) so every field —
+            // including ones truedat does not model — is preserved losslessly.
+            bool compactMode = false;
+            bool prettifyMode = false;
+            string? prettifyOutPath = null;
 
             bool synthesize = false;
             string? synthCatalog = null;
@@ -2083,6 +2092,15 @@ namespace Truedat
                     { snapshotOutPath = args[i + 1]; i++; }
                 }
                 else if (canonical == "restore" && i + 1 < args.Length) { restoreMode = true; restoreArchivePath = args[++i]; }
+                else if (canonical == "compact") compactMode = true;
+                else if (canonical == "prettify") prettifyMode = true;
+                // --prettify <catalog> [out]: the FIRST positional is the source (bound to
+                // xmlPath by the generic handler below and resolved via ResolveMoodsCatalog);
+                // the SECOND positional, if present, is the explicit output. Claimed here —
+                // before the generic single-positional handler — only once xmlPath is set.
+                else if (prettifyMode && prettifyOutPath == null && xmlPath != null
+                         && !arg.StartsWith("-") && !arg.StartsWith("/"))
+                    prettifyOutPath = args[i];
                 else if (canonical == "keep-backups" && i + 1 < args.Length && int.TryParse(args[i + 1], out var kb) && kb >= 0) { _keepBackups = kb; i++; }
                 else if (canonical == "analyze") analyzeMode = true;
                 else if (canonical == "audit") auditLog = true;
@@ -2267,7 +2285,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -2353,7 +2371,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -2365,7 +2383,7 @@ namespace Truedat
 
             if (convertDirMode)
             {
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --convert-dir is a standalone mode (mutually exclusive with scan/hash/transcode/etc).");
                     Environment.ExitCode = 1;
@@ -2503,6 +2521,31 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunSnapshot(srcCatalog!, snapshotOutPath);
+                return;
+            }
+
+            // --compact <catalog> / --prettify <catalog> [out]: reformat an existing
+            // catalog at the JSON level (lossless — a JsonDocument round-trip preserves
+            // every field, including ones truedat does not model). Source resolution
+            // mirrors --snapshot / --stats / --verify. An in-place rewrite (--compact,
+            // or --prettify with no out) archives a compressed backup first.
+            if (compactMode || prettifyMode)
+            {
+                string? srcCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var reformatRefusal);
+                if (reformatRefusal != null)
+                {
+                    Console.Error.WriteLine(reformatRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (!File.Exists(srcCatalog))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {srcCatalog}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunReformat(srcCatalog!, prettifyMode, prettifyMode ? prettifyOutPath : null);
                 return;
             }
 
@@ -6856,6 +6899,85 @@ namespace Truedat
         }
 
         /// <summary>
+        /// --compact &lt;catalog&gt; / --prettify &lt;catalog&gt; [out]: reformat an existing
+        /// catalog's JSON without going through truedat's TrackFeatures model — a
+        /// JsonDocument.Parse round-trip re-emitted with a Utf8JsonWriter preserves EVERY
+        /// field byte-for-byte in value, including keys truedat does not model, so the
+        /// operation is lossless. <paramref name="pretty"/> selects indented vs compact
+        /// output. When <paramref name="outPath"/> is null the source is rewritten IN
+        /// PLACE and a compressed, rotated backup is archived first; when an explicit out
+        /// is given the source is left untouched and no backup is taken. Writes via a temp
+        /// file + AtomicReplace, matching --snapshot / --migrate.
+        /// NOTE: JsonDocument.Parse materializes the whole file (~2 GB cap) — fine for
+        /// current catalogs; a &gt;2 GB streaming reformat is a separate follow-on.
+        /// </summary>
+        static int RunReformat(string catalogPath, bool pretty, string? outPath)
+        {
+            Console.WriteLine(pretty ? "=== Prettify Mode ===" : "=== Compact Mode ===");
+            Console.WriteLine($"  Catalog: {catalogPath}");
+
+            bool inPlace = string.IsNullOrEmpty(outPath);
+            var target = inPlace ? catalogPath : outPath!;
+            long beforeBytes = new FileInfo(catalogPath).Length;
+
+            JsonDocument doc;
+            try
+            {
+                var bytes = File.ReadAllBytes(catalogPath);
+                doc = JsonDocument.Parse(bytes);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: cannot parse catalog: {ex.Message}");
+                return 1;
+            }
+
+            using (doc)
+            {
+                // Archive a compressed backup BEFORE any in-place rewrite; an explicit
+                // out leaves the source untouched, so it needs no backup.
+                string? bakPath = null;
+                if (inPlace)
+                {
+                    try { bakPath = BackupCatalogCompressed(catalogPath); }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Error: backup failed, refusing to rewrite in place: {ex.Message}");
+                        return 1;
+                    }
+                    Console.WriteLine($"Backup:  {bakPath}");
+                }
+
+                var destDir = Path.GetDirectoryName(Path.GetFullPath(target));
+                if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir!);
+                var tmp = target + ".reformat.tmp";
+                try { File.Delete(tmp); } catch { }
+                try
+                {
+                    using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+                    {
+                        using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = pretty }))
+                            doc.RootElement.WriteTo(jw);
+                        fs.Flush(flushToDisk: true);
+                    }
+                    Program.AtomicReplace(tmp, target);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Error: reformat failed while writing: {ex.Message}");
+                    try { File.Delete(tmp); } catch { }
+                    return 1;
+                }
+
+                long afterBytes = new FileInfo(target).Length;
+                Console.WriteLine();
+                Console.WriteLine($"Source:  {catalogPath} ({beforeBytes / (1024.0 * 1024.0):F1} MB)");
+                Console.WriteLine($"Output:  {target} ({afterBytes / (1024.0 * 1024.0):F1} MB){(inPlace ? " [in place]" : "")}");
+                return 0;
+            }
+        }
+
+        /// <summary>
         /// --restore &lt;archive&gt;: rebuild mbxmoods.json from a snapshot ZIP, a
         /// compressed backup, a .gz, or a plain catalog (format is sniffed). Any existing
         /// catalog at the destination is backed up (compressed + rotated) before the
@@ -9491,7 +9613,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var srMoods = Path.Combine(saveTestDir, "mbxmoods.json");
                 File.WriteAllText(srMoods, "{\"stale\":true}");
                 SaveResults(srMoods, new ConcurrentDictionary<string, TrackEntry>());
-                Assert(File.Exists(srMoods) && File.ReadAllText(srMoods).Contains("\"trackCount\": 0"),
+                Assert(File.Exists(srMoods) && File.ReadAllText(srMoods).Contains("\"trackCount\":0"),
                     "SaveResults replaced the existing catalog");
                 Assert(!File.Exists(srMoods + ".tmp") && !File.Exists(srMoods + ".bak"),
                     "SaveResults leaves no .tmp or .bak on success");
@@ -9541,6 +9663,81 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { CatalogMaxBytes = hlSavedMax; Volatile.Write(ref _catalogLimitTripped, hlSavedTrip); }
             }
             finally { try { Directory.Delete(saveTestDir, true); } catch { } }
+
+            // --- Catalog reformat: --compact / --prettify (lossless JSON round-trip) ---
+            // Reformat is a pure JsonDocument round-trip (NOT a pass through TrackFeatures),
+            // so it must preserve every field byte-for-byte in value, including keys truedat
+            // does not model. In-place rewrites archive a compressed backup first; an
+            // explicit out leaves the source untouched.
+            var rfDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-reformat-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rfDir);
+            try
+            {
+                // Compact catalog fixture carrying a field truedat does NOT model, plus a
+                // nested structure, so a lossy model round-trip would visibly drop data.
+                var rfSrcJson = "{\"version\":\"1.0\",\"trackCount\":1,\"tracks\":{\"C:/a.flac\":{\"bpm\":120,\"someUnknownField\":123,\"nested\":{\"x\":[1,2,3]}}}}";
+
+                string Compact(JsonElement e)
+                {
+                    using var ms = new MemoryStream();
+                    using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false }))
+                        e.WriteTo(w);
+                    return Encoding.UTF8.GetString(ms.ToArray());
+                }
+
+                // (a) compact output is strictly smaller than pretty output for the same catalog.
+                var rfPretty = Path.Combine(rfDir, "pretty.json");
+                var rfCompact = Path.Combine(rfDir, "compact.json");
+                File.WriteAllText(rfPretty, rfSrcJson);
+                File.WriteAllText(rfCompact, rfSrcJson);
+                Assert(RunReformat(rfPretty, true, null) == 0, "reformat: --prettify in place returns 0");
+                Assert(RunReformat(rfCompact, false, null) == 0, "reformat: --compact in place returns 0");
+                var rfPrettyLen = new FileInfo(rfPretty).Length;
+                var rfCompactLen = new FileInfo(rfCompact).Length;
+                Assert(rfCompactLen < rfPrettyLen,
+                    $"reformat: compact ({rfCompactLen} B) is strictly smaller than pretty ({rfPrettyLen} B)");
+
+                // (b) lossless including the unmodeled field: compact->prettify re-parses equal.
+                var rfLossless = Path.Combine(rfDir, "lossless.json");
+                File.WriteAllText(rfLossless, rfSrcJson);
+                RunReformat(rfLossless, false, null);   // compact in place
+                RunReformat(rfLossless, true, null);    // then prettify in place
+                using (var rfD0 = JsonDocument.Parse(rfSrcJson))
+                using (var rfD1 = JsonDocument.Parse(File.ReadAllBytes(rfLossless)))
+                {
+                    var t1 = rfD1.RootElement.GetProperty("tracks").GetProperty("C:/a.flac");
+                    Assert(t1.GetProperty("someUnknownField").GetInt32() == 123,
+                        "reformat: an unmodeled field survives compact->prettify (lossless)");
+                    Assert(t1.GetProperty("nested").GetProperty("x").GetArrayLength() == 3,
+                        "reformat: nested unmodeled structure survives");
+                    Assert(Compact(rfD0.RootElement) == Compact(rfD1.RootElement),
+                        "reformat: round-trip re-parses equal to the original catalog");
+                }
+
+                // (c) an in-place reformat archives a compressed backup BEFORE writing.
+                var rfBakDir = Path.Combine(rfDir, "bak");
+                Directory.CreateDirectory(rfBakDir);
+                var rfBakCat = Path.Combine(rfBakDir, "mbxmoods.json");
+                File.WriteAllText(rfBakCat, rfSrcJson);
+                RunReformat(rfBakCat, false, null);     // in-place compact
+                Assert(Directory.GetFiles(rfBakDir, "mbxmoods.json.bak.*.zip").Length >= 1,
+                    "reformat: in-place --compact archives a .bak.*.zip backup first");
+
+                // (d) --prettify <src> <out> leaves the SOURCE byte-identical, writes a larger
+                //     (pretty) out, and takes NO backup (source untouched).
+                var rfOutSrc = Path.Combine(rfDir, "outsrc.json");
+                File.WriteAllText(rfOutSrc, rfSrcJson);
+                var rfOutSrcBefore = File.ReadAllBytes(rfOutSrc);
+                var rfOut = Path.Combine(rfDir, "out-pretty.json");
+                Assert(RunReformat(rfOutSrc, true, rfOut) == 0, "reformat: --prettify with explicit out returns 0");
+                Assert(File.ReadAllBytes(rfOutSrc).SequenceEqual(rfOutSrcBefore),
+                    "reformat: --prettify <src> <out> leaves the SOURCE byte-identical");
+                Assert(new FileInfo(rfOut).Length > new FileInfo(rfOutSrc).Length,
+                    "reformat: explicit-out prettify writes a larger (pretty) file than the compact source");
+                Assert(Directory.GetFiles(rfDir, "outsrc.json.bak.*.zip").Length == 0,
+                    "reformat: explicit-out prettify takes NO backup (source untouched)");
+            }
+            finally { try { Directory.Delete(rfDir, true); } catch { } }
 
             // --- Catalog backup compression + snapshot/restore (BACKLOG 2026-08-08) ---
             // The safe half: backups/snapshots compress to ZIP; the live catalog stays
@@ -13380,7 +13577,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
             {
-                using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true }))
+                // Compact (no indentation): on a 72k-track catalog pretty-printing is ~25%
+                // pure whitespace (~18M lines). The live catalog is written compact by
+                // default; use --prettify to reformat a copy for human reading.
+                using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
                 {
                     jw.WriteStartObject();
                     jw.WriteString("version", "1.0");
