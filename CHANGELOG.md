@@ -3,6 +3,30 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Fixed
+
+- **Speech verdict's silence vote was firing on ~the whole catalog.** It read
+  `silenceRate30dB`, but an Essentia units bug (its silence-rate compares an *amplitude*
+  threshold against a *mean-of-squares* power — off by a square) makes that field gate at
+  RMS < −15 dBFS, which ordinary music trips constantly (a Charlie Parker fixture reads
+  0.997). The vote now reads `silenceRate60dB` (effective −30 dBFS, the only honest gate)
+  with thresholds derived from the live-catalog distribution (n=3716 ordinary-music
+  entries: median 0.101, p90 0.299): talk when > 0.30, music when < 0.06. `speechMethod`
+  bumps to `truedat-speech-v1.3-untuned-2026-08-13`. Write-time and retroactive — no rescan.
+
+### Added
+
+- **Compact `prov` / `content` codes in the `truedat` verdict block**, both **absent on a
+  clean ordinary-music track** (the common case costs zero bytes). `prov` carries
+  provenance-defect codes — `pad16` (16-bit content padded into a 24-bit container, emitted
+  from the existing bit-usage hi-res verdict) and `tc` (lossy re-encoded from lossy) live
+  now; `up44`/`lossy` arrive with the Tier 1 ceiling detector. `content` names a non-music
+  content class — `speech` (an alias of `speechLikely: "yes"`) or `silence` (a mostly-silent
+  track, gated on `silenceRate60dB` plus loudness/energy corroborators). Both are write-time,
+  retroactive, and untuned; a `?` suffix marks low confidence.
+
 ## [0.5.4.7-RC5] — 2026-08-11
 
 ### Changed

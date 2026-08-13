@@ -13,17 +13,19 @@
     "fields": [
       "bpm", "key", "mode", "keyVotes", "spectralCentroid", "danceability", "onsetRate", "loudness", "spectralFlux",
       "bpmFirstPeak", "bpmFirstPeakWeight", "bpmFirstPeakSpread", "bpmSecondPeak", "bpmSecondPeakWeight", "bpmSecondPeakSpread",
-      "chordsChangesRate", "chordsHistogram", "hpcp12", "dynamicComplexity", "speechLikely", "audioStreamSha256",
+      "chordsChangesRate", "chordsHistogram", "hpcp12", "dynamicComplexity", "speechLikely", "prov", "content", "audioStreamSha256",
       "zeroCrossingRate", "silenceRate30dB", "chordsStrength", "hpcpEntropy",
       "bitUsage", "hfEnergyRatio", "hfSpectralStructure", "dynamicRange", "averageLoudness", "mfcc",
       "fingerprint", "loudnessMomentary", "spectralContrastCoeffs",
-      "artist", "title", "album", "genre", "durationMs", "lastModified"
+      "artist", "title", "album", "genre", "lastModified"
     ],
     "_added_by_sanity_check_2026_08_10": {
       "fingerprint": "fingerprint.v1 — hi-res + lossy-transcode verdicts read codec/bitDepth/bitrate/encoder/mp3LameTag (ComputeTruedatVerdict); also identity / dedupe / verify.",
       "loudnessMomentary": "BASE re-extract canary in HasCurrentFeatures — if excluded, every entry reads as stale and re-analyzes on EVERY scan (infinite re-extract).",
       "spectralContrastCoeffs": "--refresh-features / --stats wave marker, paired with dynamicComplexity in HasCurrentFeatures and the advisor."
-    }
+    },
+    "_durationMs_removed_2026_08_13": "Removed from required.fields: there is no top-level durationMs field — it lives inside fingerprint.v1, already covered by the 'fingerprint' required entry. Listing it top-level made every entry read as missing a field it never had.",
+    "_prov_content_added_2026_08_13": "prov + content are nested inside the truedat verdict block, absent-when-clean (write-time codes, 2026-08-13). prov = provenance-defect codes (pad16/tc live; up44/lossy are Tier 1); content = non-music content class (speech/silence)."
   },
   "excluded": {
     "fields": {

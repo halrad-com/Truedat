@@ -226,9 +226,11 @@ namespace Truedat
         public double Strength;
     }
 
-    /// <summary>Phase 2.5 bit-depth-substance measurement. A 24-bit file with
-    /// LowestNonZeroBit >= 8 is 16-bit content padded with zeros — the canonical
-    /// fake-hi-res signature. Populated by ComputeBitUsage (ffmpeg s32le walk).
+    /// <summary>Phase 2.5 bit-depth-substance measurement. After ffmpeg's int24->int32
+    /// shift, real 24-bit content lands at LowestNonZeroBit ~7-8 and 16-bit content
+    /// padded into a 24-bit container lands at ~16 — the canonical fake-hi-res signature.
+    /// The hi-res voter (ComputeTruedatVerdict) reads it with margins <=10 -> real,
+    /// >=14 -> fake, 11-13 -> abstain. Populated by ComputeBitUsage (ffmpeg s32le walk).
     /// Public because TrackFeatures.BitUsage is part of the serialized contract.</summary>
     public sealed class BitUsageSummary
     {
@@ -236,7 +238,7 @@ namespace Truedat
         public double BottomBitActivity;  // fraction of non-silent samples with bit 0 != 0 (0..1)
         public double EffectiveBits;      // log2(rms / quantStep) approximation; clipped to [0, 32] (s32le sample space ceiling)
         public int SamplesAnalyzed;
-        public string Method = "";        // "ffmpeg-s32le-30s-mid" — frozen tag for future-method tracking
+        public string Method = "";        // "ffmpeg-s32le-30s-mid-native" — frozen tag for future-method tracking
     }
 
     /// <summary>Phase 4 — the multi-signal-voted authenticity verdict per track.
