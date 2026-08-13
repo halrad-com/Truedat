@@ -2093,11 +2093,12 @@ namespace Truedat
                 else if (canonical == "restore" && i + 1 < args.Length) { restoreMode = true; restoreArchivePath = args[++i]; }
                 else if (canonical == "compact") compactMode = true;
                 else if (canonical == "prettify") prettifyMode = true;
-                // --prettify <catalog> [out]: the FIRST positional is the source (bound to
-                // xmlPath by the generic handler below and resolved via ResolveMoodsCatalog);
-                // the SECOND positional, if present, is the explicit output. Claimed here —
-                // before the generic single-positional handler — only once xmlPath is set.
-                else if (prettifyMode && prettifyOutPath == null && xmlPath != null
+                // --prettify <catalog> [out]: the explicit output positional. The source is resolved
+                // via ResolveMoodsCatalog, so it may arrive as the first positional (-> xmlPath) OR via
+                // --moods (-> analyzeFileMoods). Claim the output here — before the generic single-
+                // positional handler — once EITHER source form is already set, so `--moods cat.json
+                // --prettify out.json` binds out.json here instead of mis-parsing it as the source.
+                else if (prettifyMode && prettifyOutPath == null && (xmlPath != null || analyzeFileMoods != null)
                          && !arg.StartsWith("-") && !arg.StartsWith("/"))
                     prettifyOutPath = args[i];
                 else if (canonical == "keep-backups" && i + 1 < args.Length && int.TryParse(args[i + 1], out var kb) && kb >= 0) { _keepBackups = kb; i++; }
@@ -5949,7 +5950,9 @@ namespace Truedat
 
                 if (match != null)
                 {
-                    trackData["trackId"] = match.TrackId;
+                    // trackId is pruned (schema-excluded, WriteTrackEntry omits it) — don't let --remap
+                    // re-stamp it from the XML match, or remapped entries would carry a field the rest omit.
+                    if (!FieldPolicy.IsExcluded("trackId")) trackData["trackId"] = match.TrackId;
                     newTracks[match.Location] = trackData;
                     remapped++;
                     Console.WriteLine($"  REMAP: {moodArtist} - {moodTitle}");
@@ -13888,7 +13891,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // ~orders of magnitude faster to load than parsing the JSON). Best-effort: the sidecar
             // is a rebuildable cache and the reader falls back to JSON, so a failure here must
             // never fail the catalog save. ONE sidecar spans the whole catalog (all parts) — unsplit.
-            try { CatalogSidecar.Write(Path.ChangeExtension(moodsPath, ".mbxs"), allTracks); }
+            // Build the sidecar from the SAME `items` snapshot the JSON was written from — NOT the
+            // live allTracks — so (a) a concurrent periodic-save add can't grow the dictionary past
+            // the Rec[n]/paths[n] arrays mid-enumeration (IndexOutOfRange, silently swallowed), and
+            // (b) the sidecar's track set + count match the JSON byte-for-byte (MBXHub can boot from
+            // the sidecar alone, so a divergent count is a real inconsistency).
+            try { CatalogSidecar.Write(Path.ChangeExtension(moodsPath, ".mbxs"), items); }
             catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not written: {ex.Message}"); }
         }
 
