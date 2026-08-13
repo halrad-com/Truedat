@@ -13,13 +13,18 @@ namespace Truedat
     /// canonical, human-readable source of truth; the sidecar is a rebuildable derived cache.
     /// truedat owns the WRITER; MBXHub owns the reader.
     ///
-    /// ============================ .mbxs FORMAT v2 (little-endian) ============================
-    /// v2 widens the Rec from v1's 5 fields to the full set MBXHub's ContinuityScorer PfsPoint
-    /// ranks on, EXCEPT the two truedat does not author. Valence and Arousal are NOT stored —
-    /// they are the output of MBXHub's mood-model (a hub-side setting the operator retrains
-    /// WITHOUT a rescan), so baking them in would make the file wrong the instant the model
-    /// changes. Same reason CamelotCode and BpmNorm are absent (derivable reader-side from
-    /// keyCode / a hub bpm setting). Instead the sidecar carries the RAW feature inputs the
+    /// ============================ .mbxs FORMAT v3 (little-endian) ============================
+    /// v3 appends the 9 remaining raw model-input scalars (the "grow list") + a per-row JSON
+    /// offset/length seek table to the v2 record; every v2 offset is unchanged (append-only). With
+    /// v3 the sidecar carries ALL 21 raw scalars the AutoQ mood model reads, so MBXHub loads the
+    /// mood cache from the ~24 MB sidecar (~0.2 s) instead of parsing the ~540 MB JSON (~23.6 s),
+    /// deriving V/A byte-identically. v2 widened the Rec from v1's 5 fields to MBXHub's
+    /// ContinuityScorer PfsPoint set, EXCEPT what truedat does not author. Valence and Arousal are
+    /// NOT stored — they are the output of MBXHub's mood-model (a hub-side setting the operator
+    /// retrains WITHOUT a rescan), so baking them in would make the file wrong the instant the model
+    /// changes. Same reason CamelotCode, BpmNorm and modeMajor are absent (derivable reader-side:
+    /// camelot/modeMajor from keyCode, bpmNorm from a hub bpm setting, smfmValence/Arousal from the
+    /// SMFM block). Instead the sidecar carries the RAW feature inputs the
     /// mood-model consumes — the general + arousal + valence scalars AND the Sony 12-TONE SMFM
     /// block (the 24-feature model is an SMFM-fusion model) — so the hub derives V/A at load
     /// exactly as it does from the JSON. AcousticRanks (BpmPct/CentroidPct/DancePct/OnsetPct/
@@ -29,7 +34,7 @@ namespace Truedat
     ///
     /// Header (20 bytes):
     ///   char[4]  magic       = "MBXS"
-    ///   u32      version     = 2
+    ///   u32      version     = 3
     ///   u32      trackCount  = N
     ///   u32      chromaFloats= 24            (hpcp12[12] ++ thpcp12[12])
     ///   u32      smfmSlots   = 12            (Sony 12-TONE STMO slot scores)
@@ -39,7 +44,7 @@ namespace Truedat
     ///   (u16 byteLen + UTF-8 bytes)[G]       deduped genre strings; Rec.GenreId indexes this,
     ///                                        0xFFFF = no genre.
     ///
-    /// Rec[N]  — fixed 85-byte stride, SORTED ASCENDING by PathHash (O(log N) binary-search
+    /// Rec[N]  — fixed 133-byte stride (v2 was 85), SORTED ASCENDING by PathHash (O(log N) binary-search
     ///           random access with no parsing):
     ///   i64  PathHash          FNV-1a 64-bit over the UTF-16 chars of the catalog key (the file
     ///                          path, exactly the JSON "tracks" key). See FnvPathHash.
@@ -69,6 +74,19 @@ namespace Truedat
     ///   u8   HasHpcp           1 if this row's hpcp12 chroma is real, 0 if the 12 floats are NaN.
     ///   u8   HasThpcp          1 if this row's thpcp12 chroma is real, 0 otherwise.
     ///   u8   HasSmfm           1 if this row's SMFM slot scores are real, 0 if NaN filler.
+    ///   ---- v3 append (RecBytesV3 = 133) ----
+    ///   f32  SpectralSkewness  } the 9 remaining raw model-input scalars ("grow list") the AutoQ
+    ///   f32  SpectralEntropy   } mood model reads. NaN = absent. All already emitted to mbxmoods.json
+    ///   f32  SpectralComplexity} today (nullable extended fields) -> writer projection, NO rescan.
+    ///   f32  HpcpCrest         } Carried so MBXHub derives V/A from the sidecar byte-identical to the
+    ///   f32  HpcpEntropy       } JSON path with no mean-imputation. spectralFlatness (above) is the
+    ///   f32  Hfc               } known phantom (~0); carried as-is to keep the vector complete.
+    ///   f32  BeatsLoudness     }
+    ///   f32  ChordsStrength    }
+    ///   f32  DynamicRange      }  (distinct from DynCx = dynamicComplexity above)
+    ///   i64  JsonOffset        byte offset of this row's JSON object in the co-written mbxmoods.json.
+    ///   i32  JsonLength        byte length of that object — the lazy cold-read seek table; 0 until
+    ///                          populated by the writer (offsets valid only against the plain live JSON).
     ///
     /// Chroma  — f32[N * 24], row i (same sorted order as Rec[i]) = hpcp12[0..11] ++ thpcp12[0..11].
     ///           Missing vectors are written as 12 NaN floats and flagged via HasHpcp/HasThpcp.
@@ -88,7 +106,7 @@ namespace Truedat
     {
         internal const int ChromaFloats = 24;   // hpcp12[12] + thpcp12[12]
         internal const int SmfmSlots = 12;      // Sony 12-TONE raw STMO slot scores
-        internal const uint FormatVersion = 2;
+        internal const uint FormatVersion = 3;
         private const ushort NoGenre = 0xFFFF;
 
         /// <summary>FNV-1a 64-bit over the string's UTF-16 chars. Matches the reader; used both as
@@ -196,6 +214,15 @@ namespace Truedat
                     r.ChordsChanges = F(f.ChordsChangesRate);
                     r.SmfmBpm = FN(f.SmfmBpm);
                     r.GenreId = GenreId(f.Genre, genreIndex, genres);
+                    r.SpectralSkewness = FN(f.SpectralSkewness);
+                    r.SpectralEntropy = FN(f.SpectralEntropy);
+                    r.SpectralComplexity = FN(f.SpectralComplexity);
+                    r.HpcpCrest = FN(f.HpcpCrest);
+                    r.HpcpEntropy = FN(f.HpcpEntropy);
+                    r.Hfc = FN(f.Hfc);
+                    r.BeatsLoudness = FN(f.BeatsLoudness);
+                    r.ChordsStrength = FN(f.ChordsStrength);
+                    r.DynamicRange = FN(f.DynamicRange);
                     FillChroma(chroma, chOff, f.Hpcp12, out bool h);
                     FillChroma(chroma, chOff + 12, f.Thpcp12, out bool th);
                     FillSmfm(smfm, smOff, f.SmfmScores, out bool hs);
@@ -208,6 +235,8 @@ namespace Truedat
                     r.RawBpm = r.RawBpmAlt = r.RawBpmAltWeight = r.DynCx = float.NaN;
                     r.Centroid = r.Flux = r.Loudness = r.Dance = r.Onset = r.Zcr = r.Rms =
                         r.Flatness = r.Dissonance = r.PitchSalience = r.ChordsChanges = r.SmfmBpm = float.NaN;
+                    r.SpectralSkewness = r.SpectralEntropy = r.SpectralComplexity = r.HpcpCrest =
+                        r.HpcpEntropy = r.Hfc = r.BeatsLoudness = r.ChordsStrength = r.DynamicRange = float.NaN;
                     r.KeyCode = -1; r.KeyAgreement = -1; r.KeyVotesPresent = 0; r.GenreId = NoGenre;
                     FillChroma(chroma, chOff, null, out _);
                     FillChroma(chroma, chOff + 12, null, out _);
@@ -246,6 +275,11 @@ namespace Truedat
                     bw.Write(r.Onset); bw.Write(r.Zcr); bw.Write(r.Rms); bw.Write(r.Flatness);
                     bw.Write(r.Dissonance); bw.Write(r.PitchSalience); bw.Write(r.ChordsChanges); bw.Write(r.SmfmBpm);
                     bw.Write(r.GenreId); bw.Write(r.HasHpcp); bw.Write(r.HasThpcp); bw.Write(r.HasSmfm);
+                    // v3 append: 9 model-input scalars (r+85..r+117) + JSON offset/length (r+121, r+129) -> 133 B stride.
+                    bw.Write(r.SpectralSkewness); bw.Write(r.SpectralEntropy); bw.Write(r.SpectralComplexity);
+                    bw.Write(r.HpcpCrest); bw.Write(r.HpcpEntropy); bw.Write(r.Hfc);
+                    bw.Write(r.BeatsLoudness); bw.Write(r.ChordsStrength); bw.Write(r.DynamicRange);
+                    bw.Write(r.JsonOffset); bw.Write(r.JsonLength);
                 }
                 foreach (var o in order)
                 {
@@ -330,6 +364,11 @@ namespace Truedat
             public float Centroid, Flux, Loudness, Dance, Onset, Zcr, Rms, Flatness, Dissonance, PitchSalience, ChordsChanges, SmfmBpm;
             public ushort GenreId;
             public byte HasHpcp, HasThpcp, HasSmfm;
+            // v3 model-input scalars (the grow list) — NaN = absent, mirroring FN().
+            public float SpectralSkewness, SpectralEntropy, SpectralComplexity, HpcpCrest, HpcpEntropy, Hfc, BeatsLoudness, ChordsStrength, DynamicRange;
+            // v3 per-row JSON object span into the co-written mbxmoods.json (the lazy-read seek table); 0 until populated.
+            public long JsonOffset;
+            public int JsonLength;
         }
 
         /// <summary>Parsed sidecar, in stored (PathHash-sorted) order. Reference reader for the
@@ -357,6 +396,17 @@ namespace Truedat
             public float[] PitchSalience = Array.Empty<float>();
             public float[] ChordsChanges = Array.Empty<float>();
             public float[] SmfmBpm = Array.Empty<float>();
+            public float[] SpectralSkewness = Array.Empty<float>();
+            public float[] SpectralEntropy = Array.Empty<float>();
+            public float[] SpectralComplexity = Array.Empty<float>();
+            public float[] HpcpCrest = Array.Empty<float>();
+            public float[] HpcpEntropy = Array.Empty<float>();
+            public float[] Hfc = Array.Empty<float>();
+            public float[] BeatsLoudness = Array.Empty<float>();
+            public float[] ChordsStrength = Array.Empty<float>();
+            public float[] DynamicRange = Array.Empty<float>();
+            public long[] JsonOffset = Array.Empty<long>();
+            public int[] JsonLength = Array.Empty<int>();
             public string[] Genre = Array.Empty<string>();   // resolved per-row (null when absent)
             public byte[] HasHpcp = Array.Empty<byte>();
             public byte[] HasThpcp = Array.Empty<byte>();
@@ -407,6 +457,10 @@ namespace Truedat
                 d.Centroid = new float[n]; d.Flux = new float[n]; d.Loudness = new float[n]; d.Dance = new float[n];
                 d.Onset = new float[n]; d.Zcr = new float[n]; d.Rms = new float[n]; d.Flatness = new float[n];
                 d.Dissonance = new float[n]; d.PitchSalience = new float[n]; d.ChordsChanges = new float[n]; d.SmfmBpm = new float[n];
+                d.SpectralSkewness = new float[n]; d.SpectralEntropy = new float[n]; d.SpectralComplexity = new float[n];
+                d.HpcpCrest = new float[n]; d.HpcpEntropy = new float[n]; d.Hfc = new float[n];
+                d.BeatsLoudness = new float[n]; d.ChordsStrength = new float[n]; d.DynamicRange = new float[n];
+                d.JsonOffset = new long[n]; d.JsonLength = new int[n];
                 d.Genre = new string[n]; d.HasHpcp = new byte[n]; d.HasThpcp = new byte[n]; d.HasSmfm = new byte[n];
                 for (int i = 0; i < n; i++)
                 {
@@ -420,6 +474,10 @@ namespace Truedat
                     ushort gid = br.ReadUInt16();
                     d.Genre[i] = gid != NoGenre && gid < genreTable.Length ? genreTable[gid] : null;
                     d.HasHpcp[i] = br.ReadByte(); d.HasThpcp[i] = br.ReadByte(); d.HasSmfm[i] = br.ReadByte();
+                    d.SpectralSkewness[i] = br.ReadSingle(); d.SpectralEntropy[i] = br.ReadSingle(); d.SpectralComplexity[i] = br.ReadSingle();
+                    d.HpcpCrest[i] = br.ReadSingle(); d.HpcpEntropy[i] = br.ReadSingle(); d.Hfc[i] = br.ReadSingle();
+                    d.BeatsLoudness[i] = br.ReadSingle(); d.ChordsStrength[i] = br.ReadSingle(); d.DynamicRange[i] = br.ReadSingle();
+                    d.JsonOffset[i] = br.ReadInt64(); d.JsonLength[i] = br.ReadInt32();
                 }
                 d.Chroma = new float[n * ChromaFloats];
                 for (int i = 0; i < d.Chroma.Length; i++) d.Chroma[i] = br.ReadSingle();

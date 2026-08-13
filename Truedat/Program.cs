@@ -12406,6 +12406,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     SpectralCentroid = 1500, SpectralFlux = 0.11, Loudness = 0.8, Danceability = 1.2,
                     OnsetRate = 3.3, ZeroCrossingRate = 0.07, SpectralRms = 0.05, SpectralFlatness = 0.02,
                     Dissonance = 0.45, PitchSalience = 0.6, ChordsChangesRate = 0.25,
+                    SpectralSkewness = 1.11, SpectralEntropy = 2.22, SpectralComplexity = 3.33,
+                    HpcpCrest = 4.44, HpcpEntropy = 5.55, Hfc = 6.66,
+                    BeatsLoudness = 7.77, ChordsStrength = 8.88, DynamicRange = 9.99,
                     SmfmBpm = 128.0, SmfmScores = new[] { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120 },
                 };
                 var cat = new Dictionary<string, TrackEntry>
@@ -12419,7 +12422,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     CatalogSidecar.Write(scPath, cat);
                     var d = CatalogSidecar.Read(scPath);
-                    Assert(d.Version == 2 && d.TrackCount == 3, "sidecar: header version 2, 3 tracks");
+                    Assert(d.Version == 3 && d.TrackCount == 3, "sidecar: header version 3, 3 tracks");
                     bool sorted = true;
                     for (int i = 1; i < d.TrackCount; i++) if (d.PathHash[i] < d.PathHash[i - 1]) sorted = false;
                     Assert(sorted, "sidecar: records sorted ascending by PathHash");
@@ -12442,6 +12445,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(Math.Abs(d.Chroma[ia * 24 + 0] - 0f) < 1e-3 && Math.Abs(d.Chroma[ia * 24 + 11] - 1f) < 1e-3
                            && Math.Abs(d.Chroma[ia * 24 + 12] - 1f) < 1e-3,
                            "sidecar: track a chroma = hpcp12 ++ thpcp12");
+                    Assert(Math.Abs(d.SpectralSkewness[ia] - 1.11f) < 1e-4 && Math.Abs(d.SpectralEntropy[ia] - 2.22f) < 1e-4
+                           && Math.Abs(d.SpectralComplexity[ia] - 3.33f) < 1e-4 && Math.Abs(d.HpcpCrest[ia] - 4.44f) < 1e-4
+                           && Math.Abs(d.HpcpEntropy[ia] - 5.55f) < 1e-4 && Math.Abs(d.Hfc[ia] - 6.66f) < 1e-4
+                           && Math.Abs(d.BeatsLoudness[ia] - 7.77f) < 1e-4 && Math.Abs(d.ChordsStrength[ia] - 8.88f) < 1e-4
+                           && Math.Abs(d.DynamicRange[ia] - 9.99f) < 1e-4,
+                           "sidecar v3: track a 9 model-input scalars round-trip (r+85..r+117)");
+                    Assert(d.JsonOffset.Length == d.TrackCount && d.JsonLength.Length == d.TrackCount,
+                           "sidecar v3: JSON offset/length columns parse at the 133-byte stride");
                     int ib = d.IndexOf("C:/m/b.flac");
                     Assert(ib >= 0 && d.HasHpcp[ib] == 1 && d.HasThpcp[ib] == 0 && float.IsNaN(d.Chroma[ib * 24 + 12]),
                            "sidecar: track b has hpcp, thpcp absent (NaN filler, flag 0)");
@@ -12455,6 +12466,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                            "sidecar: track c no votes -> agreement -1, no genre");
                     Assert(d.HasSmfm[ic] == 0 && float.IsNaN(d.SmfmBpm[ic]) && float.IsNaN(d.Smfm[ic * 12 + 0]),
                            "sidecar: track c no SMFM -> flag 0, NaN filler (the common case)");
+                    Assert(float.IsNaN(d.SpectralSkewness[ic]) && float.IsNaN(d.Hfc[ic]) && float.IsNaN(d.DynamicRange[ic]),
+                           "sidecar v3: track c absent model-inputs -> NaN");
                     Assert(d.IndexOf("C:/m/nope.flac") == -1, "sidecar: unknown path -> -1");
                 }
                 finally { try { File.Delete(scPath); } catch { } }
