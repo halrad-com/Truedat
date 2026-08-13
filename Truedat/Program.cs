@@ -6008,9 +6008,10 @@ namespace Truedat
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
                 root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; root["generatedAt"] = DateTime.UtcNow.ToString("o");
                 var tmpPath = moodsPath + ".tmp";
-                File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
                 AtomicReplace(tmpPath, moodsPath);
                 Console.WriteLine($"Updated: {moodsPath}");
+                RegenerateSidecar(moodsPath);
             }
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
         }
@@ -6123,9 +6124,10 @@ namespace Truedat
             root["trackCount"] = newTracks.Count;
             root["generatedAt"] = DateTime.UtcNow.ToString("o");
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             AtomicReplace(tmpPath, moodsPath);
             Console.WriteLine($"Updated: {moodsPath}");
+            RegenerateSidecar(moodsPath);
         }
 
         /// <summary>
@@ -6673,8 +6675,9 @@ namespace Truedat
             };
 
             var tmpPath = outputPath + ".tmp";
-            File.WriteAllText(tmpPath, result.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            File.WriteAllText(tmpPath, result.ToJsonString(new JsonSerializerOptions { WriteIndented = false }), Encoding.UTF8);
             AtomicReplace(tmpPath, outputPath);
+            RegenerateSidecar(outputPath);
 
             Console.WriteLine($"Written: {outputPath}");
             Console.WriteLine();
@@ -6817,9 +6820,10 @@ namespace Truedat
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             root["generatedAt"] = DateTime.UtcNow.ToString("o");
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             AtomicReplace(tmpPath, moodsPath);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count} tracks)");
+            RegenerateSidecar(moodsPath);
         }
 
         // -- Catalog backup compression + snapshot/restore ---------------------
@@ -6841,6 +6845,26 @@ namespace Truedat
             if (removed > 0)
                 Console.WriteLine($"Rotated: removed {removed} old backup(s), keeping the newest {_keepBackups}.");
             return bakPath;
+        }
+
+        /// <summary>Rebuild the .mbxs sidecar beside a just-rewritten catalog. The mutating
+        /// maintenance modes (--fixup / --remap / --migrate / --merge-moods / --restore /
+        /// --compact / in-place --prettify) write the catalog through their own
+        /// File.WriteAllText / AtomicReplace, NOT SaveResults, so they emit no sidecar — a
+        /// rewrite would otherwise leave MBXHub's freshness gate looking at a stale .mbxs and
+        /// falling back to the slow JSON parse. Reloads the catalog (single-file or multi-part,
+        /// via LoadExistingMoods) and rewrites the sidecar. Best-effort, same discipline as
+        /// SaveResults' sidecar write: the sidecar is a rebuildable cache, so a failure here
+        /// must never fail the mode.</summary>
+        static void RegenerateSidecar(string catalogPath)
+        {
+            try
+            {
+                var cat = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(catalogPath, cat);
+                CatalogSidecar.Write(Path.ChangeExtension(catalogPath, ".mbxs"), cat);
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not regenerated: {ex.Message}"); }
         }
 
         /// <summary>
@@ -6958,6 +6982,10 @@ namespace Truedat
                     return 1;
                 }
 
+                // Only an in-place rewrite touches the live catalog's sidecar; an explicit
+                // out leaves the source (and its .mbxs) untouched, so nothing to regen there.
+                if (inPlace) RegenerateSidecar(target);
+
                 long afterBytes = new FileInfo(target).Length;
                 Console.WriteLine();
                 Console.WriteLine($"Source:  {catalogPath} ({beforeBytes / (1024.0 * 1024.0):F1} MB)");
@@ -7024,6 +7052,8 @@ namespace Truedat
                 try { File.Delete(tmp); } catch { }
                 return 1;
             }
+
+            RegenerateSidecar(destCatalog);
 
             int? tc = null;
             try
@@ -9754,6 +9784,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var rfCompactLen = new FileInfo(rfCompact).Length;
                 Assert(rfCompactLen < rfPrettyLen,
                     $"reformat: compact ({rfCompactLen} B) is strictly smaller than pretty ({rfPrettyLen} B)");
+                // The compact rewrite must carry NO indented-property structure — the whole
+                // point is that a maintenance mode never re-inflates the catalog.
+                var rfCompactText = File.ReadAllText(rfCompact);
+                Assert(!rfCompactText.Contains("\n  \""),
+                    "reformat: compact output has no newline-indented property (not re-inflated)");
 
                 // (b) lossless including the unmodeled field: compact->prettify re-parses equal.
                 var rfLossless = Path.Combine(rfDir, "lossless.json");
@@ -9796,6 +9831,44 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "reformat: explicit-out prettify takes NO backup (source untouched)");
             }
             finally { try { Directory.Delete(rfDir, true); } catch { } }
+
+            // --- Sidecar regeneration after a maintenance-mode catalog rewrite ---
+            // The mutating modes rewrite the catalog through their own File.WriteAllText /
+            // AtomicReplace (not SaveResults), so RegenerateSidecar is what keeps the .mbxs
+            // from going stale — MBXHub's freshness gate falls back to the slow JSON parse
+            // when the sidecar is older than the catalog it describes.
+            var rgDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-regen-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rgDir);
+            try
+            {
+                var rgCat = Path.Combine(rgDir, "mbxmoods.json");
+                var rgSidecar = Path.ChangeExtension(rgCat, ".mbxs");
+                File.WriteAllText(rgCat,
+                    "{\"version\":\"1.0\",\"trackCount\":3,\"tracks\":{" +
+                    "\"C:/m/a.flac\":{\"bpm\":120,\"key\":\"C\",\"mode\":\"major\"}," +
+                    "\"C:/m/b.flac\":{\"bpm\":90,\"key\":\"A\",\"mode\":\"minor\"}," +
+                    "\"C:/m/c.flac\":{\"bpm\":0,\"key\":\"\",\"mode\":\"\"}}}");
+
+                // (b) RegenerateSidecar builds a .mbxs that isn't there and reads back N tracks.
+                Assert(!File.Exists(rgSidecar), "regen: fixture starts with no .mbxs sidecar");
+                RegenerateSidecar(rgCat);
+                Assert(File.Exists(rgSidecar), "regen: RegenerateSidecar creates the .mbxs sidecar");
+                Assert(CatalogSidecar.Read(rgSidecar).TrackCount == 3,
+                    "regen: rebuilt sidecar reports the catalog's 3 tracks");
+
+                // (c) After a mutating-path rewrite (--compact in place, which now regenerates
+                // the sidecar), the .mbxs is at least as new as the catalog it describes.
+                var rgFresh = Path.Combine(rgDir, "fresh", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(rgFresh)!);
+                File.WriteAllText(rgFresh,
+                    "{\"version\":\"1.0\",\"trackCount\":1,\"tracks\":{\"C:/x.flac\":{\"bpm\":100,\"key\":\"D\",\"mode\":\"major\"}}}");
+                Assert(RunReformat(rgFresh, false, null) == 0, "regen: --compact in-place rewrite returns 0");
+                var rgFreshSidecar = Path.ChangeExtension(rgFresh, ".mbxs");
+                Assert(File.Exists(rgFreshSidecar), "regen: in-place --compact emits the sidecar");
+                Assert(File.GetLastWriteTimeUtc(rgFreshSidecar) >= File.GetLastWriteTimeUtc(rgFresh),
+                    "regen: sidecar mtime >= catalog mtime after a mutating rewrite (not stale)");
+            }
+            finally { try { Directory.Delete(rgDir, true); } catch { } }
 
             // --- Catalog backup compression + snapshot/restore (BACKLOG 2026-08-08) ---
             // The safe half: backups/snapshots compress to ZIP; the live catalog stays
