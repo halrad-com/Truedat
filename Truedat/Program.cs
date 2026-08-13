@@ -6134,6 +6134,183 @@ namespace Truedat
         }
 
         /// <summary>
+        /// Best-effort, read-only snapshot of the <c>.mbxs</c> catalog sidecar's health,
+        /// as surfaced at the top of a <c>--verify</c> run. Every field defaults to the
+        /// "unknown" sentinel so a partial read still prints something honest; nothing here
+        /// ever throws (the sidecar is an optional cache and must not gate a verify).
+        /// </summary>
+        internal sealed class SidecarReadout
+        {
+            public bool Present;             // the .mbxs file exists beside the catalog
+            public long SizeBytes;           // sidecar file length (0 if unknown)
+            public int Version = -1;         // declared format version; -1 = unreadable / bad magic
+            public int SidecarCount = -1;    // trackCount stored in the sidecar header; -1 = unknown
+            public int CatalogCount = -1;    // trackCount read from the live catalog; -1 = unknown
+            public bool MultiPart;           // catalog is split across numbered parts (no single .json)
+            public bool FreshnessKnown;      // both mtimes were readable, so Fresh is meaningful
+            public bool Fresh;               // sidecar mtime >= newest catalog mtime (not stale)
+        }
+
+        /// <summary>Sniff just the .mbxs header (magic + version + trackCount) without parsing
+        /// the whole file — used to recover the declared version/count when a full
+        /// <see cref="CatalogSidecar.Read"/> refuses an unsupported version. Best-effort.</summary>
+        static void TryReadSidecarHeader(string sidecarPath, out int version, out int trackCount)
+        {
+            version = -1; trackCount = -1;
+            try
+            {
+                using var fs = new FileStream(sidecarPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using var br = new BinaryReader(fs);
+                var magic = Encoding.ASCII.GetString(br.ReadBytes(4));
+                if (magic != "MBXS") return;   // not a sidecar / truncated: leave both -1
+                version = (int)br.ReadUInt32();
+                trackCount = (int)br.ReadUInt32();
+            }
+            catch { /* header sniff is best-effort */ }
+        }
+
+        /// <summary>Read a catalog's top-level <c>trackCount</c> from its leading window
+        /// (the same bounded read <c>--snapshot</c> / <c>--restore</c> use). Null when absent.</summary>
+        static int? TryCatalogTrackCount(string catalogPath)
+        {
+            try
+            {
+                var prefix = new byte[64 * 1024];
+                using var fs = new FileStream(catalogPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                int n = fs.Read(prefix, 0, prefix.Length);
+                return CatalogArchive.TryReadTrackCountFromPrefix(prefix, n);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Gather the sidecar-integrity readout for <paramref name="catalogPath"/>.
+        /// Read-only, never throws, writes nothing. Compares the <c>.mbxs</c> sidecar's
+        /// version / track count / mtime against the live catalog (single-file or the newest
+        /// of its numbered parts) so the operator can see a stale or mismatched cache that
+        /// would silently demote MBXHub to the slow JSON boot path.</summary>
+        static SidecarReadout InspectSidecar(string catalogPath)
+        {
+            var r = new SidecarReadout();
+            try
+            {
+                var sidecarPath = Path.ChangeExtension(catalogPath, ".mbxs");
+                if (!File.Exists(sidecarPath)) return r;   // Present stays false -> JSON fallback
+                r.Present = true;
+                try { r.SizeBytes = new FileInfo(sidecarPath).Length; } catch { }
+
+                // Sidecar version + track count. Read() fully validates (as the hub does) and
+                // throws InvalidDataException on bad magic / unsupported version — in that case
+                // recover the declared version from the raw header so we can still name it.
+                try
+                {
+                    var d = CatalogSidecar.Read(sidecarPath);
+                    r.Version = d.Version;
+                    r.SidecarCount = d.TrackCount;
+                }
+                catch
+                {
+                    TryReadSidecarHeader(sidecarPath, out int hv, out int hc);
+                    r.Version = hv; r.SidecarCount = hc;
+                }
+
+                // Catalog track count + newest catalog mtime: a single mbxmoods.json, else the
+                // numbered parts (mbxmoods.json.1, .2, …). Freshness uses the NEWEST part mtime,
+                // matching the hub's rule.
+                DateTime catalogMtimeUtc = DateTime.MinValue;
+                bool catalogMtimeKnown = false;
+                if (File.Exists(catalogPath))
+                {
+                    r.CatalogCount = TryCatalogTrackCount(catalogPath) ?? -1;
+                    try { catalogMtimeUtc = new FileInfo(catalogPath).LastWriteTimeUtc; catalogMtimeKnown = true; } catch { }
+                }
+                else
+                {
+                    var parts = EnumerateCatalogParts(catalogPath);
+                    if (parts.Count > 0)
+                    {
+                        r.MultiPart = true;
+                        int sum = 0; bool any = false;
+                        foreach (var kv in parts)
+                        {
+                            var c = TryCatalogTrackCount(kv.Value);
+                            if (c.HasValue) { sum += c.Value; any = true; }
+                            try
+                            {
+                                var m = new FileInfo(kv.Value).LastWriteTimeUtc;
+                                if (m > catalogMtimeUtc) catalogMtimeUtc = m;
+                                catalogMtimeKnown = true;
+                            }
+                            catch { }
+                        }
+                        if (any) r.CatalogCount = sum;
+                    }
+                }
+
+                // Stale = sidecar older than the (newest) catalog file.
+                if (catalogMtimeKnown)
+                {
+                    try
+                    {
+                        var scMtime = new FileInfo(sidecarPath).LastWriteTimeUtc;
+                        r.Fresh = scMtime >= catalogMtimeUtc;
+                        r.FreshnessKnown = true;
+                    }
+                    catch { }
+                }
+            }
+            catch { /* the readout must never fail a verify */ }
+            return r;
+        }
+
+        static string FormatSidecarSize(long bytes)
+        {
+            if (bytes >= 1024L * 1024L) return $"{bytes / (1024.0 * 1024.0):F1} MB";
+            if (bytes >= 1024L) return $"{bytes / 1024.0:F1} KB";
+            return $"{bytes} B";
+        }
+
+        /// <summary>Print the sidecar-integrity block. Purely informational — never changes
+        /// <c>--verify</c>'s exit code (the sidecar is an optional cache; the exit code stays
+        /// driven by the hash-drift walk).</summary>
+        static void PrintSidecarReadout(SidecarReadout r)
+        {
+            Console.WriteLine("Sidecar (.mbxs):");
+            if (!r.Present)
+            {
+                Console.WriteLine("  present:     no  — MBXHub will fall back to the full JSON at boot");
+                Console.WriteLine();
+                return;
+            }
+            Console.WriteLine($"  present:     yes ({FormatSidecarSize(r.SizeBytes)})");
+
+            int current = (int)CatalogSidecar.FormatVersion;
+            if (r.Version < 0)
+                Console.WriteLine("  version:     unreadable (corrupt / bad magic -> JSON fallback)");
+            else if (r.Version == current)
+                Console.WriteLine($"  version:     {r.Version} (current)");
+            else
+                Console.WriteLine($"  version:     {r.Version} (unsupported; this build writes v{current} -> JSON fallback)");
+
+            if (r.SidecarCount < 0)
+                Console.WriteLine("  trackCount:  unknown (sidecar header unreadable)");
+            else if (r.CatalogCount < 0)
+                Console.WriteLine($"  trackCount:  {r.SidecarCount:N0}" +
+                    (r.MultiPart ? "  (multi-part catalog; count not compared)" : "  (catalog count unavailable)"));
+            else if (r.SidecarCount == r.CatalogCount)
+                Console.WriteLine($"  trackCount:  {r.SidecarCount:N0} == catalog");
+            else
+                Console.WriteLine($"  trackCount:  {r.SidecarCount:N0} != catalog {r.CatalogCount:N0}  (STALE/mismatched -> regenerate: run a scan or --compact)");
+
+            if (!r.FreshnessKnown)
+                Console.WriteLine("  freshness:   unknown (could not compare mtimes)");
+            else if (r.Fresh)
+                Console.WriteLine("  freshness:   fresh (sidecar >= catalog mtime)");
+            else
+                Console.WriteLine("  freshness:   STALE (sidecar older than catalog -> regenerate: run a scan or --compact)");
+            Console.WriteLine();
+        }
+
+        /// <summary>
         /// Read-only diagnostic. Walk a moods file and, for each entry, classify:
         ///   OK       — file present, audioStreamSha256 recomputes to the cached value
         ///   DRIFT    — file present, audioStreamSha256 differs (audio bytes changed)
@@ -6164,6 +6341,11 @@ namespace Truedat
                     Console.WriteLine("WARNING: ffmpeg not found on PATH — features tier will silently skip every entry.");
             }
             Console.WriteLine();
+
+            // Read-only sidecar-integrity block: surfaces a stale / mismatched / unsupported
+            // .mbxs before the walk, since that condition silently demotes MBXHub to the slow
+            // JSON boot. Best-effort — never throws, never writes, never touches the exit code.
+            PrintSidecarReadout(InspectSidecar(moodsPath));
 
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int loaded = LoadExistingMoods(moodsPath, allTracks);
@@ -12888,6 +13070,47 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(float.IsNaN(zC) && float.IsNaN(zE), "sidecar v3: ChordsSummary(all-zero) -> both NaN");
                 }
                 finally { try { File.Delete(scPath); } catch { } }
+            }
+
+            // --- Sidecar-integrity readout (--verify's .mbxs block) ---
+            {
+                var scDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-scstat-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(scDir);
+                var scCat = Path.Combine(scDir, "mbxmoods.json");
+                var scSide = Path.ChangeExtension(scCat, ".mbxs");
+                try
+                {
+                    var tracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    tracks["C:/m/a.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 120, Key = "C", Mode = "major" } };
+                    tracks["C:/m/b.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 90, Key = "A", Mode = "minor" } };
+                    tracks["C:/m/c.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 128, Key = "G", Mode = "major" } };
+                    // SaveResults writes mbxmoods.json (trackCount=3, in the header window) AND emits
+                    // its .mbxs sidecar last — so the sidecar mtime is >= the catalog mtime (fresh).
+                    SaveResults(scCat, tracks);
+                    Assert(File.Exists(scSide), "sidecar-readout: SaveResults emitted the .mbxs sidecar");
+
+                    // (1) Healthy: present + current version + count-match + fresh.
+                    var st = InspectSidecar(scCat);
+                    Assert(st.Present, "sidecar-readout: present when the .mbxs exists");
+                    Assert(st.Version == (int)CatalogSidecar.FormatVersion, "sidecar-readout: reports the current format version (3)");
+                    Assert(st.SidecarCount == 3 && st.CatalogCount == 3, "sidecar-readout: sidecar count == catalog count == 3");
+                    Assert(st.FreshnessKnown && st.Fresh, "sidecar-readout: fresh (sidecar >= catalog mtime)");
+
+                    // (2) Stale: touch the catalog to a NEWER mtime than the sidecar.
+                    var scMtime = new FileInfo(scSide).LastWriteTimeUtc;
+                    File.SetLastWriteTimeUtc(scCat, scMtime.AddMinutes(1));
+                    var stale = InspectSidecar(scCat);
+                    Assert(stale.Present && stale.FreshnessKnown && !stale.Fresh,
+                           "sidecar-readout: STALE when the catalog mtime is newer than the sidecar");
+                    // Mutation-verified during development: hardwiring Fresh=true (or flipping the
+                    // >= comparison) makes THIS assert fail — the freshness verdict is load-bearing.
+
+                    // (3) Missing: delete the .mbxs -> present=false (JSON fallback).
+                    File.Delete(scSide);
+                    var gone = InspectSidecar(scCat);
+                    Assert(!gone.Present, "sidecar-readout: reports absent when the .mbxs is missing (JSON fallback)");
+                }
+                finally { try { Directory.Delete(scDir, true); } catch { } }
             }
 
             Console.WriteLine(failures == 0
