@@ -2408,7 +2408,9 @@ namespace Truedat
                 if (!string.IsNullOrWhiteSpace(convertCodecs))
                 {
                     codecFilter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var c in convertCodecs.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0))
+                    // non-null: guarded by !string.IsNullOrWhiteSpace above (net48 ref assemblies lack
+                    // the [NotNullWhen] annotation, so flow analysis can't see the guard).
+                    foreach (var c in convertCodecs!.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0))
                     {
                         codecFilter.Add(c);
                         if (!IsLosslessConvertibleToFlac(c))
@@ -9886,7 +9888,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 //     Parse the streamed JSON (don't substring-match the raw text) — the Utf8JsonWriter
                 //     encoder escapes e.g. '+' in a "+dirty" stamp, so the on-disk bytes differ from the
                 //     literal while the decoded value matches.
-                string gbStreamed = null;
+                string? gbStreamed = null;
                 using (var gbDoc = JsonDocument.Parse(File.ReadAllBytes(srFresh)))
                     if (gbDoc.RootElement.TryGetProperty("generatedBy", out var gbProp)) gbStreamed = gbProp.GetString();
                 Assert(gbStreamed == VersionInfo.Display,
@@ -16172,10 +16174,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static double NavDbl(JsonElement root, string path, double def = 0)
         {
             var el = NavigatePath(root, path);
-            bool resolved = el.HasValue && el.Value.ValueKind == JsonValueKind.Number;
             _navQueried.TryAdd(path, 0);            // phantom-key detector (records, never changes the value)
-            if (resolved) _navResolved.TryAdd(path, 0);
-            return resolved ? el.Value.GetDouble() : def;
+            if (el.HasValue && el.Value.ValueKind == JsonValueKind.Number)
+            {
+                _navResolved.TryAdd(path, 0);
+                return el.Value.GetDouble();
+            }
+            return def;
         }
 
         /// <summary>

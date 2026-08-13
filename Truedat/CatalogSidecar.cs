@@ -190,7 +190,7 @@ namespace Truedat
 
         /// <summary>Decode a 64-hex audioStreamSha256 to 32 raw bytes. Returns null (→ 32 zero bytes on
         /// write) when the string is null, not exactly 64 chars, or contains a non-hex character.</summary>
-        private static byte[] DecodeShaHex(string hex)
+        private static byte[]? DecodeShaHex(string? hex)
         {
             if (hex == null || hex.Length != 64) return null;
             var b = new byte[32];
@@ -228,7 +228,7 @@ namespace Truedat
 
         /// <summary>Chord-density summary of the raw 24-bin chordsHistogram. Matches MBXHub
         /// MoodCacheEntry.ChordsConcentration/ChordsEntropy exactly (zero drift). NaN = absent.</summary>
-        internal static void ChordsSummary(double[] h, out float concentration, out float entropy)
+        internal static void ChordsSummary(double[]? h, out float concentration, out float entropy)
         {
             concentration = float.NaN;
             entropy = float.NaN;
@@ -274,7 +274,9 @@ namespace Truedat
             {
                 var f = kv.Value?.Features;
                 paths[idx] = kv.Key;
-                var r = new Rec { PathHash = FnvPathHash(kv.Key) };
+                // JsonOffset/JsonLength: reserved for the lazy-read phase; contractually 0 until then
+                // (the writer still emits their bytes — part of the frozen 178-byte v3 stride).
+                var r = new Rec { PathHash = FnvPathHash(kv.Key), JsonOffset = 0, JsonLength = 0 };
                 int chOff = idx * ChromaFloats;
                 int smOff = idx * SmfmSlots;
                 // v3-amend hot fields. Sha lives on TrackEntry (not Features), so decode it regardless of
@@ -320,7 +322,8 @@ namespace Truedat
                     r.HasThpcp = (byte)(th ? 1 : 0);
                     r.HasSmfm = (byte)(hs ? 1 : 0);
                     // Same write-time verdict path the JSON uses, so carry-not-compute (no rescan).
-                    r.SpeechLikely = SpeechEnum(Program.ComputeTruedatVerdict(kv.Key, kv.Value).SpeechLikely);
+                    // kv.Value! : non-null by construction here — f (= kv.Value?.Features) != null in this branch.
+                    r.SpeechLikely = SpeechEnum(Program.ComputeTruedatVerdict(kv.Key, kv.Value!).SpeechLikely);
                 }
                 else
                 {
@@ -424,7 +427,7 @@ namespace Truedat
             return Encoding.UTF8.GetString(br.ReadBytes(len));
         }
 
-        private static void FillChroma(float[] dst, int off, double[] vec, out bool present)
+        private static void FillChroma(float[] dst, int off, double[]? vec, out bool present)
         {
             if (vec != null && vec.Length == 12)
             {
@@ -438,7 +441,7 @@ namespace Truedat
             }
         }
 
-        private static void FillSmfm(float[] dst, int off, int[] scores, out bool present)
+        private static void FillSmfm(float[] dst, int off, int[]? scores, out bool present)
         {
             if (scores != null && scores.Length > 0)
             {
@@ -471,7 +474,7 @@ namespace Truedat
             // v3 amend (hot non-model fields carried for a sidecar-only boot):
             // Sha = audioStreamSha256 as 32 raw bytes, null meaning all-zero (absent). SpeechLikely = u8 enum
             // (0 none, 1 yes, 2 no, 3 unknown, 4 n/a) from Program.ComputeTruedatVerdict.
-            public byte[] Sha;
+            public byte[]? Sha;
             public byte SpeechLikely;
             // v3 amend #2 (178-byte stride): averageLoudness + chords-density summary (both NaN = absent).
             public float AverageLoudness, ChordsConcentration, ChordsEntropy;
@@ -518,7 +521,7 @@ namespace Truedat
             public float[] AverageLoudness = Array.Empty<float>();      // v3 amend #2; NaN = absent
             public float[] ChordsConcentration = Array.Empty<float>();  // v3 amend #2; NaN = absent (matches MoodCacheEntry)
             public float[] ChordsEntropy = Array.Empty<float>();        // v3 amend #2; NaN = absent (matches MoodCacheEntry)
-            public string[] Genre = Array.Empty<string>();   // resolved per-row (null when absent)
+            public string?[] Genre = Array.Empty<string?>();   // resolved per-row (null when absent)
             public byte[] HasHpcp = Array.Empty<byte>();
             public byte[] HasThpcp = Array.Empty<byte>();
             public byte[] HasSmfm = Array.Empty<byte>();
@@ -574,7 +577,7 @@ namespace Truedat
                 d.JsonOffset = new long[n]; d.JsonLength = new int[n];
                 d.Sha = new byte[n][]; d.SpeechLikely = new byte[n];
                 d.AverageLoudness = new float[n]; d.ChordsConcentration = new float[n]; d.ChordsEntropy = new float[n];
-                d.Genre = new string[n]; d.HasHpcp = new byte[n]; d.HasThpcp = new byte[n]; d.HasSmfm = new byte[n];
+                d.Genre = new string?[n]; d.HasHpcp = new byte[n]; d.HasThpcp = new byte[n]; d.HasSmfm = new byte[n];
                 for (int i = 0; i < n; i++)
                 {
                     d.PathHash[i] = br.ReadInt64();
