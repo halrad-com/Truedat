@@ -14,7 +14,8 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   double; everything else (full-precision, huge, tiny, non-finite) keeps today's bytes.
   Applies to new saves and — via the same predicate in the number branch of the token copier —
   to `--compact`/`--prettify` re-formatting of existing catalogs, no rescan needed.
-  ~10–15% smaller catalog text.
+  Measured on a real 72k-track catalog: 372.7 MB → 260.6 MB (**30% smaller**), values verified
+  intact (100% Essentia + identity coverage after the pass).
 
 ## [0.5.4.8-RC1] — 2026-08-13
 
