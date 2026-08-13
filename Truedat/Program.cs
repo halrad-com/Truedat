@@ -255,7 +255,13 @@ namespace Truedat
         public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
-        public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";  // rev-1.3: silence vote replaced its silenceRate30dB gate (essentia units bug: effective −15 dBFS, fired on ~the whole catalog) with silenceRate60dB thresholds derived from the live-catalog distribution; still untuned — calibrate against a labeled talk corpus before tightening further
+        public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";
+        // Compact defect / content codes per the 2026-08-12 detection review. Both
+        // ABSENT (empty) on a clean ordinary-music track, so the common case costs zero
+        // bytes. A "?" suffix marks low confidence. Multiple prov codes join with '+',
+        // dominant (confident) first, "?"-suffixed ones last.
+        public string Prov = "";      // provenance defect: "pad16" | "tc" | "up44"/"lossy" (Tier 1) — joined with '+'
+        public string Content = "";   // content class other than music: "speech" | "silence"  // rev-1.3: silence vote replaced its silenceRate30dB gate (essentia units bug: effective −15 dBFS, fired on ~the whole catalog) with silenceRate60dB thresholds derived from the live-catalog distribution; still untuned — calibrate against a labeled talk corpus before tightening further
     }
 
     class TrackEntry
@@ -12464,6 +12470,89 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
+            // --- prov / content codes (2026-08-12 detection review) ------------------
+            {
+                // Silence content axis: gate (silenceRate60dB > 0.85) + corroborators.
+                var sil = ComputeTruedatVerdict("s1", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        SilenceRate60dB = 0.95, AverageLoudness = 0.02, Loudness = -50,
+                    },
+                });
+                Assert(sil.Content == "silence",
+                    "content: gate + 2 corroborators (avgLoud + loudness) -> silence");
+
+                // Gate + exactly ONE corroborator -> low-confidence "silence?".
+                var sil1 = ComputeTruedatVerdict("s2", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        SilenceRate60dB = 0.95, AverageLoudness = 0.02, Loudness = -14,
+                    },   // avgLoud corroborates; loudness -14 does NOT; spectralEnergy absent
+                });
+                Assert(sil1.Content == "silence?",
+                    "content: gate + 1 corroborator -> silence?");
+
+                // Ordinary music (sr60 0.10, no defect signals) -> both codes empty.
+                var clean = ComputeTruedatVerdict("m1", new TrackEntry
+                {
+                    Features = new TrackFeatures { Danceability = 1.4, SilenceRate60dB = 0.10 },
+                });
+                Assert(clean.Content == "" && clean.Prov == "",
+                    "content/prov: ordinary music emits neither code");
+
+                // pad16: lossless 24-bit container whose bit-usage says 16-bit padded.
+                var pad = ComputeTruedatVerdict("p1", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        BitUsage = new BitUsageSummary { LowestNonZeroBit = 16, EffectiveBits = 12 },
+                    },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24 },
+                });
+                Assert(pad.HiresGenuine == "no" && pad.Prov == "pad16",
+                    "prov: 16-bit-padded 24-bit FLAC -> hiresGenuine no + prov pad16");
+
+                // tc: lossy container re-encoded from lossy (Lavc encoder, no LAME tag).
+                var tc = ComputeTruedatVerdict("t1", new TrackEntry
+                {
+                    Features = new TrackFeatures(),
+                    FingerprintV1 = new FingerprintV1 { Codec = "mp3", Bitrate = 256, Encoder = "Lavc58.134" },
+                });
+                Assert(tc.LossyTranscodeLikely == "yes" && tc.Prov.Contains("tc"),
+                    "prov: lossy-from-lossy transcode -> prov contains tc");
+
+                // Suppression-predicate regression: an entry whose ONLY signal is
+                // content-silence (every yes/no axis stays unknown) must STILL emit the
+                // truedat block carrying "content":"silence" — the review's trap.
+                string SerializeEntry(TrackEntry e)
+                {
+                    using var ms = new MemoryStream();
+                    using (var jw = new Utf8JsonWriter(ms))
+                    {
+                        jw.WriteStartObject();
+                        WriteTrackEntry(jw, @"D:\m\q.flac", e);
+                        jw.WriteEndObject();
+                    }
+                    return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                }
+                var silenceOnly = new TrackEntry
+                {
+                    Features = new TrackFeatures { SilenceRate60dB = 0.95, AverageLoudness = 0.02, Loudness = -50 },
+                };
+                var silenceJson = SerializeEntry(silenceOnly);
+                Assert(silenceJson.Contains("\"content\":\"silence\""),
+                    "predicate: content-silence-only entry still emits the truedat block");
+                // ...and a clean music entry emits NO truedat block (existing behavior).
+                var cleanEntry = new TrackEntry
+                {
+                    Features = new TrackFeatures { Danceability = 1.4, SilenceRate60dB = 0.10 },
+                };
+                Assert(!SerializeEntry(cleanEntry).Contains("\"truedat\""),
+                    "predicate: clean music entry emits no truedat block");
+            }
+
             // --- IsTagsOnlyChange acceptance envelope --------------------------------
             {
                 FingerprintV1 Mk() => new FingerprintV1
@@ -14288,11 +14377,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var trace = _audit ? new StringBuilder() : null;
             trace?.AppendLine($"TRUEDAT verdict: {(string.IsNullOrEmpty(trackPath) ? "(unknown)" : trackPath)}");
 
+            // Local prov-code appender: joins with '+', confident codes before any
+            // '?'-suffixed (low-confidence) ones — the dominant-first contract from the
+            // 2026-08-12 review. Tier 0 appends at most one code per axis today (pad16 XOR
+            // tc — disjoint applicability gates, they cannot co-occur), but the joiner is
+            // the ordering contract Tier 1's up44/lossy codes will share.
+            void AppendProv(string code)
+            {
+                if (string.IsNullOrEmpty(code)) return;
+                var codes = v.Prov.Length == 0
+                    ? new List<string>()
+                    : v.Prov.Split('+').ToList();
+                codes.Add(code);
+                var ordered = codes.Where(c => !c.EndsWith("?", StringComparison.Ordinal))
+                                   .Concat(codes.Where(c => c.EndsWith("?", StringComparison.Ordinal)));
+                v.Prov = string.Join("+", ordered);
+            }
+
             // ----- hi-res verdict -----
             // Applicability gate: lossless container + claim of >=24-bit.
             if (fp != null && IsLosslessCodecForHiresCheck(fp.Codec) && fp.BitDepth >= 24)
             {
                 double score = 0, maxWeight = 0;
+                bool lnzVotedFake = false;   // bitUsage said "16-bit padded into 24" — the pad16 signature
 
                 // Signal: bitUsage.lowestNonZeroBit. After ffmpeg's int24->int32 shift,
                 // real 24-bit content lands at ~7-8; 16-bit padded to 24 lands at ~16.
@@ -14302,6 +14409,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int lnz = f.BitUsage.LowestNonZeroBit;
                     int vote = lnz <= 10 ? 1 : lnz >= 14 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.40; maxWeight += 0.40; }
+                    if (vote == -1) lnzVotedFake = true;
                     trace?.AppendLine($"  TRUEDAT hires lowestNonZeroBit={lnz} vote={vote:+#;-#;0} weight=0.40");
                 }
 
@@ -14358,6 +14466,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
                 trace?.AppendLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
+
+                // prov:"pad16" — the bit-usage verdict already knows WHY it voted fake.
+                // Emit the code when the lnz signal fired fake and the verdict agreed
+                // ("no"); if the lnz fired fake but the panel only reached "unknown", emit
+                // the low-confidence "pad16?" so the evidence is still greppable.
+                if (lnzVotedFake)
+                {
+                    if (v.HiresGenuine == "no") AppendProv("pad16");
+                    else if (v.HiresGenuine == "unknown") AppendProv("pad16?");
+                }
             }
 
             // ----- lossy-transcode verdict -----
@@ -14438,6 +14556,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 (v.LossyTranscodeLikely, v.LossyTranscodeConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.30);
                 trace?.AppendLine($"  TRUEDAT transcode SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.LossyTranscodeLikely}");
+
+                // prov:"tc" — lossy re-encoded from lossy, an alias of the transcode
+                // verdict. pad16 and tc cannot co-occur today (pad16 gates on a lossless
+                // >=24-bit container, tc on a lossy codec — disjoint), but AppendProv keeps
+                // the '+'-join contract for when Tier 1's up44/lossy codes join the party.
+                if (v.LossyTranscodeLikely == "yes") AppendProv("tc");
             }
 
             // ----- speechLikely verdict (spec 2026-07-22 B1) -----
@@ -14560,6 +14684,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 trace?.AppendLine($"  TRUEDAT speech SCORE={score:F2} maxWeight={maxWeight:F2} danceability={f.Danceability:F2} -> verdict={v.SpeechLikely}");
             }
 
+            // ----- content axis (2026-08-12 review) -----
+            // A readable content class other than "music". Two members today:
+            //   "speech"  — a byte-cheap alias of speechLikely == "yes" (the verbose axis
+            //               stays untouched for hub compat).
+            //   "silence" — a mostly-silent track. This is NOT a weighted panel: per the
+            //               review, silenceRate60dB is the ONLY honest silence gate (the
+            //               nominal-dB fields are half-off from the units bug), so it is a
+            //               required GATE plus corroborators, not a vote blend.
+            //
+            // Precedence: set the speech alias FIRST, then let silence OVERWRITE it when
+            // the silence gate fires — a mostly-silent track is more usefully classified
+            // "silence" than "speech" (a near-empty file is not talk content in any way a
+            // consumer wants to act on).
+            //
+            // Thresholds are UNTUNED — validate against a labeled sample before any
+            // downstream action keys on them (the review says so explicitly).
+            if (v.SpeechLikely == "yes") v.Content = "speech";
+            // silence GATE (required): silenceRate60dB > 0.85. Measured max over 3716 real
+            // music entries was 0.769, so 0.85 clears the entire music sample.
+            if (f.SilenceRate60dB.HasValue && f.SilenceRate60dB.Value > 0.85)
+            {
+                // Corroborators — count how many independently agree the track is empty.
+                int corrob = 0;
+                if (f.AverageLoudness.HasValue && f.AverageLoudness.Value < 0.10) corrob++;
+                if (f.Loudness < -35) corrob++;                     // core field, always present (EBU-integrated-style dB)
+                if (f.SpectralEnergy.HasValue && f.SpectralEnergy.Value < 1e-6) corrob++;
+                if (corrob >= 2) v.Content = "silence";             // gate + >=2 corroborators -> confident
+                else if (corrob == 1) v.Content = "silence?";       // gate + exactly 1 -> low confidence
+                // gate + 0 corroborators -> abstain (leave whatever speech set, if any)
+                trace?.AppendLine($"  TRUEDAT content silence gate sr60={f.SilenceRate60dB.Value:F3} corroborators={corrob} -> content={(string.IsNullOrEmpty(v.Content) ? "(none)" : v.Content)}");
+            }
+            if (!string.IsNullOrEmpty(v.Prov)) trace?.AppendLine($"  TRUEDAT prov={v.Prov}");
+            if (!string.IsNullOrEmpty(v.Content)) trace?.AppendLine($"  TRUEDAT content={v.Content}");
+
             // One atomic write of the whole per-track block to the log file only. When
             // --audit is set but no tee/log is active (a mode without a log file), the
             // detail is dropped — the console must never get it either way.
@@ -14570,7 +14728,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // 1.9 GB in a day. An "unknown" is not a decision point; a track that
             // matters shows up the moment any axis decides.
             if (trace != null &&
-                (IsDecidedVerdict(v.HiresGenuine) || IsDecidedVerdict(v.LossyTranscodeLikely) || IsDecidedVerdict(v.SpeechLikely)))
+                (IsDecidedVerdict(v.HiresGenuine) || IsDecidedVerdict(v.LossyTranscodeLikely) || IsDecidedVerdict(v.SpeechLikely)
+                 || v.Prov != "" || v.Content != ""))
                 _tee?.FileOnly(trace.ToString().TrimEnd());
 
             return v;
@@ -14825,7 +14984,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             bool hiresDecided = verdict.HiresGenuine == "yes" || verdict.HiresGenuine == "no";
             bool transcodeDecided = verdict.LossyTranscodeLikely == "yes" || verdict.LossyTranscodeLikely == "no";
             bool speechDecided = verdict.SpeechLikely == "yes" || verdict.SpeechLikely == "no";
-            if (hiresDecided || transcodeDecided || speechDecided)
+            // Suppression predicate (2026-08-12 review): also emit when a prov/content
+            // code is present. A content-silence-only track decides no yes/no axis, so
+            // the axes-only predicate would suppress its own flag — the trap the review
+            // called out.
+            if (hiresDecided || transcodeDecided || speechDecided
+                || verdict.Prov != "" || verdict.Content != "")
             {
                 jw.WritePropertyName("truedat");
                 jw.WriteStartObject();
@@ -14839,6 +15003,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (verdict.SpeechConfidence.HasValue)
                     jw.WriteNumber("speechConfidence", verdict.SpeechConfidence.Value);
                 jw.WriteString("speechMethod", verdict.SpeechMethod);
+                if (!string.IsNullOrEmpty(verdict.Prov))
+                    jw.WriteString("prov", verdict.Prov);
+                if (!string.IsNullOrEmpty(verdict.Content))
+                    jw.WriteString("content", verdict.Content);
                 jw.WriteString("method", verdict.Method);
                 jw.WriteEndObject();
             }
