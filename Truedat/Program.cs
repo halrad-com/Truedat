@@ -12763,6 +12763,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     SpectralSkewness = 1.11, SpectralEntropy = 2.22, SpectralComplexity = 3.33,
                     HpcpCrest = 4.44, HpcpEntropy = 5.55, Hfc = 6.66,
                     BeatsLoudness = 7.77, ChordsStrength = 8.88, DynamicRange = 9.99,
+                    AverageLoudness = 0.375, ChordsHistogram = new double[] { 3, 1, 0, 0 },
                     SmfmBpm = 128.0, SmfmScores = new[] { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120 },
                 };
                 // Track a carries a known audioStreamSha256 = 64 hex "ab" -> 32 bytes 0xAB (v3-amend field).
@@ -12809,7 +12810,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                            && Math.Abs(d.DynamicRange[ia] - 9.99f) < 1e-4,
                            "sidecar v3: track a 9 model-input scalars round-trip (r+85..r+117)");
                     Assert(d.JsonOffset.Length == d.TrackCount && d.JsonLength.Length == d.TrackCount,
-                           "sidecar v3: JSON offset/length columns parse at the 166-byte stride");
+                           "sidecar v3: JSON offset/length columns parse at the 178-byte stride");
                     int ib = d.IndexOf("C:/m/b.flac");
                     Assert(ib >= 0 && d.HasHpcp[ib] == 1 && d.HasThpcp[ib] == 0 && float.IsNaN(d.Chroma[ib * 24 + 12]),
                            "sidecar: track b has hpcp, thpcp absent (NaN filler, flag 0)");
@@ -12856,6 +12857,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                            "sidecar v3: track b speechLikely enum matches ComputeTruedatVerdict");
                     Assert(d.SpeechLikely[ic] == ExpectSpeech("C:/m/c.flac", cat["C:/m/c.flac"]),
                            "sidecar v3: track c speechLikely enum matches ComputeTruedatVerdict");
+
+                    // --- v3 amend #2: averageLoudness + chords-density summary (178-byte stride) ---
+                    Assert(Math.Abs(d.AverageLoudness[ia] - 0.375f) < 1e-4,
+                           "sidecar v3: track a averageLoudness round-trips");
+                    // chordsHistogram {3,1,0,0}: sum=4,max=3 -> concentration=0.75; normalized Shannon
+                    // entropy = -(0.75*ln0.75 + 0.25*ln0.25)/ln(4) = 0.4056390622...
+                    Assert(Math.Abs(d.ChordsConcentration[ia] - 0.75f) < 1e-4,
+                           "sidecar v3: track a chordsConcentration = 0.75 (max/sum of {3,1,0,0})");
+                    Assert(Math.Abs(d.ChordsEntropy[ia] - 0.4056390622f) < 1e-4,
+                           "sidecar v3: track a chordsEntropy = 0.40563906 (normalized Shannon /ln(4))");
+                    // Writer == helper: the persisted summary equals a direct ChordsSummary call on the same input.
+                    CatalogSidecar.ChordsSummary(new double[] { 3, 1, 0, 0 }, out float dcC, out float dcE);
+                    Assert(Math.Abs(d.ChordsConcentration[ia] - dcC) < 1e-6 && Math.Abs(d.ChordsEntropy[ia] - dcE) < 1e-6,
+                           "sidecar v3: track a chords summary equals a direct ChordsSummary call (writer==helper)");
+                    // Track c: no averageLoudness, no chordsHistogram -> all three NaN.
+                    Assert(float.IsNaN(d.AverageLoudness[ic]) && float.IsNaN(d.ChordsConcentration[ic]) && float.IsNaN(d.ChordsEntropy[ic]),
+                           "sidecar v3: track c absent averageLoudness + chords summary -> NaN");
+                    // ChordsSummary edge rules (match MoodCacheEntry): null -> both NaN;
+                    // length-1 -> entropy NaN (needs >=2 bins) but concentration valid; all-zero -> both NaN.
+                    CatalogSidecar.ChordsSummary(null, out float nC, out float nE);
+                    Assert(float.IsNaN(nC) && float.IsNaN(nE), "sidecar v3: ChordsSummary(null) -> both NaN");
+                    CatalogSidecar.ChordsSummary(new double[] { 5 }, out float oC, out float oE);
+                    Assert(Math.Abs(oC - 1.0f) < 1e-6 && float.IsNaN(oE),
+                           "sidecar v3: ChordsSummary(length-1) -> concentration=1, entropy NaN (needs >=2 bins)");
+                    CatalogSidecar.ChordsSummary(new double[] { 0, 0, 0, 0 }, out float zC, out float zE);
+                    Assert(float.IsNaN(zC) && float.IsNaN(zE), "sidecar v3: ChordsSummary(all-zero) -> both NaN");
                 }
                 finally { try { File.Delete(scPath); } catch { } }
             }

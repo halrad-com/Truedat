@@ -44,7 +44,7 @@ namespace Truedat
     ///   (u16 byteLen + UTF-8 bytes)[G]       deduped genre strings; Rec.GenreId indexes this,
     ///                                        0xFFFF = no genre.
     ///
-    /// Rec[N]  — fixed 166-byte stride (v2 was 85, first v3 cut was 133), SORTED ASCENDING by PathHash
+    /// Rec[N]  — fixed 178-byte stride (v2 was 85, first v3 cut was 133, sha/speech amend was 166), SORTED ASCENDING by PathHash
     ///           (O(log N) binary-search random access with no parsing):
     ///   i64  PathHash          FNV-1a 64-bit over the UTF-16 chars of the catalog key (the file
     ///                          path, exactly the JSON "tracks" key). See FnvPathHash.
@@ -95,6 +95,14 @@ namespace Truedat
     ///   u8   SpeechLikely      AutoQ's per-pick speech-exclude gate. 0 = absent/none, 1 = yes, 2 = no,
     ///                          3 = unknown, 4 = n/a. Computed at write time from the SAME verdict path
     ///                          the JSON uses (Program.ComputeTruedatVerdict), so it is carry-not-compute.
+    ///   ---- v3 amend #2 (178-byte stride, version STAYS 3 — amended in place, pre-first-consumption) ----
+    ///   f32  AverageLoudness   averageLoudness (loudness continuity term)      (NaN if absent) — carry, no compute.
+    ///   f32  ChordsConcentration  the SUMMARY of chordsHistogram[24] (max/sum), matching MBXHub
+    ///                          MoodCacheEntry.ChordsConcentration byte-for-byte. NaN when the histogram
+    ///                          is absent / empty / all-nonpositive. The pick reads chord-density per candidate.
+    ///   f32  ChordsEntropy     the SUMMARY of chordsHistogram[24] (normalized Shannon /ln(bins)), matching
+    ///                          MBXHub MoodCacheEntry.ChordsEntropy byte-for-byte. NaN when the histogram is
+    ///                          absent / <2 bins / all-nonpositive. We carry the leaner summary, not the raw array.
     ///
     /// Chroma  — f32[N * 24], row i (same sorted order as Rec[i]) = hpcp12[0..11] ++ thpcp12[0..11].
     ///           Missing vectors are written as 12 NaN floats and flagged via HasHpcp/HasThpcp.
@@ -218,6 +226,34 @@ namespace Truedat
             }
         }
 
+        /// <summary>Chord-density summary of the raw 24-bin chordsHistogram. Matches MBXHub
+        /// MoodCacheEntry.ChordsConcentration/ChordsEntropy exactly (zero drift). NaN = absent.</summary>
+        internal static void ChordsSummary(double[] h, out float concentration, out float entropy)
+        {
+            concentration = float.NaN;
+            entropy = float.NaN;
+            if (h == null) return;
+            // Concentration: null if empty or all-nonpositive
+            if (h.Length >= 1)
+            {
+                double sum = 0, max = 0;
+                foreach (var v in h) { if (v <= 0) continue; sum += v; if (v > max) max = v; }
+                if (sum > 0) concentration = (float)(max / sum);
+            }
+            // Entropy: null if fewer than 2 bins or all-nonpositive; normalized Shannon /ln(h.Length)
+            if (h.Length >= 2)
+            {
+                double sum = 0;
+                foreach (var v in h) if (v > 0) sum += v;
+                if (sum > 0)
+                {
+                    double e = 0;
+                    foreach (var v in h) { if (v <= 0) continue; double p = v / sum; e -= p * System.Math.Log(p); }
+                    entropy = (float)(e / System.Math.Log(h.Length));
+                }
+            }
+        }
+
         /// <summary>Build and atomically write the sidecar for the whole catalog. Best-effort:
         /// throws only to its caller's try/catch — a sidecar failure must never fail a JSON save,
         /// because the sidecar is a rebuildable cache and the reader falls back to JSON.</summary>
@@ -275,6 +311,8 @@ namespace Truedat
                     r.BeatsLoudness = FN(f.BeatsLoudness);
                     r.ChordsStrength = FN(f.ChordsStrength);
                     r.DynamicRange = FN(f.DynamicRange);
+                    r.AverageLoudness = FN(f.AverageLoudness);
+                    ChordsSummary(f.ChordsHistogram, out r.ChordsConcentration, out r.ChordsEntropy);
                     FillChroma(chroma, chOff, f.Hpcp12, out bool h);
                     FillChroma(chroma, chOff + 12, f.Thpcp12, out bool th);
                     FillSmfm(smfm, smOff, f.SmfmScores, out bool hs);
@@ -291,6 +329,7 @@ namespace Truedat
                         r.Flatness = r.Dissonance = r.PitchSalience = r.ChordsChanges = r.SmfmBpm = float.NaN;
                     r.SpectralSkewness = r.SpectralEntropy = r.SpectralComplexity = r.HpcpCrest =
                         r.HpcpEntropy = r.Hfc = r.BeatsLoudness = r.ChordsStrength = r.DynamicRange = float.NaN;
+                    r.AverageLoudness = r.ChordsConcentration = r.ChordsEntropy = float.NaN;
                     r.KeyCode = -1; r.KeyAgreement = -1; r.KeyVotesPresent = 0; r.GenreId = NoGenre;
                     FillChroma(chroma, chOff, null, out _);
                     FillChroma(chroma, chOff + 12, null, out _);
@@ -337,6 +376,9 @@ namespace Truedat
                     // v3 amend (r+133..r+165 -> 166 B stride): audioStreamSha256 (32 raw bytes, all-zero
                     // when absent) + speechLikely (u8 enum). Carried for a sidecar-only hub boot.
                     bw.Write(r.Sha ?? ZeroSha); bw.Write(r.SpeechLikely);
+                    // v3 amend #2 (r+166..r+177 -> 178 B stride): averageLoudness + chords-density summary
+                    // (concentration, entropy) — carry-not-compute; chords fields match MoodCacheEntry byte-for-byte.
+                    bw.Write(r.AverageLoudness); bw.Write(r.ChordsConcentration); bw.Write(r.ChordsEntropy);
                 }
                 foreach (var o in order)
                 {
@@ -431,6 +473,8 @@ namespace Truedat
             // (0 none, 1 yes, 2 no, 3 unknown, 4 n/a) from Program.ComputeTruedatVerdict.
             public byte[] Sha;
             public byte SpeechLikely;
+            // v3 amend #2 (178-byte stride): averageLoudness + chords-density summary (both NaN = absent).
+            public float AverageLoudness, ChordsConcentration, ChordsEntropy;
         }
 
         /// <summary>Parsed sidecar, in stored (PathHash-sorted) order. Reference reader for the
@@ -471,6 +515,9 @@ namespace Truedat
             public int[] JsonLength = Array.Empty<int>();
             public byte[][] Sha = Array.Empty<byte[]>();       // per-row 32 raw bytes; all-zero when absent
             public byte[] SpeechLikely = Array.Empty<byte>();  // per-row u8 enum (0 none/1 yes/2 no/3 unknown/4 n-a)
+            public float[] AverageLoudness = Array.Empty<float>();      // v3 amend #2; NaN = absent
+            public float[] ChordsConcentration = Array.Empty<float>();  // v3 amend #2; NaN = absent (matches MoodCacheEntry)
+            public float[] ChordsEntropy = Array.Empty<float>();        // v3 amend #2; NaN = absent (matches MoodCacheEntry)
             public string[] Genre = Array.Empty<string>();   // resolved per-row (null when absent)
             public byte[] HasHpcp = Array.Empty<byte>();
             public byte[] HasThpcp = Array.Empty<byte>();
@@ -526,6 +573,7 @@ namespace Truedat
                 d.BeatsLoudness = new float[n]; d.ChordsStrength = new float[n]; d.DynamicRange = new float[n];
                 d.JsonOffset = new long[n]; d.JsonLength = new int[n];
                 d.Sha = new byte[n][]; d.SpeechLikely = new byte[n];
+                d.AverageLoudness = new float[n]; d.ChordsConcentration = new float[n]; d.ChordsEntropy = new float[n];
                 d.Genre = new string[n]; d.HasHpcp = new byte[n]; d.HasThpcp = new byte[n]; d.HasSmfm = new byte[n];
                 for (int i = 0; i < n; i++)
                 {
@@ -544,6 +592,7 @@ namespace Truedat
                     d.BeatsLoudness[i] = br.ReadSingle(); d.ChordsStrength[i] = br.ReadSingle(); d.DynamicRange[i] = br.ReadSingle();
                     d.JsonOffset[i] = br.ReadInt64(); d.JsonLength[i] = br.ReadInt32();
                     d.Sha[i] = br.ReadBytes(32); d.SpeechLikely[i] = br.ReadByte();
+                    d.AverageLoudness[i] = br.ReadSingle(); d.ChordsConcentration[i] = br.ReadSingle(); d.ChordsEntropy[i] = br.ReadSingle();
                 }
                 d.Chroma = new float[n * ChromaFloats];
                 for (int i = 0; i < d.Chroma.Length; i++) d.Chroma[i] = br.ReadSingle();
