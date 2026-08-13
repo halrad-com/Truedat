@@ -16,7 +16,7 @@
       "zeroCrossingRate", "silenceRate30dB", "chordsStrength", "hpcpEntropy",
       "bitUsage", "hfEnergyRatio", "hfSpectralStructure", "dynamicRange", "averageLoudness", "mfcc",
       "fingerprint", "loudnessMomentary", "spectralContrastCoeffs",
-      "artist", "title", "album", "genre", "durationMs", "trackId", "lastModified"
+      "artist", "title", "album", "genre", "durationMs", "lastModified"
     ],
     "_added_by_sanity_check_2026_08_10": {
       "fingerprint": "fingerprint.v1 — hi-res + lossy-transcode verdicts read codec/bitDepth/bitrate/encoder/mp3LameTag (ComputeTruedatVerdict); also identity / dedupe / verify.",
@@ -26,7 +26,8 @@
   },
   "excluded": {
     "fields": {
-      "bpmHistogram": { "availability": "suppressed", "reason": "217MB / ~29% of the catalog, ~94% zeros, no consumer (write-only; bpm peaks are separate extractor fields). GATE: writer/.mbxs/--fixup cut awaits operator greenlight." },
+      "bpmHistogram": { "availability": "suppressed", "reason": "~29% of the catalog, ~94% zeros, no consumer (write-only; bpm peaks are separate extractor fields). GATE: writer/.mbxs/--fixup ." },
+      "trackId": { "availability": "suppressed", "reason": "iTunes-XML-local numbering; consumed by nothing (hub MoodCache skips it; truedat only round-trips it), churns on every XML re-export, and is meaningless across merged libraries -- at best a trace to the origin file, which merging loses. Suppressed on write, stripped by --fixup." },
       "melbands": { "availability": "dropped-at-parse" },
       "erbbands": { "availability": "dropped-at-parse" },
       "barkbands": { "availability": "dropped-at-parse" },
@@ -36,7 +37,7 @@
     }
   },
   "summarize": {
-    "_note": "chordsHistogram is KEEP-RAW (extended), NOT summarized — bliss-style harmonic similarity (cross-track cosine) needs the raw [24] array. Summarize-in-place (chordsEntropy/chordsConcentration/major-minor mass) is a documented fallback only, if storage pressure ever appears.",
+    "_note": "chordsHistogram is KEEP-RAW (extended), NOT summarized — harmonic similarity (cross-track cosine) needs the raw [24] array. Summarize-in-place (chordsEntropy/chordsConcentration/major-minor mass) is a documented fallback only, if storage pressure ever appears.",
     "fields": {}
   }
 }

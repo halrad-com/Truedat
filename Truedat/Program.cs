@@ -12595,6 +12595,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 FieldPolicy.OverrideForTest(new string[0]);
                 Assert(Serialize().Contains("bpmHistogram"), "fieldpolicy: writer EMITS the field when NOT excluded (gate is real)");
+                Assert(Serialize().Contains("\"trackId\""), "fieldpolicy: writer EMITS trackId when NOT excluded");
+                FieldPolicy.OverrideForTest(new[] { "trackId" });
+                Assert(!Serialize().Contains("\"trackId\""), "fieldpolicy: writer OMITS trackId when excluded (the prune)");
 
                 // The --fixup strip path (JsonObject.Remove over the excluded set).
                 FieldPolicy.OverrideForTest(new[] { "bpmHistogram" });
@@ -14153,7 +14156,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var f = entry.Features;
             jw.WritePropertyName(path);
             jw.WriteStartObject();
-            jw.WriteNumber("trackId", f.TrackId);
+            if (!FieldPolicy.IsExcluded("trackId")) jw.WriteNumber("trackId", f.TrackId);
             jw.WriteString("artist", f.Artist);
             jw.WriteString("title", f.Title);
             jw.WriteString("album", f.Album);
