@@ -12669,9 +12669,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     BeatsLoudness = 7.77, ChordsStrength = 8.88, DynamicRange = 9.99,
                     SmfmBpm = 128.0, SmfmScores = new[] { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120 },
                 };
+                // Track a carries a known audioStreamSha256 = 64 hex "ab" -> 32 bytes 0xAB (v3-amend field).
+                var shaAb = "";
+                for (int i = 0; i < 32; i++) shaAb += "ab";
                 var cat = new Dictionary<string, TrackEntry>
                 {
-                    ["C:/m/a.flac"] = new TrackEntry { Features = fa },
+                    ["C:/m/a.flac"] = new TrackEntry { Features = fa, AudioStreamSha256 = shaAb },
                     ["C:/m/b.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 90, Key = "A", Mode = "minor", Hpcp12 = hp1, KeyVoteEdma = Kv("A", "minor"), Genre = "Techno" } },
                     ["C:/m/c.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 0, Key = "", Mode = "" } },
                 };
@@ -12710,7 +12713,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                            && Math.Abs(d.DynamicRange[ia] - 9.99f) < 1e-4,
                            "sidecar v3: track a 9 model-input scalars round-trip (r+85..r+117)");
                     Assert(d.JsonOffset.Length == d.TrackCount && d.JsonLength.Length == d.TrackCount,
-                           "sidecar v3: JSON offset/length columns parse at the 133-byte stride");
+                           "sidecar v3: JSON offset/length columns parse at the 166-byte stride");
                     int ib = d.IndexOf("C:/m/b.flac");
                     Assert(ib >= 0 && d.HasHpcp[ib] == 1 && d.HasThpcp[ib] == 0 && float.IsNaN(d.Chroma[ib * 24 + 12]),
                            "sidecar: track b has hpcp, thpcp absent (NaN filler, flag 0)");
@@ -12727,6 +12730,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(float.IsNaN(d.SpectralSkewness[ic]) && float.IsNaN(d.Hfc[ic]) && float.IsNaN(d.DynamicRange[ic]),
                            "sidecar v3: track c absent model-inputs -> NaN");
                     Assert(d.IndexOf("C:/m/nope.flac") == -1, "sidecar: unknown path -> -1");
+
+                    // --- v3 amend: audioStreamSha256 (32 raw bytes) + speechLikely (u8) ---
+                    bool shaA = d.Sha[ia] != null && d.Sha[ia].Length == 32;
+                    for (int i = 0; shaA && i < 32; i++) if (d.Sha[ia][i] != 0xAB) shaA = false;
+                    Assert(shaA, "sidecar v3: track a audioStreamSha256 = 32 bytes 0xAB (64-hex decode round-trips)");
+                    bool shaBZero = d.Sha[ib] != null && d.Sha[ib].Length == 32;
+                    for (int i = 0; shaBZero && i < 32; i++) if (d.Sha[ib][i] != 0) shaBZero = false;
+                    Assert(shaBZero, "sidecar v3: track b has no sha -> 32 zero bytes");
+                    bool shaCZero = d.Sha[ic] != null && d.Sha[ic].Length == 32;
+                    for (int i = 0; shaCZero && i < 32; i++) if (d.Sha[ic][i] != 0) shaCZero = false;
+                    Assert(shaCZero, "sidecar v3: track c has no sha -> 32 zero bytes");
+
+                    // speechLikely must match the same write-time verdict path, mapped 1:1 to the enum.
+                    byte ExpectSpeech(string p, TrackEntry e)
+                    {
+                        switch (ComputeTruedatVerdict(p, e).SpeechLikely)
+                        {
+                            case "yes": return 1;
+                            case "no": return 2;
+                            case "unknown": return 3;
+                            case "n/a": return 4;
+                            default: return 0;
+                        }
+                    }
+                    Assert(d.SpeechLikely[ia] == ExpectSpeech("C:/m/a.flac", cat["C:/m/a.flac"]),
+                           "sidecar v3: track a speechLikely enum matches ComputeTruedatVerdict");
+                    Assert(d.SpeechLikely[ib] == ExpectSpeech("C:/m/b.flac", cat["C:/m/b.flac"]),
+                           "sidecar v3: track b speechLikely enum matches ComputeTruedatVerdict");
+                    Assert(d.SpeechLikely[ic] == ExpectSpeech("C:/m/c.flac", cat["C:/m/c.flac"]),
+                           "sidecar v3: track c speechLikely enum matches ComputeTruedatVerdict");
                 }
                 finally { try { File.Delete(scPath); } catch { } }
             }
@@ -13847,7 +13880,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Compute the per-track verdict. Pure function: depends only on
         /// the entry's already-extracted features. Runs inline in WriteTrackEntry
         /// on every save so threshold changes ship without a rescan.</summary>
-        static TruedatVerdict ComputeTruedatVerdict(string trackPath, TrackEntry entry)
+        internal static TruedatVerdict ComputeTruedatVerdict(string trackPath, TrackEntry entry)
         {
             var v = new TruedatVerdict();
             var f = entry.Features;

@@ -44,8 +44,8 @@ namespace Truedat
     ///   (u16 byteLen + UTF-8 bytes)[G]       deduped genre strings; Rec.GenreId indexes this,
     ///                                        0xFFFF = no genre.
     ///
-    /// Rec[N]  — fixed 133-byte stride (v2 was 85), SORTED ASCENDING by PathHash (O(log N) binary-search
-    ///           random access with no parsing):
+    /// Rec[N]  — fixed 166-byte stride (v2 was 85, first v3 cut was 133), SORTED ASCENDING by PathHash
+    ///           (O(log N) binary-search random access with no parsing):
     ///   i64  PathHash          FNV-1a 64-bit over the UTF-16 chars of the catalog key (the file
     ///                          path, exactly the JSON "tracks" key). See FnvPathHash.
     ///   f32  RawBpm            rhythm.bpm                       (NaN if absent)
@@ -87,6 +87,14 @@ namespace Truedat
     ///   i64  JsonOffset        byte offset of this row's JSON object in the co-written mbxmoods.json.
     ///   i32  JsonLength        byte length of that object — the lazy cold-read seek table; 0 until
     ///                          populated by the writer (offsets valid only against the plain live JSON).
+    ///   ---- v3 amend (166-byte stride, version STAYS 3 — amended in place, pre-first-consumption) ----
+    ///   u8[32] Sha             audioStreamSha256 as 32 RAW bytes (the SHA-256 decoded from the 64-hex
+    ///                          JSON string). ALL-ZERO (32 zero bytes) when absent (null / not 64 hex).
+    ///                          MBXHub builds its boot hash index (cross-box / moved-file resolution +
+    ///                          tuned V/A) on this — a sidecar-only boot without it comes up empty.
+    ///   u8   SpeechLikely      AutoQ's per-pick speech-exclude gate. 0 = absent/none, 1 = yes, 2 = no,
+    ///                          3 = unknown, 4 = n/a. Computed at write time from the SAME verdict path
+    ///                          the JSON uses (Program.ComputeTruedatVerdict), so it is carry-not-compute.
     ///
     /// Chroma  — f32[N * 24], row i (same sorted order as Rec[i]) = hpcp12[0..11] ++ thpcp12[0..11].
     ///           Missing vectors are written as 12 NaN floats and flagged via HasHpcp/HasThpcp.
@@ -169,6 +177,47 @@ namespace Truedat
         private static float F(double v) => (float)v;
         private static float FN(double? v) => v.HasValue ? (float)v.Value : float.NaN;
 
+        // 32 all-zero bytes = the "sha absent" sentinel written for a null / non-64-hex audioStreamSha256.
+        private static readonly byte[] ZeroSha = new byte[32];
+
+        /// <summary>Decode a 64-hex audioStreamSha256 to 32 raw bytes. Returns null (→ 32 zero bytes on
+        /// write) when the string is null, not exactly 64 chars, or contains a non-hex character.</summary>
+        private static byte[] DecodeShaHex(string hex)
+        {
+            if (hex == null || hex.Length != 64) return null;
+            var b = new byte[32];
+            for (int i = 0; i < 32; i++)
+            {
+                int hi = HexVal(hex[i * 2]);
+                int lo = HexVal(hex[i * 2 + 1]);
+                if (hi < 0 || lo < 0) return null;
+                b[i] = (byte)((hi << 4) | lo);
+            }
+            return b;
+        }
+
+        private static int HexVal(char c)
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        }
+
+        /// <summary>Map ComputeTruedatVerdict's SpeechLikely string to the u8 enum. 0 = absent/none,
+        /// 1 = yes, 2 = no, 3 = unknown, 4 = n/a (an unrecognised string also folds to 0).</summary>
+        private static byte SpeechEnum(string s)
+        {
+            switch (s)
+            {
+                case "yes": return 1;
+                case "no": return 2;
+                case "unknown": return 3;
+                case "n/a": return 4;
+                default: return 0;   // null / empty / unrecognised
+            }
+        }
+
         /// <summary>Build and atomically write the sidecar for the whole catalog. Best-effort:
         /// throws only to its caller's try/catch — a sidecar failure must never fail a JSON save,
         /// because the sidecar is a rebuildable cache and the reader falls back to JSON.</summary>
@@ -192,6 +241,9 @@ namespace Truedat
                 var r = new Rec { PathHash = FnvPathHash(kv.Key) };
                 int chOff = idx * ChromaFloats;
                 int smOff = idx * SmfmSlots;
+                // v3-amend hot fields. Sha lives on TrackEntry (not Features), so decode it regardless of
+                // whether features exist; null (absent / non-64-hex) is written as 32 zero bytes.
+                r.Sha = DecodeShaHex(kv.Value?.AudioStreamSha256);
                 if (f != null)
                 {
                     r.RawBpm = F(f.Bpm);
@@ -229,6 +281,8 @@ namespace Truedat
                     r.HasHpcp = (byte)(h ? 1 : 0);
                     r.HasThpcp = (byte)(th ? 1 : 0);
                     r.HasSmfm = (byte)(hs ? 1 : 0);
+                    // Same write-time verdict path the JSON uses, so carry-not-compute (no rescan).
+                    r.SpeechLikely = SpeechEnum(Program.ComputeTruedatVerdict(kv.Key, kv.Value).SpeechLikely);
                 }
                 else
                 {
@@ -280,6 +334,9 @@ namespace Truedat
                     bw.Write(r.HpcpCrest); bw.Write(r.HpcpEntropy); bw.Write(r.Hfc);
                     bw.Write(r.BeatsLoudness); bw.Write(r.ChordsStrength); bw.Write(r.DynamicRange);
                     bw.Write(r.JsonOffset); bw.Write(r.JsonLength);
+                    // v3 amend (r+133..r+165 -> 166 B stride): audioStreamSha256 (32 raw bytes, all-zero
+                    // when absent) + speechLikely (u8 enum). Carried for a sidecar-only hub boot.
+                    bw.Write(r.Sha ?? ZeroSha); bw.Write(r.SpeechLikely);
                 }
                 foreach (var o in order)
                 {
@@ -369,6 +426,11 @@ namespace Truedat
             // v3 per-row JSON object span into the co-written mbxmoods.json (the lazy-read seek table); 0 until populated.
             public long JsonOffset;
             public int JsonLength;
+            // v3 amend (hot non-model fields carried for a sidecar-only boot):
+            // Sha = audioStreamSha256 as 32 raw bytes, null meaning all-zero (absent). SpeechLikely = u8 enum
+            // (0 none, 1 yes, 2 no, 3 unknown, 4 n/a) from Program.ComputeTruedatVerdict.
+            public byte[] Sha;
+            public byte SpeechLikely;
         }
 
         /// <summary>Parsed sidecar, in stored (PathHash-sorted) order. Reference reader for the
@@ -407,6 +469,8 @@ namespace Truedat
             public float[] DynamicRange = Array.Empty<float>();
             public long[] JsonOffset = Array.Empty<long>();
             public int[] JsonLength = Array.Empty<int>();
+            public byte[][] Sha = Array.Empty<byte[]>();       // per-row 32 raw bytes; all-zero when absent
+            public byte[] SpeechLikely = Array.Empty<byte>();  // per-row u8 enum (0 none/1 yes/2 no/3 unknown/4 n-a)
             public string[] Genre = Array.Empty<string>();   // resolved per-row (null when absent)
             public byte[] HasHpcp = Array.Empty<byte>();
             public byte[] HasThpcp = Array.Empty<byte>();
@@ -461,6 +525,7 @@ namespace Truedat
                 d.HpcpCrest = new float[n]; d.HpcpEntropy = new float[n]; d.Hfc = new float[n];
                 d.BeatsLoudness = new float[n]; d.ChordsStrength = new float[n]; d.DynamicRange = new float[n];
                 d.JsonOffset = new long[n]; d.JsonLength = new int[n];
+                d.Sha = new byte[n][]; d.SpeechLikely = new byte[n];
                 d.Genre = new string[n]; d.HasHpcp = new byte[n]; d.HasThpcp = new byte[n]; d.HasSmfm = new byte[n];
                 for (int i = 0; i < n; i++)
                 {
@@ -478,6 +543,7 @@ namespace Truedat
                     d.HpcpCrest[i] = br.ReadSingle(); d.HpcpEntropy[i] = br.ReadSingle(); d.Hfc[i] = br.ReadSingle();
                     d.BeatsLoudness[i] = br.ReadSingle(); d.ChordsStrength[i] = br.ReadSingle(); d.DynamicRange[i] = br.ReadSingle();
                     d.JsonOffset[i] = br.ReadInt64(); d.JsonLength[i] = br.ReadInt32();
+                    d.Sha[i] = br.ReadBytes(32); d.SpeechLikely[i] = br.ReadByte();
                 }
                 d.Chroma = new float[n * ChromaFloats];
                 for (int i = 0; i < d.Chroma.Length; i++) d.Chroma[i] = br.ReadSingle();
