@@ -3,6 +3,19 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Fixed
+
+- **Catalog doubles now serialize in shortest text form.** net48's `Utf8JsonWriter` lacks the
+  shortest-round-trip double formatter (.NET Core 3+ only), so a dp-rounded value landed in
+  the catalog as its G17 expansion — `0.10100000000000001` for a stored `0.101`. Provably
+  lossless: a number's text is only shortened when parsing it back yields the bit-identical
+  double; everything else (full-precision, huge, tiny, non-finite) keeps today's bytes.
+  Applies to new saves and — via the same predicate in the number branch of the token copier —
+  to `--compact`/`--prettify` re-formatting of existing catalogs, no rescan needed.
+  ~10–15% smaller catalog text.
+
 ## [0.5.4.8-RC1] — 2026-08-13
 
 ### Added

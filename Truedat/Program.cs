@@ -7163,7 +7163,7 @@ namespace Truedat
                     using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
                     {
                         using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = pretty }))
-                            doc.RootElement.WriteTo(jw);
+                            WriteElementNormalized(jw, doc.RootElement);
                         fs.Flush(flushToDisk: true);
                     }
                     Program.AtomicReplace(tmp, target);
@@ -7184,6 +7184,50 @@ namespace Truedat
                 Console.WriteLine($"Source:  {catalogPath} ({beforeBytes / (1024.0 * 1024.0):F1} MB)");
                 Console.WriteLine($"Output:  {target} ({afterBytes / (1024.0 * 1024.0):F1} MB){(inPlace ? " [in place]" : "")}");
                 return 0;
+            }
+        }
+
+        /// <summary>Recursive copy of a JsonElement that normalizes ONLY the Number token:
+        /// integers (fits in long) are written verbatim, and a double is rewritten in its
+        /// shortest decimal form solely when parse-back is the bit-identical double
+        /// (TryShortestDecimal) — so --compact/--prettify strip the net48 G17 artifact
+        /// ("0.10100000000000001" for a stored "0.101") from EXISTING catalogs without a
+        /// rescan, while staying a pure formatter. Every other number — full-precision
+        /// doubles (keep their G17 text), integers beyond long, anything the predicate
+        /// rejects — falls through to JsonElement.WriteTo, which preserves the raw source
+        /// text exactly, so nothing is ever truncated. All non-number tokens keep the
+        /// pre-existing WriteTo behavior unchanged.</summary>
+        static void WriteElementNormalized(Utf8JsonWriter jw, JsonElement el)
+        {
+            switch (el.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    jw.WriteStartObject();
+                    foreach (var prop in el.EnumerateObject())
+                    {
+                        jw.WritePropertyName(prop.Name);
+                        WriteElementNormalized(jw, prop.Value);
+                    }
+                    jw.WriteEndObject();
+                    break;
+                case JsonValueKind.Array:
+                    jw.WriteStartArray();
+                    foreach (var item in el.EnumerateArray())
+                        WriteElementNormalized(jw, item);
+                    jw.WriteEndArray();
+                    break;
+                case JsonValueKind.Number:
+                    // The l == 0 sign check keeps a raw "-0" token verbatim (rewriting it
+                    // as "0" would flip the sign bit for a reader that parses doubles).
+                    if (el.TryGetInt64(out long l) && !(l == 0 && el.GetRawText()[0] == '-'))
+                    { jw.WriteNumberValue(l); break; }
+                    if (el.TryGetDouble(out double d) && TryShortestDecimal(d, out var m))
+                    { jw.WriteNumberValue(m); break; }
+                    el.WriteTo(jw);   // raw number text preserved byte-for-byte
+                    break;
+                default:
+                    el.WriteTo(jw);   // strings / true / false / null — unchanged path
+                    break;
             }
         }
 
@@ -10123,6 +10167,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Both zeros must take the plain double writer (bytes unchanged from today).
                 Assert(NfValue(-0.0) == NfBaseline(-0.0) && NfValue(0.0) == NfBaseline(0.0),
                     "number-format: both zeros take the fallback writer (sign bit never laundered)");
+
+                // (d) --compact normalizes number text in an EXISTING catalog, losslessly.
+                var nfDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-numfmt-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(nfDir);
+                try
+                {
+                    var nfCat = Path.Combine(nfDir, "mbxmoods.json");
+                    File.WriteAllText(nfCat, "{\"a\":0.10100000000000001,\"b\":42,\"c\":0.33333333333333331}");
+                    Assert(RunReformat(nfCat, false, null) == 0,
+                        "number-format: --compact over the number fixture returns 0");
+                    var nfText = File.ReadAllText(nfCat);
+                    Assert(nfText.Contains("\"a\":0.101,"),
+                        "number-format: reformat normalizes 0.10100000000000001 to 0.101");
+                    Assert(nfText.Contains("\"b\":42,"),
+                        "number-format: reformat leaves the int unchanged");
+                    using (var nfDoc = JsonDocument.Parse(nfText))
+                        Assert(NfBitIdentical(nfDoc.RootElement.GetProperty("c").GetDouble(), nfThird),
+                            "number-format: full-precision number parses bit-identical after reformat");
+                }
+                finally { try { Directory.Delete(nfDir, true); } catch { } }
             }
 
             // --- Sidecar regeneration after a maintenance-mode catalog rewrite ---
