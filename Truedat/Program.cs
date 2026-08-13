@@ -255,7 +255,7 @@ namespace Truedat
         public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
-        public string SpeechMethod = "truedat-speech-v1.2-untuned-2026-07-22";  // rev-1.2: danceability music veto tightened to < 0.50 (spares instrumental music); still untuned — calibrate against a labeled talk corpus before tightening further
+        public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";  // rev-1.3: silence vote replaced its silenceRate30dB gate (essentia units bug: effective −15 dBFS, fired on ~the whole catalog) with silenceRate60dB thresholds derived from the live-catalog distribution; still untuned — calibrate against a labeled talk corpus before tightening further
     }
 
     class TrackEntry
@@ -6922,7 +6922,7 @@ namespace Truedat
             {
                 Danceability       = SafeDbl(track, "danceability") ?? 0,
                 ChordsStrength     = SafeDbl(track, "chordsStrength"),
-                SilenceRate30dB    = SafeDbl(track, "silenceRate30dB"),
+                SilenceRate60dB    = SafeDbl(track, "silenceRate60dB"),
                 ZeroCrossingRate   = SafeDbl(track, "zeroCrossingRate") ?? 0,
                 BpmFirstPeakWeight = SafeDbl(track, "bpmFirstPeakWeight"),
             };
@@ -12368,17 +12368,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- speechLikely verdict (spec 2026-07-22 B1) ---
             {
+                // `silence` feeds silenceRate60dB now (rev-1.3): talk gate > 0.30,
+                // music gate < 0.06. Genuine-speech fixtures carry 0.45 (above the talk
+                // gate); the dense-music "no" fixture carries 0.03 (below the music gate);
+                // false-positive fixtures carry music-median 0.10 (abstain).
                 TrackEntry Mk(double dance, double? chords, double? silence, double zcr) => new TrackEntry
                 {
                     Features = new TrackFeatures
                     {
                         Danceability = dance, ChordsStrength = chords,
-                        SilenceRate30dB = silence, ZeroCrossingRate = zcr,
+                        SilenceRate60dB = silence, ZeroCrossingRate = zcr,
                     },
                 };
-                var talk = ComputeTruedatVerdict("t", Mk(0.4, 0.40, 0.35, 0.12));
+                // chords sits NEUTRAL (0.50, in the abstain band) so the silence vote is
+                // load-bearing here — dance + zcr alone (0.45/0.90) fall short of 0.70;
+                // only the silence talk-vote (+0.20) carries it over. That makes this
+                // assertion the guard for the rev-1.3 talk gate (invert `sr > 0.30` and it
+                // drops to "unknown").
+                var talk = ComputeTruedatVerdict("t", Mk(0.4, 0.50, 0.45, 0.12));
                 Assert(talk.SpeechLikely == "yes", "speech: talk-shaped features -> yes");
-                var music = ComputeTruedatVerdict("m", Mk(1.4, 0.58, 0.01, 0.05));
+                var music = ComputeTruedatVerdict("m", Mk(1.4, 0.58, 0.03, 0.05));
                 Assert(music.SpeechLikely == "no", "speech: music-shaped features -> no");
                 var sparse = ComputeTruedatVerdict("s", new TrackEntry { Features = new TrackFeatures() });
                 Assert(sparse.SpeechLikely == "n/a" || sparse.SpeechLikely == "unknown", "speech: sparse features -> n/a or unknown");
@@ -12386,7 +12395,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // danceability/chords/silence but sits LOW on zcr — must NOT reach
                 // "yes" (a verdict AutoQ and the exclusion workflow both treat as
                 // confident talk).
-                var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.35, 0.05));
+                var tone = ComputeTruedatVerdict("z", Mk(0.4, 0.40, 0.45, 0.05));
                 Assert(tone.SpeechLikely == "unknown", "speech: tone-shaped features (low zcr) -> unknown, not yes");
                 // Rev-1.2 music veto: sparse/live INSTRUMENTAL music matches talk on
                 // chords/silence/zcr but is unmistakably musical on danceability.
@@ -12397,9 +12406,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Southern Culture "For Lovers Only (Reprise)" (0.698).
                 // All must demote to "unknown", not "yes".
                 //
-                // The panel below reproduces the REAL incident shape (Hot House measured
-                // chords 0.447, silence 0.997, zcr 0.129, bpmFirstPeakWeight 0, edma
-                // strength ~0.49 -> score 0.95 / maxWeight 1.25 = 0.76 -> "yes"). The
+                // The panel below reproduces the REAL incident shape (Hot House: chords
+                // 0.447, zcr 0.129, bpmFirstPeakWeight 0, edma strength ~0.49). silence now
+                // carries the honest silenceRate60dB (0.10 here — music median, so it
+                // ABSTAINS instead of voting talk the way the old buggy 30dB reading did);
+                // the remaining signals still clear 0.7 at danceability 0 (score 1.05 /
+                // maxWeight 1.25 = 0.84 -> "yes"), so the veto is genuinely consulted. The
                 // earlier 4-signal panel scored only 0.60/0.90 = 0.667, which returns
                 // "unknown" BEFORE the veto is ever consulted — so for the >=0.7 cases it
                 // asserted nothing and would have passed with the veto deleted
@@ -12410,7 +12422,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Features = new TrackFeatures
                     {
                         Danceability = dance, ChordsStrength = 0.44,
-                        SilenceRate30dB = 0.99, ZeroCrossingRate = 0.13,
+                        SilenceRate60dB = 0.10, ZeroCrossingRate = 0.13,
                         BpmFirstPeakWeight = 0.0,
                         KeyVoteEdma = new KeyVote { Key = "A", Scale = "minor", Strength = 0.49 },
                     },
@@ -12428,7 +12440,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "speech: same panel at danceability 0 DOES reach yes (proves the veto is load-bearing)");
                 // ...and genuine speech on the plain 4-signal panel still reaches "yes",
                 // otherwise the gate has neutered the signal entirely.
-                var spoken = ComputeTruedatVerdict("p", Mk(0.0, 0.43, 1.0, 0.27));
+                var spoken = ComputeTruedatVerdict("p", Mk(0.0, 0.43, 0.45, 0.27));
                 Assert(spoken.SpeechLikely == "yes", "speech: genuine spoken word (danceability 0) still -> yes");
 
                 // --- Recompute-path drift guard -------------------------------------
@@ -12440,13 +12452,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // TrackEntry path, and RecomputeSpeechLikely is the JSON-facing twin any
                 // future JSON-only caller would reach for; the two must never disagree.
                 {
-                    var spokenJson = JsonNode.Parse("{\"danceability\":0.0,\"chordsStrength\":0.43,\"silenceRate30dB\":1.0,\"zeroCrossingRate\":0.27}");
+                    var spokenJson = JsonNode.Parse("{\"danceability\":0.0,\"chordsStrength\":0.43,\"silenceRate60dB\":0.45,\"zeroCrossingRate\":0.27}");
                     Assert(RecomputeSpeechLikely(spokenJson) == spoken.SpeechLikely,
                         "list-speech recompute matches the TrackEntry path");
                     // A stale persisted "yes" must not leak through: the recompute is
                     // honest about the CURRENT features/thresholds, not whatever verdict
                     // an earlier build happened to write to truedat.speechLikely.
-                    var staleJson = JsonNode.Parse("{\"danceability\":1.09,\"chordsStrength\":0.44,\"silenceRate30dB\":0.99,\"zeroCrossingRate\":0.13,\"bpmFirstPeakWeight\":0.0,\"keyVotes\":{\"edma\":{\"key\":\"A\",\"scale\":\"minor\",\"strength\":0.49}},\"truedat\":{\"speechLikely\":\"yes\"}}");
+                    var staleJson = JsonNode.Parse("{\"danceability\":1.09,\"chordsStrength\":0.44,\"silenceRate60dB\":0.10,\"zeroCrossingRate\":0.13,\"bpmFirstPeakWeight\":0.0,\"keyVotes\":{\"edma\":{\"key\":\"A\",\"scale\":\"minor\",\"strength\":0.49}},\"truedat\":{\"speechLikely\":\"yes\"}}");
                     Assert(RecomputeSpeechLikely(staleJson) != "yes",
                         "speech recompute ignores a stale stored 'yes' and trusts current features");
                 }
@@ -14464,14 +14476,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (vote != 0) score += vote * 0.25;
                     trace?.AppendLine($"  TRUEDAT speech chordsStrength={cs:F3} vote={vote:+#;-#;0} weight=0.25");
                 }
-                // Silence rate: conversational pauses push it up.
-                if (f.SilenceRate30dB.HasValue)
+                // Silence rate: conversational pauses push it up. Reads silenceRate60dB,
+                // NOT silenceRate30dB. Essentia's silencerate.cpp compares an AMPLITUDE
+                // threshold (db2lin(threshold_dB/2)) against instantPower, which is a
+                // mean-of-SQUARES — off by a square, so every nominal gate lands a factor
+                // of 2 (in dB) too high: nominal −30 dB actually gates RMS < −15 dBFS.
+                // Ordinary music trips that constantly (Charlie Parker fixture reads
+                // silenceRate30dB=0.997), so the old `> 0.25` gate voted "talk" on ~the
+                // whole catalog. silenceRate60dB (effective −30 dBFS) is the only usable
+                // one. Thresholds come from the measured live-catalog distribution of
+                // silenceRate60dB over n=3716 ordinary-music entries (2026-08-13: median
+                // 0.101, p75 0.179, p90 0.299, p99 0.571, max 0.769): vote "talk" when
+                // sr > 0.30 (only music's top decile co-fires); vote "music" when
+                // sr < 0.06 (~music p25 — dense/loud content, whose pauses essentially
+                // never trip more frames than this while speech's always do).
+                if (f.SilenceRate60dB.HasValue)
                 {
-                    double sr = f.SilenceRate30dB.Value;
-                    int vote = sr > 0.25 ? 1 : sr < 0.05 ? -1 : 0;
+                    double sr = f.SilenceRate60dB.Value;
+                    int vote = sr > 0.30 ? 1 : sr < 0.06 ? -1 : 0;
                     maxWeight += 0.20;
                     if (vote != 0) score += vote * 0.20;
-                    trace?.AppendLine($"  TRUEDAT speech silenceRate30dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
+                    trace?.AppendLine($"  TRUEDAT speech silenceRate60dB={sr:F3} vote={vote:+#;-#;0} weight=0.20");
                 }
                 // Zero-crossing rate: speech sits higher than most music.
                 // Core field, always present — no presence gate (0 is a legitimate value).
