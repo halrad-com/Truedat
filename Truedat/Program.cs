@@ -6006,7 +6006,7 @@ namespace Truedat
             {
                 var bakPath = BackupCatalogCompressed(moodsPath);
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
-                root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; root["generatedAt"] = DateTime.UtcNow.ToString("o");
+                root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
                 var tmpPath = moodsPath + ".tmp";
                 File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
                 AtomicReplace(tmpPath, moodsPath);
@@ -6122,7 +6122,7 @@ namespace Truedat
             Console.WriteLine($"Backup: {bakPath}");
             root["tracks"] = newTracks;
             root["trackCount"] = newTracks.Count;
-            root["generatedAt"] = DateTime.UtcNow.ToString("o");
+            StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
             File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             AtomicReplace(tmpPath, moodsPath);
@@ -6670,9 +6670,9 @@ namespace Truedat
             {
                 ["tracks"] = mergedTracks,
                 ["trackCount"] = mergedTracks.Count,
-                ["generatedAt"] = DateTime.UtcNow.ToString("o"),
                 ["mergedFrom"] = new JsonArray(sources.Select(s => (JsonNode)JsonValue.Create(s)!).ToArray())
             };
+            StampCatalogHeader(result, DateTime.UtcNow.ToString("o"));
 
             var tmpPath = outputPath + ".tmp";
             File.WriteAllText(tmpPath, result.ToJsonString(new JsonSerializerOptions { WriteIndented = false }), Encoding.UTF8);
@@ -6818,7 +6818,7 @@ namespace Truedat
             root["trackCount"] = tracks.Count;
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
-            root["generatedAt"] = DateTime.UtcNow.ToString("o");
+            StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
             File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             AtomicReplace(tmpPath, moodsPath);
@@ -9643,6 +9643,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 SaveResults(srFresh, new ConcurrentDictionary<string, TrackEntry>());
                 Assert(File.Exists(srFresh) && !File.Exists(srFresh + ".bak"),
                     "SaveResults (first save) writes and leaves no .bak");
+
+                // --- generatedBy header stamp: both writer families carry the WRITER build version
+                //     (VersionInfo.Display) via the two shared helpers, and both agree on the value.
+                //     Parse the streamed JSON (don't substring-match the raw text) — the Utf8JsonWriter
+                //     encoder escapes e.g. '+' in a "+dirty" stamp, so the on-disk bytes differ from the
+                //     literal while the decoded value matches.
+                string gbStreamed = null;
+                using (var gbDoc = JsonDocument.Parse(File.ReadAllBytes(srFresh)))
+                    if (gbDoc.RootElement.TryGetProperty("generatedBy", out var gbProp)) gbStreamed = gbProp.GetString();
+                Assert(gbStreamed == VersionInfo.Display,
+                    "generatedBy: SaveResults streaming header stamps VersionInfo.Display");
+                // DOM: StampCatalogHeader sets all three header fields.
+                var gbRoot = new JsonObject();
+                StampCatalogHeader(gbRoot, "T");
+                Assert(gbRoot["generatedBy"] != null && gbRoot["generatedBy"]!.GetValue<string>() == VersionInfo.Display,
+                    "generatedBy: StampCatalogHeader sets generatedBy == VersionInfo.Display");
+                Assert(gbRoot["generatedAt"] != null && gbRoot["generatedAt"]!.GetValue<string>() == "T",
+                    "generatedBy: StampCatalogHeader sets generatedAt");
+                Assert(gbRoot["version"] != null && gbRoot["version"]!.GetValue<string>() == "1.0",
+                    "generatedBy: StampCatalogHeader sets version 1.0");
+                // Both helpers are one source: the DOM stamp equals the streamed stamp.
+                Assert(gbRoot["generatedBy"]!.GetValue<string>() == gbStreamed,
+                    "generatedBy: streaming and DOM helpers produce the same value");
 
                 // --- Multi-part catalog: split-write over the wall + multi-part read (supersedes
                 //     the old refuse-guard). An over-limit catalog can no longer be LOADED (a single
@@ -13728,6 +13751,33 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         }
 
         /// <summary>
+        /// Common catalog header for the STREAMING writers (Utf8JsonWriter): schema version,
+        /// generation timestamp, and the truedat build that wrote it (VersionInfo.Display — the
+        /// WRITER stamp, not the Essentia extractor version). Every streaming writer routes through
+        /// here so a new writer inherits the full header for free; the caller keeps writing its own
+        /// count fields (trackCount / totalTrackCount+partIndex) and the tracks object after this call.
+        /// </summary>
+        static void WriteCatalogHeaderCommon(Utf8JsonWriter jw, string generatedAt)
+        {
+            jw.WriteString("version", "1.0");
+            jw.WriteString("generatedAt", generatedAt);
+            jw.WriteString("generatedBy", VersionInfo.Display);
+        }
+
+        /// <summary>
+        /// Common catalog header for the DOM-MUTATING modes (JsonObject root + ToJsonString):
+        /// --fixup / --remap / --migrate / --merge-moods. Stamps the same three fields as
+        /// WriteCatalogHeaderCommon so both writer families carry an identical generatedBy value from
+        /// this single source. Idempotent — safe to call on a root that already has version/generatedAt.
+        /// </summary>
+        static void StampCatalogHeader(JsonObject root, string generatedAt)
+        {
+            root["version"] = "1.0";
+            root["generatedAt"] = generatedAt;
+            root["generatedBy"] = VersionInfo.Display;
+        }
+
+        /// <summary>
         /// Stream allTracks to disk using Utf8JsonWriter — writes UTF-8 directly to FileStream.
         /// No intermediate strings, no StreamWriter. Memory usage is O(1) per track.
         /// </summary>
@@ -13758,8 +13808,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
                 {
                     jw.WriteStartObject();
-                    jw.WriteString("version", "1.0");
-                    jw.WriteString("generatedAt", generatedAt);
+                    WriteCatalogHeaderCommon(jw, generatedAt);
                     jw.WriteNumber("trackCount", total);
                     jw.WritePropertyName("tracks");
                     jw.WriteStartObject();
@@ -13851,8 +13900,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
                     {
                         jw.WriteStartObject();
-                        jw.WriteString("version", "1.0");
-                        jw.WriteString("generatedAt", generatedAt);
+                        WriteCatalogHeaderCommon(jw, generatedAt);
                         jw.WriteNumber("totalTrackCount", total);
                         jw.WriteNumber("partIndex", partIndex);
                         jw.WritePropertyName("tracks");
