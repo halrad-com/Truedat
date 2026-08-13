@@ -3,7 +3,40 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+## [0.5.4.8-RC1] — 2026-08-13
+
+### Added
+
+- **The catalog now writes compact by default, with `--prettify` for viewing.** `mbxmoods.json`
+  is an operational file first — minimal (single-line) JSON cuts it ~31% (a real 72k-track
+  catalog: 565 MB pretty → 388 MB compact) with zero information loss. `--compact <path>`
+  re-formats an existing catalog in place (archived backup first); `--prettify <src> [out]`
+  produces the human-readable form when you want to read it. Both are pure formatters —
+  they never re-analyze and never change values.
+- **Multi-part catalog split at the 2 GB wall.** JSON strings and whole-file reads hit a hard
+  2 GB (`Int32.MaxValue`) limit; a 150k-track catalog was already close and 200k crosses it.
+  When a save would exceed the cap, the catalog now splits into numbered part files
+  (`mbxmoods.json.1`, `.2`, …) that every reader merges transparently (contiguity and
+  per-part track counts verified on load). Catalogs under the cap keep the single-file form.
+- **`.mbxs` sidecar grown to v3 — the complete AutoQ hot path.** The binary index now carries
+  everything MBXHub needs at boot and per pick: a permanent identity+gate core block
+  (path, `audioStreamSha256`, genre, `speechLikely`) that a model retrain can never drop,
+  the full V/A model-input set, `averageLoudness`, the chords summary scalars
+  (`chordsConcentration`/`chordsEntropy`, ported formula-exact from the hub), and per-track
+  JSON offset+length so cold fields lazy-load from the full file without a parse. At 27 MB
+  against a 388 MB compact catalog (~14× smaller), the hub boots from the sidecar alone —
+  the full JSON stays the durable record and the fallback when no sidecar exists.
+- **`generatedBy` stamp.** Every catalog write records the truedat build version in the
+  header via one shared finalize path, so a catalog names the writer that produced it.
+- **`--verify` reports sidecar integrity** before the hash walk: present/size, format
+  version, track count vs the catalog, and freshness (stale sidecar → "run a scan or
+  `--compact`"). Read-only, never affects the exit code.
+
+### Changed
+
+- **`trackId` is no longer written** (and `--fixup` strips stored values). It was
+  iTunes-XML-local numbering consumed by nothing: the hub skips it, it churns on every XML
+  re-export, and it is meaningless across merged libraries.
 
 ### Fixed
 
