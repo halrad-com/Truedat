@@ -19,6 +19,37 @@
    sprint start (Beyond Compare / Python-diag options considered and set aside — it's a
    truedat mode).
 
+2. **Tier 1 detection — spectral-ceiling + cliff detector** (`prov: up44` / `lossy`).
+   The one new measurement that closes both the 44.1→48k upsample gap and the
+   lossy-laundering gap (lossy history inside a lossless container — tracked nowhere
+   until now). Accumulate mean mag² per FFT bin across windows (reusing the
+   `ComputeHfAnalysis` loop), measure where the spectrum actually ends (**ceiling**)
+   and how sharply (**cliff**): resampler/codec anti-alias filters are near-brickwall,
+   naturally dark music rolls off gradually — the steepness gate is what answers the
+   false-positive failure that killed Signal D. Must run on lossless at ANY rate/depth
+   (44.1k FLAC is *the* laundering container and is exactly where HF analysis refuses
+   today). Honest `unknown` expected on streaming-derived 48k material (codec masking
+   is physics). The `prov` code plumbing + `+`-joiner shipped in v0.5.4.8-RC1 and is
+   waiting for these codes. Full method sketch in the 2026-08-12 detection review
+   (local design notes). Needs operator go.
+
+3. **Catalog number-text bloat — G17 doubles** (small, mechanical, tens of MB).
+   Values are already `Math.Round`-ed to 2–6 dp, but most decimals have no exact
+   binary double, and on net48 System.Text.Json lacks the shortest-round-trip
+   formatter (.NET Core 3+ only) so it prints 17 significant digits:
+   `0.10100000000000001` (19 chars) instead of `0.101` (5) — confirmed live in the
+   2026-08-13 catalog. The extra digits are a pure formatting artifact: parsing either
+   string yields the IDENTICAL double, so no consumer sees a different value. Fix:
+   cast the already-rounded double to `decimal` at the writer helpers
+   (`jw.WriteNumber(name, (decimal)v)` in `WriteOpt`/`Opt` sites) — decimal
+   serializes as the short form. Estimated ~10–15% off the compact catalog. Verify a
+   handful of boundary values round-trip and the self-tests' pinned JSON still match.
+
+4. **v3 `.mbxs` fixture for restfulbee** (chore, small). rb said go (2026-08-12);
+   generate a small synthetic v3 sidecar (178 B records) + matching mini-catalog so
+   their hub-side v3 reader lands against a known-good file. Their lane after that:
+   sidecar-only boot (the mood-JSON parse is ~95% of hub boot time).
+
 The rest of the 2026-07-30 queue shipped (pushed through `562d09c`): T6 ffmpeg
 `ApplyCpuLimit`, T1 `Monitor.TryEnter` periodic save + separate errors-CSV lock,
 T2 memoized-hash handoff into `RunSourceWorkers` + `--file-md5`-gated MD5, scan
@@ -69,7 +100,7 @@ verify becomes a felt requirement, not speculatively.
 
 Operator-parked; do not build without an explicit go.
 
-## Catalog backup compression + snapshot (proposed 2026-08-08)
+## Compressed LIVE catalog — stretch (backup/snapshot half SHIPPED 2026-08-09)
 
 **Status (2026-08-09): the safe half SHIPPED.** `CatalogArchive` (own file) is the shared
 compress/decompress helper (ZIP-on-write, sniffing read for zip/gz/plain). Backups at the four
