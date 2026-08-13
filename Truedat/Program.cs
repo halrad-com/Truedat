@@ -1019,16 +1019,15 @@ namespace Truedat
         internal static long ErrorLogMaxBytes = 5 * 1024 * 1024;   // static (not const) so the self-test can lower it
         static bool _errorLogHeaderWritten;   // per run: header + rotation happen on the first failure logged
 
-        // Catalog hard-limit guard. A catalog whose serialized size approaches ~2 GB can no
-        // longer be LOADED: LoadExistingMoods (JsonDocument.Parse) and every --fixup / --migrate /
+        // Catalog part-roll threshold. A single catalog whose serialized size approaches ~2 GB can
+        // no longer be LOADED: LoadExistingMoods (JsonDocument.Parse) and every --fixup / --migrate /
         // --remap / --merge-moods path materialize the whole file into one string / byte[], which
-        // caps at Int32.MaxValue (~2.1 GB). So SaveResults REFUSES to commit a catalog over this
-        // safety line (deliberate margin below the wall): the last-good file on disk stays
-        // readable, the scan shuts down, and the operator is told the library has outgrown a
-        // single catalog file. Static (not const) so the self-test can lower it. The real fix is
-        // reducing per-track weight and/or sharding the catalog below this ceiling.
+        // caps at Int32.MaxValue (~2.1 GB). So SaveResults SPLITS an over-limit catalog into numbered
+        // parts (mbxmoods.json.1, .2, …), each a complete catalog kept under this line (deliberate
+        // margin below the wall), and the multi-part reader stitches them back. INVARIANT: a catalog
+        // is EITHER a single mbxmoods.json OR the numbered parts, never both. Static (not const) so
+        // the self-test can lower it to force a split over a handful of tracks.
         internal static long CatalogMaxBytes = 1_900_000_000L;   // ~1.9 GB, ~200 MB under the ~2.1 GB .NET wall
-        internal static int _catalogLimitTripped;   // set once SaveResults refuses an over-limit write
 
         // --enableshortfiles: scan very short files that are skipped by default. Off by
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
@@ -5071,22 +5070,12 @@ namespace Truedat
                                         var saveSw = Stopwatch.StartNew();
                                         SaveResults(moodsPath, allTracks);
                                         saveSw.Stop();
-                                        if (Volatile.Read(ref _catalogLimitTripped) != 0)
-                                        {
-                                            // Catalog hit the ~2 GB hard-limit guard: SaveResults refused the
-                                            // write and left the last-good catalog in place. Stop the scan —
-                                            // every further save would refuse too. (No "Saved" line: nothing was.)
-                                            try { cts.Cancel(); } catch { }
-                                        }
-                                        else
-                                        {
-                                            Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
-                                            Interlocked.Increment(ref _saveCount);
-                                            // Period measures save-end to save-start: a slow save
-                                            // must not eat its own next interval.
-                                            Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
-                                            Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
-                                        }
+                                        Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                                        Interlocked.Increment(ref _saveCount);
+                                        // Period measures save-end to save-start: a slow save
+                                        // must not eat its own next interval.
+                                        Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
+                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
                                     }
                                 }
                                 finally { Monitor.Exit(saveLock); }
@@ -9625,42 +9614,111 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(File.Exists(srFresh) && !File.Exists(srFresh + ".bak"),
                     "SaveResults (first save) writes and leaves no .bak");
 
-                // --- Hard-limit guard: SaveResults refuses to commit a catalog over the wall ---
-                // (an over-limit catalog can no longer be LOADED — JsonDocument.Parse / ReadAllText
-                //  cap at Int32.MaxValue — so the guard keeps the last-good file readable instead.)
-                var hlMoods = Path.Combine(saveTestDir, "hardlimit", "mbxmoods.json");
-                Directory.CreateDirectory(Path.GetDirectoryName(hlMoods)!);
+                // --- Multi-part catalog: split-write over the wall + multi-part read (supersedes
+                //     the old refuse-guard). An over-limit catalog can no longer be LOADED (a single
+                //     JsonDocument.Parse / string caps at Int32.MaxValue), so SaveResults SPLITS it
+                //     into numbered parts each kept under CatalogMaxBytes, and LoadExistingMoods
+                //     stitches them back. A tiny CatalogMaxBytes forces a split over a handful of
+                //     tracks. CatalogMaxBytes is a settable static — save/restore around the block.
+                var splitDir = Path.Combine(saveTestDir, "split");
+                Directory.CreateDirectory(splitDir);
+                var splMoods = Path.Combine(splitDir, "mbxmoods.json");
                 var hlSavedMax = CatalogMaxBytes;
-                var hlSavedTrip = Volatile.Read(ref _catalogLimitTripped);
                 try
                 {
-                    // 1) Establish a last-good catalog under a generous limit.
-                    CatalogMaxBytes = 1_900_000_000L;
-                    Volatile.Write(ref _catalogLimitTripped, 0);
-                    SaveResults(hlMoods, new ConcurrentDictionary<string, TrackEntry>());
-                    Assert(File.Exists(hlMoods), "hard-limit: baseline catalog written under a generous limit");
-                    var hlGoodBytes = File.ReadAllBytes(hlMoods);
+                    // A handful of distinct tracks with round-trippable fields (bpm, sha).
+                    var splTracks = new ConcurrentDictionary<string, TrackEntry>();
+                    for (int n = 0; n < 8; n++)
+                    {
+                        var p = $"C:/music/track{n:D2}.flac";
+                        splTracks[p] = new TrackEntry
+                        {
+                            LastModified = new DateTime(2026, 1, 1, 0, 0, n, DateTimeKind.Utc),
+                            Features = new TrackFeatures { FilePath = p, Bpm = 100 + n },
+                            AudioStreamSha256 = $"sha{n:D2}",
+                        };
+                    }
+                    int splN = splTracks.Count;
 
-                    // 2) Force the limit tiny so the next save would exceed it: refuse the swap,
-                    //    leave the last-good file byte-identical, trip the flag, leave no .tmp.
-                    CatalogMaxBytes = 10;   // any real catalog exceeds 10 bytes
-                    var hlBigger = new ConcurrentDictionary<string, TrackEntry>();
-                    hlBigger["C:/x.flac"] = new TrackEntry { Features = new TrackFeatures { FilePath = "C:/x.flac" } };
-                    SaveResults(hlMoods, hlBigger);
-                    Assert(Volatile.Read(ref _catalogLimitTripped) != 0,
-                        "hard-limit: SaveResults trips the guard when the catalog would exceed the limit");
-                    Assert(File.ReadAllBytes(hlMoods).SequenceEqual(hlGoodBytes),
-                        "hard-limit: over-limit save is refused; last-good catalog left byte-identical");
-                    Assert(!File.Exists(hlMoods + ".tmp"),
-                        "hard-limit: refused save leaves no .tmp behind");
+                    // (a) Tiny threshold -> multiple parts, no single file, valid part headers.
+                    CatalogMaxBytes = 400;   // header + a couple of tracks per part
+                    SaveResults(splMoods, splTracks);
+                    Assert(!File.Exists(splMoods), "split: over-limit save writes NO single mbxmoods.json");
+                    var splParts = EnumerateCatalogParts(splMoods);
+                    Assert(splParts.Count >= 2, "split: over-limit catalog writes >= 2 numbered parts");
+                    long splSummed = 0; int splExpectIdx = 1; bool splContig = true; long splDeclaredTotal = -1;
+                    foreach (var kv in splParts)
+                    {
+                        if (kv.Key != splExpectIdx++) splContig = false;
+                        using var pdoc = JsonDocument.Parse(File.ReadAllBytes(kv.Value));
+                        var pr = pdoc.RootElement;
+                        Assert(pr.TryGetProperty("version", out _) && pr.TryGetProperty("partIndex", out _)
+                               && pr.TryGetProperty("totalTrackCount", out _) && pr.TryGetProperty("trackCount", out _)
+                               && pr.TryGetProperty("tracks", out _),
+                            $"split: part {kv.Key} carries every header field");
+                        Assert(pr.GetProperty("partIndex").GetInt32() == kv.Key, $"split: part {kv.Key} partIndex matches file suffix");
+                        splSummed += pr.GetProperty("trackCount").GetInt64();
+                        splDeclaredTotal = pr.GetProperty("totalTrackCount").GetInt64();
+                    }
+                    Assert(splContig, "split: part indices are contiguous 1..K");
+                    Assert(splSummed == splN && splDeclaredTotal == splN,
+                        "split: summed part trackCount == totalTrackCount == N");
 
-                    // 3) Once tripped, further saves are no-ops even under a generous limit.
+                    // (b) LoadExistingMoods stitches the parts back to exactly N tracks, fields intact.
+                    var splLoaded = new ConcurrentDictionary<string, TrackEntry>();
+                    int splLoadedN = LoadExistingMoods(splMoods, splLoaded);
+                    Assert(splLoadedN == splN && splLoaded.Count == splN, "split-read: loads back exactly N tracks");
+                    Assert(splLoaded.ContainsKey(@"C:\music\track00.flac") && splLoaded.ContainsKey(@"C:\music\track07.flac"),
+                        "split-read: keys round-trip");
+                    Assert(splLoaded.TryGetValue(@"C:\music\track05.flac", out var splChk)
+                           && splChk.Features.Bpm == 105 && splChk.AudioStreamSha256 == "sha05",
+                        "split-read: per-track fields round-trip");
+
+                    // (c) Transition split -> single: large threshold fits in one file; parts cleared.
                     CatalogMaxBytes = 1_900_000_000L;
-                    SaveResults(hlMoods, hlBigger);
-                    Assert(File.ReadAllBytes(hlMoods).SequenceEqual(hlGoodBytes),
-                        "hard-limit: once tripped, SaveResults stays a no-op until the flag is cleared");
+                    SaveResults(splMoods, splTracks);
+                    Assert(File.Exists(splMoods), "transition: under-limit save writes a single mbxmoods.json");
+                    Assert(EnumerateCatalogParts(splMoods).Count == 0, "transition: single-file save clears the stale .N parts");
+
+                    // (c) Reverse single -> split: tiny threshold; single file cleared, parts return.
+                    CatalogMaxBytes = 400;
+                    SaveResults(splMoods, splTracks);
+                    Assert(!File.Exists(splMoods), "transition: split save clears the stale single mbxmoods.json");
+                    var splParts2 = EnumerateCatalogParts(splMoods);
+                    Assert(splParts2.Count >= 2, "transition: split save re-writes the numbered parts");
+
+                    // (d) Incompleteness: drop a part -> reader loads fewer than N (checkable signal).
+                    File.Delete(splParts2[0].Value);
+                    var splPartial = new ConcurrentDictionary<string, TrackEntry>();
+                    int splPartialN = LoadExistingMoods(splMoods, splPartial);
+                    Assert(splPartialN < splN, "split-read: a missing part yields fewer than N tracks (not a false full count)");
                 }
-                finally { CatalogMaxBytes = hlSavedMax; Volatile.Write(ref _catalogLimitTripped, hlSavedTrip); }
+                finally { CatalogMaxBytes = hlSavedMax; }
+
+                // (e) Backup at the single -> split transition: when a single mbxmoods.json exists and
+                //     the next save splits, the pre-split catalog is archived as mbxmoods.json.bak.*.zip.
+                var bkDir = Path.Combine(saveTestDir, "splitbackup");
+                Directory.CreateDirectory(bkDir);
+                var bkMoods = Path.Combine(bkDir, "mbxmoods.json");
+                var bkSavedMax = CatalogMaxBytes;
+                try
+                {
+                    var bkTracks = new ConcurrentDictionary<string, TrackEntry>();
+                    for (int n = 0; n < 6; n++)
+                    {
+                        var p = $"C:/music/bk{n:D2}.flac";
+                        bkTracks[p] = new TrackEntry { LastModified = new DateTime(2026, 2, 1, 0, 0, n, DateTimeKind.Utc), Features = new TrackFeatures { FilePath = p, Bpm = 90 + n } };
+                    }
+                    CatalogMaxBytes = 1_900_000_000L;
+                    SaveResults(bkMoods, bkTracks);                 // single file established
+                    Assert(File.Exists(bkMoods) && Directory.GetFiles(bkDir, "mbxmoods.json.bak.*.zip").Length == 0,
+                        "split-backup: single-file save takes no compressed backup");
+                    CatalogMaxBytes = 300;
+                    SaveResults(bkMoods, bkTracks);                 // splits -> archive the pre-split single
+                    Assert(Directory.GetFiles(bkDir, "mbxmoods.json.bak.*.zip").Length >= 1,
+                        "split-backup: single -> split transition archives the pre-split catalog");
+                }
+                finally { CatalogMaxBytes = bkSavedMax; }
             }
             finally { try { Directory.Delete(saveTestDir, true); } catch { } }
 
@@ -13566,15 +13624,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// </summary>
         static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
-            // Once the hard-limit guard has tripped, never attempt another (doomed, huge) temp
-            // write: the last-good, under-limit catalog already on disk is authoritative until the
-            // library is pruned or sharded below CatalogMaxBytes.
-            if (Volatile.Read(ref _catalogLimitTripped) != 0) return;
+            // Snapshot the catalog once so the fast single-file write and any fallback split write
+            // share ONE consistent view even though scan workers may still be adding entries under
+            // the periodic-save lock. O(count) references, not O(bytes).
+            var items = allTracks.ToArray();
+            int total = items.Length;
+            var generatedAt = DateTime.UtcNow.ToString("o");
 
             var tmpPath = moodsPath + ".tmp";
             var bakPath = moodsPath + ".bak";
             try { File.Delete(tmpPath); } catch { }
 
+            // Fast path: stream the whole catalog into ONE file, tracking the running byte size with
+            // the writer's own counters (BytesCommitted + BytesPending — the same counters the offset
+            // code uses). The common case fits under CatalogMaxBytes in a single pass at today's cost.
+            // If it would cross the line — a file that can no longer be LOADED, JsonDocument.Parse caps
+            // at Int32.MaxValue — stop, discard the partial temp, and fall through to the split writer.
+            bool overflow = false;
             using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
             {
                 // Compact (no indentation): on a 72k-track catalog pretty-printing is ~25%
@@ -13584,57 +13650,162 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     jw.WriteStartObject();
                     jw.WriteString("version", "1.0");
-                    jw.WriteString("generatedAt", DateTime.UtcNow.ToString("o"));
-                    jw.WriteNumber("trackCount", allTracks.Count);
+                    jw.WriteString("generatedAt", generatedAt);
+                    jw.WriteNumber("trackCount", total);
                     jw.WritePropertyName("tracks");
                     jw.WriteStartObject();
-                    foreach (var kvp in allTracks)
+                    foreach (var kvp in items)
+                    {
+                        // Check BEFORE the write so a single file never actually exceeds the wall.
+                        if (jw.BytesCommitted + jw.BytesPending > CatalogMaxBytes) { overflow = true; break; }
                         WriteTrackEntry(jw, kvp.Key, kvp.Value);
-                    jw.WriteEndObject();
-                    jw.WriteEndObject();
+                    }
+                    if (!overflow)
+                    {
+                        jw.WriteEndObject();
+                        jw.WriteEndObject();
+                    }
                 }
                 // Force the new catalog to stable storage BEFORE the swap unlinks the old one.
                 // Without this, the rename can commit while the new file's tail is still in the
                 // OS write cache, so a power loss could leave a valid-length mbxmoods.json with a
                 // zeroed tail — and a scan save keeps no timestamped .bak to fall back to.
-                fs.Flush(flushToDisk: true);
+                if (!overflow) fs.Flush(flushToDisk: true);
             }
 
-            // Hard-limit guard. The temp is a complete, fsynced file now, so its byte length is
-            // the exact size the live catalog would become. Refuse to swap in a catalog that can
-            // no longer be loaded (see CatalogMaxBytes) — leave the existing, readable catalog
-            // untouched, trip the flag so the scan stops and later saves no-op, and say why.
-            var candidateBytes = new FileInfo(tmpPath).Length;
-            if (candidateBytes > CatalogMaxBytes)
+            if (overflow)
             {
-                Volatile.Write(ref _catalogLimitTripped, 1);
+                // Doomed single-file temp: discard and re-emit as numbered parts. Rare (only for a
+                // catalog past ~1.9 GB — no library reaches this today), so the extra pass is fine.
                 try { File.Delete(tmpPath); } catch { }
-                Console.Error.WriteLine(
-                    $"  ERROR: catalog would be {candidateBytes / (1024 * 1024)} MB, over the " +
-                    $"{CatalogMaxBytes / (1024 * 1024)} MB safety limit (~2 GB hard wall). NOT written — " +
-                    $"the existing catalog is unchanged and still readable. The library has outgrown a " +
-                    $"single catalog file; the scan is stopping. Reduce per-track fields or shard the catalog.");
-                return;   // do NOT swap: last-good catalog preserved, .mbxs left untouched
+                SaveResultsSplit(moodsPath, items, total, generatedAt);
             }
+            else
+            {
+                // One transient backup across the swap window: ReplaceFile moves the OLD catalog to
+                // .bak (a rename, not a 374 MB copy) as it installs the new one, so a crash mid-swap
+                // still leaves a complete catalog under either mbxmoods.json or mbxmoods.json.bak. On
+                // success we delete it (no accumulation). A crash between the swap and this delete just
+                // leaves a stale .bak that the next save's pre-delete clears — and at that point the
+                // live file is already the new good catalog, so the leftover is redundant.
+                try { File.Delete(bakPath); } catch { }
+                AtomicReplace(tmpPath, moodsPath, bakPath);
+                try { File.Delete(bakPath); } catch { }
 
-            // One transient backup across the swap window: ReplaceFile moves the OLD catalog to
-            // .bak (a rename, not a 374 MB copy) as it installs the new one, so a crash mid-swap
-            // still leaves a complete catalog under either mbxmoods.json or mbxmoods.json.bak. On
-            // success we delete it (no accumulation). A crash between the swap and this delete just
-            // leaves a stale .bak that the next save's pre-delete clears — and at that point the
-            // live file is already the new good catalog, so the leftover is redundant.
-            try { File.Delete(bakPath); } catch { }
-            AtomicReplace(tmpPath, moodsPath, bakPath);
-            try { File.Delete(bakPath); } catch { }
+                // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both —
+                // clear any parts left by a previous, larger scan that has since shrunk to one file.
+                DeleteCatalogParts(moodsPath);
 
-            if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {allTracks.Count} tracks)"); } catch { } }
+                if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} ({new FileInfo(moodsPath).Length / 1024} KB, {total} tracks)"); } catch { } }
+            }
 
             // Emit the .mbxs binary sidecar beside the catalog (MBXHub MoodCache fast-path,
             // ~orders of magnitude faster to load than parsing the JSON). Best-effort: the sidecar
             // is a rebuildable cache and the reader falls back to JSON, so a failure here must
-            // never fail the catalog save.
+            // never fail the catalog save. ONE sidecar spans the whole catalog (all parts) — unsplit.
             try { CatalogSidecar.Write(Path.ChangeExtension(moodsPath, ".mbxs"), allTracks); }
             catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not written: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Split-write path: emit the catalog as numbered parts mbxmoods.json.1, .2, … each a
+        /// COMPLETE, under-CatalogMaxBytes catalog carrying its own trackCount plus the whole
+        /// catalog's totalTrackCount and its partIndex. Streaming and O(1) per track: each part
+        /// rolls the moment adding the next track would cross the wall. trackCount is written AFTER
+        /// the tracks object because a streaming writer can't know a part's count until its subset
+        /// is emitted, and a JSON reader is order-independent — every contract field is present.
+        /// </summary>
+        static void SaveResultsSplit(string moodsPath, KeyValuePair<string, TrackEntry>[] items, int total, string generatedAt)
+        {
+            // A single mbxmoods.json on disk now is the PRE-SPLIT catalog: archive it once, before
+            // the numbered parts supersede it, so the last single-file state stays recoverable.
+            // Routine single-file saves keep only their atomic .bak swap; this heavier compressed
+            // backup fires only at the single -> split transition, and never when already split.
+            if (File.Exists(moodsPath))
+            {
+                try { BackupCatalogCompressed(moodsPath); }
+                catch (Exception ex) { Console.Error.WriteLine($"  Warning: pre-split backup not written: {ex.Message}"); }
+            }
+
+            int partIndex = 0;
+            int i = 0;
+            int written = 0;
+            while (i < items.Length)
+            {
+                partIndex++;
+                var partPath = moodsPath + "." + partIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var partTmp = partPath + ".tmp";
+                try { File.Delete(partTmp); } catch { }
+                int partCount = 0;
+                using (var fs = new FileStream(partTmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+                {
+                    using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
+                    {
+                        jw.WriteStartObject();
+                        jw.WriteString("version", "1.0");
+                        jw.WriteString("generatedAt", generatedAt);
+                        jw.WriteNumber("totalTrackCount", total);
+                        jw.WriteNumber("partIndex", partIndex);
+                        jw.WritePropertyName("tracks");
+                        jw.WriteStartObject();
+                        // Always place at least one track in a part (even a lone track larger than the
+                        // limit), then keep adding until the NEXT track would cross the wall.
+                        for (; i < items.Length; i++)
+                        {
+                            if (partCount > 0 && jw.BytesCommitted + jw.BytesPending > CatalogMaxBytes) break;
+                            WriteTrackEntry(jw, items[i].Key, items[i].Value);
+                            partCount++;
+                        }
+                        jw.WriteEndObject();   // tracks
+                        jw.WriteNumber("trackCount", partCount);
+                        jw.WriteEndObject();   // root
+                    }
+                    fs.Flush(flushToDisk: true);
+                }
+                AtomicReplace(partTmp, partPath);
+                written += partCount;
+            }
+
+            // The stale single catalog and any higher-numbered parts from a larger previous split are
+            // no longer part of the set — remove them so only .1..partIndex remain (the INVARIANT).
+            try { File.Delete(moodsPath); } catch { }
+            DeleteCatalogParts(moodsPath, keepThrough: partIndex);
+
+            if (_audit) { try { Console.WriteLine($"  DEBUG save: {moodsPath} split into {partIndex} part(s), {written} tracks"); } catch { } }
+        }
+
+        /// <summary>
+        /// Enumerate sibling catalog parts mbxmoods.json.&lt;N&gt; (numeric suffix only — never the
+        /// mbxmoods.json.tmp swap file or mbxmoods.json.bak.&lt;ts&gt;.zip backups that share the
+        /// prefix), sorted ascending by index.
+        /// </summary>
+        static List<KeyValuePair<int, string>> EnumerateCatalogParts(string moodsPath)
+        {
+            var result = new List<KeyValuePair<int, string>>();
+            var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var baseName = Path.GetFileName(moodsPath);
+            var prefix = baseName + ".";
+            string[] files;
+            try { files = Directory.GetFiles(dir, baseName + ".*"); }
+            catch { return result; }
+            foreach (var file in files)
+            {
+                var name = Path.GetFileName(file);
+                if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                var suffix = name.Substring(prefix.Length);
+                if (int.TryParse(suffix, out var n) && n >= 1)
+                    result.Add(new KeyValuePair<int, string>(n, file));
+            }
+            result.Sort((a, b) => a.Key.CompareTo(b.Key));
+            return result;
+        }
+
+        /// <summary>Delete numbered catalog parts with index &gt; <paramref name="keepThrough"/>.</summary>
+        static void DeleteCatalogParts(string moodsPath, int keepThrough = 0)
+        {
+            foreach (var kv in EnumerateCatalogParts(moodsPath))
+                if (kv.Key > keepThrough)
+                    try { File.Delete(kv.Value); } catch { }
         }
 
         // ----------------------------------------------------------------------
@@ -14242,69 +14413,142 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// </summary>
         static int LoadExistingMoods(string path, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
-            if (!File.Exists(path)) return 0;
-            try
+            // Single catalog present -> today's path (unchanged). INVARIANT: a catalog is EITHER a
+            // single mbxmoods.json OR the numbered parts, so a present single file wins outright.
+            if (File.Exists(path))
             {
-                var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-                using var doc = JsonDocument.Parse(fs, docOptions);
-                var root = doc.RootElement;
-
-                if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
-                    return 0;
-
-                foreach (var prop in tracks.EnumerateObject())
+                try
                 {
-                    var filePath = PathHelper.NormalizeSeparators(prop.Name);
-                    var track = prop.Value;
+                    var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                    using var doc = JsonDocument.Parse(fs, docOptions);
+                    var root = doc.RootElement;
 
-                    DateTime lastMod;
-                    var lastModStr = GetStr(track, "lastModified");
-                    if (string.IsNullOrEmpty(lastModStr))
+                    if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
+                        return 0;
+
+                    MergeTracksElement(tracks, allTracks);
+                    return allTracks.Count;
+                }
+                catch (JsonException ex)
+                {
+                    var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
+                    try { File.Copy(path, bakPath); }
+                    catch (Exception bakEx)
                     {
-                        try { lastMod = File.GetLastWriteTimeUtc(filePath); }
-                        catch { continue; }
+                        Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
                     }
-                    else if (!DateTime.TryParse(lastModStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastMod))
-                        continue;
-
-                    var features = ParseTrackFeaturesFromJson(track);
-                    features.FilePath = filePath;
-                    allTracks[filePath] = new TrackEntry
-                    {
-                        LastModified = lastMod,
-                        Features = features,
-                        AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
-                        FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
-                        AudioStreamSha256 = GetStr(track, "audioStreamSha256") is var shaStr && shaStr.Length > 0 ? shaStr : null,
-                        AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
-                        FingerprintV1 = ParseFingerprintV1FromJson(track),
-                    };
+                    Console.WriteLine();
+                    Console.WriteLine($"ERROR: Existing moods file is corrupt: {ex.Message}");
+                    Console.WriteLine($"Backup: {bakPath}");
+                    Console.WriteLine();
+                    Console.WriteLine("To start fresh, delete or rename the corrupt file and re-run:");
+                    Console.WriteLine($"  del \"{path}\"");
+                    Environment.Exit(1);
+                    return 0; // unreachable, satisfies compiler
                 }
-                return allTracks.Count;
-            }
-            catch (JsonException ex)
-            {
-                var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
-                try { File.Copy(path, bakPath); }
-                catch (Exception bakEx)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"WARNING: Could not create backup: {bakEx.Message}");
+                    Console.WriteLine($"WARNING: Could not load existing moods ({ex.Message})");
+                    return 0;
                 }
-                Console.WriteLine();
-                Console.WriteLine($"ERROR: Existing moods file is corrupt: {ex.Message}");
-                Console.WriteLine($"Backup: {bakPath}");
-                Console.WriteLine();
-                Console.WriteLine("To start fresh, delete or rename the corrupt file and re-run:");
-                Console.WriteLine($"  del \"{path}\"");
-                Environment.Exit(1);
-                return 0; // unreachable, satisfies compiler
             }
-            catch (Exception ex)
+
+            // No single file -> stitch numbered parts (mbxmoods.json.1, .2, …), if any.
+            var parts = EnumerateCatalogParts(path);
+            if (parts.Count == 0) return 0;
+            return LoadMoodsParts(parts, allTracks);
+        }
+
+        /// <summary>
+        /// Merge a "tracks" JSON object (as written by SaveResults) into <paramref name="allTracks"/>.
+        /// Shared by the single-file and multi-part loaders so both build TrackEntry identically.
+        /// Returns the number of entries added.
+        /// </summary>
+        static int MergeTracksElement(JsonElement tracks, ConcurrentDictionary<string, TrackEntry> allTracks)
+        {
+            if (tracks.ValueKind != JsonValueKind.Object) return 0;
+            int added = 0;
+            foreach (var prop in tracks.EnumerateObject())
             {
-                Console.WriteLine($"WARNING: Could not load existing moods ({ex.Message})");
-                return 0;
+                var filePath = PathHelper.NormalizeSeparators(prop.Name);
+                var track = prop.Value;
+
+                DateTime lastMod;
+                var lastModStr = GetStr(track, "lastModified");
+                if (string.IsNullOrEmpty(lastModStr))
+                {
+                    try { lastMod = File.GetLastWriteTimeUtc(filePath); }
+                    catch { continue; }
+                }
+                else if (!DateTime.TryParse(lastModStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out lastMod))
+                    continue;
+
+                var features = ParseTrackFeaturesFromJson(track);
+                features.FilePath = filePath;
+                allTracks[filePath] = new TrackEntry
+                {
+                    LastModified = lastMod,
+                    Features = features,
+                    AnalysisDurationSecs = GetNullableDbl(track, "analysisDuration"),
+                    FileMd5 = GetStr(track, "fileMd5") is var md5Str && md5Str.Length > 0 ? md5Str : null,
+                    AudioStreamSha256 = GetStr(track, "audioStreamSha256") is var shaStr && shaStr.Length > 0 ? shaStr : null,
+                    AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
+                    FingerprintV1 = ParseFingerprintV1FromJson(track),
+                };
+                added++;
             }
+            return added;
+        }
+
+        /// <summary>
+        /// Load a multi-part catalog. Each part is &lt; 2 GB by construction, so a plain
+        /// JsonDocument.Parse per part is safe. Tolerant like the single-file loader: a corrupt or
+        /// unreadable part is warned and skipped, the rest still load. Verifies completeness —
+        /// indices contiguous 1..K and Σ(part trackCount) == totalTrackCount — and WARNS (never
+        /// throws) when the set is incomplete, loading whatever is present.
+        /// </summary>
+        static int LoadMoodsParts(List<KeyValuePair<int, string>> parts, ConcurrentDictionary<string, TrackEntry> allTracks)
+        {
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            long summedTrackCount = 0;
+            long declaredTotal = -1;
+            bool haveTotal = false;
+            var seen = new List<int>();
+
+            foreach (var kv in parts)
+            {
+                try
+                {
+                    using var fs = new FileStream(kv.Value, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                    using var doc = JsonDocument.Parse(fs, docOptions);
+                    var root = doc.RootElement;
+                    seen.Add(kv.Key);
+                    if (root.TryGetProperty("trackCount", out var tcEl) && tcEl.ValueKind == JsonValueKind.Number)
+                        summedTrackCount += tcEl.GetInt64();
+                    if (!haveTotal && root.TryGetProperty("totalTrackCount", out var ttEl) && ttEl.ValueKind == JsonValueKind.Number)
+                    {
+                        declaredTotal = ttEl.GetInt64();
+                        haveTotal = true;
+                    }
+                    if (root.TryGetProperty("tracks", out var tracks))
+                        MergeTracksElement(tracks, allTracks);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"WARNING: catalog part {Path.GetFileName(kv.Value)} could not be loaded ({ex.Message}); remaining parts still load — the set is INCOMPLETE.");
+                }
+            }
+
+            bool contiguous = seen.Count > 0;
+            for (int k = 0; k < seen.Count; k++)
+                if (seen[k] != k + 1) { contiguous = false; break; }
+            if (!contiguous)
+                Console.WriteLine($"WARNING: catalog parts are not contiguous 1..K (found indices [{string.Join(",", seen)}]); loaded {allTracks.Count} track(s) from what is present — the set is INCOMPLETE.");
+            if (haveTotal && summedTrackCount != declaredTotal)
+                Console.WriteLine($"WARNING: catalog parts summed trackCount {summedTrackCount} != totalTrackCount {declaredTotal}; loaded {allTracks.Count} track(s) — the set is INCOMPLETE.");
+
+            return allTracks.Count;
         }
 
         /// <summary>
