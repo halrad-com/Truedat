@@ -10048,6 +10048,83 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             finally { try { Directory.Delete(rfDir, true); } catch { } }
 
+            // --- number-format: shortest-form double serialization (net48 G17 artifact) ---
+            // net48's Utf8JsonWriter prints doubles as G17, so a dp-rounded 0.101 landed in
+            // the catalog as "0.10100000000000001". WriteShortestNumber rewrites the text
+            // ONLY when parse-back is the bit-identical double; everything else keeps
+            // today's bytes. Same predicate drives --compact/--prettify normalization.
+            {
+                string NfValue(double v)
+                {
+                    using var ms = new MemoryStream();
+                    using (var w = new Utf8JsonWriter(ms))
+                    {
+                        w.WriteStartArray();
+                        WriteShortestNumber(w, v);
+                        w.WriteEndArray();
+                    }
+                    var s = Encoding.UTF8.GetString(ms.ToArray());
+                    return s.Substring(1, s.Length - 2);   // strip [ ]
+                }
+                string NfBaseline(double v)
+                {
+                    using var ms = new MemoryStream();
+                    using (var w = new Utf8JsonWriter(ms))
+                    {
+                        w.WriteStartArray();
+                        w.WriteNumberValue(v);
+                        w.WriteEndArray();
+                    }
+                    var s = Encoding.UTF8.GetString(ms.ToArray());
+                    return s.Substring(1, s.Length - 2);
+                }
+                double NfParse(string text) =>
+                    double.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+                bool NfBitIdentical(double a, double b) =>
+                    BitConverter.DoubleToInt64Bits(a) == BitConverter.DoubleToInt64Bits(b);
+
+                // (a) classic dp-rounded catalog values take the shortest form.
+                Assert(NfValue(0.101) == "0.101",
+                    "number-format: 0.101 writes as 0.101 (not the G17 artifact)");
+                Assert(NfValue(0.2989) == "0.2989",
+                    "number-format: a 4dp value writes shortest");
+                var nfEntry = new TrackEntry
+                {
+                    Features = new TrackFeatures { Danceability = 0.101, SpectralCentroid = 0.2989 },
+                };
+                string nfJson;
+                using (var nfMs = new MemoryStream())
+                {
+                    using (var nfJw = new Utf8JsonWriter(nfMs))
+                    {
+                        nfJw.WriteStartObject();
+                        WriteTrackEntry(nfJw, @"D:\m\nf.flac", nfEntry);
+                        nfJw.WriteEndObject();
+                    }
+                    nfJson = Encoding.UTF8.GetString(nfMs.ToArray());
+                }
+                Assert(nfJson.Contains("\"danceability\":0.101,"),
+                    "number-format: catalog entry carries the shortest danceability text");
+                Assert(!nfJson.Contains("0.10100000000000001"),
+                    "number-format: catalog entry has no G17 artifact");
+
+                // (b) full-precision fallback: text may stay G17 but parse-back is bit-identical.
+                double nfThird = 1.0 / 3.0;
+                Assert(NfBitIdentical(NfParse(NfValue(nfThird)), nfThird),
+                    "number-format: full-precision double falls back, parse-back bit-identical");
+
+                // (c) tiny fallback: decimal would round 1e-30 to zero; predicate must reject.
+                double nfTiny = 1e-30;
+                Assert(NfBitIdentical(NfParse(NfValue(nfTiny)), nfTiny),
+                    "number-format: 1e-30 rejects the decimal path, parse-back bit-identical");
+
+                // Zero guard: (double)((decimal)(-0.0)) == -0.0 is TRUE under ==, so without
+                // the explicit v != 0.0 check the decimal path would launder the sign bit.
+                // Both zeros must take the plain double writer (bytes unchanged from today).
+                Assert(NfValue(-0.0) == NfBaseline(-0.0) && NfValue(0.0) == NfBaseline(0.0),
+                    "number-format: both zeros take the fallback writer (sign bit never laundered)");
+            }
+
             // --- Sidecar regeneration after a maintenance-mode catalog rewrite ---
             // The mutating modes rewrite the catalog through their own File.WriteAllText /
             // AtomicReplace (not SaveResults), so RegenerateSidecar is what keeps the .mbxs
@@ -14749,6 +14826,42 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return ("unknown", null);
         }
 
+        /// <summary>True when v has a provably-lossless shortest decimal form. Zero is
+        /// excluded on purpose: (double)((decimal)(-0.0)) == -0.0 compares TRUE under ==,
+        /// so the decimal path would silently launder the sign bit of a negative zero —
+        /// both zeros take the plain double writer instead (same bytes as today).</summary>
+        static bool TryShortestDecimal(double v, out decimal m)
+        {
+            if (!double.IsNaN(v) && !double.IsInfinity(v) && v != 0.0 && Math.Abs(v) < 7.9e28)
+            {
+                m = (decimal)v;                    // rounds to <= 15 significant digits
+                if ((double)m == v) return true;   // parse-back is the bit-identical double
+            }
+            m = 0m;
+            return false;
+        }
+
+        /// <summary>Write a double in shortest text form when provably lossless.
+        /// net48's Utf8JsonWriter prints G17 ("0.10100000000000001") because the
+        /// shortest-round-trip formatter is .NET Core 3+ only. Casting the (already
+        /// dp-rounded) double to decimal yields the short form ("0.101") — but ONLY
+        /// when converting back gives the bit-identical double do we use it, so this
+        /// can never change a parsed value: full-precision, huge (>=~7.9e28), tiny
+        /// (<~1e-28 nonzero) and non-finite doubles all fall back to the double writer
+        /// (same bytes as today).</summary>
+        static void WriteShortestNumber(Utf8JsonWriter jw, double v)
+        {
+            if (TryShortestDecimal(v, out var m)) jw.WriteNumberValue(m);
+            else jw.WriteNumberValue(v);
+        }
+
+        /// <summary>Property-name overload of WriteShortestNumber.</summary>
+        static void WriteShortestNumber(Utf8JsonWriter jw, string name, double v)
+        {
+            if (TryShortestDecimal(v, out var m)) jw.WriteNumber(name, m);
+            else jw.WriteNumber(name, v);
+        }
+
         static void WriteTrackEntry(Utf8JsonWriter jw, string path, TrackEntry entry)
         {
             var f = entry.Features;
@@ -14759,30 +14872,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             jw.WriteString("title", f.Title);
             jw.WriteString("album", f.Album);
             jw.WriteString("genre", f.Genre);
-            jw.WriteNumber("bpm", f.Bpm);
+            WriteShortestNumber(jw, "bpm", f.Bpm);
             jw.WriteString("key", f.Key);
             jw.WriteString("mode", f.Mode);
-            jw.WriteNumber("spectralCentroid", f.SpectralCentroid);
-            jw.WriteNumber("spectralFlux", f.SpectralFlux);
-            jw.WriteNumber("loudness", f.Loudness);
-            jw.WriteNumber("danceability", f.Danceability);
-            jw.WriteNumber("onsetRate", f.OnsetRate);
-            jw.WriteNumber("zeroCrossingRate", f.ZeroCrossingRate);
-            jw.WriteNumber("spectralRms", f.SpectralRms);
-            jw.WriteNumber("spectralFlatness", f.SpectralFlatness);
-            jw.WriteNumber("dissonance", f.Dissonance);
-            jw.WriteNumber("pitchSalience", f.PitchSalience);
-            jw.WriteNumber("chordsChangesRate", f.ChordsChangesRate);
+            WriteShortestNumber(jw, "spectralCentroid", f.SpectralCentroid);
+            WriteShortestNumber(jw, "spectralFlux", f.SpectralFlux);
+            WriteShortestNumber(jw, "loudness", f.Loudness);
+            WriteShortestNumber(jw, "danceability", f.Danceability);
+            WriteShortestNumber(jw, "onsetRate", f.OnsetRate);
+            WriteShortestNumber(jw, "zeroCrossingRate", f.ZeroCrossingRate);
+            WriteShortestNumber(jw, "spectralRms", f.SpectralRms);
+            WriteShortestNumber(jw, "spectralFlatness", f.SpectralFlatness);
+            WriteShortestNumber(jw, "dissonance", f.Dissonance);
+            WriteShortestNumber(jw, "pitchSalience", f.PitchSalience);
+            WriteShortestNumber(jw, "chordsChangesRate", f.ChordsChangesRate);
             // DR is emitted only when present — old entries pass through without gaining empty keys.
             // MBXHub plugin treats missing as null and falls back to loudness-derived / genre-default.
             if (f.DynamicRange.HasValue)
             {
-                jw.WriteNumber("dynamicRange", f.DynamicRange.Value);
+                WriteShortestNumber(jw, "dynamicRange", f.DynamicRange.Value);
                 if (!string.IsNullOrEmpty(f.DynamicRangeSource))
                     jw.WriteString("dynamicRangeSource", f.DynamicRangeSource);
             }
             // Extended features — same omit-when-null pattern.
-            static void WriteOpt(Utf8JsonWriter w, string name, double? v) { if (v.HasValue) w.WriteNumber(name, v.Value); }
+            static void WriteOpt(Utf8JsonWriter w, string name, double? v) { if (v.HasValue) WriteShortestNumber(w, name, v.Value); }
             WriteOpt(jw, "loudnessMomentary", f.LoudnessMomentary);
             WriteOpt(jw, "loudnessShortTerm", f.LoudnessShortTerm);
             WriteOpt(jw, "replayGain", f.ReplayGain);
@@ -14830,7 +14943,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 w.WriteStartObject();
                 w.WriteString("key", v.Key);
                 w.WriteString("scale", v.Scale);
-                w.WriteNumber("strength", Math.Round(v.Strength, 4));
+                WriteShortestNumber(w, "strength", Math.Round(v.Strength, 4));
                 w.WriteEndObject();
             }
             if (f.KeyVoteKrumhansl != null || f.KeyVoteTemperley != null || f.KeyVoteEdma != null)
@@ -14854,7 +14967,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("chordsHistogram");
                 jw.WriteStartArray();
-                foreach (var v in f.ChordsHistogram) jw.WriteNumberValue(Math.Round(v, 4));
+                foreach (var v in f.ChordsHistogram) WriteShortestNumber(jw, Math.Round(v, 4));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "chordsNumberRate", f.ChordsNumberRate);
@@ -14867,7 +14980,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("hpcp12");
                 jw.WriteStartArray();
-                foreach (var v in f.Hpcp12) jw.WriteNumberValue(Math.Round(v, 4));
+                foreach (var v in f.Hpcp12) WriteShortestNumber(jw, Math.Round(v, 4));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "dynamicComplexity", f.DynamicComplexity);
@@ -14875,7 +14988,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("thpcp12");
                 jw.WriteStartArray();
-                foreach (var v in f.Thpcp12) jw.WriteNumberValue(Math.Round(v, 4));
+                foreach (var v in f.Thpcp12) WriteShortestNumber(jw, Math.Round(v, 4));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "beatsIntervalMean", f.BeatsIntervalMean);
@@ -14892,7 +15005,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("mfccStdev");
                 jw.WriteStartArray();
-                foreach (var v in f.MfccStdev) jw.WriteNumberValue(Math.Round(v, 4));
+                foreach (var v in f.MfccStdev) WriteShortestNumber(jw, Math.Round(v, 4));
                 jw.WriteEndArray();
             }
             void WriteArr(string name, double[]? a)
@@ -14900,7 +15013,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (a == null) return;
                 jw.WritePropertyName(name);
                 jw.WriteStartArray();
-                foreach (var v in a) jw.WriteNumberValue(Math.Round(v, 4));
+                foreach (var v in a) WriteShortestNumber(jw, Math.Round(v, 4));
                 jw.WriteEndArray();
             }
             WriteArr("spectralContrastCoeffs", f.SpectralContrastCoeffs);
@@ -14914,8 +15027,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WritePropertyName("bitUsage");
                 jw.WriteStartObject();
                 jw.WriteNumber("lowestNonZeroBit", f.BitUsage.LowestNonZeroBit);
-                jw.WriteNumber("bottomBitActivity", f.BitUsage.BottomBitActivity);
-                jw.WriteNumber("effectiveBits", f.BitUsage.EffectiveBits);
+                WriteShortestNumber(jw, "bottomBitActivity", f.BitUsage.BottomBitActivity);
+                WriteShortestNumber(jw, "effectiveBits", f.BitUsage.EffectiveBits);
                 jw.WriteNumber("samplesAnalyzed", f.BitUsage.SamplesAnalyzed);
                 if (!string.IsNullOrEmpty(f.BitUsage.Method))
                     jw.WriteString("method", f.BitUsage.Method);
@@ -14923,7 +15036,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             // Phase 3 — HF energy ratio; omit-when-null.
             if (f.HfEnergyRatio.HasValue)
-                jw.WriteNumber("hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, 6));
+                WriteShortestNumber(jw, "hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, 6));
             if (!string.IsNullOrEmpty(f.HfEnergyMethod))
                 jw.WriteString("hfEnergyMethod", f.HfEnergyMethod);
             // Phase 5 — HF spectral structure (FFT-derived); omit-when-null.
@@ -14931,9 +15044,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("hfSpectralStructure");
                 jw.WriteStartObject();
-                jw.WriteNumber("flatness", Math.Round(f.HfSpectralStructure.Flatness, 4));
-                jw.WriteNumber("peakToMean", Math.Round(f.HfSpectralStructure.PeakToMean, 2));
-                jw.WriteNumber("imagingSymmetry", Math.Round(f.HfSpectralStructure.ImagingSymmetry, 4));
+                WriteShortestNumber(jw, "flatness", Math.Round(f.HfSpectralStructure.Flatness, 4));
+                WriteShortestNumber(jw, "peakToMean", Math.Round(f.HfSpectralStructure.PeakToMean, 2));
+                WriteShortestNumber(jw, "imagingSymmetry", Math.Round(f.HfSpectralStructure.ImagingSymmetry, 4));
                 if (!string.IsNullOrEmpty(f.HfSpectralStructure.Method))
                     jw.WriteString("method", f.HfSpectralStructure.Method);
                 jw.WriteEndObject();
@@ -14948,19 +15061,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WriteEndArray();
                 WriteOpt(jw, "smfmChannel", (double?)f.SmfmChannel);
                 WriteOptStr(jw, "smfmChannelName", f.SmfmChannelName);
-                if (f.SmfmBpm.HasValue) jw.WriteNumber("smfmBpm", Math.Round(f.SmfmBpm.Value, 3));
+                if (f.SmfmBpm.HasValue) WriteShortestNumber(jw, "smfmBpm", Math.Round(f.SmfmBpm.Value, 3));
             }
             if (f.Mfcc != null)
             {
                 jw.WritePropertyName("mfcc");
                 jw.WriteStartArray();
-                foreach (var v in f.Mfcc) jw.WriteNumberValue(v);
+                foreach (var v in f.Mfcc) WriteShortestNumber(jw, v);
                 jw.WriteEndArray();
             }
             jw.WriteString("lastModified", entry.LastModified.ToString("o"));
             if (entry.AnalysisDurationSecs.HasValue)
             {
-                jw.WriteNumber("analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, 1));
+                WriteShortestNumber(jw, "analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, 1));
             }
             if (!string.IsNullOrEmpty(entry.FileMd5))
                 jw.WriteString("fileMd5", entry.FileMd5);
@@ -14997,13 +15110,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WriteStartObject();
                 jw.WriteString("hiresGenuine", verdict.HiresGenuine);
                 if (verdict.HiresConfidence.HasValue)
-                    jw.WriteNumber("hiresConfidence", verdict.HiresConfidence.Value);
+                    WriteShortestNumber(jw, "hiresConfidence", verdict.HiresConfidence.Value);
                 jw.WriteString("lossyTranscodeLikely", verdict.LossyTranscodeLikely);
                 if (verdict.LossyTranscodeConfidence.HasValue)
-                    jw.WriteNumber("lossyTranscodeConfidence", verdict.LossyTranscodeConfidence.Value);
+                    WriteShortestNumber(jw, "lossyTranscodeConfidence", verdict.LossyTranscodeConfidence.Value);
                 jw.WriteString("speechLikely", verdict.SpeechLikely);
                 if (verdict.SpeechConfidence.HasValue)
-                    jw.WriteNumber("speechConfidence", verdict.SpeechConfidence.Value);
+                    WriteShortestNumber(jw, "speechConfidence", verdict.SpeechConfidence.Value);
                 jw.WriteString("speechMethod", verdict.SpeechMethod);
                 if (!string.IsNullOrEmpty(verdict.Prov))
                     jw.WriteString("prov", verdict.Prov);
