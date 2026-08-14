@@ -76,29 +76,60 @@ wins. Keep the table beside the version constants so a new build is a one-line a
 
 Operator-parked; do not build without an explicit go.
 
-## Resumable / incremental verify (PARKED 2026-08-08)
+## Resumable / interruptible verify (backlogged 2026-08-14 — field-driven)
 
 `--verify` is a whole-catalog one-shot: it re-reads every file's audio region to
 recompute `audioStreamSha256`, holds results in memory, and writes
 `mbxmoods-verify.csv` (and, under `--backfill`, the moods file) only at the end. Kill
-it or lose power mid-run and all progress is lost — the next run starts from zero. On a
-large library over the wire that's a 2 hr (72K local-tested) to 24 hr (156K, field
-report) pass that saturates the link the whole time and can't be paused. It's also
-mutually exclusive with `--chunk`, so it can't be sharded for restartability either.
+it or lose power mid-run and all progress is lost — the next run starts from zero. It's
+also mutually exclusive with `--chunk`, so it can't be sharded for restartability either.
 
-Proposed: a per-entry `lastVerified` timestamp, written on an OK result, so verify can
-(a) skip entries verified within the last N days and (b) resume an interrupted run by
-continuing over the un-verified remainder — turning the multi-hour wall into resumable
-slices runnable in quiet windows.
+**Field driver (Trev, 2026-08-14):** a ~6 TB / ~156K library verified over WiFi5 (866
+Mbps link) ran an 18–24 hr pass that saturated the link the whole time; summer
+thunderstorms blip the NAS/router, and with no pause/resume a blip means starting from
+zero. This is the concrete need the 2026-08-08 park was waiting on.
 
-Why parked (operator ruling 2026-08-08): this changes the **schema**, which is locked
-(2026-07-11 rule — no field churn without an explicit ask), and it would make *plain*
-verify a **writer** (it must save the ~900 MB catalog to record the timestamps), turning
-a read-only audit into a full write. Operator does not want to churn the schema more on a
-guess. The value is real but unproven against a concrete need; revisit only if resumable
-verify becomes a felt requirement, not speculatively.
+Two candidate approaches (decide at build time — could ship one, or both):
 
-Operator-parked; do not build without an explicit go.
+- **A. Chunking — wire `--chunk M/N` into `--verify`.** Each shard verifies its own
+  hash-mod subset (the deterministic `ChunkOwns` split already used for scanning) and
+  writes a hostname/chunk-suffixed CSV; a completed shard is durably done, so the operator
+  runs the pass in restartable slices across quiet windows. **Lightest option — no schema
+  change, plain verify stays read-only**; it only lifts the `--verify`/`--chunk`
+  mutual-exclusion. This is the approach that dodges the schema-lock objection that parked
+  the item, and it's the better first cut for Trev's exact case.
+- **B. Checkpoints — per-entry `lastVerified` timestamp.** Written on an OK result so
+  verify can skip entries verified within the last N days and auto-resume over the
+  un-verified remainder — no manual sharding. **Cost: this changes the locked schema
+  (2026-07-11 rule) AND makes *plain* verify a writer** (it must save the ~900 MB catalog
+  to record timestamps), turning a read-only audit into a full write. That cost is exactly
+  why 2026-08-08 parked it; approach A avoids it entirely.
+
+Backlogged, not authorized — needs an explicit go, and the approach (A / B / both) is an
+open decision.
+
+## Prune catalog entries by exclusion rule (backlogged 2026-08-14 — field-driven)
+
+A maintenance pass that cross-references `mbxmoods-exclude.json` against the catalog and
+**removes entries matching an exclusion rule** — closing the gap that exclusions gate
+*future* scanning but never retire entries scanned before a rule existed (or before the
+exclusion feature shipped). Natural home is `--fixup` (its existing catalog-reconciliation
+pass) or a dedicated verb; write a compressed, rotated backup first like the other mutating
+modes.
+
+**Field driver (Trev, 2026-08-14):** a dozen-odd tracks that need a refresh but are now
+excluded (scanned pre-exclusion-feature) sit stale in the catalog forever; plus a batch of
+1 hr+ tracks he wants excluded *and* dropped from the file.
+
+**This is on-side, and the distinction is the whole point:** it prunes on
+**operator-written rules** (evidence), never on a classification (heuristic). The entire
+heuristic-purge class was deliberately deleted (`CLAUDE.md`, Heuristics → Evidence), and
+this is explicitly NOT that — it acts on the same ground-truth authority as any
+`include`/`exclude` rule the operator authored. Guardrails: `include` still wins (never
+prune an included entry); backup-before-write; and a `--preview`-style dry run reporting
+exactly what would be removed before it touches the file.
+
+Backlogged, not authorized — needs an explicit go.
 
 ## Compressed LIVE catalog — stretch (backup/snapshot half SHIPPED 2026-08-09)
 
