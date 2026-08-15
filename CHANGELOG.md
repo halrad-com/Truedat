@@ -3,7 +3,7 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+## [0.5.4.9-RC0] — 2026-08-15
 
 ### Added
 
@@ -30,15 +30,11 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Fixed
 
-- **Catalog doubles now serialize in shortest text form.** net48's `Utf8JsonWriter` lacks the
-  shortest-round-trip double formatter (.NET Core 3+ only), so a dp-rounded value landed in
-  the catalog as its G17 expansion — `0.10100000000000001` for a stored `0.101`. Provably
-  lossless: a number's text is only shortened when parsing it back yields the bit-identical
-  double; everything else (full-precision, huge, tiny, non-finite) keeps today's bytes.
-  Applies to new saves and — via the same predicate in the number branch of the token copier —
-  to `--compact`/`--prettify` re-formatting of existing catalogs, no rescan needed.
-  Measured on a real 72k-track catalog: 372.7 MB → 260.6 MB (**30% smaller**), values verified
-  intact (100% Essentia + identity coverage after the pass).
+- **`--compact` and `--prettify` were missing from `--help`.** Both have shipped since
+  `f4cc04d` and are documented in the README, but the binary's own help never listed them, so
+  the only way to discover them was to already know they existed. The self-test's drift guard
+  didn't catch it because it checks one direction only — a flag *mentioned in help* must exist
+  in `KnownFlags`, not the reverse.
 
 ## [0.5.4.8-RC1] — 2026-08-13
 
@@ -85,6 +81,15 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   with thresholds derived from the live-catalog distribution (n=3716 ordinary-music
   entries: median 0.101, p90 0.299): talk when > 0.30, music when < 0.06. `speechMethod`
   bumps to `truedat-speech-v1.3-untuned-2026-08-13`. Write-time and retroactive — no rescan.
+- **Catalog doubles now serialize in shortest text form.** net48's `Utf8JsonWriter` lacks the
+  shortest-round-trip double formatter (.NET Core 3+ only), so a dp-rounded value landed in
+  the catalog as its G17 expansion — `0.10100000000000001` for a stored `0.101`. Provably
+  lossless: a number's text is only shortened when parsing it back yields the bit-identical
+  double; everything else (full-precision, huge, tiny, non-finite) keeps today's bytes.
+  Applies to new saves and — via the same predicate in the number branch of the token copier —
+  to `--compact`/`--prettify` re-formatting of existing catalogs, no rescan needed.
+  Measured on a real 72k-track catalog: 372.7 MB → 260.6 MB (**30% smaller**), values verified
+  intact (100% Essentia + identity coverage after the pass).
 
 ### Added
 

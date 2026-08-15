@@ -656,6 +656,14 @@ namespace Truedat
             Console.WriteLine("  --restore <archive> Rebuild mbxmoods.json from a snapshot / backup / .gz / plain catalog");
             Console.WriteLine("                      (format is sniffed). Backs up any existing catalog first; restores the");
             Console.WriteLine("                      catalog only (a bundled exclusion file is left in the archive).");
+            Console.WriteLine("  --compact [path]    Re-format an existing catalog to minimal JSON in place (the format");
+            Console.WriteLine("                      every save already writes). Lossless: a JSON-level round-trip that");
+            Console.WriteLine("                      preserves every field byte-for-byte in value, including keys truedat");
+            Console.WriteLine("                      does not model. Archives a compressed backup first. Never re-analyzes.");
+            Console.WriteLine("  --prettify [path] [out]  The inverse: re-format to indented, human-readable JSON. With no");
+            Console.WriteLine("                      <out> the catalog is rewritten in place (backup archived first); give");
+            Console.WriteLine("                      <out> and the source is left untouched. Same lossless round-trip —");
+            Console.WriteLine("                      use it to read a catalog, then --compact to put it back.");
             Console.WriteLine("  --keep-backups N    Keep the newest N timestamped catalog backups after --fixup / --remap /");
             Console.WriteLine("                      --merge-moods / --migrate (rotation, never truncation; 0 = keep all,");
             Console.WriteLine("                      default 5). Backups are compressed .zip (~8-10x smaller than a plain copy).");
