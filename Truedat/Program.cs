@@ -6329,6 +6329,43 @@ namespace Truedat
             return $"{bytes} B";
         }
 
+        /// <summary>One-phrase verdict on whether MBXHub can boot from this sidecar, for the
+        /// compact --stats line. Pure so the branch that matters most — an OLD-VERSION sidecar,
+        /// which looks perfectly healthy by size and mtime yet silently demotes the hub to the
+        /// slow JSON boot — is testable here; the writer only ever emits the current version, so
+        /// that case cannot be produced on disk to test end-to-end.
+        /// Precedence is deliberate: version first (an unreadable or unsupported sidecar is
+        /// unusable no matter how fresh), then freshness, then count.</summary>
+        internal static string SidecarStateNote(SidecarReadout sc, int currentVersion)
+        {
+            if (!sc.Present) return "absent — MBXHub parses the full JSON at boot";
+            if (sc.Version < 0) return "unreadable — JSON fallback";
+            if (sc.Version != currentVersion) return "JSON fallback (MBXHub declines an unknown version)";
+            if (sc.FreshnessKnown && !sc.Fresh) return "STALE, older than the catalog";
+            if (sc.SidecarCount >= 0 && sc.CatalogCount >= 0 && sc.SidecarCount != sc.CatalogCount)
+                return $"{sc.SidecarCount:N0} of {sc.CatalogCount:N0} entries — regenerate";
+            return "current, fresh";
+        }
+
+        /// <summary>The --stats Recommended line for an unusable sidecar, or null when it is
+        /// healthy. Null on healthy is the point: the advisor only ever names a gap a command
+        /// can close (the d146a04 rule), and a good sidecar says its piece in the Catalog block
+        /// instead of nagging. Shares SidecarStateNote's precedence by construction.</summary>
+        internal static string? SidecarAdvice(SidecarReadout sc, int currentVersion)
+        {
+            if (!sc.Present)
+                return "no .mbxs sidecar                        ->  truedat  (any scan writes one; MBXHub parses the full JSON at boot until then)";
+            if (sc.Version < 0)
+                return "sidecar unreadable                      ->  truedat --compact  (or any scan) to rewrite it";
+            if (sc.Version != currentVersion)
+                return $"sidecar is v{sc.Version}, this build writes v{currentVersion}   ->  truedat  (any scan rewrites it; the hub falls back to JSON until then)";
+            if (sc.FreshnessKnown && !sc.Fresh)
+                return "sidecar is older than the catalog       ->  truedat --compact  (or any scan) to regenerate it";
+            if (sc.SidecarCount >= 0 && sc.CatalogCount >= 0 && sc.SidecarCount != sc.CatalogCount)
+                return $"sidecar holds {sc.SidecarCount:N0} of {sc.CatalogCount:N0} entries   ->  truedat --compact  (or any scan) to regenerate it";
+            return null;
+        }
+
         /// <summary>Print the sidecar-integrity block. Purely informational — never changes
         /// <c>--verify</c>'s exit code (the sidecar is an optional cache; the exit code stays
         /// driven by the hash-drift walk).</summary>
@@ -8395,6 +8432,17 @@ namespace Truedat
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate  (needs the library's iTunes XML; run from the library dir, not a metadata mirror)");
+
+            // Sidecar integrity, in the cheap read-only surface. This readout used to live only
+            // in --verify, which walks every file recomputing SHAs — so the only way to answer
+            // "is my .mbxs the version the hub can boot from?" was to start an hours-long verify
+            // and Ctrl+C out of it. It belongs here: --stats already reads the catalog and the
+            // question is diagnostic, not integrity-of-audio.
+            var sc = InspectSidecar(path);
+            int scCurrent = (int)CatalogSidecar.FormatVersion;
+            var scAdvice = SidecarAdvice(sc, scCurrent);
+            if (scAdvice != null) rec.Add(scAdvice);
+
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
             {
@@ -8414,11 +8462,19 @@ namespace Truedat
                 {
                     Console.WriteLine();
                     Console.WriteLine($"  Catalog:  {catBytes / (1024.0 * 1024.0):F1} MB  (mbxmoods.json)");
-                    var scPath = Path.ChangeExtension(path, ".mbxs");
-                    if (File.Exists(scPath))
+                    if (sc.Present)
                     {
-                        long scBytes = new FileInfo(scPath).Length;
-                        Console.WriteLine($"  Sidecar:  {scBytes / (1024.0 * 1024.0):F1} MB  (.mbxs binary index, {(double)catBytes / Math.Max(1, scBytes):F0}x smaller)");
+                        // One line, but it must answer the question that matters: can MBXHub boot
+                        // from this, or is it silently falling back to parsing the whole JSON?
+                        // Size alone never answered that — a v2 sidecar looks perfectly healthy.
+                        string ver = sc.Version < 0 ? "unreadable"
+                                   : sc.Version == scCurrent ? $"v{sc.Version}"
+                                   : $"v{sc.Version}, needs v{scCurrent}";
+                        Console.WriteLine($"  Sidecar:  {sc.SizeBytes / (1024.0 * 1024.0):F1} MB  (.mbxs {ver}, {(double)catBytes / Math.Max(1, sc.SizeBytes):F0}x smaller) — {SidecarStateNote(sc, scCurrent)}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("  Sidecar:  none  (.mbxs absent — MBXHub parses the full JSON at boot)");
                     }
                     var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
                     var baks = Directory.GetFiles(dir, Path.GetFileName(path) + ".bak.*.zip");
@@ -13405,6 +13461,53 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                        && swung.Value.Min == 0.4 && swung.Value.Max == 0.6, "beats: alternating -> mean 0.5, stdev 0.1, min 0.4, max 0.6");
                 Assert(BeatIntervalStats(null) == null, "beats: null -> null");
                 Assert(BeatIntervalStats(new[] { 0.0, 1.0 }) == null, "beats: <3 beats -> null");
+            }
+
+            // --- --stats sidecar verdict: SidecarStateNote / SidecarAdvice -------------
+            // The load-bearing case is an OLD-VERSION sidecar: right size, right mtime, looks
+            // healthy — and silently demotes MBXHub to the slow JSON boot. It cannot be produced
+            // on disk (the writer only emits the current version), so it is pinned here.
+            {
+                const int cur = 3;
+                SidecarReadout R(bool present, int ver, bool freshKnown, bool fresh, int scCount, int catCount)
+                    => new SidecarReadout
+                    {
+                        Present = present, Version = ver, FreshnessKnown = freshKnown, Fresh = fresh,
+                        SidecarCount = scCount, CatalogCount = catCount, SizeBytes = 1024
+                    };
+
+                var healthy = R(true, 3, true, true, 100, 100);
+                Assert(SidecarStateNote(healthy, cur) == "current, fresh", "sidecar-stats: a current fresh sidecar reads healthy");
+                Assert(SidecarAdvice(healthy, cur) == null, "sidecar-stats: a healthy sidecar produces NO advice (never nag)");
+
+                // THE case: v2 on a v3 build — the hub declines it and falls back to JSON.
+                var old = R(true, 2, true, true, 100, 100);
+                Assert(SidecarStateNote(old, cur).IndexOf("JSON fallback", StringComparison.Ordinal) >= 0,
+                    $"sidecar-stats: an old-version sidecar reads as JSON fallback (got '{SidecarStateNote(old, cur)}')");
+                Assert(SidecarAdvice(old, cur) != null && SidecarAdvice(old, cur)!.IndexOf("v2", StringComparison.Ordinal) >= 0,
+                    "sidecar-stats: an old-version sidecar advises, naming the version it found");
+
+                var absent = R(false, 0, false, false, -1, -1);
+                Assert(SidecarStateNote(absent, cur).IndexOf("absent", StringComparison.Ordinal) >= 0, "sidecar-stats: absent reads absent");
+                Assert(SidecarAdvice(absent, cur) != null, "sidecar-stats: absent advises");
+
+                var stale = R(true, 3, true, false, 100, 100);
+                Assert(SidecarStateNote(stale, cur).IndexOf("STALE", StringComparison.Ordinal) >= 0, "sidecar-stats: older-than-catalog reads STALE");
+
+                var shortCount = R(true, 3, true, true, 90, 100);
+                Assert(SidecarStateNote(shortCount, cur).IndexOf("90 of 100", StringComparison.Ordinal) >= 0,
+                    "sidecar-stats: a count mismatch names both counts");
+
+                // Precedence: version beats freshness. A v2 sidecar that is ALSO stale must
+                // report the version (the unusable fact), not the staleness (the fixable one).
+                var oldAndStale = R(true, 2, true, false, 100, 100);
+                Assert(SidecarStateNote(oldAndStale, cur).IndexOf("JSON fallback", StringComparison.Ordinal) >= 0,
+                    "sidecar-stats: version outranks freshness when both are wrong");
+
+                // Unknown freshness must not read as stale — the hub still boots from it.
+                var freshUnknown = R(true, 3, false, false, 100, 100);
+                Assert(SidecarStateNote(freshUnknown, cur) == "current, fresh",
+                    "sidecar-stats: unknown freshness is not treated as stale");
             }
 
             // --- mfcc stdev from covariance diagonal (capture-once, speech) --------

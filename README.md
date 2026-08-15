@@ -131,13 +131,20 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --stats [path]          Read-only catalog summary: Essentia-analyzed count, hash coverage
                           per kind, and SMFM track count. Path defaults to ./mbxmoods.json.
                           Also printed at end of every scan. With --audit, written to the log.
-                          Reports ONE speech count — the union of the label (stored genre
-                          == "Podcast") and the acoustic verdict (speechLikely == yes), each
-                          entry counted once — pointing at review + an exclusion rule
-                          (never --migrate, which doesn't touch entries either way). Separately,
-                          a Recommended section maps detected gaps (missing tonal/rhythm wave,
-                          missing fingerprint.v1, stray fileMd5) to the exact command that
-                          closes each — truedat never prompts interactively.
+                          Reports TWO disjoint speech counts, so each points at a surface that
+                          can actually show what it counted: "Speech (acoustic)" is the
+                          recomputed speechLikely == yes set (exactly what --list-speech lists)
+                          and "Speech (genre label)" is the stored genre == "Podcast" remainder
+                          that never reached an acoustic yes (invisible to --list-speech, so it
+                          points at a genre rule instead). Both point at review + an exclusion
+                          rule, never at --migrate, which doesn't touch entries either way.
+                          Also reports the .mbxs sidecar's version, freshness and entry count —
+                          the cheap way to see whether MBXHub can boot from it or is silently
+                          falling back to parsing the whole JSON. Separately, a Recommended
+                          section maps detected gaps (missing tonal/rhythm wave, missing
+                          fingerprint.v1, stray fileMd5, entries an exclusion rule now covers,
+                          an unusable sidecar) to the exact command that closes each — truedat
+                          never prompts interactively.
   --stats-detail N        List per-file status when a catalog has < N tracks (default 5).
   --list-speech [path]    Read-only: list the entries whose verdict is speechLikely=yes —
                           candidates for an exclusion rule, not a --migrate prune (--migrate

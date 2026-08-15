@@ -3,6 +3,24 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Added
+
+- **`--stats` now reports the `.mbxs` sidecar's version, freshness and entry count**, not just
+  its size. This answers "can MBXHub boot from this, or is it silently parsing the whole JSON?"
+  — a question that previously had no cheap surface: the readout existed only in `--verify`,
+  which walks every file recomputing SHAs, so the only way to check was to start an hours-long
+  verify and Ctrl+C out of it. An unusable sidecar (absent, old version, stale, wrong count)
+  also earns a Recommended line naming the fix; a healthy one stays silent. The old-version case
+  is the one that matters and the one size alone could never show — a v2 sidecar looks perfectly
+  healthy by size and mtime while the hub declines it and falls back to JSON.
+
+### Fixed
+
+- **`--stats`' README description still documented the single union speech count** that was
+  split into two disjoint lines in `4d8a60c`.
+
 ## [0.5.4.9-RC0] — 2026-08-15
 
 ### Added
