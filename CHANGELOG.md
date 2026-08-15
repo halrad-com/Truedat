@@ -21,6 +21,12 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   Kept separate from `--fixup` deliberately: that mode needs the XML and reconciles *paths* against
   the filesystem, and folding a second removal class into it would change what it costs without
   the operator typing anything new.
+- **`--stats` now surfaces that gap.** The **Recommended** block counts the entries your rules
+  cover and names `--prune-excluded`; the wave-missing breakdown's "excluded from scanning"
+  bucket — previously a dead end reading "a rescan skips these" — now says the rule-excluded
+  ones can be retired. A test pins the advisor's count to the prune's own removal set, so the
+  summary can never quote a number its command won't produce (the d146a04 rule: only ever name
+  a gap some command can close).
 
 ### Fixed
 

@@ -2593,7 +2593,23 @@ namespace Truedat
                 TeeWriter? statsTee = null;
                 string statsLog = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log");
                 if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); _tee = statsTee; }
-                ReportCatalog(statsPath!, statsTracks.Values, statsDetailThreshold);
+                // Load the exclusion rules FRESH and local to this report (never the scan's
+                // live _exclusions — see the MatchCount note on ComputeCatalogStats), so the
+                // summary can count entries a rule now covers and point at --prune-excluded.
+                // An unparseable rule file is not fatal HERE: --stats is a read-only report and
+                // must still render everything else it knows. Report zero and say why instead.
+                ExclusionSet? statsExclusions = null;
+                if (!_noExclusions)
+                {
+                    var statsExclFile = _exclusionsPath ?? ExclusionStore.Resolve(statsPath!);
+                    statsExclusions = ExclusionStore.Load(statsExclFile, out var statsExclErr);
+                    if (statsExclErr != null)
+                    {
+                        Console.WriteLine($"  (exclusion rules unreadable, so no prune count: {statsExclErr})");
+                        statsExclusions = null;
+                    }
+                }
+                ReportCatalog(statsPath!, statsTracks.Values, statsDetailThreshold, null, null, statsExclusions);
                 if (statsTee != null) { Console.WriteLine($"Log:    {statsLog}"); _tee = null; statsTee.Dispose(); }
                 Environment.ExitCode = 0;
                 return;
@@ -8051,6 +8067,13 @@ namespace Truedat
             public int SpeechAcoustic;    // recomputed SpeechLikely=="yes" — exactly the set RunListSpeech lists
             public int SpeechLabelOnly;   // genre=="Podcast" label but NOT acoustic-yes — invisible to --list-speech; a genre rule reaches them
             public int MissingFingerprint; // entries with no fingerprint.v1 block
+            // Entries an exclusion rule now covers — analyzed before the rule existed, so
+            // they sit in the catalog forever (a rule gates future scanning only).
+            // --prune-excluded is the command that closes this, which is the ONLY reason
+            // the advisor is allowed to name it (d146a04: never point at a gap no command
+            // can fix). Counted only when the caller passes an exclusion set; see the
+            // MatchCount note on ComputeCatalogStats for why the scan path passes null.
+            public int ExcludedByRule;
         }
 
         /// <summary>Read-only: list the entries whose stored features recompute to a
@@ -8149,7 +8172,13 @@ namespace Truedat
             }
         }
 
-        static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries)
+        /// <param name="exclusions">When non-null, entries matching a rule are counted into
+        /// <see cref="CatalogStats.ExcludedByRule"/>. **Pass a FRESHLY LOADED set, and never
+        /// the scan's live `_exclusions`.** IsExcluded increments each rule's MatchCount, and
+        /// the scan's per-rule "N matched / (stale rule?)" report reads exactly that counter —
+        /// re-walking the catalog through the live set would silently double it. That is why
+        /// the end-of-scan summary passes null here and only standalone --stats passes a set.</param>
+        static CatalogStats ComputeCatalogStats(IEnumerable<TrackEntry> entries, ExclusionSet? exclusions = null)
         {
             var s = new CatalogStats();
             var shaCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -8177,6 +8206,9 @@ namespace Truedat
                 // --refresh-features; the advisor must see the gap regardless).
                 if (pr.Essentia && (e.Features?.DynamicComplexity == null || e.Features?.SpectralContrastCoeffs == null)) s.MissingWave++;
                 if (e.FingerprintV1 == null) s.MissingFingerprint++;
+                if (exclusions != null && !exclusions.IsEmpty
+                    && exclusions.IsExcluded(e.Features?.FilePath ?? "", e.Features?.Genre, out _))
+                    s.ExcludedByRule++;
                 if (e.Features != null)
                 {
                     // ONE speech genus (audiobook, comedy, lecture, news, interview,
@@ -8205,7 +8237,7 @@ namespace Truedat
         /// --audit tee captures it in truedat.log). When the catalog has fewer than
         /// <paramref name="detailThreshold"/> tracks it lists each file with its per-field
         /// status instead of aggregate counts — aggregates over 1-4 files aren't useful.</summary>
-        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null)
+        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
             int total = entries.Count;
@@ -8250,7 +8282,7 @@ namespace Truedat
                 return note.Length > 0 ? line + "   " + note : line;
             }
 
-            var s = ComputeCatalogStats(entries);
+            var s = ComputeCatalogStats(entries, exclusions);
             Console.WriteLine($"Catalog summary: {path}");
             Console.WriteLine($"  {total:N0} tracks total");
             Console.WriteLine();
@@ -8341,7 +8373,7 @@ namespace Truedat
                 if (waveOrphan > 0)
                     waveBreakdown.Add($"{waveOrphan,6:N0}  no longer in library    ->  truedat --fixup          (drops orphaned entries)");
                 if (waveFiltered > 0)
-                    waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (filtered: exclusion-rule/video/URL/non-audio)");
+                    waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (exclusion-rule/video/URL/non-audio); the rule-excluded ones retire with truedat --prune-excluded");
                 if (waveSkipped > 0)
                     waveBreakdown.Add($"{waveSkipped,6:N0}  skipped, not analyzable ->  see mbxmoods-skipped.csv (e.g. short files; a refresh will NOT clear these)");
                 if (waveStale > 0)
@@ -8349,6 +8381,8 @@ namespace Truedat
                         ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
                         : $"{waveStale,6:N0}  analyzable, just stale   ->  truedat --refresh");
             }
+            if (s.ExcludedByRule > 0)
+                rec.Add($"{s.ExcludedByRule:N0} entries an exclusion rule covers    ->  truedat --prune-excluded --dry-run  (then without --dry-run to retire them)");
             if (s.MissingFingerprint > 0)
                 rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
@@ -13384,6 +13418,55 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var cs = ComputeCatalogStats(new[] { julyOnly, harmonicComplete, notAnalyzed });
                 Assert(cs.MissingWave == 1, "stats: MissingWave counts a July-complete entry lacking the harmonic wave");
                 Assert(cs.EssentiaAnalyzed == 2, "stats: EssentiaAnalyzed counts both mfcc-bearing entries");
+                Assert(cs.ExcludedByRule == 0, "stats: no exclusion set -> ExcludedByRule stays zero (scan path passes null)");
+            }
+
+            // --- --stats ExcludedByRule: the count that earns --prune-excluded a line in the
+            // Recommended block. It must agree with what the prune would actually remove
+            // (same IsExcluded, include-wins included), or the advisor names a number its
+            // own command won't produce — the exact d146a04 defect. ---------------------
+            {
+                TrackEntry Ent(string path, string genre) => new TrackEntry
+                {
+                    Features = new TrackFeatures { FilePath = path, Genre = genre, Mfcc = new double[] { 1 } }
+                };
+                var pool = new[]
+                {
+                    Ent(@"D:\Music\Podcasts\JRE.mp3", "Podcast"),
+                    Ent(@"D:\Music\Podcasts\KEXP\session.flac", "Podcast"),   // rescued by include
+                    Ent(@"D:\Music\Rock\song.flac", "Rock"),
+                };
+                var exSet = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":["
+                    + "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"},"
+                    + "{\"kind\":\"folder\",\"action\":\"include\",\"pattern\":\"\\\\Podcasts\\\\KEXP\\\\**\"}]}",
+                    out var exErr);
+                Assert(exErr == null, $"stats: prune-count rule set parses ({exErr})");
+                var withEx = ComputeCatalogStats(pool, exSet);
+                Assert(withEx.ExcludedByRule == 1, $"stats: ExcludedByRule counts rule-covered entries, include-wins respected (got {withEx.ExcludedByRule})");
+
+                // The advisor's count and the prune's removal list must be the SAME set —
+                // pin them against each other rather than trusting two call sites to agree.
+                var asCatalog = new JsonObject();
+                foreach (var e in pool)
+                {
+                    asCatalog[e.Features!.FilePath!] = new JsonObject { ["genre"] = e.Features.Genre };
+                }
+                var freshSet = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":["
+                    + "{\"kind\":\"folder\",\"action\":\"exclude\",\"pattern\":\"\\\\Podcasts\\\\**\"},"
+                    + "{\"kind\":\"folder\",\"action\":\"include\",\"pattern\":\"\\\\Podcasts\\\\KEXP\\\\**\"}]}",
+                    out _);
+                Assert(PlanExclusionPrune(asCatalog, freshSet).Count == withEx.ExcludedByRule,
+                    "stats: the advisor's count equals what --prune-excluded would remove");
+
+                // A null set must not walk the rules at all: the scan's per-rule
+                // "N matched / (stale rule?)" report reads MatchCount, and a second walk
+                // through the LIVE set would silently double it.
+                var untouched = ExclusionSet.FromJson(
+                    "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"genre\",\"action\":\"exclude\",\"value\":\"Podcast\"}]}", out _);
+                ComputeCatalogStats(pool);   // no set passed — the scan/end-of-run path
+                Assert(untouched.Rules[0].MatchCount == 0, "stats: passing no exclusion set leaves rule MatchCount untouched");
             }
 
             // --- ClassifyWaveMissing precedence: a short-file / over-length entry lands in

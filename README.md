@@ -562,6 +562,11 @@ truedat --prune-excluded --dry-run      # list exactly what would go, write noth
 truedat --prune-excluded                # remove them (compressed backup written first)
 ```
 
+You don't have to remember to check: `truedat --stats` counts the entries your rules now cover
+and names the command in its **Recommended** block, and that count is the same set the prune
+removes (pinned by a test, so the advisor can never quote a number its own command won't
+produce). A catalog with nothing to retire says nothing.
+
 It reads the catalog and the rules and nothing else — no iTunes XML, no audio, genre taken
 from the entry itself — so it runs on a metadata mirror. `include` rules still win, so a track
 you rescued from a scan keeps its entry too, and a rule matching nothing reports `0 matched`
