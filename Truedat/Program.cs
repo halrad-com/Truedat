@@ -676,6 +676,11 @@ namespace Truedat
             Console.WriteLine("                      delta + --apply-exclusions; audio files untouched)");
             Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data");
             Console.WriteLine("                      + coverage -> mbxmoods-smfm-missing.csv");
+            Console.WriteLine("  --prune-excluded [path]  Remove catalog entries matching an exclusion rule — the");
+            Console.WriteLine("                      entries scanned before the rule existed, which exclusions only");
+            Console.WriteLine("                      ever kept out of FUTURE scans. include rules still win; backs up");
+            Console.WriteLine("                      first. Add --dry-run to list exactly what would go, writing nothing.");
+            Console.WriteLine("                      Audio files are never touched.");
             Console.WriteLine();
             Console.WriteLine("Advanced:");
             Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
@@ -731,7 +736,7 @@ namespace Truedat
             Console.WriteLine("                      lossy WMA -> FLAC is larger but no worse, and escapes the format.");
             Console.WriteLine("  --convert-codecs <list>  With --convert-dir: comma list of ffprobe codecs to target (advanced).");
             Console.WriteLine("  --compression-level <0-8>  FLAC compression for --convert-dir (default 8) / --transcode (default 0).");
-            Console.WriteLine("  --dry-run           With --convert-dir: print the plan, write nothing.");
+            Console.WriteLine("  --dry-run           With --convert-dir / --prune-excluded: print the plan, write nothing.");
             Console.WriteLine("  --background        Run child processes with 25% CPU cap (won't starve foreground apps)");
             Console.WriteLine("  --cpu-limit <n>     Cap child process CPU to n% (1-100, e.g. 20 for low-end machines)");
             Console.WriteLine("  --allow-sleep       Let the machine sleep during scans. Default: work-bearing runs");
@@ -765,7 +770,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "prune-excluded", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -1935,6 +1940,7 @@ namespace Truedat
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
+            bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
@@ -2071,6 +2077,7 @@ namespace Truedat
                 else if (canonical == "stats") statsMode = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
+                else if (canonical == "prune-excluded") pruneExcludedMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
@@ -2155,7 +2162,7 @@ namespace Truedat
                 else if (canonical == "synth-moods" && i + 1 < args.Length) synthMoods = args[++i];
                 else if (canonical == "seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
                     { synthSeed = sd; i++; }
-                else if (canonical == "dry-run") { synthDryRun = true; dryRun = true; }   // shared: --synthesize and --convert-dir are mutually exclusive
+                else if (canonical == "dry-run") { synthDryRun = true; dryRun = true; }   // shared: --synthesize / --convert-dir / --prune-excluded are mutually exclusive
                 else if (canonical == "seed-moods") seedMoods = true;
                 else if (canonical == "seed-catalog" && i + 1 < args.Length) seedCatalog = args[++i];
                 else if (canonical == "seed-target" && i + 1 < args.Length) seedTarget = args[++i];
@@ -2293,7 +2300,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -2379,7 +2386,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -2391,7 +2398,7 @@ namespace Truedat
 
             if (convertDirMode)
             {
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode || compactMode || prettifyMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --convert-dir is a standalone mode (mutually exclusive with scan/hash/transcode/etc).");
                     Environment.ExitCode = 1;
@@ -2648,6 +2655,25 @@ namespace Truedat
                 LoadExistingMoods(smfmPath!, smfmTracks);
                 RunListMissingSmfm(smfmPath!, smfmTracks.Values);
                 Environment.ExitCode = 0;
+                return;
+            }
+
+            // --prune-excluded: retire catalog entries an exclusion rule now covers.
+            // Rules gate future scanning but have never retired entries scanned BEFORE
+            // the rule existed, so those sit stale forever. Catalog + rules only — no
+            // iTunes XML, no audio — so it runs on a metadata mirror; path resolution
+            // mirrors --stats / --list-speech. Mutates the catalog (backup first);
+            // --dry-run reports the exact removal list and writes nothing.
+            if (pruneExcludedMode)
+            {
+                string? prunePath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var pruneRefusal);
+                if (pruneRefusal != null)
+                {
+                    Console.Error.WriteLine(pruneRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                RunPruneExcluded(prunePath!, dryRun);
                 return;
             }
 
@@ -7018,6 +7044,203 @@ namespace Truedat
             File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             AtomicReplace(tmpPath, moodsPath);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count} tracks)");
+            RegenerateSidecar(moodsPath);
+        }
+
+        /// <summary>One catalog entry an exclusion rule would remove. Carries the rule
+        /// text so the report says WHY it goes, and artist/title so the operator can
+        /// recognize the track without reading a path.</summary>
+        internal sealed class PruneVictim
+        {
+            public string Path = "";
+            public string Artist = "";
+            public string Title = "";
+            public string Reason = "";
+        }
+
+        /// <summary>
+        /// Pure planner for <c>--prune-excluded</c>: which catalog entries the operator's
+        /// exclusion rules would remove. Split from the IO because this is the half that
+        /// can cost an operator an entry, and a decision that destructive should be
+        /// pinned by tests rather than read out of a write path.
+        ///
+        /// **Rules only.** Structural skips (video / DSD / stream URL / over-length) are
+        /// "cannot analyze", not policy, and can never appear here anyway — an entry
+        /// exists because the track WAS analyzable. So the sole authority is the same one
+        /// that governs scanning: rules the operator wrote.
+        ///
+        /// Genre comes from the entry itself, so this runs on a metadata mirror with no
+        /// library XML and no audio in reach (the <c>--list-speech</c> posture, not the
+        /// <c>--preview</c> one). An entry with no stored genre simply never matches a
+        /// genre rule — same contract as a scan path with no metadata in hand.
+        ///
+        /// include-wins is <see cref="ExclusionSet.IsExcluded"/>'s own contract and is
+        /// inherited deliberately: the rule that rescues a track from a scan rescues its
+        /// entry from the prune too. Do not re-implement the precedence here.
+        /// </summary>
+        internal static List<PruneVictim> PlanExclusionPrune(JsonObject tracks, ExclusionSet exclusions)
+        {
+            var victims = new List<PruneVictim>();
+            if (exclusions.IsEmpty) return victims;
+            foreach (var kv in tracks)
+            {
+                var data = kv.Value as JsonObject;
+                if (data == null) continue;
+                if (!exclusions.IsExcluded(kv.Key, SafeStr(data, "genre"), out var reason)) continue;
+                victims.Add(new PruneVictim
+                {
+                    Path = kv.Key,
+                    Artist = SafeStr(data, "artist") ?? "",
+                    Title = SafeStr(data, "title") ?? "",
+                    Reason = reason
+                });
+            }
+            return victims;
+        }
+
+        /// <summary>
+        /// <c>--prune-excluded [path]</c> — retire catalog entries that an exclusion rule
+        /// now covers. Exclusions gate FUTURE scanning; they have never retired an entry
+        /// scanned before the rule existed (or before the exclusion feature shipped), so
+        /// those entries sit stale in the catalog forever. This closes that gap.
+        ///
+        /// It is deliberately NOT folded into <c>--fixup</c>: fixup needs the iTunes XML
+        /// and reconciles PATHS against the filesystem, while this needs neither and acts
+        /// on RULES — and quietly growing a second class of removal onto an existing
+        /// destructive verb would change what <c>--fixup</c> costs without the operator
+        /// typing anything new.
+        ///
+        /// This prunes on operator-written evidence, never on a classification — the
+        /// heuristic-purge class was deleted on purpose (CLAUDE.md, Heuristics → Evidence)
+        /// and must not return by this door. Guardrails: include still wins, a compressed
+        /// rotated backup is written before the swap, and <c>--dry-run</c> reports the
+        /// exact removal list without touching the file.
+        /// </summary>
+        static void RunPruneExcluded(string moodsPath, bool dryRun)
+        {
+            Console.WriteLine("=== Prune Excluded Mode ===");
+            Console.WriteLine("Removes catalog entries matching an exclusion rule. Audio files are never touched.");
+            if (dryRun) Console.WriteLine("DRY RUN — reporting only, nothing will be written.");
+            Console.WriteLine();
+
+            if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
+
+            // --no-exclusions bypasses the very rules this mode acts on: obeying it would
+            // prune nothing while looking like a completed run. Refuse instead.
+            if (_noExclusions)
+            {
+                Console.Error.WriteLine("Error: --no-exclusions cannot be combined with --prune-excluded —");
+                Console.Error.WriteLine("  the exclusion rules ARE the authority this mode acts on.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            if (!ValidateExplicitExclusionsPath(out var explicitErr))
+            {
+                Console.Error.WriteLine($"Error: {explicitErr}");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            var exclusionsFile = _exclusionsPath ?? ExclusionStore.Resolve(moodsPath);
+            var exclusions = ExclusionStore.Load(exclusionsFile, out var exclusionError);
+            if (exclusionError != null)
+            {
+                // Same fail-closed posture as a scan: an unparseable rule file must never
+                // be treated as "no rules" — here that would silently prune nothing.
+                Console.Error.WriteLine($"Error: {exclusionError}");
+                Environment.ExitCode = 1;
+                return;
+            }
+            exclusions = ApplyExcludePlaylist(exclusions, Path.GetDirectoryName(exclusionsFile) ?? ".",
+                out var playlistPath, out var playlistEntries, out _, out var playlistError);
+            if (playlistError != null)
+            {
+                Console.Error.WriteLine($"Error: {playlistError}");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            Console.WriteLine($"Exclusions: {exclusionsFile} ({exclusions.Rules.Count} rule(s))");
+            if (playlistPath != null) Console.WriteLine($"  + playlist: {playlistPath} ({playlistEntries} entr(y/ies))");
+            foreach (var diag in exclusions.Diagnostics) Console.WriteLine($"  warning: {diag}");
+            if (exclusions.IsEmpty)
+            {
+                Console.WriteLine();
+                Console.WriteLine("No exclusion rules in force — nothing to prune.");
+                return;
+            }
+
+            Console.WriteLine($"Loading: {moodsPath}");
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            JsonObject? root;
+            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            catch (JsonException)
+            {
+                Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
+                Console.WriteLine("  --prune-excluded operates on mbxmoods.json — point it at your mbxmoods.json file,");
+                Console.WriteLine("  not the iTunes XML.");
+                Environment.ExitCode = 2;
+                return;
+            }
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
+            var tracks = root["tracks"]?.AsObject();
+            if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+            int totalEntries = tracks.Count;
+
+            var victims = PlanExclusionPrune(tracks, exclusions);
+
+            Console.WriteLine();
+            Console.WriteLine("=== Results ===");
+            Console.WriteLine($"  {"Entries:",-14}{totalEntries,9:N0}");
+            Console.WriteLine($"  {(dryRun ? "Would prune:" : "Pruned:"),-14}{victims.Count,9:N0}");
+            Console.WriteLine($"  {"Kept:",-14}{totalEntries - victims.Count,9:N0}");
+
+            // Per-rule counts: a rule matching zero entries is visible rather than silent,
+            // exactly as the scan reports it — same MatchCount the planner just populated.
+            if (victims.Count > 0 || exclusions.Rules.Count > 0)
+            {
+                Console.WriteLine();
+                foreach (var rule in exclusions.Rules)
+                    Console.WriteLine($"    {rule.Describe()}: {rule.MatchCount} matched");
+            }
+
+            if (victims.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine(victims.Count <= 20
+                    ? (dryRun ? "Entries that would be removed:" : "Entries removed:")
+                    : (dryRun ? $"Entries that would be removed ({victims.Count:N0} total, showing first 20):"
+                              : $"Entries removed ({victims.Count:N0} total, showing first 20):"));
+                foreach (var v in victims.Take(20))
+                    Console.WriteLine($"  [{v.Reason}] {v.Artist} - {v.Title}: {v.Path}");
+                if (victims.Count > 20) Console.WriteLine($"  ... and {victims.Count - 20:N0} more");
+            }
+
+            if (victims.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("No catalog entry matches an exclusion rule — nothing to prune.");
+                return;
+            }
+
+            if (dryRun)
+            {
+                Console.WriteLine();
+                Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                return;
+            }
+
+            foreach (var v in victims) tracks.Remove(v.Path);
+
+            var bakPath = BackupCatalogCompressed(moodsPath);
+            Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
+            root["trackCount"] = tracks.Count;
+            StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
+            var tmpPath = moodsPath + ".tmp";
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            AtomicReplace(tmpPath, moodsPath);
+            Console.WriteLine($"Updated: {moodsPath} ({tracks.Count:N0} tracks)");
             RegenerateSidecar(moodsPath);
         }
 
@@ -12196,6 +12419,90 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Environment.CurrentDirectory = savedCwd;
                     try { Directory.Delete(relRoot, true); } catch { }
                 }
+            }
+
+            // --- PlanExclusionPrune: --prune-excluded's decision (2026-08-15) ---
+            // This is the half that costs an operator an entry, so every removal AND
+            // every rescue is pinned here rather than proven by running the write path.
+            {
+                JsonObject Cat(params string[] entries)
+                {
+                    var tracks = new JsonObject();
+                    foreach (var e in entries)
+                    {
+                        // "path|genre|artist|title" — genre "-" means the entry has no genre key
+                        var parts = e.Split('|');
+                        var obj = new JsonObject { ["artist"] = parts[2], ["title"] = parts[3] };
+                        if (parts[1] != "-") obj["genre"] = parts[1];
+                        tracks[parts[0]] = obj;
+                    }
+                    return tracks;
+                }
+                ExclusionSet PruneSet(string inner)
+                {
+                    var s = ExclusionSet.FromJson("{\"schemaVersion\":1,\"rules\":[" + inner + "]}", out var err);
+                    Assert(err == null, $"prune: rule set parses ({err})");
+                    return s;
+                }
+                string PFolder(string action, string pattern) =>
+                    "{\"kind\":\"folder\",\"action\":\"" + action + "\",\"pattern\":\"" + pattern.Replace("\\", "\\\\") + "\"}";
+                string PGenre(string action, string value) =>
+                    "{\"kind\":\"genre\",\"action\":\"" + action + "\",\"value\":\"" + value + "\"}";
+                string PFile(string action, string path) =>
+                    "{\"kind\":\"file\",\"action\":\"" + action + "\",\"path\":\"" + path.Replace("\\", "\\\\") + "\"}";
+
+                var cat = Cat(
+                    @"D:\Music\Podcasts\JRE 2100.mp3|Podcast|JRE|Ep 2100",
+                    @"D:\Music\Podcasts\KEXP\session.flac|Podcast|KEXP|Live Session",
+                    @"D:\Music\Rock\song.flac|Rock|Band|Song",
+                    @"P:\Library\Podcasts\other.mp3|-|Other|Show",
+                    @"D:\Music\Misc\setlist.mp3|-|Various|Setlist");
+
+                // genre rule removes exactly its own entries
+                var byGenre = PlanExclusionPrune(cat, PruneSet(PGenre("exclude", "Podcast")));
+                Assert(byGenre.Count == 2, $"prune: genre rule plans exactly its entries (got {byGenre.Count})");
+                Assert(byGenre.All(v => v.Reason == "genre=Podcast"), "prune: victim carries the rule that removed it");
+                Assert(byGenre.Any(v => v.Title == "Ep 2100"), "prune: victim carries artist/title for the report");
+                Assert(!byGenre.Any(v => v.Path.IndexOf(@"\Rock\", StringComparison.OrdinalIgnoreCase) >= 0),
+                    "prune: an unmatched entry is never planned for removal");
+
+                // an entry with no stored genre cannot match a genre rule (same contract as
+                // a scan path with no metadata in hand) — but a folder rule still reaches it
+                var noGenre = PlanExclusionPrune(cat, PruneSet(PGenre("exclude", "Rock")));
+                Assert(noGenre.Count == 1 && noGenre[0].Path.EndsWith("song.flac", StringComparison.OrdinalIgnoreCase),
+                    "prune: genre rule matches only entries that stored that genre");
+                var byFolder = PlanExclusionPrune(cat, PruneSet(PFolder("exclude", @"\Podcasts\**")));
+                Assert(byFolder.Count == 3, $"prune: fragment folder rule reaches every root (got {byFolder.Count})");
+                Assert(byFolder.Any(v => v.Path.StartsWith("P:", StringComparison.OrdinalIgnoreCase)),
+                    "prune: fragment folder rule reaches a mirrored root with no stored genre");
+
+                // include WINS — the rule that rescues a track from a scan rescues its entry
+                var rescued = PlanExclusionPrune(cat,
+                    PruneSet(PFolder("exclude", @"\Podcasts\**") + "," + PFolder("include", @"\Podcasts\KEXP\**")));
+                Assert(rescued.Count == 2, $"prune: include rule spares its entry (got {rescued.Count})");
+                Assert(!rescued.Any(v => v.Path.IndexOf(@"\KEXP\", StringComparison.OrdinalIgnoreCase) >= 0),
+                    "prune: an included entry is never pruned");
+                var rescuedByFile = PlanExclusionPrune(cat,
+                    PruneSet(PGenre("exclude", "Podcast") + "," + PFile("include", @"D:\Music\Podcasts\KEXP\session.flac")));
+                Assert(rescuedByFile.Count == 1, "prune: a file include rescues an entry a genre rule would take");
+
+                // no rules => no removals, whatever the catalog looks like
+                Assert(PlanExclusionPrune(cat, ExclusionSet.Empty).Count == 0, "prune: an empty rule set plans nothing");
+
+                // a malformed entry (non-object, or a non-string genre) must never throw —
+                // this mode exists partly to clean up catalogs, so it cannot crash on one
+                var messy = Cat(@"D:\Music\Podcasts\ok.mp3|Podcast|A|B");
+                messy[@"D:\Music\weird.mp3"] = JsonValue.Create(42);
+                messy[@"D:\Music\Podcasts\badgenre.mp3"] = new JsonObject { ["genre"] = 7 };
+                var messyPlan = PlanExclusionPrune(messy, PruneSet(PGenre("exclude", "Podcast")));
+                Assert(messyPlan.Count == 1, $"prune: malformed entries are skipped, not fatal (got {messyPlan.Count})");
+
+                // per-rule MatchCount is populated by the plan, so the stale-rule report
+                // ("0 matched") is real rather than always-zero
+                var counting = PruneSet(PGenre("exclude", "Podcast") + "," + PGenre("exclude", "Nothing Here"));
+                PlanExclusionPrune(cat, counting);
+                Assert(counting.Rules[0].MatchCount == 2, $"prune: planning counts rule hits (got {counting.Rules[0].MatchCount})");
+                Assert(counting.Rules[1].MatchCount == 0, "prune: a rule matching nothing reports zero (stale-rule signal)");
             }
 
             // --- ExclusionStore: merge semantics (spec 2026-07-24) ---

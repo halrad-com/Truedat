@@ -108,28 +108,26 @@ Two candidate approaches (decide at build time — could ship one, or both):
 Backlogged, not authorized — needs an explicit go, and the approach (A / B / both) is an
 open decision.
 
-## Prune catalog entries by exclusion rule (backlogged 2026-08-14 — field-driven)
+## Prune catalog entries by exclusion rule — SHIPPED 2026-08-15 as `--prune-excluded`
 
-A maintenance pass that cross-references `mbxmoods-exclude.json` against the catalog and
-**removes entries matching an exclusion rule** — closing the gap that exclusions gate
-*future* scanning but never retire entries scanned before a rule existed (or before the
-exclusion feature shipped). Natural home is `--fixup` (its existing catalog-reconciliation
-pass) or a dedicated verb; write a compressed, rotated backup first like the other mutating
-modes.
+Closed the gap that exclusion rules gate *future* scanning but never retired entries scanned
+before a rule existed (or before the exclusion feature shipped) — field-driven by Trev
+(2026-08-14): stale-but-excluded entries that could never be refreshed, plus a batch of 1 hr+
+tracks he wanted excluded *and* dropped from the catalog.
 
-**Field driver (Trev, 2026-08-14):** a dozen-odd tracks that need a refresh but are now
-excluded (scanned pre-exclusion-feature) sit stale in the catalog forever; plus a batch of
-1 hr+ tracks he wants excluded *and* dropped from the file.
+Shipped as a **dedicated verb**, not a branch of `--fixup`: fixup needs the iTunes XML and
+reconciles *paths* against the filesystem, while this needs neither (genre comes from the
+catalog entry, so it runs on a metadata mirror) — and growing a second removal class onto an
+existing destructive verb would have changed what `--fixup` costs without the operator typing
+anything new. Guardrails as designed: `include` still wins, `--dry-run` prints the exact
+removal list and writes nothing, a compressed rotated backup precedes the atomic swap, the
+`.mbxs` sidecar is regenerated, and `--no-exclusions` is *refused* rather than obeyed.
 
-**This is on-side, and the distinction is the whole point:** it prunes on
-**operator-written rules** (evidence), never on a classification (heuristic). The entire
-heuristic-purge class was deliberately deleted (`CLAUDE.md`, Heuristics → Evidence), and
-this is explicitly NOT that — it acts on the same ground-truth authority as any
-`include`/`exclude` rule the operator authored. Guardrails: `include` still wins (never
-prune an included entry); backup-before-write; and a `--preview`-style dry run reporting
-exactly what would be removed before it touches the file.
-
-Backlogged, not authorized — needs an explicit go.
+**The distinction that made it on-side holds in the shipped code and must keep holding:** it
+prunes on **operator-written rules** (evidence), never on a classification (heuristic). The
+heuristic-purge class stays deleted (`CLAUDE.md`, Heuristics → Evidence). "Prune the
+speech-likely entries" is that class wearing this verb's clothes — the answer is to write a
+rule and run this, not to teach it to classify.
 
 ## Compressed LIVE catalog — stretch (backup/snapshot half SHIPPED 2026-08-09)
 

@@ -155,6 +155,14 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           still need Sony tagging" report, not a truedat gap. For that
                           reason it is deliberately absent from the --stats Recommended
                           block, which only ever names gaps a truedat command can close.
+  --prune-excluded [path] Remove catalog entries that an exclusion rule now covers — the
+                          ones scanned before the rule existed, which exclusions otherwise
+                          only ever keep out of FUTURE scans. Rules are the sole authority:
+                          include rules still win, and nothing is removed on a classification.
+                          Needs no iTunes XML and reads no audio (genre comes from the entry),
+                          so it runs on a metadata mirror. Writes a compressed backup first
+                          and regenerates the .mbxs sidecar. Add --dry-run to print exactly
+                          what would go and write nothing. Audio files are never touched.
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended
@@ -541,6 +549,33 @@ down). In `preview.json` these are the `state` and `candidates[]` fields on each
 
 Excluding a file does not remove an existing `mbxmoods.json` entry — it only stops future
 analysis, so the decision is reversible.
+
+### Retiring the entries a rule now covers
+
+Because a rule only gates future scanning, anything analyzed *before* you wrote the rule (or
+before exclusions existed at all) keeps its catalog entry indefinitely — a talk archive you
+excluded months ago is still sitting in `mbxmoods.json`, stale and never refreshed.
+`--prune-excluded` closes that gap:
+
+```
+truedat --prune-excluded --dry-run      # list exactly what would go, write nothing
+truedat --prune-excluded                # remove them (compressed backup written first)
+```
+
+It reads the catalog and the rules and nothing else — no iTunes XML, no audio, genre taken
+from the entry itself — so it runs on a metadata mirror. `include` rules still win, so a track
+you rescued from a scan keeps its entry too, and a rule matching nothing reports `0 matched`
+just as a scan reports it. The catalog is rewritten atomically after a rotated `.zip` backup,
+and the `.mbxs` sidecar is regenerated so it can't go stale behind the catalog.
+
+Removal is decided **only** by rules you wrote. Nothing is pruned on a classification — not a
+speech verdict, not a genre heuristic, not an embedded marker — which is the same line the rest
+of the system holds (see *Speech signals are evidence, not a filter*). `--no-exclusions` is
+refused here rather than obeyed: it would bypass the very authority the mode acts on and report
+a completed run that pruned nothing.
+
+Entries removed this way come back if the file is still in your library and you later drop the
+rule — the next scan re-analyzes it like any other track.
 
 Edit the file by hand, or merge changes into it:
 

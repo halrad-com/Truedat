@@ -153,8 +153,9 @@ parses as invalid.
 A **missing** file excludes nothing (not an error). A **present but unparseable** file makes
 truedat exit 1 rather than scan — analyzing everything while the operator believes rules are
 in force is the silent failure the whole design exists to remove. Invalid individual rules are
-skipped, counted and diagnosed (tolerant-reader convention). Exclusions never prune existing
-catalog entries. Every skip is ledgered in `mbxmoods-skipped.csv` on all scan modes; the
+skipped, counted and diagnosed (tolerant-reader convention). A rule never prunes a catalog
+entry **as a side effect** — scanning and pruning are separate acts, and only the dedicated
+`--prune-excluded` verb (below) retires entries, never a scan. Every skip is ledgered in `mbxmoods-skipped.csv` on all scan modes; the
 iTunes-XML library scan additionally prints per-rule hit counts so stale rules surface (the
 per-file modes have nothing to count, but still print a warning per ignored/invalid rule
 diagnostic). `--exclusions`
@@ -362,8 +363,22 @@ local tidy-up:
   into the review folder. What it never does is analyze, or write `mbxmoods.json`. Say the
   precise thing; "read-only" invites the wrong assumption.
 - **There is no `purge` mode, and there must not be one.** Nothing in truedat removes a catalog
-  entry on a classification — that whole class was deleted in the Heuristics → Evidence arc.
-  `--fixup` is the only mode that can cost an operator an entry, and it does so on ground truth
+  entry on a **classification** — that whole class was deleted in the Heuristics → Evidence arc.
+  **Exactly two modes can cost an operator an entry, and each acts on a different ground truth.**
+  `--prune-excluded` (2026-08-15) acts on **operator-written rules**: it removes entries matching
+  `mbxmoods-exclude.json`, closing the gap that a rule gates future scanning but never retired the
+  entries scanned before it existed. That is emphatically **not** the deleted class — it prunes on
+  the same authored authority as any `include`/`exclude` rule, `include` still wins, and no verdict,
+  genre heuristic or embedded marker is consulted. Its guardrails are `--dry-run` (exact removal
+  list, writes nothing), a compressed rotated backup before the atomic swap, sidecar regeneration,
+  and a refusal (not obedience) when `--no-exclusions` is passed, since that would bypass the very
+  authority it acts on. Deliberately a separate verb rather than a branch of `--fixup`: fixup needs
+  the XML and reconciles paths, this needs neither, and growing a second removal class onto an
+  existing destructive verb would change what `--fixup` costs without the operator typing anything
+  new. **If a future request is "prune the speech-likely entries" or "prune by genre heuristic",
+  that is the deleted class wearing this verb's clothes — the answer is to write a rule and run
+  this, not to teach it to classify.**
+  `--fixup` is the other, and it does so on filesystem ground truth
   (`File.Exists` says the file is gone), not inference — and only once it has proven the file's
   *volume* is reachable. A bare `File.Exists`/`Directory.Exists` false cannot tell "file deleted"
   from "share offline", so before reconciling, `--fixup` probes each distinct library root once

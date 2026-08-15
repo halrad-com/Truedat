@@ -5,6 +5,23 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- **`--prune-excluded` retires catalog entries an exclusion rule now covers.** Exclusion rules
+  gate *future* scanning; they never retired entries analyzed before the rule existed (or before
+  exclusions shipped), so those sat stale in `mbxmoods.json` indefinitely — a talk archive you
+  excluded months ago still occupied the catalog and could never be refreshed. The new mode
+  cross-references the rules against the catalog and removes what they cover: `--dry-run` prints
+  the exact removal list and writes nothing, a compressed rotated backup precedes the atomic
+  swap, and the `.mbxs` sidecar is regenerated so it can't lag the catalog. Rules are the sole
+  authority — `include` still wins, and nothing is removed on a classification (no speech verdict,
+  no genre heuristic, no embedded marker); `--no-exclusions` is refused rather than obeyed, since
+  it would bypass the very authority the mode acts on. Needs no iTunes XML and reads no audio
+  (genre comes from the entry), so it runs on a metadata mirror. Audio files are never touched.
+  Kept separate from `--fixup` deliberately: that mode needs the XML and reconciles *paths* against
+  the filesystem, and folding a second removal class into it would change what it costs without
+  the operator typing anything new.
+
 ### Fixed
 
 - **Catalog doubles now serialize in shortest text form.** net48's `Utf8JsonWriter` lacks the
