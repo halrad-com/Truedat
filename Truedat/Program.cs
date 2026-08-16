@@ -701,6 +701,9 @@ namespace Truedat
             Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
             Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
             Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
+            Console.WriteLine("  --paths [--json]    Report every path this run would use (catalog, sidecar, exclusions,");
+            Console.WriteLine("                      playlist, logs, ledgers, staging), each present or absent, and which");
+            Console.WriteLine("                      step resolved the catalog. Read-only; writes and creates nothing.");
             Console.WriteLine("  --moods <path>      Moods file for the per-file modes / --verify / --stats (merge target");
             Console.WriteLine("                      for --analyze-file / --file-list / --folder; default mbxmoods.json");
             Console.WriteLine("                      next to the XML, else auto-discovered beside the exe (exe-dir");
@@ -798,7 +801,7 @@ namespace Truedat
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
-            "compact", "prettify",
+            "compact", "prettify", "paths", "json",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1953,6 +1956,7 @@ namespace Truedat
             string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
+            bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
@@ -2091,6 +2095,10 @@ namespace Truedat
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
+                else if (canonical == "paths") pathsMode = true;
+                // --json is the short spelling for --paths; it means the same thing as
+                // --json-output, which predates it and stays the canonical name.
+                else if (canonical == "json") jsonOutput = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
                 else if (canonical == "prune-excluded") pruneExcludedMode = true;
@@ -2609,6 +2617,69 @@ namespace Truedat
             // Path resolution mirrors --verify: --moods <path>, else the positional
             // arg, else ./mbxmoods.json (a bare directory resolves to mbxmoods.json
             // inside it). Writes nothing.
+            // --paths: report every path this invocation would use, and — the part that actually
+            // answers the support question — WHICH resolution step chose the catalog. Read-only in
+            // the strict sense: it creates nothing, not even the review directory --preview makes.
+            if (pathsMode)
+            {
+                string? pathsCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var pathsRefusal);
+                if (pathsRefusal != null)
+                {
+                    Console.Error.WriteLine(pathsRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
+                string origin;
+                if (!string.IsNullOrEmpty(analyzeFileMoods)) origin = "--moods argument";
+                else if (!string.IsNullOrEmpty(xmlPath)) origin = "the library you named";
+                else
+                {
+                    var discovered = DiscoverCatalogBesideExe();
+                    origin = string.IsNullOrEmpty(discovered)
+                        ? "current directory (nothing else matched)"
+                        : "auto-discovered: " + (Path.GetDirectoryName(discovered!) ?? discovered!);
+                }
+
+                var discoveredXml = ResolveITunesXml(xmlPath);
+                var pathEntries = CollectPaths(pathsCatalog!, File.Exists(discoveredXml) ? discoveredXml : null);
+
+                if (jsonOutput)
+                {
+                    var sb = new StringBuilder();
+                    sb.Append("{\"resolvedFrom\":").Append(JsonSerializer.Serialize(origin)).Append(",\"paths\":{");
+                    for (int i = 0; i < pathEntries.Count; i++)
+                    {
+                        var e = pathEntries[i];
+                        if (i > 0) sb.Append(',');
+                        sb.Append(JsonSerializer.Serialize(e.Key)).Append(":{")
+                          .Append("\"label\":").Append(JsonSerializer.Serialize(e.Label))
+                          .Append(",\"path\":").Append(JsonSerializer.Serialize(e.Path))
+                          .Append(",\"present\":").Append(e.Present ? "true" : "false");
+                        if (!string.IsNullOrEmpty(e.Note))
+                            sb.Append(",\"note\":").Append(JsonSerializer.Serialize(e.Note));
+                        sb.Append('}');
+                    }
+                    sb.Append("}}");
+                    Console.WriteLine(sb.ToString());
+                }
+                else
+                {
+                    Console.WriteLine($"Resolved from: {origin}");
+                    Console.WriteLine();
+                    int width = 0;
+                    foreach (var e in pathEntries) if (e.Label.Length > width) width = e.Label.Length;
+                    foreach (var e in pathEntries)
+                    {
+                        Console.WriteLine($"  {e.Label.PadRight(width)}  {(e.Present ? "present" : "absent ")}  {e.Path}"
+                            + (string.IsNullOrEmpty(e.Note) ? "" : Environment.NewLine
+                               + $"  {new string(' ', width)}           ({e.Note})"));
+                    }
+                }
+                Environment.ExitCode = 0;
+                return;
+            }
+
             if (statsMode)
             {
                 string? statsPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var statsRefusal);
@@ -8588,6 +8659,82 @@ namespace Truedat
         /// (0x20..0x7E). Music extensions in the wild are all ASCII (.mp3, .flac,
         /// .m4a, .wav, .aiff, .ogg, .opus, .wma) so the common case is unchanged.
         /// </summary>
+        /// <summary>One row of the --paths report: what it is, where it resolved, whether it is
+        /// there, and a short note when the file itself can say something useful.</summary>
+        internal sealed class PathEntry
+        {
+            public string Key = "";
+            public string Label = "";
+            public string Path = "";
+            public bool Present;
+            public string? Note;
+        }
+
+        /// <summary>
+        /// Every path this invocation would use, resolved. This exists because path resolution is
+        /// invisible until it is wrong: a catalog silently read from the wrong directory, or an
+        /// exclusion file that was never where the operator thought, both look exactly like
+        /// working software right up until the numbers are inexplicable. Two support incidents in
+        /// one day traced to that, neither of them a malfunction.
+        ///
+        /// The paths are DERIVED THE SAME WAY the real modes derive them — ExclusionStore.Resolve,
+        /// PlaylistReader.Discover, the host-suffixing helpers — never re-spelled here. A second
+        /// spelling would drift and this report would confidently name a file nothing writes to,
+        /// which is worse than no report at all.
+        /// </summary>
+        internal static List<PathEntry> CollectPaths(string catalogPath, string? libraryXml)
+        {
+            var entries = new List<PathEntry>();
+            var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
+
+            void Add(string key, string label, string path, string? note = null)
+            {
+                bool present;
+                try { present = File.Exists(path) || Directory.Exists(path); }
+                catch { present = false; }
+                // Normalize: a path the operator typed with forward slashes would otherwise sit in
+                // the report next to derived ones in Windows form, and this report is read by
+                // people comparing paths by eye — and by a UI panel rendering them in a column.
+                var shown = path;
+                try { if (!string.IsNullOrEmpty(path)) shown = Path.GetFullPath(path); } catch { }
+                entries.Add(new PathEntry { Key = key, Label = label, Path = shown, Present = present, Note = note });
+            }
+
+            Add("catalog", "catalog", catalogPath);
+            Add("sidecar", "sidecar", Path.ChangeExtension(catalogPath, ".mbxs"));
+            Add("exclusions", "exclusions", ExclusionStore.Resolve(catalogPath));
+
+            // The playlist has no fixed name until one exists — Discover returns null when the
+            // operator keeps none, which is a legitimate state, not a missing file. Report the
+            // convention location in that case so they can see where to put one.
+            var playlist = PlaylistReader.Discover(dir);
+            Add("excludePlaylist", "exclude playlist",
+                playlist ?? Path.Combine(dir, PlaylistReader.ConventionName + ".m3u8"),
+                playlist == null ? "none kept — this is where one would go" : null);
+
+            Add("libraryXml", "library XML",
+                string.IsNullOrEmpty(libraryXml) ? Path.Combine(dir, "iTunes Music Library.xml") : libraryXml!);
+            Add("log", "log", Path.Combine(dir, "truedat.log"));
+
+            // Host-suffixed ledgers: this host's names, via the same helpers the scan uses. A
+            // shard from another machine writes its own and is deliberately NOT guessed at here.
+            var host = SanitizeForFilename(Environment.MachineName);
+            string Hosted(string name) => InsertFilenameSuffix(Path.Combine(dir, name), host);
+            Add("errorsCsv", "errors (csv)", Hosted("mbxmoods-errors.csv"));
+            Add("errorsLog", "errors (log)", Hosted("mbxmoods-errors.log"));
+            Add("skipped", "skipped", Hosted("mbxmoods-skipped.csv"));
+            Add("verifyCsv", "verify", Path.Combine(dir, "mbxmoods-verify.csv"));
+            Add("duplicates", "duplicates", Path.Combine(dir, "mbxmoods-duplicates.json"));
+
+            var reviewRoot = Path.GetDirectoryName(Path.GetFullPath(dir));
+            if (!string.IsNullOrEmpty(reviewRoot))
+                Add("reviewDir", "review dir", Path.Combine(reviewRoot!, "AppData", "MBXHub", "review"));
+
+            Add("staging", "staging", _stageOpts?.StageDir ?? "",
+                "staged copies, downmixes and the extractor's output JSON; --stage-dir moves all three");
+            return entries;
+        }
+
         /// <summary>
         /// Where the Essentia extractor writes its per-track output JSON. Prefers the staging
         /// directory so all of truedat's relocatable scratch lands in ONE place: an operator who
@@ -11507,6 +11654,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 Assert(h.Method == "direct", $"--no-stage returns direct (got {h.Method})");
                 Assert(h.Path == @"\\server\share\test.mp3", "--no-stage preserves source path");
+            }
+
+            // --paths: the report exists to answer "which files is this actually using", so the
+            // invariant that matters is that it derives paths the SAME way the real modes do.
+            {
+                var cpDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-paths-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(cpDir);
+                    var cpCat = Path.Combine(cpDir, MoodsFileName);
+                    File.WriteAllText(cpCat, "{}");
+                    var cpEntries = CollectPaths(cpCat, null);
+                    PathEntry? Find(string k) => cpEntries.Find(e => e.Key == k);
+
+                    Assert(Find("catalog")?.Path == cpCat && Find("catalog")!.Present,
+                        "paths: the catalog row is the resolved catalog, marked present");
+                    Assert(Find("sidecar")?.Path == Path.ChangeExtension(cpCat, ".mbxs"),
+                        "paths: the sidecar is the catalog's .mbxs sibling");
+                    // Derived through ExclusionStore.Resolve, not re-spelled — a second spelling
+                    // would drift and the report would name a file nothing writes to.
+                    Assert(Find("exclusions")?.Path == ExclusionStore.Resolve(cpCat),
+                        "paths: exclusions come from ExclusionStore.Resolve");
+                    Assert(Find("exclusions")?.Present == false,
+                        "paths: an exclusion file that is not there reports absent, it is not omitted");
+                    // Host-suffixed ledgers must carry THIS host's suffix, via the same helper.
+                    var cpHost = SanitizeForFilename(Environment.MachineName);
+                    Assert(Find("errorsCsv")?.Path == InsertFilenameSuffix(Path.Combine(cpDir, "mbxmoods-errors.csv"), cpHost),
+                        "paths: ledgers carry the host suffix the scan would write");
+                    Assert(Find("staging")?.Path == Path.GetFullPath(_stageOpts.StageDir),
+                        "paths: staging reports the dir in force, so --stage-dir is visible");
+
+                    // A playlist that exists must be found, not reported as the convention slot.
+                    var cpPl = Path.Combine(cpDir, PlaylistReader.ConventionName + ".m3u8");
+                    File.WriteAllText(cpPl, "# empty");
+                    var cpWithPl = CollectPaths(cpCat, null);
+                    var plEntry = cpWithPl.Find(e => e.Key == "excludePlaylist");
+                    Assert(plEntry?.Path == cpPl && plEntry!.Present,
+                        "paths: an existing exclude playlist is discovered, not assumed");
+
+                    // Every row needs a key and a label or the panel renders blanks.
+                    foreach (var e in cpWithPl)
+                        Assert(!string.IsNullOrEmpty(e.Key) && !string.IsNullOrEmpty(e.Label),
+                            "paths: every entry carries a key and a label");
+                }
+                finally { try { Directory.Delete(cpDir, true); } catch { } }
             }
 
             // Essentia's output JSON follows --stage-dir, so one exclusion covers the scratch.
