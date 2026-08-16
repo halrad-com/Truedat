@@ -3764,13 +3764,37 @@ namespace Truedat
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
 
+                // Source-loss latch for the per-file modes. This is the autoscan path (the
+                // MBXHub plugin pipes new paths to --file-list -), so it runs unattended and a
+                // dropped share must not quietly convert a batch of good files into skipped
+                // rows. Exit code carries the failure out to the caller.
+                int flSourceLost = 0;
+                string flSourceLostDetail = "";
+
                 // Two-lane triage (see MoodsMode for the rationale): the per-file body below
                 // is IDENTICAL to the single loop it replaces. Split dispatch only, so cheap
                 // cache hits catch up fast while the slow analyses spread evenly across threads.
                 Action<string> processFile = filePath =>
                 {
+                    if (Volatile.Read(ref flSourceLost) != 0) return;
                     if (!File.Exists(filePath))
                     {
+                        // Volume gone, or file gone? This is the autoscan path — the plugin pipes
+                        // new paths here continuously — so a NAS blip would otherwise ledger a
+                        // batch of perfectly good new files as missing and move on. Re-probe the
+                        // ROOT first; a healthy root always answers.
+                        if (!ProbeRootReachable(ReachabilityRoot(filePath), out var flWhyDown))
+                        {
+                            if (Interlocked.Exchange(ref flSourceLost, 1) == 0)
+                            {
+                                flSourceLostDetail = $"{ReachabilityRoot(filePath)} stopped answering ({flWhyDown}); first seen at {filePath}";
+                                Console.Error.WriteLine();
+                                Console.Error.WriteLine("STOPPING: the source became unreachable.");
+                                Console.Error.WriteLine($"  {flSourceLostDetail}");
+                                Console.Error.WriteLine("  Remaining paths are NOT recorded as missing — re-run once it is back.");
+                            }
+                            return;
+                        }
                         // Missing is a structural skip, not an analysis failure (M6): ledger it
                         // to mbxmoods-skipped.csv like MoodsMode does, count it as a skip (reuse
                         // the counter fl already reports), and DON'T trip exit 1 — a piped path
@@ -4152,6 +4176,16 @@ namespace Truedat
                 EmitStagingSummary();
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                     ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold);
+                // Exit 3 (not 1) when the source went away: the caller — the autoscan plugin —
+                // must be able to tell "some files failed analysis" from "the share dropped, so
+                // this run means nothing and the paths should be re-queued".
+                if (Volatile.Read(ref flSourceLost) != 0)
+                {
+                    Console.Error.WriteLine("INCOMPLETE: the source became unreachable — remaining paths were not examined.");
+                    Console.Error.WriteLine($"  {flSourceLostDetail}");
+                    Environment.ExitCode = 3;
+                    return;
+                }
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
