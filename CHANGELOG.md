@@ -7,6 +7,16 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
+- **`--paths` reports every path this run would use** — catalog, sidecar, exclusion file, exclude
+  playlist, library XML, log, the host-suffixed error/skipped ledgers, verify and duplicates
+  outputs, review directory and staging directory — each marked present or absent, plus the line
+  that matters most: **which step resolved the catalog**. Path resolution is invisible until it is
+  wrong, and a catalog quietly read from the wrong directory looks exactly like working software
+  until the numbers stop making sense. Absent entries are reported rather than omitted, because
+  half the value is seeing that the exclusion file you believe is in force is not there. Read-only
+  in the strict sense — it creates nothing, not even the review directory `--preview` makes.
+  `--paths --json` emits the same data for MBXHub's status page.
+
 - **`--verify` is now restartable via `--chunk M/N`.** A whole-catalog verify re-reads every
   file's audio to recompute its hash; on a ~6 TB / 156k library over WiFi that is an 18-24 hour
   pass, and it was one-shot — a NAS blip or a power cut and every hour of it was lost, with no
