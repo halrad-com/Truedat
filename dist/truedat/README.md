@@ -87,7 +87,9 @@ truedat.exe "iTunes Music Library.xml"
 
 Output: `mbxmoods.json` (next to the XML file)
 
-**Auto-discovery:** if you omit the positional XML arg, truedat looks for the library in these directories, nearest first, and takes the first hit: `<exe-dir>\..` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>`, then the `Library\` subfolder of each, then successive parent directories (up to four levels) and their `Library\` subfolders, then the current directory. The upward walk is what lets you run truedat from MusicBee's own data folder — from `<root>\AppData\MBXHub\` it finds `<root>\Library\` — and it is bounded so it can't wander off into an unrelated library. The error message lists the probed locations so a no-hit failure is self-diagnosing.
+**Auto-discovery:** if you omit the positional XML arg, truedat searches for the library nearest-first and takes the first hit. In order: the exe's parent directory (the drop-in case — put the truedat folder under your library directory and it just works), the exe's own directory, the `Library\` subfolder of each, then successive parent directories (bounded) and their `Library\` subfolders, then the instance's `AppData\` subfolders, and finally `%APPDATA%\MusicBee` for a non-portable install. The error message lists the probed locations so a no-hit failure is self-diagnosing.
+
+In practice that means **anywhere under a MusicBee instance is found** — including running truedat from `<root>\AppData\MBXHub\` — while `<root>\Library` always wins when several candidates exist, and the user's default library is only consulted when nothing instance-relative matched. It is a fixed set of known locations rather than a recursive scan, so it stays fast and predictable.
 
 The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-missing-smfm`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) find `mbxmoods.json` through the **same** ladder when you give them no path. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that a bare `truedat --stats` always means the same library a bare `truedat` scan does, from whichever directory you happen to run them.
 
@@ -320,21 +322,19 @@ protection scans every one of them — work that buys nothing, since the big one
 copies of files already sitting in your library. Three separate scratch locations are involved,
 and they are not all relocatable:
 
-- **Staged source copies and multi-channel downmixes** — one whole audio file per track, by far
-  the largest share. These follow `--stage-dir <path>`, so point it somewhere an exclusion covers
-  rather than excepting all of `%TEMP%`.
-- **Essentia's per-track output JSON** — written to `%TEMP%` by the OS temp-file API and deleted
-  as soon as truedat parses it. Small (tens of KB) but one per track, and `--stage-dir` does
-  **not** move it.
+- **Staged source copies, multi-channel downmixes, and Essentia's per-track output JSON** — all
+  follow `--stage-dir <path>`. The staged copies are whole audio files and by far the largest
+  share. Point `--stage-dir` somewhere an exclusion covers rather than excepting all of `%TEMP%`.
 - **Per-drive `.truedat-tmp` hardlinks** — created at the root of the volume holding the audio,
-  and not relocatable at all: a hardlink has to live on the same volume as the file it points at.
+  and not relocatable: a hardlink has to live on the same volume as the file it points at. These
+  are links rather than copies, so no audio is duplicated for a scanner to read.
 
-So a stage-dir exclusion covers the expensive part but not all of it. If you want the lot covered
-in one move, exclude the truedat / essentia / ffmpeg **processes** instead of (or as well as) a
-directory — that follows the work wherever it writes. Process exclusions are also the answer if
-your scanner is heuristic about unsigned binaries; Essentia decodes audio in tight loops and reads
-like something worth a second look. None of this is required — it is about not paying to scan the
-same audio twice.
+So one `--stage-dir` exclusion covers everything except the hardlinks. If you would rather cover
+the lot in one move, exclude the truedat / essentia / ffmpeg **processes** instead of (or as well
+as) a directory — that follows the work wherever it writes. Process exclusions are also the answer
+if your scanner is heuristic about unsigned binaries; Essentia decodes audio in tight loops and
+reads like something worth a second look. None of this is required — it is about not paying to
+scan the same audio twice.
 
 **Run one truedat at a time.** Truedat is single-instance by design. At startup it sweeps
 leftover scratch files from previous runs — staged copies and downmix WAVs under the staging

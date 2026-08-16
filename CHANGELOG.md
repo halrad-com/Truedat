@@ -68,8 +68,23 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   subfolder — the exact inverse of the mapping that already takes a library to its hub folder, so
   the two encode one layout rather than two guesses. Nearest-first, so a catalog in the folder you
   run from still wins; bounded, so it cannot wander into an unrelated library.
+- **The catalog is found anywhere under a MusicBee instance**, including the instance's
+  `AppData\` subfolders, and `%APPDATA%\MusicBee` is checked last for a non-portable install
+  (whose data sits there while the program lives in Program Files, so nothing instance-relative
+  reaches it). `<root>\Library` still wins when several candidates exist, and the user's default
+  library is only consulted once nothing instance-relative matched — a tool inside a portable
+  instance must resolve to that instance. A fixed set of known locations, not a recursive scan.
 
 ### Changed
+
+- **Essentia's per-track output JSON now follows `--stage-dir`.** It was pinned to `%TEMP%`
+  regardless, so pointing staging at a folder excluded from antivirus still left a temp file per
+  track being scanned in real time. It also brings that file under the startup orphan sweep, which
+  only ever knew about the staging directory — a killed scan used to leave one extractor JSON in
+  `%TEMP%` permanently, with nothing that would ever collect them. Falls back to `%TEMP%` if the
+  staging directory is not ASCII-printable, since that path becomes an argument to the extractor
+  and non-ASCII argument paths are what staging exists to avoid. The per-drive `.truedat-tmp`
+  hardlinks remain where they are — a hardlink cannot cross volumes.
 
 - **`--stage-dir` is documented as the antivirus answer**, not only as a relocation knob. A scan
   writes and deletes one staged copy per track, so real-time protection re-scans a stream of

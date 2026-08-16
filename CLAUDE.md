@@ -438,8 +438,21 @@ bare scan; `ResolveMoodsCatalog` finds `mbxmoods.json` for every catalog mode. B
 **`LibrarySearchDirs`** — one shared ladder, so they cannot discover a library from different
 places — then fall back to the cwd. Order: exe-dir's parent, exe-dir, each of those two's
 `Library\` subfolder, then successive ancestors (bounded at `LibrarySearchMaxAncestors`) bare and
-`\Library`. Parent before exe-dir is load-bearing and pinned: a catalog inside the tool folder is
-the accident, the library's is the one meant. `--apply-exclusions` is a third caller and routes
+`\Library`, then each ancestor's `AppData\*` children, and last `%APPDATA%\MusicBee`. Parent before
+exe-dir is load-bearing and pinned: a catalog inside the tool folder is the accident, the library's
+is the one meant. `<root>\Library` beats `AppData\*` (it is the canonical home and
+`ResolveReviewDir`'s anchor), and `%APPDATA%\MusicBee` is last because a tool inside a *portable*
+instance must resolve to that instance, never to the user's default one — that ordering is pinned
+by a test on ladder position, not just membership. Known locations, never a recursive scan: a
+MusicBee root can sit inside someone's music tree.
+
+**The authoritative answer lives in the plugin, not here.** MusicBee tells it the data folder via
+`Setting_GetPersistentStoragePath()`; truedat is a standalone CLI and can only infer. So this
+ladder is the best-effort path for a hand-typed command, and it should not keep growing rungs to
+chase cases the hub can simply *tell* us — the hub already knows the folder when it launches
+truedat (`TruedatLauncher`), so passing the catalog explicitly is strictly better than another
+guess. truedat must never call the hub to find out: it has to work standalone, on a metadata
+mirror, and with the hub not running. `--apply-exclusions` is a third caller and routes
 through the same discovery. If a fourth surface ever needs to answer "which library did they
 mean", it joins them; it does not invent a fourth answer.
 
