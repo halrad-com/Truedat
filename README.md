@@ -202,6 +202,20 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           catalog first, then atomically swaps. Restores the catalog only — a
                           bundled exclusion file is left in the archive (extract it by hand to
                           roll policy back too).
+  --compact [path]        Re-format an existing catalog to minimal JSON in place — the format
+                          every save already writes. Lossless: a JSON-level round-trip that
+                          preserves every field byte-for-byte in value, including keys truedat
+                          does not model. Archives a compressed backup first; never re-analyzes.
+  --prettify [path] [out] The inverse — indented, human-readable JSON. With no <out> the catalog
+                          is rewritten in place (backup archived first); give <out> and the
+                          source is left untouched. Read a catalog with this, --compact to
+                          put it back.
+                          NOTE: the modes that REWRITE a catalog (--compact, --prettify,
+                          --restore, --prune-excluded) require an explicit target — a path,
+                          --moods, or the library XML as the positional argument. They refuse
+                          rather than fall back to whatever mbxmoods.json happens to sit in the
+                          current directory. Read-only modes (--stats, --list-speech,
+                          --list-missing-smfm) still default to it.
   --keep-backups N        How many timestamped catalog backups to keep after --fixup / --remap
                           / --merge-moods / --migrate (rotation, never truncation; 0 = keep
                           all; default 5). Backups are compressed .zip — mbxmoods.json is

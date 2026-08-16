@@ -3,6 +3,20 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Fixed
+
+- **A catalog mode that WRITES will no longer act on whatever `mbxmoods.json` happens to be in
+  the current directory.** `--compact`, `--prettify`, `--restore` and `--prune-excluded` fell
+  back to `<cwd>\mbxmoods.json` when given no path — no existence check, no evidence the file
+  was a library catalog — then rewrote it and left a `.bak.zip` and a `.mbxs` beside it. Run
+  from a source checkout it found the repo's own test fixture, which is exactly how it was
+  caught. They now refuse and name the path they would have written; read-only modes
+  (`--stats`, `--list-speech`, `--list-missing-smfm`) keep the convenience, because they cannot
+  destroy anything. Same defect class as the `--apply-exclusions` cwd bug fixed earlier: a
+  destructive verb must never inherit its target from wherever the operator is standing.
+
 ## [0.5.4.9-RC1] — 2026-08-15
 
 ### Added

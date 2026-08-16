@@ -2514,6 +2514,14 @@ namespace Truedat
             // before --snapshot because a run naming both should restore, not snapshot.
             if (restoreMode)
             {
+                // --restore OVERWRITES the destination catalog. Never let it pick that
+                // destination out of the current directory (see IsBareCwdCatalog).
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                {
+                    Console.Error.WriteLine(BareCwdRefusal("--restore", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 string? destCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var restoreRefusal);
                 if (restoreRefusal != null)
                 {
@@ -2556,6 +2564,15 @@ namespace Truedat
             // or --prettify with no out) archives a compressed backup first.
             if (compactMode || prettifyMode)
             {
+                // --compact / --prettify rewrite the catalog IN PLACE (backup archived first),
+                // so the target must be named, never inherited from the cwd.
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                {
+                    Console.Error.WriteLine(BareCwdRefusal(compactMode ? "--compact" : "--prettify",
+                        Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 string? srcCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var reformatRefusal);
                 if (reformatRefusal != null)
                 {
@@ -2690,6 +2707,13 @@ namespace Truedat
             // --dry-run reports the exact removal list and writes nothing.
             if (pruneExcludedMode)
             {
+                // --prune-excluded REMOVES entries and rewrites the catalog. Same rule.
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                {
+                    Console.Error.WriteLine(BareCwdRefusal("--prune-excluded", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 string? prunePath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var pruneRefusal);
                 if (pruneRefusal != null)
                 {
@@ -7705,6 +7729,35 @@ namespace Truedat
         /// cannot be a catalog; the caller prints it and exits 1.
         /// </summary>
         internal const string MoodsFileName = "mbxmoods.json";
+
+        /// <summary>
+        /// True when a catalog mode was given NOTHING to anchor to — no <c>--moods</c>, no
+        /// positional path, no library XML — so <see cref="ResolveMoodsCatalog"/> is about to
+        /// fall back to <c>&lt;current directory&gt;\mbxmoods.json</c>.
+        ///
+        /// That fallback is fine for a read-only report and dangerous for anything that WRITES:
+        /// it acts on whatever file happens to sit in the directory you are standing in, with no
+        /// existence check and no evidence it is a real library catalog. It cost us exactly that
+        /// — a bare reformat/restore run from the repo root found the checked-in test fixture
+        /// named <c>mbxmoods.json</c>, rewrote it, and left a <c>.bak.zip</c> and a <c>.mbxs</c>
+        /// behind (2026-08-13; the clobber was caught only by the build's dirty-stamp).
+        ///
+        /// This is the same defect class already fixed once for <c>--apply-exclusions</c>, which
+        /// used to create a brand-new exclusion file wherever the operator happened to be
+        /// standing and exit 0. Mutating modes must name their target; convenience belongs to
+        /// the surfaces that cannot destroy anything.
+        /// </summary>
+        internal static bool IsBareCwdCatalog(string? explicitPath, string? libraryXmlPath)
+            => string.IsNullOrEmpty(explicitPath) && string.IsNullOrEmpty(libraryXmlPath);
+
+        /// <summary>Refusal text for a mutating catalog mode that was given no target. Names the
+        /// path it would have written to, so the operator can see what they nearly hit.</summary>
+        internal static string BareCwdRefusal(string verb, string wouldHaveWritten)
+            => $"Error: {verb} needs the catalog named explicitly." + Environment.NewLine
+             + $"  With no path it would act on the current directory: {wouldHaveWritten}" + Environment.NewLine
+             + $"  That file is whatever happens to be here — not necessarily a library catalog —" + Environment.NewLine
+             + $"  and {verb} rewrites it. Pass the path (or --moods <path>), or run from the library folder"
+             + Environment.NewLine + "  with its iTunes XML as the positional argument.";
 
         static string? ResolveMoodsCatalog(string? explicitPath, string? libraryXmlPath, out string? refusal)
         {
@@ -13461,6 +13514,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                        && swung.Value.Min == 0.4 && swung.Value.Max == 0.6, "beats: alternating -> mean 0.5, stdev 0.1, min 0.4, max 0.6");
                 Assert(BeatIntervalStats(null) == null, "beats: null -> null");
                 Assert(BeatIntervalStats(new[] { 0.0, 1.0 }) == null, "beats: <3 beats -> null");
+            }
+
+            // --- bare-cwd guard: a mutating catalog mode must never inherit its target ---
+            // Regression for the 2026-08-13 incident: `truedat --compact` (and --restore,
+            // --prune-excluded) run with no path resolved to <cwd>\mbxmoods.json, found the
+            // repo's own checked-in test fixture, rewrote it and dropped a .bak.zip + .mbxs
+            // beside it. Nothing about the resolution was wrong — the fallback simply must not
+            // be reachable by a verb that writes.
+            {
+                Assert(IsBareCwdCatalog(null, null), "bare-cwd: no --moods and no positional is the cwd fallback");
+                Assert(IsBareCwdCatalog("", ""), "bare-cwd: empty strings count as absent");
+                Assert(!IsBareCwdCatalog(@"D:\lib\mbxmoods.json", null), "bare-cwd: an explicit --moods anchors the target");
+                Assert(!IsBareCwdCatalog(null, @"D:\lib\iTunes Music Library.xml"), "bare-cwd: a positional library XML anchors the target");
+                Assert(!IsBareCwdCatalog(@"D:\a.json", @"D:\b.xml"), "bare-cwd: both given is obviously anchored");
+
+                // The refusal must NAME the file it would have hit — the whole point is that the
+                // operator can see they were one keystroke from a file they never meant to touch.
+                var refusal = BareCwdRefusal("--compact", @"C:\src\truedat\mbxmoods.json");
+                Assert(refusal.IndexOf("--compact", StringComparison.Ordinal) >= 0, "bare-cwd: refusal names the verb");
+                Assert(refusal.IndexOf(@"C:\src\truedat\mbxmoods.json", StringComparison.Ordinal) >= 0,
+                    "bare-cwd: refusal names the path it would have written");
             }
 
             // --- --stats sidecar verdict: SidecarStateNote / SidecarAdvice -------------
