@@ -263,6 +263,24 @@ failure, because MBXHub's stdout capture is a bounded async tail and must not be
 
 Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migrate` / `--fixup` / `--merge-moods` / `--synthesize` / `--seed-moods` / `--hash-only`.
 
+**Verify is resilient to the source going away, and says so in a receipt.** `File.Exists` cannot
+distinguish a deleted file from an offline volume (NAS down, WiFi/ethernet dropped, external
+drive unplugged or spun out), so an unguarded verify *completes* with every entry MISSING — and
+with coverage receipts in play it would certify a slice it never read, which is worse than
+failing because it manufactures assurance. So verify probes each distinct library root before
+walking (refuse + exit 3 if any is unreachable) and **re-probes on the first MISSING**, stopping
+the walk when a volume drops mid-pass. On either path nothing is written: no CSV, no receipt, no
+backfill save. This is the guard `--fixup` already had; verify was the gap. **Do not "optimize"
+the mid-walk re-probe away** — it only fires on a MISSING result, so a healthy run pays nothing,
+and it is the only thing standing between an 18-hour pass and a confidently wrong result.
+
+Each completed run writes `<catalog>-verify[.<host>.<M>of<N>].receipt.json`: the slice it walked,
+an order-independent XOR fold of those paths, and the same fold over the whole catalog.
+`--verify-coverage` combines the receipts and proves the pass covered the catalog — every shard
+present exactly once, all against one catalog state, folds XOR-ing to the catalog's own. The
+fold is what makes it a proof rather than a tally: a skipped shard leaves a residue, a
+double-counted shard cancels itself. It attests to the **process**, not the audio.
+
 **`--verify` is the deliberate exception (2026-08-16)** — there, `--chunk` is what makes an
 interrupted pass restartable rather than a way to spread work across machines. A ~6 TB / 156k
 library over WiFi is an 18-24 hour walk, and one-shot means a NAS blip costs all of it. Each

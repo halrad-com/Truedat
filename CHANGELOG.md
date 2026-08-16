@@ -20,8 +20,27 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   shard's save rewrites the whole catalog from its own copy, so shards must run one at a time;
   truedat says so rather than letting a parallel run silently drop work.
 
+- **Verify coverage receipts + `--verify-coverage`.** Each verify run drops an immutable receipt
+  beside its CSV recording which slice it walked, folded into an order-independent digest;
+  `--verify-coverage` combines them and proves the pass covered the catalog — every shard run,
+  each exactly once, against one catalog state. The digest is what makes it a proof rather than
+  a tally: XOR of the shards' folds equals the catalog's own fold *only* if they partitioned it,
+  so a skipped shard leaves a residue and a shard counted twice cancels itself. This is a
+  self-integrity check on the **process** — whether you are entitled to believe the verify —
+  not a judgement on the audio, which is what the CSV says. Nothing is written to the catalog;
+  the receipts are new files beside it.
+
 ### Fixed
 
+- **Verify now refuses when the library is unreachable, instead of reporting every entry
+  MISSING.** `File.Exists` cannot tell a deleted file from a downed NAS, an unplugged external
+  drive, or WiFi dropping — so an offline volume produced a run that *completed* with thousands
+  of MISSING rows, and would now have certified coverage of a slice it never read. Verify now
+  probes each library root before walking (refusing outright if any is unreachable) and
+  re-probes on the first MISSING, so a volume that drops **mid-pass** stops the run at that
+  point rather than mislabelling the remainder. Nothing is written on either path — no CSV, no
+  receipt, and no backfill computed against a half-read library. Same guard `--fixup` has had;
+  verify was the gap.
 - **A catalog mode that WRITES will no longer act on whatever `mbxmoods.json` happens to be in
   the current directory.** `--compact`, `--prettify`, `--restore` and `--prune-excluded` fell
   back to `<cwd>\mbxmoods.json` when given no path — no existence check, no evidence the file

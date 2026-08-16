@@ -684,6 +684,10 @@ namespace Truedat
             Console.WriteLine("                      delta + --apply-exclusions; audio files untouched)");
             Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data");
             Console.WriteLine("                      + coverage -> mbxmoods-smfm-missing.csv");
+            Console.WriteLine("  --verify-coverage [path]  Read-only: combine the verify shard receipts beside a");
+            Console.WriteLine("                      catalog and prove the pass actually covered it — every shard run,");
+            Console.WriteLine("                      each exactly once, against one catalog state. Answers \"can I trust");
+            Console.WriteLine("                      this verify?\", not \"is the audio sound\" (that's the CSV).");
             Console.WriteLine("  --prune-excluded [path]  Remove catalog entries matching an exclusion rule — the");
             Console.WriteLine("                      entries scanned before the rule existed, which exclusions only");
             Console.WriteLine("                      ever kept out of FUTURE scans. include rules still win; backs up");
@@ -778,7 +782,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "prune-excluded", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -1949,6 +1953,7 @@ namespace Truedat
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
+            bool verifyCoverageMode = false; // --verify-coverage: combine shard receipts into a coverage proof (read-only, no audio)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
@@ -2086,6 +2091,7 @@ namespace Truedat
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
                 else if (canonical == "prune-excluded") pruneExcludedMode = true;
+                else if (canonical == "verify-coverage") verifyCoverageMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
@@ -2700,6 +2706,23 @@ namespace Truedat
                 LoadExistingMoods(smfmPath!, smfmTracks);
                 RunListMissingSmfm(smfmPath!, smfmTracks.Values);
                 Environment.ExitCode = 0;
+                return;
+            }
+
+            // --verify-coverage: combine the shard receipts into a coverage proof. Read-only,
+            // reads no audio — it answers "was the verify pass complete?", not "is the library
+            // sound". Resolution mirrors --stats, and the cwd fallback is fine here precisely
+            // because it cannot write anything.
+            if (verifyCoverageMode)
+            {
+                string? vcPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var vcRefusal);
+                if (vcRefusal != null)
+                {
+                    Console.Error.WriteLine(vcRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunVerifyCoverage(vcPath!);
                 return;
             }
 
@@ -6271,6 +6294,178 @@ namespace Truedat
             catch { return null; }
         }
 
+        /// <summary>
+        /// Order-independent 64-bit digest of one catalog path, for verify-coverage receipts.
+        /// FNV-1a over the SAME normalization <see cref="ChunkOwns"/> hashes (separator-folded,
+        /// case-folded), so a shard's digest cannot disagree with its own ownership decision
+        /// because of a path dialect. 64-bit rather than reusing PathComparer's 32-bit hash:
+        /// these get XOR-folded over ~150k entries and then compared for EQUALITY, so a
+        /// collision is a false "covered" — the one wrong answer this must not give.
+        /// </summary>
+        internal static ulong PathDigest64(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return 0;
+            const ulong offset = 14695981039346656037UL, prime = 1099511628211UL;
+            ulong h = offset;
+            foreach (var raw in path!)
+            {
+                var c = raw == '/' ? '\\' : char.ToUpperInvariant(raw);
+                h ^= c;
+                h *= prime;
+            }
+            return h;
+        }
+
+        /// <summary>
+        /// XOR-fold a set of per-path digests into one combinable value. XOR because coverage
+        /// must be provable by COMBINING shard receipts in any order, with no shared state
+        /// between the runs that produced them — sum would overflow-alias, and a list of every
+        /// path would defeat the point of a small receipt.
+        ///
+        /// The property that matters: XOR of the shards' folds equals the fold over the whole
+        /// catalog IFF the shards partition it. A gap leaves a residue; a duplicated entry
+        /// cancels itself and shows up as the same mismatch. Either way the verdict is "not a
+        /// clean partition", which is the honest answer — the receipt names counts too, so the
+        /// combiner can say WHICH of the two it looks like.
+        /// </summary>
+        internal static ulong FoldDigests(IEnumerable<string> paths)
+        {
+            ulong acc = 0;
+            foreach (var p in paths) acc ^= PathDigest64(p);
+            return acc;
+        }
+
+        /// <summary>
+        /// <c>--verify-coverage</c>: combine the shard receipts beside a catalog and say whether
+        /// the verify pass, taken as a whole, actually covered it.
+        ///
+        /// This is a **self-integrity** check on the PROCESS, not a judgement on the library —
+        /// the CSVs say whether the audio is sound; this says whether you are entitled to believe
+        /// them. A set of shards that looks finished (eight CSVs, no errors) can still have a
+        /// hole in it: a shard never run, a shard run twice against a catalog that changed in
+        /// between, or a run that died when the NAS dropped. Counts alone cannot tell those
+        /// apart, which is why each receipt carries an order-independent digest fold: XOR the
+        /// shards' folds and it equals the catalog's own fold if and only if the shards
+        /// partitioned it exactly.
+        ///
+        /// Read-only over everything. Never writes, never touches the catalog.
+        /// </summary>
+        static int RunVerifyCoverage(string moodsPath)
+        {
+            Console.WriteLine("=== Verify Coverage ===");
+            Console.WriteLine($"Catalog: {moodsPath}");
+            Console.WriteLine();
+
+            var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var stem = Path.GetFileNameWithoutExtension(moodsPath);
+            string[] files;
+            try { files = Directory.GetFiles(dir, $"{stem}-verify*.receipt.json"); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: could not read receipts in {dir}: {ex.Message}");
+                return 1;
+            }
+            if (files.Length == 0)
+            {
+                Console.WriteLine("No verify receipts found beside this catalog.");
+                Console.WriteLine($"  Looked for: {Path.Combine(dir, stem + "-verify*.receipt.json")}");
+                Console.WriteLine("  Run truedat --verify (optionally with --chunk M/N) to produce them.");
+                return 1;
+            }
+
+            var rcpts = new List<(string File, int Index, int Total, string Host, int Entries,
+                                  ulong Cover, ulong Whole, int CatCount, string CatPath, bool Complete,
+                                  int Ok, int Drift, int Missing, int NoHash, int Errored)>();
+            foreach (var f in files.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var root = JsonNode.Parse(File.ReadAllText(f))?.AsObject();
+                    if (root == null) { Console.WriteLine($"  skipped (unreadable): {Path.GetFileName(f)}"); continue; }
+                    ulong Hex(string? s) => string.IsNullOrEmpty(s) ? 0
+                        : ulong.TryParse(s, System.Globalization.NumberStyles.HexNumber,
+                            System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+                    int I(JsonNode? n, params string[] p) => (int)(SafeDbl(n, p) ?? 0);
+                    rcpts.Add((
+                        Path.GetFileName(f),
+                        I(root, "shard", "index"), I(root, "shard", "total"),
+                        SafeStr(root, "shard", "host") ?? "?",
+                        I(root, "coverage", "entries"),
+                        Hex(SafeStr(root, "coverage", "digest")),
+                        Hex(SafeStr(root, "catalog", "digest")),
+                        I(root, "catalog", "trackCount"),
+                        SafeStr(root, "catalog", "path") ?? "",
+                        (root["run"] as JsonObject)?["complete"]?.GetValue<bool>() ?? false,
+                        I(root, "results", "ok"), I(root, "results", "drift"),
+                        I(root, "results", "missing"), I(root, "results", "noHash"),
+                        I(root, "results", "errored")));
+                }
+                catch (Exception ex) { Console.WriteLine($"  skipped (bad JSON): {Path.GetFileName(f)} — {ex.Message}"); }
+            }
+            if (rcpts.Count == 0) { Console.WriteLine("No usable receipts."); return 1; }
+
+            var problems = new List<string>();
+
+            // 1. All shards must describe the SAME catalog state. If they don't, their coverage
+            //    is not combinable at all and every later check is meaningless — so this is
+            //    reported first and hard.
+            var wholes = rcpts.Select(r => r.Whole).Distinct().ToList();
+            if (wholes.Count > 1)
+                problems.Add($"receipts describe {wholes.Count} DIFFERENT catalog states — the catalog changed between shards, so their coverage cannot be combined");
+
+            // 2. Every shard of the declared set must be present, exactly once.
+            int total = rcpts.Select(r => r.Total).DefaultIfEmpty(1).Max();
+            var byIndex = rcpts.GroupBy(r => r.Index).ToDictionary(g => g.Key, g => g.Count());
+            var absent = Enumerable.Range(1, total).Where(i => !byIndex.ContainsKey(i)).ToList();
+            if (absent.Count > 0)
+                problems.Add($"shard(s) never run: {string.Join(", ", absent.Select(i => $"{i}/{total}"))}");
+            var dupes = byIndex.Where(kv => kv.Value > 1).Select(kv => $"{kv.Key}/{total} x{kv.Value}").ToList();
+            if (dupes.Count > 0)
+                problems.Add($"shard(s) with more than one receipt: {string.Join(", ", dupes)} — delete the stale one and re-run");
+
+            // 3. Any run that did not finish cleanly disqualifies the set.
+            var incomplete = rcpts.Where(r => !r.Complete).Select(r => r.File).ToList();
+            if (incomplete.Count > 0)
+                problems.Add($"receipt(s) from a run that did not complete: {string.Join(", ", incomplete)}");
+
+            // 4. THE proof. Only meaningful when the receipts agree on the catalog, and only
+            //    when each shard appears once — but check it regardless so the output shows
+            //    both the symptom and the arithmetic.
+            ulong combined = 0;
+            foreach (var r in rcpts.GroupBy(r => r.Index).Select(g => g.First())) combined ^= r.Cover;
+            ulong expected = wholes.Count == 1 ? wholes[0] : 0;
+            bool digestOk = wholes.Count == 1 && combined == expected;
+            if (!digestOk && wholes.Count == 1)
+                problems.Add($"coverage fold {combined:x16} does not match the catalog's {expected:x16} — the shards did not partition it");
+
+            int summed = rcpts.GroupBy(r => r.Index).Select(g => g.First().Entries).Sum();
+            int catCount = rcpts[0].CatCount;
+            if (summed != catCount)
+                problems.Add($"shards cover {summed:N0} entries but the catalog holds {catCount:N0}");
+
+            Console.WriteLine($"Receipts:  {rcpts.Count}  (shards 1..{total})");
+            foreach (var r in rcpts.OrderBy(r => r.Index))
+                Console.WriteLine($"  {r.Index}/{r.Total} on {r.Host,-12} {r.Entries,8:N0} entries   ok {r.Ok:N0}  drift {r.Drift:N0}  missing {r.Missing:N0}  errored {r.Errored:N0}");
+            Console.WriteLine();
+            Console.WriteLine($"  catalog entries:  {catCount:N0}");
+            Console.WriteLine($"  covered entries:  {summed:N0}");
+            Console.WriteLine($"  coverage fold:    {combined:x16}");
+            Console.WriteLine($"  catalog fold:     {expected:x16}");
+            Console.WriteLine();
+
+            if (problems.Count == 0)
+            {
+                Console.WriteLine("COVERAGE COMPLETE — every catalog entry was verified exactly once.");
+                Console.WriteLine($"  Combined results: ok {rcpts.Sum(r => r.Ok):N0}, drift {rcpts.Sum(r => r.Drift):N0}, " +
+                                  $"missing {rcpts.Sum(r => r.Missing):N0}, no-hash {rcpts.Sum(r => r.NoHash):N0}, errored {rcpts.Sum(r => r.Errored):N0}");
+                return 0;
+            }
+
+            Console.WriteLine("COVERAGE INCOMPLETE — this pass does not prove the catalog was verified:");
+            foreach (var p in problems) Console.WriteLine($"  - {p}");
+            return 1;
+        }
+
         /// <summary>Gather the sidecar-integrity readout for <paramref name="catalogPath"/>.
         /// Read-only, never throws, writes nothing. Compares the <c>.mbxs</c> sidecar's
         /// version / track count / mtime against the live catalog (single-file or the newest
@@ -6512,15 +6707,52 @@ namespace Truedat
                 }
             }
 
+            // --- Source reachability, up front (the guard --fixup has and verify lacked) ---
+            // A verify decides "MISSING" from File.Exists, which cannot tell a deleted file from
+            // an offline volume. Unguarded, a NAS that is down (or drops mid-walk) produces a run
+            // that COMPLETES with every entry MISSING — and, now that shards emit coverage
+            // receipts, one that would certify a slice it never actually read. That is worse than
+            // failing: it manufactures false assurance. So probe each distinct root once before
+            // walking, and refuse the run outright if any is unreachable.
+            var vRootCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in workList)
+            {
+                var r = ReachabilityRoot(kv.Key);
+                if (r.Length > 0) vRootCounts[r] = vRootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+            }
+            var vProbed = vRootCounts
+                .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _)))
+                .ToList();
+            var (vRefuse, vDownSummary) = EvaluateReachability(vProbed);
+            if (vRefuse)
+            {
+                Console.WriteLine();
+                Console.WriteLine("REFUSING: part of the library is unreachable — every entry on that volume");
+                Console.WriteLine("would read as MISSING, which is an offline share, not a verified result.");
+                Console.WriteLine($"  {vDownSummary}");
+                Console.WriteLine("Nothing was written (no CSV, no receipt). Re-run with the library mounted.");
+                KeepAwakeRelease();
+                return 3;
+            }
+
             int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0, backfilled = 0;
             var details = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
             int done = 0;
+            var startedUtc = DateTime.UtcNow;
+
+            // Mid-walk volume loss. The up-front probe only proved the source was up when the run
+            // STARTED; an 18-hour pass over WiFi is exactly the window in which a storm drops the
+            // NAS. From that moment every remaining File.Exists says false. Detect it at the first
+            // MISSING (re-probe that file's ROOT — a healthy root always answers), stop the walk,
+            // and mark the run untrustworthy so no receipt can claim the slice was covered.
+            int sourceLost = 0;
+            string sourceLostDetail = "";
 
             // Verify walks the whole catalog recomputing hashes (full audio reads) even
             // without --backfill, so it counts as work-bearing — not merely read-only-fast.
             KeepAwakePump(workMode: true);
-            Parallel.ForEach(workList, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
+            Parallel.ForEach(workList, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, (kvp, loopState) =>
             {
                 var path = kvp.Key;
                 var entry = kvp.Value;
@@ -6528,8 +6760,23 @@ namespace Truedat
                 string detail = "";
                 var filled = new List<string>();   // tracks which fields this entry got backfilled (CSV column 4)
 
+                // Another worker already found the source gone — stop rather than record
+                // thousands of meaningless MISSING rows behind it.
+                if (Volatile.Read(ref sourceLost) != 0) { loopState.Stop(); return; }
+
                 if (!File.Exists(path))
                 {
+                    // "Gone" is ambiguous: deleted, or the volume just dropped (NAS/WiFi/ethernet
+                    // down, external drive unplugged or spun out). Re-probe this file's ROOT —
+                    // root level because loss is volume-wide, and a healthy root ALWAYS answers,
+                    // so any error there is unambiguously "unreachable" rather than "deleted".
+                    if (!ProbeRootReachable(ReachabilityRoot(path), out var whyDown))
+                    {
+                        if (Interlocked.Exchange(ref sourceLost, 1) == 0)
+                            sourceLostDetail = $"{ReachabilityRoot(path)} stopped answering ({whyDown}); first seen at {path}";
+                        loopState.Stop();
+                        return;
+                    }
                     status = "MISSING";
                     Interlocked.Increment(ref missing);
                 }
@@ -6668,6 +6915,24 @@ namespace Truedat
 
             sw.Stop();
 
+            // The source dropped mid-walk. Everything after that point is unexamined, so this
+            // run proves nothing about the slice — refuse it whole rather than emit a partial
+            // CSV that reads like a result, and above all do NOT save a backfill computed
+            // against a half-read library. Re-running the same shard costs one slice.
+            if (Volatile.Read(ref sourceLost) != 0)
+            {
+                KeepAwakeRelease();
+                Console.WriteLine();
+                Console.WriteLine("REFUSING: the library became unreachable mid-verify.");
+                Console.WriteLine($"  {sourceLostDetail}");
+                Console.WriteLine($"  Examined {done:N0} of {workList.Count:N0} entries before the drop.");
+                Console.WriteLine("Nothing was written — no CSV, no receipt" + (backfill ? ", no backfill saved" : "") + ".");
+                Console.WriteLine(chunkTotal > 0
+                    ? $"Re-run this shard (--chunk {chunkIndex}/{chunkTotal}) once the library is back."
+                    : "Re-run once the library is back.");
+                return 3;
+            }
+
             // In backfill mode write the merged file back atomically — only when we actually
             // changed something. Idempotent re-runs do zero IO on the moods file.
             if (backfill && backfilled > 0)
@@ -6705,6 +6970,68 @@ namespace Truedat
             {
                 Console.WriteLine($"WARNING: could not write {csvPath}: {ex.Message}");
                 csvPath = "(not written)";
+            }
+
+            // --- Coverage receipt -------------------------------------------------------
+            // A shard's own console output cannot prove the PASS was complete — that only shows
+            // up when the shards are combined. So each run drops an immutable, append-only
+            // receipt beside its CSV recording which slice it walked, folded into an
+            // order-independent digest that XORs with its siblings to equal the catalog's own.
+            // It attests to the RUN (was this verify complete and sound?), not to the library —
+            // audio integrity is what the CSV says. Written only on a run that was not cut short,
+            // so a receipt existing is itself evidence the source stayed up throughout.
+            var receiptPath = Path.ChangeExtension(csvPath, ".receipt.json");
+            if (csvPath != "(not written)")
+            {
+                try
+                {
+                    var covered = FoldDigests(workList.Select(kv => kv.Key));
+                    var whole = FoldDigests(allTracks.Keys);
+                    var rcpt = new JsonObject
+                    {
+                        ["schemaVersion"] = 1,
+                        ["kind"] = "verify-coverage-receipt",
+                        ["catalog"] = new JsonObject
+                        {
+                            ["path"] = Path.GetFullPath(moodsPath),
+                            ["trackCount"] = loaded,
+                            // The whole-catalog fold, recorded by EVERY shard: if two shards
+                            // disagree here they ran against different catalog states and their
+                            // coverage cannot be combined, however tidy the counts look.
+                            ["digest"] = whole.ToString("x16"),
+                        },
+                        ["shard"] = new JsonObject
+                        {
+                            ["index"] = chunkTotal > 0 ? chunkIndex : 1,
+                            ["total"] = chunkTotal > 0 ? chunkTotal : 1,
+                            ["host"] = Environment.MachineName,
+                        },
+                        ["coverage"] = new JsonObject
+                        {
+                            ["entries"] = workList.Count,
+                            ["digest"] = covered.ToString("x16"),
+                        },
+                        ["results"] = new JsonObject
+                        {
+                            ["ok"] = ok, ["drift"] = drift, ["missing"] = missing,
+                            ["noHash"] = noHash, ["errored"] = errored, ["backfilled"] = backfilled,
+                        },
+                        ["run"] = new JsonObject
+                        {
+                            ["startedUtc"] = startedUtc.ToString("o"),
+                            ["finishedUtc"] = DateTime.UtcNow.ToString("o"),
+                            ["version"] = VersionInfo.Display,
+                            ["backfill"] = backfill,
+                            ["complete"] = true,
+                        },
+                    };
+                    File.WriteAllText(receiptPath, rcpt.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"WARNING: could not write coverage receipt: {ex.Message}");
+                    receiptPath = "(not written)";
+                }
             }
 
             Console.WriteLine();
@@ -13306,6 +13633,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     int covered = 0;
                     for (int m = 1; m <= shards; m++) covered += tiny.Count(p => ChunkOwns(p, m, shards));
                     Assert(covered == 1, "verify-chunk: a single-entry catalog is owned by exactly one shard, the rest are empty");
+
+                    // --- coverage receipts: the field-checkable proof ---------------------
+                    // The partition being correct in THIS binary is pinned above, but an
+                    // operator running eight shards over a week has no way to see that. The
+                    // receipts must compose into a proof: XOR of the shard folds equals the
+                    // fold over the whole catalog, and only then.
+                    var whole = FoldDigests(catalog);
+                    ulong combined = 0;
+                    for (int m = 1; m <= shards; m++)
+                        combined ^= FoldDigests(catalog.Where(p => ChunkOwns(p, m, shards)));
+                    Assert(combined == whole, "verify-coverage: XOR of every shard's fold equals the whole-catalog fold");
+
+                    // A MISSED shard must not look complete — this is the failure the receipt
+                    // exists to catch, and the reason a count check alone is not enough.
+                    ulong missingOne = 0;
+                    for (int m = 1; m <= shards; m++)
+                        if (m != 3) missingOne ^= FoldDigests(catalog.Where(p => ChunkOwns(p, m, shards)));
+                    Assert(missingOne != whole, "verify-coverage: skipping a shard leaves a residue — a gap cannot read as covered");
+
+                    // A shard run TWICE cancels itself out and must also fail the check rather
+                    // than silently pass (XOR is self-inverse, so double-counting is visible).
+                    ulong doubled = combined ^ FoldDigests(catalog.Where(p => ChunkOwns(p, 2, shards)));
+                    Assert(doubled != whole, "verify-coverage: a shard counted twice does not read as covered");
+
+                    // Digest normalization must match ChunkOwns' own, or a shard's proof could
+                    // disagree with its ownership decision over a mere path dialect.
+                    Assert(PathDigest64(@"D:\M\a.flac") == PathDigest64(@"d:/m/A.FLAC"),
+                        "verify-coverage: the path digest folds separators and case, like ChunkOwns");
+                    Assert(PathDigest64("") == 0 && PathDigest64(null) == 0,
+                        "verify-coverage: an empty path contributes nothing to the fold");
                 }
 
                 // Ledger scoping, over FilterExclusions itself.
