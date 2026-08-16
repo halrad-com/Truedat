@@ -1554,8 +1554,10 @@ namespace Truedat
             }
             catch { }
 
-            // Downmix WAVs and staged copies both live under the stage dir now, so one sweep
-            // covers both and --stage-dir isolates both.
+            // Staged copies, downmix WAVs and the Essentia extractor's per-track output JSON all
+            // live under the stage dir now, so one sweep covers all three and --stage-dir isolates
+            // all three. (The extractor JSON used to be Path.GetTempFileName, i.e. loose in %TEMP%
+            // where nothing ever swept it — a killed scan leaked one file per analyzed track.)
             try
             {
                 var stageDir = _stageOpts.StageDir;
@@ -1563,7 +1565,7 @@ namespace Truedat
                 {
                     // One pass, not one per kind: a second glob over the same directory would
                     // report the same recent file twice in the "left alone" line.
-                    if (SweepAged(stageDir, "*", "staged/downmix file(s)") == 0)
+                    if (SweepAged(stageDir, "*", "staged/downmix/extractor file(s)") == 0)
                         try { Directory.Delete(stageDir); } catch { }
                 }
             }
@@ -8305,6 +8307,7 @@ namespace Truedat
             }
 
             const string LibrarySubdir = "Library";
+            const string AppDataSubdir = "AppData";
 
             if (levels.Count > 1) yield return levels[1];                              // parent
             yield return levels[0];                                                    // exe dir
@@ -8315,6 +8318,51 @@ namespace Truedat
             {
                 yield return levels[i];
                 yield return Path.Combine(levels[i], LibrarySubdir);
+            }
+
+            // Last: the instance's AppData children (<root>\AppData\MBXHub, \truedat, …). The
+            // rule the operator settled on is "if it is under the MusicBee instance, it gets
+            // found", and people do keep the catalog beside whichever tool wrote it.
+            //
+            // These come LAST on purpose. <root>\Library is the canonical home — it is where the
+            // iTunes XML lands, and ResolveReviewDir anchors the instance root as the PARENT of
+            // the moods dir — so a catalog there must win over one in an AppData subfolder. The
+            // run-from-AppData case is already served earlier by the exe-dir rung, so this arm
+            // only decides the genuinely new case: catalog in AppData, invoked from elsewhere.
+            //
+            // Enumerated rather than hardcoded to a tool name, and SORTED so the choice is
+            // deterministic — two catalogs under one instance must not resolve differently run to
+            // run. Which rung won is reportable, which is the point of --paths.
+            for (int i = 0; i < levels.Count; i++)
+            {
+                var appData = Path.Combine(levels[i], AppDataSubdir);
+                List<string>? children = null;
+                try
+                {
+                    if (Directory.Exists(appData))
+                    {
+                        children = new List<string>(Directory.EnumerateDirectories(appData));
+                        children.Sort(StringComparer.OrdinalIgnoreCase);
+                    }
+                }
+                catch { /* unreadable AppData is not a reason to fail discovery */ }
+                if (children == null) continue;
+                foreach (var child in children) yield return child;
+            }
+
+            // Finally, the NON-PORTABLE install. Everything above is instance-relative, which is
+            // the right instinct for a portable MusicBee (<root>\Library, <root>\AppData\…) and
+            // reaches nothing for a standard one: that keeps its data in %APPDATA%\MusicBee while
+            // the program lives in Program Files, so no amount of walking up from the exe arrives
+            // anywhere near the library. Last on purpose — a tool sitting inside a portable
+            // instance must resolve to THAT instance, never to the user's default one.
+            string? roaming = null;
+            try { roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData); } catch { }
+            if (!string.IsNullOrEmpty(roaming))
+            {
+                var mbData = Path.Combine(roaming!, "MusicBee");
+                yield return Path.Combine(mbData, LibrarySubdir);
+                yield return mbData;
             }
         }
 
@@ -8540,6 +8588,42 @@ namespace Truedat
         /// (0x20..0x7E). Music extensions in the wild are all ASCII (.mp3, .flac,
         /// .m4a, .wav, .aiff, .ogg, .opus, .wma) so the common case is unchanged.
         /// </summary>
+        /// <summary>
+        /// Where the Essentia extractor writes its per-track output JSON. Prefers the staging
+        /// directory so all of truedat's relocatable scratch lands in ONE place: an operator who
+        /// points <c>--stage-dir</c> at a folder their antivirus ignores should not still be
+        /// paying for a real-time scan of a temp file per track, and until this existed
+        /// <c>Path.GetTempFileName</c> pinned these to <c>%TEMP%</c> no matter what. It also folds
+        /// these into the startup orphan sweep, which only ever knew about the stage dir — a
+        /// killed scan used to leave its extractor JSON in <c>%TEMP%</c> permanently.
+        ///
+        /// Falls back to <c>%TEMP%</c> in two cases, both deliberate:
+        ///   * the stage dir is not ASCII-printable — this path becomes an ARGUMENT to the
+        ///     extractor, and non-ASCII argument paths are precisely what staging exists to avoid;
+        ///     <c>--stage-dir</c> is operator-chosen, so it can be anything.
+        ///   * the directory cannot be created or written.
+        /// Neither is worth failing a scan over: the output file's location is an efficiency
+        /// concern, not a correctness one.
+        /// </summary>
+        internal static string CreateExtractorOutputPath()
+        {
+            try
+            {
+                var stageDir = _stageOpts?.StageDir;
+                if (!string.IsNullOrEmpty(stageDir) && IsAsciiPrintable(stageDir!))
+                {
+                    Directory.CreateDirectory(stageDir!);
+                    var candidate = Path.Combine(stageDir!, $"essentia-{Guid.NewGuid():N}.json");
+                    // Create it now: GetTempFileName's callers expect the file to exist, and
+                    // creating it here keeps the "someone else grabs the name" window shut.
+                    using (File.Create(candidate)) { }
+                    return candidate;
+                }
+            }
+            catch { /* fall through to %TEMP% */ }
+            return Path.GetTempFileName();
+        }
+
         static bool IsAsciiPrintable(string ext)
         {
             for (int i = 0; i < ext.Length; i++)
@@ -11425,6 +11509,35 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(h.Path == @"\\server\share\test.mp3", "--no-stage preserves source path");
             }
 
+            // Essentia's output JSON follows --stage-dir, so one exclusion covers the scratch.
+            {
+                var savedStage = _stageOpts;
+                try
+                {
+                    var esDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-extout-" + Guid.NewGuid().ToString("N"));
+                    _stageOpts = new StageOptions { StageDir = esDir };
+                    var p1 = CreateExtractorOutputPath();
+                    Assert(Path.GetDirectoryName(p1) == esDir.TrimEnd(Path.DirectorySeparatorChar),
+                        "extractor-out: lands in the stage dir, not %TEMP%");
+                    Assert(File.Exists(p1), "extractor-out: the file exists (callers assume GetTempFileName semantics)");
+                    var p2 = CreateExtractorOutputPath();
+                    Assert(p2 != p1, "extractor-out: each track gets its own file");
+
+                    // A non-ASCII stage dir would put a non-ASCII path on the extractor's own
+                    // argument list — the exact hazard staging exists to avoid — so fall back.
+                    var badDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-extoüt-" + Guid.NewGuid().ToString("N"));
+                    _stageOpts = new StageOptions { StageDir = badDir };
+                    var p3 = CreateExtractorOutputPath();
+                    Assert(Path.GetDirectoryName(p3) != badDir.TrimEnd(Path.DirectorySeparatorChar),
+                        "extractor-out: a non-ASCII stage dir falls back to %TEMP%");
+                    Assert(File.Exists(p3), "extractor-out: the fallback file exists too");
+
+                    try { File.Delete(p1); File.Delete(p2); File.Delete(p3); } catch { }
+                    try { Directory.Delete(esDir, true); } catch { }
+                }
+                finally { _stageOpts = savedStage; }
+            }
+
             // IsAsciiPrintable — extension sanitization invariant.
             Assert(IsAsciiPrintable(".mp3"), "ASCII ext passes");
             Assert(IsAsciiPrintable(".flac"), "ASCII ext (multi-char) passes");
@@ -14249,6 +14362,47 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Directory.CreateDirectory(deep);
                     Assert(ProbeCatalogBesideExe(deep) == null,
                         "discover: the upward walk is bounded, not unlimited");
+
+                    // "If it is under the MusicBee instance, it gets found" — a catalog kept in an
+                    // AppData subfolder is reachable from a tool installed elsewhere in the same
+                    // instance. Here the exe is at <root>\Library\truedat and the catalog is at
+                    // <root>\AppData\MBXHub, so no bare/\Library rung reaches it.
+                    File.Delete(rootCatalog);
+                    var rootToolDir = Path.Combine(rootLib, "truedat");
+                    Directory.CreateDirectory(rootToolDir);
+                    var hubHeldCatalog = Path.Combine(hubDir, MoodsFileName);
+                    File.WriteAllText(hubHeldCatalog, "{}");
+                    Assert(ProbeCatalogBesideExe(rootToolDir) == hubHeldCatalog,
+                        "discover: a catalog in <root>\\AppData\\MBXHub is found from <root>\\Library\\truedat");
+
+                    // …but Library stays canonical: it is where the XML lands and where
+                    // ResolveReviewDir anchors the instance root, so it must win over AppData.
+                    File.WriteAllText(rootCatalog, "{}");
+                    Assert(ProbeCatalogBesideExe(rootToolDir) == rootCatalog,
+                        "discover: <root>\\Library beats <root>\\AppData\\* when both hold a catalog");
+
+                    // Deterministic when several AppData children hold one — sorted, not
+                    // whatever order the filesystem happens to enumerate.
+                    File.Delete(rootCatalog);
+                    var altToolData = Path.Combine(root, "AppData", "Atruedat");
+                    Directory.CreateDirectory(altToolData);
+                    var altCatalog = Path.Combine(altToolData, MoodsFileName);
+                    File.WriteAllText(altCatalog, "{}");
+                    Assert(ProbeCatalogBesideExe(rootToolDir) == altCatalog,
+                        "discover: several AppData children resolve deterministically by sorted name");
+
+                    // Non-portable MusicBee: program in Program Files, data in %APPDATA%\MusicBee.
+                    // Nothing instance-relative reaches that, so it is the last rung — and it must
+                    // stay last, or a tool inside a portable instance would resolve to the user's
+                    // default library instead of the instance it was installed into.
+                    var ladder = new List<string>(LibrarySearchDirs(rootToolDir));
+                    var roamingDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                    var mbRoaming = Path.Combine(roamingDir, "MusicBee");
+                    var mbRoamingLib = Path.Combine(mbRoaming, "Library");
+                    Assert(ladder.Contains(mbRoamingLib),
+                        "discover: %APPDATA%\\MusicBee\\Library is on the ladder for a non-portable install");
+                    Assert(ladder.IndexOf(mbRoamingLib) > ladder.IndexOf(rootLib),
+                        "discover: the non-portable fallback is tried AFTER the instance's own Library");
                 }
                 finally
                 {
@@ -16969,7 +17123,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (_audit && pathMethod != "original")
                 Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
-            var tempJson = Path.GetTempFileName();
+            var tempJson = CreateExtractorOutputPath();
             RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
             try
             {
