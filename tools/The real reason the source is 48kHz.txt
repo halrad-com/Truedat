@@ -1,9 +1,0 @@
-The real reason: the source is 48kHz
-
-The 48kHz is baked in at YouTube, before you ever download it:
-
-1. YouTube's best audio stream is Opus (itag 251, in WebM). The Opus codec spec mandates 48kHz — it's not a choice YouTube makes, it's the codec. Every Opus stream operates at 48kHz internally. So any "bestaudio" pull from YouTube is 48kHz by definition.
-2. 48kHz is the video/film industry standard (44.1kHz is the CD/music standard). Because YouTube is a video platform, its whole audio pipeline is 48kHz-native. YouTube re-encodes uploads to 48kHz on ingest.
-3. yt-dlp's default bestaudio therefore grabs a 48kHz Opus stream. ffmpeg then preserves the sample rate through extraction/remux (it does not resample unless you pass -ar).
-
-So "even though the source is something else" — the original master before upload may well have been 44.1kHz, but YouTube's copy is genuinely 48kHz. You're getting a faithful download of a 48kHz source, not a Windows-mangled one. The 48kHz is real, not an artifact of your machine.
