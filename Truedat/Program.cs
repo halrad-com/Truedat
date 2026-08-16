@@ -4403,6 +4403,35 @@ namespace Truedat
                 Console.WriteLine($"Output: {moodsPath}");
             }
 
+            // Library reachability, before a single file is touched. Without this a scan started
+            // against a downed NAS / dropped WiFi / unplugged drive walks the entire work list
+            // recording every track as "file not found" — hours of wall-clock to produce a
+            // ledger of lies. One probe per distinct root answers it in milliseconds, because
+            // unreachability is volume-wide and a healthy root always responds.
+            {
+                var scanRootCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var t in tracks)
+                {
+                    var r = ReachabilityRoot(t.Location);
+                    if (r.Length > 0) scanRootCounts[r] = scanRootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+                }
+                var scanProbed = scanRootCounts
+                    .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _)))
+                    .ToList();
+                var (scanRefuse, scanDown) = EvaluateReachability(scanProbed);
+                if (scanRefuse)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("REFUSING: part of the library is unreachable — every track on that volume");
+                    Console.WriteLine("would be recorded as missing, which is an offline source, not a scan result.");
+                    Console.WriteLine($"  {scanDown}");
+                    Console.WriteLine("Nothing was scanned and no ledger was written. Re-run with the library mounted.");
+                    if (auditLog) { _tee = null; tee?.Dispose(); }
+                    Environment.ExitCode = 3;
+                    return;
+                }
+            }
+
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -4517,6 +4546,13 @@ namespace Truedat
 
             var cts = new CancellationTokenSource();
             var cancelRequested = 0;
+            // Volume loss mid-scan. A scan reads "file not found" for every track once the NAS
+            // drops, WiFi/ethernet goes, or an external drive is unplugged or spins out — and
+            // without this it would grind through the whole remaining work list ledgering healthy
+            // files as missing, then report a confident, wrong summary. Detected on the first
+            // missing file (re-probe its ROOT; a healthy root always answers) and stopped there.
+            int scanSourceLost = 0;
+            string scanSourceLostDetail = "";
             // Ctrl+C pause gate. Signaled = running. The first Ctrl+C resets it so
             // workers park at the top of their next track, drains the in-flight ones,
             // prints the summary on a settled state, then prompts Exit/Continue; a
@@ -4743,6 +4779,23 @@ namespace Truedat
                         // gone (not merely unreachable by normal Win32 IO).
                         if (!File.Exists(scanPath))
                         {
+                            // Deleted, or did the volume just go? Re-probe this file's ROOT before
+                            // recording anything: a healthy root always answers, so an error here
+                            // means the source went away and this file is NOT missing. Ledgering it
+                            // would be a lie, and the thousands behind it would be lies too.
+                            if (!ProbeRootReachable(ReachabilityRoot(t.Location), out var scanWhyDown))
+                            {
+                                if (Interlocked.Exchange(ref scanSourceLost, 1) == 0)
+                                {
+                                    scanSourceLostDetail = $"{ReachabilityRoot(t.Location)} stopped answering ({scanWhyDown}); first seen at {t.Location}";
+                                    Console.WriteLine();
+                                    Console.WriteLine("STOPPING: the library became unreachable mid-scan.");
+                                    Console.WriteLine($"  {scanSourceLostDetail}");
+                                    Console.WriteLine("  Remaining tracks are NOT recorded as missing — re-run once it is back.");
+                                    cts.Cancel();
+                                }
+                                return;
+                            }
                             var reason = t.Location.Length >= 260
                                 ? $"file not found (path {t.Location.Length} chars >= 260 MAX_PATH)"
                                 : "file not found";
@@ -5256,6 +5309,17 @@ namespace Truedat
             Console.WriteLine();
             if (wasCancelled)
                 Console.WriteLine("=== Interrupted (Ctrl+C) - progress saved ===");
+            // A source-loss stop must never render as a completed scan. Everything analyzed
+            // before the drop is real and was saved; everything after it was never looked at,
+            // so the run is INCOMPLETE and says so — with a non-zero exit so a scheduled job
+            // notices too.
+            if (Volatile.Read(ref scanSourceLost) != 0)
+            {
+                Console.WriteLine("=== INCOMPLETE - the library went away mid-scan; work up to that point was saved ===");
+                Console.WriteLine($"  {scanSourceLostDetail}");
+                Console.WriteLine("  Tracks after the drop were NOT recorded as missing. Re-run once it is back.");
+                Environment.ExitCode = 3;
+            }
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
