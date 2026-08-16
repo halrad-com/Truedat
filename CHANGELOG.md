@@ -61,6 +61,13 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   rules went missing along with it — the mode ran, found no catalog and no rules, and nothing in
   the output said *which* directory it had looked in. Both resolvers now share one probe order
   (exe-dir's parent, then exe-dir, then the current directory). Reported from the field.
+- **truedat run from MusicBee's hub data folder now finds the library.** `<root>\AppData\MBXHub\`
+  is a natural place to keep the tool and run it from, but the library sits two levels up and
+  across at `<root>\Library`, which neither the exe's parent nor the exe's own directory reaches.
+  Discovery now walks a bounded number of parent directories and checks each one's `Library\`
+  subfolder — the exact inverse of the mapping that already takes a library to its hub folder, so
+  the two encode one layout rather than two guesses. Nearest-first, so a catalog in the folder you
+  run from still wins; bounded, so it cannot wander into an unrelated library.
 
 ### Changed
 

@@ -87,9 +87,9 @@ truedat.exe "iTunes Music Library.xml"
 
 Output: `mbxmoods.json` (next to the XML file)
 
-**Auto-discovery:** if you omit the positional XML arg, truedat probes (first hit wins): `<exe-dir>\..\iTunes Music Library.xml` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>\iTunes Music Library.xml`, then `.\iTunes Music Library.xml` (cwd). The error message lists the probed locations so a no-hit failure is self-diagnosing.
+**Auto-discovery:** if you omit the positional XML arg, truedat looks for the library in these directories, nearest first, and takes the first hit: `<exe-dir>\..` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>`, then the `Library\` subfolder of each, then successive parent directories (up to four levels) and their `Library\` subfolders, then the current directory. The upward walk is what lets you run truedat from MusicBee's own data folder — from `<root>\AppData\MBXHub\` it finds `<root>\Library\` — and it is bounded so it can't wander off into an unrelated library. The error message lists the probed locations so a no-hit failure is self-diagnosing.
 
-The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-missing-smfm`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) discover `mbxmoods.json` the same way when you give them no path — `<exe-dir>\..` first, then `<exe-dir>`, then the current directory. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that on the recommended layout a bare `truedat --stats` means the same library a bare `truedat` scan does.
+The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-missing-smfm`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) find `mbxmoods.json` through the **same** ladder when you give them no path. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that a bare `truedat --stats` always means the same library a bare `truedat` scan does, from whichever directory you happen to run them.
 
 ### Options
 

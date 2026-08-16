@@ -8255,21 +8255,67 @@ namespace Truedat
         /// at a real temp layout instead of wherever the test binary happens to live.</summary>
         internal static string? ProbeCatalogBesideExe(string? exeDirRaw)
         {
-            string exeDir = (exeDirRaw ?? string.Empty)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (exeDir.Length == 0) return null;
-
-            string? exeParent = null;
-            try { exeParent = Path.GetDirectoryName(exeDir); } catch { }
-
-            if (!string.IsNullOrEmpty(exeParent))
+            foreach (var dir in LibrarySearchDirs(exeDirRaw))
             {
-                var cand = Path.Combine(exeParent!, MoodsFileName);
+                var cand = Path.Combine(dir, MoodsFileName);
                 if (File.Exists(cand)) return cand;
             }
-            var here = Path.Combine(exeDir, MoodsFileName);
-            if (File.Exists(here)) return here;
             return null;
+        }
+
+        /// <summary>How far up from the exe we are willing to look for a library. Four levels
+        /// reaches a MusicBee root from &lt;root&gt;\AppData\MBXHub\truedat\ with one to spare.
+        /// Bounded on purpose: an unbounded walk eventually finds SOMEONE's library.</summary>
+        internal const int LibrarySearchMaxAncestors = 4;
+
+        /// <summary>
+        /// The directories that might hold a library, nearest first — shared by
+        /// <see cref="ProbeCatalogBesideExe"/> and <see cref="ResolveITunesXml"/> so the catalog
+        /// and the iTunes XML can never be discovered from different places. Order:
+        ///
+        ///   1. exe-dir's parent          — the documented drop-in: &lt;library&gt;\truedat\truedat.exe
+        ///   2. exe-dir                   — a flat install, exe sitting in the library
+        ///   3. parent\Library, exe-dir\Library
+        ///   4. then each ancestor above, bare and \Library, out to <see cref="LibrarySearchMaxAncestors"/>
+        ///
+        /// Parent before exe-dir is load-bearing and pinned by a test: a catalog inside the tool
+        /// folder is the accident (that is exactly what the repo's checked-in fixture was), the
+        /// library's is the one meant.
+        ///
+        /// The <c>\Library</c> arm is the inverse of <see cref="ResolveReviewDir"/>. That maps a
+        /// library to its hub data folder (&lt;root&gt;\Library → &lt;root&gt;\AppData\MBXHub);
+        /// this maps back, because operators run truedat FROM the hub data folder, where the
+        /// library is two levels up and across at &lt;root&gt;\Library. Same layout, read in the
+        /// other direction — if MusicBee's layout ever changes, both must change together.
+        /// </summary>
+        internal static IEnumerable<string> LibrarySearchDirs(string? exeDirRaw)
+        {
+            string exeDir = (exeDirRaw ?? string.Empty)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (exeDir.Length == 0) yield break;
+
+            // Ancestor chain: [exe-dir, parent, grandparent, ...].
+            var levels = new List<string> { exeDir };
+            for (int i = 0; i < LibrarySearchMaxAncestors; i++)
+            {
+                string? up = null;
+                try { up = Path.GetDirectoryName(levels[levels.Count - 1]); } catch { }
+                if (string.IsNullOrEmpty(up)) break;
+                levels.Add(up!);
+            }
+
+            const string LibrarySubdir = "Library";
+
+            if (levels.Count > 1) yield return levels[1];                              // parent
+            yield return levels[0];                                                    // exe dir
+            if (levels.Count > 1) yield return Path.Combine(levels[1], LibrarySubdir);
+            yield return Path.Combine(levels[0], LibrarySubdir);
+
+            for (int i = 2; i < levels.Count; i++)
+            {
+                yield return levels[i];
+                yield return Path.Combine(levels[i], LibrarySubdir);
+            }
         }
 
         /// <summary>Refusal text for a mutating catalog mode that was given no target. Names the
@@ -8327,20 +8373,16 @@ namespace Truedat
             const string XmlName = "iTunes Music Library.xml";
             if (!string.IsNullOrEmpty(explicitArg)) return explicitArg!;
 
-            string exeDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string? exeParent = null;
-            try { exeParent = Path.GetDirectoryName(exeDir); } catch { }
-
-            // 1. Exe-dir parent (musicbee\library\ when installed at musicbee\library\truedat\)
-            if (!string.IsNullOrEmpty(exeParent))
+            // Same ladder the catalog uses (LibrarySearchDirs): exe-dir parent, exe dir, their
+            // \Library arms, then bounded ancestors. The two resolvers MUST agree on where a
+            // library can be — they diverged once and a bare scan found the library while every
+            // catalog verb did not (fixed 2026-08-15).
+            foreach (var dir in LibrarySearchDirs(AppContext.BaseDirectory))
             {
-                var cand = Path.Combine(exeParent!, XmlName);
+                var cand = Path.Combine(dir, XmlName);
                 if (File.Exists(cand)) return cand;
             }
-            // 2. Exe-dir
-            var exeCand = Path.Combine(exeDir, XmlName);
-            if (File.Exists(exeCand)) return exeCand;
-            // 3. Cwd (legacy)
+            // Cwd (legacy)
             if (File.Exists(XmlName)) return XmlName;
 
             // No hit — return the cwd-relative name so the caller's File.Exists check
@@ -14173,6 +14215,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                     Assert(ProbeCatalogBesideExe(null) == null, "discover: null exe dir -> null");
                     Assert(ProbeCatalogBesideExe("") == null, "discover: empty exe dir -> null");
+
+                    // Run from the MBXHub data folder — where operators actually run it from.
+                    // <root>\AppData\MBXHub is two levels below <root>, and the catalog is across
+                    // in <root>\Library, so neither the exe's parent nor the exe dir reaches it.
+                    // This is the inverse of ResolveReviewDir's <root>\Library -> <root>\AppData\MBXHub.
+                    var root = Path.Combine(probeRoot, "MusicBee");
+                    var rootLib = Path.Combine(root, "Library");
+                    var hubDir = Path.Combine(root, "AppData", "MBXHub");
+                    Directory.CreateDirectory(rootLib);
+                    Directory.CreateDirectory(hubDir);
+                    var rootCatalog = Path.Combine(rootLib, MoodsFileName);
+                    File.WriteAllText(rootCatalog, "{}");
+
+                    Assert(ProbeCatalogBesideExe(hubDir) == rootCatalog,
+                        "discover: run from <root>\\AppData\\MBXHub finds <root>\\Library\\mbxmoods.json");
+                    var hubToolDir = Path.Combine(hubDir, "truedat");
+                    Directory.CreateDirectory(hubToolDir);
+                    Assert(ProbeCatalogBesideExe(hubToolDir) == rootCatalog,
+                        "discover: run from <root>\\AppData\\MBXHub\\truedat finds it one level further up");
+
+                    // Nearest wins: a catalog sitting IN the hub folder beats the one across in
+                    // Library, so an operator who keeps their files where they run from gets those.
+                    var hubCatalog = Path.Combine(hubDir, MoodsFileName);
+                    File.WriteAllText(hubCatalog, "{}");
+                    Assert(ProbeCatalogBesideExe(hubDir) == hubCatalog,
+                        "discover: a catalog in the folder you run from wins over one further up");
+                    File.Delete(hubCatalog);
+
+                    // Bounded: far enough above and we stop rather than wander into a neighbour's
+                    // library. Depth here exceeds LibrarySearchMaxAncestors from the deep dir.
+                    var deep = Path.Combine(hubDir, "a", "b", "c", "d", "e");
+                    Directory.CreateDirectory(deep);
+                    Assert(ProbeCatalogBesideExe(deep) == null,
+                        "discover: the upward walk is bounded, not unlimited");
                 }
                 finally
                 {

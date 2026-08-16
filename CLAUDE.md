@@ -434,11 +434,22 @@ local tidy-up:
 ## Which catalog a bare command means
 
 Two resolvers, and they must agree on probe order. `ResolveITunesXml` finds the library for a
-bare scan; `ResolveMoodsCatalog` finds `mbxmoods.json` for every catalog mode. Both probe
-**exe-dir's parent, then exe-dir, then the cwd** — the parent first because the documented
-install is `<library>\truedat\truedat.exe` beside `<library>\mbxmoods.json`. `--apply-exclusions`
-is a third caller and routes through the same discovery. If a fourth surface ever needs to answer
-"which library did they mean", it joins them; it does not invent a fourth answer.
+bare scan; `ResolveMoodsCatalog` finds `mbxmoods.json` for every catalog mode. Both iterate
+**`LibrarySearchDirs`** — one shared ladder, so they cannot discover a library from different
+places — then fall back to the cwd. Order: exe-dir's parent, exe-dir, each of those two's
+`Library\` subfolder, then successive ancestors (bounded at `LibrarySearchMaxAncestors`) bare and
+`\Library`. Parent before exe-dir is load-bearing and pinned: a catalog inside the tool folder is
+the accident, the library's is the one meant. `--apply-exclusions` is a third caller and routes
+through the same discovery. If a fourth surface ever needs to answer "which library did they
+mean", it joins them; it does not invent a fourth answer.
+
+The `\Library` arm and the upward walk exist because **operators run truedat from MusicBee's hub
+data folder**, `<root>\AppData\MBXHub\`, where the library is two levels up and across at
+`<root>\Library`. That is the exact inverse of `ResolveReviewDir`, which maps a library to its hub
+folder; the two encode the same MusicBee layout read in opposite directions, so if that layout ever
+changes they both change together. The walk is bounded on purpose — an unbounded one eventually
+finds *someone's* library — and nearest-first, so a catalog in the folder you are running from
+always wins over one further up.
 
 They diverged once and it shipped: the scan auto-discovered while every catalog verb went
 straight to `<cwd>\mbxmoods.json`, so on the recommended layout `truedat` worked and
