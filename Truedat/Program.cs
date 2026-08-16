@@ -2308,7 +2308,11 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
+            // NOTE --verify is deliberately absent from this list: --chunk is how an
+            // interrupted verify becomes restartable (each shard is durably done), so the
+            // two compose rather than conflict. Every other mode here either rewrites the
+            // catalog wholesale or has nothing to shard.
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -2504,7 +2508,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel);
+                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel, chunkIndex, chunkTotal);
                 return;
             }
 
@@ -6445,7 +6449,8 @@ namespace Truedat
         // (one SHA per entry) and backfill features-tier already gates its ffmpeg
         // cost via the --backfill-level flag. Adding staging to verify-mode would
         // pay one File.Copy per track to save zero downstream reads.
-        static int RunVerify(string moodsPath, int parallelism, bool backfill, BackfillLevel level)
+        static int RunVerify(string moodsPath, int parallelism, bool backfill, BackfillLevel level,
+            int chunkIndex = 0, int chunkTotal = 0)
         {
             Console.WriteLine(backfill ? "=== Verify + Backfill Mode ===" : "=== Verify Mode ===");
             Console.WriteLine($"Moods file: {moodsPath}");
@@ -6473,6 +6478,40 @@ namespace Truedat
             Console.WriteLine($"Loaded {loaded} entries");
             if (loaded == 0) return 0;
 
+            // --chunk: verify a deterministic hash-mod slice so an interrupted pass costs one
+            // slice instead of the whole run. A ~6 TB / 156k library over WiFi is an 18-24 hour
+            // walk; a storm blips the NAS and, one-shot, all of it is lost. Each completed shard
+            // writes its own CSV and is durably done, so the operator runs the pass in
+            // restartable windows. Same ChunkOwns split the scan uses, so the shards partition
+            // the catalog exactly — no gaps, no double-verifies.
+            //
+            // CRITICAL: the shard filters the WALK ONLY, never `allTracks`. Under --backfill the
+            // save is SaveResults(moodsPath, allTracks) — the whole dictionary — so a filtered
+            // dictionary would write a catalog containing just this shard and truncate the file
+            // to 1/N. The dictionary stays whole; only the work list is sliced.
+            var workList = chunkTotal > 0
+                ? allTracks.Where(kv => ChunkOwns(kv.Key, chunkIndex, chunkTotal)).ToList()
+                : allTracks.ToList();
+            if (chunkTotal > 0)
+            {
+                Console.WriteLine($"Chunk {chunkIndex}/{chunkTotal} on {Environment.MachineName}: verifying {workList.Count:N0} of {loaded:N0} entries");
+                if (backfill)
+                {
+                    // Each shard's save rewrites the WHOLE catalog from its own loaded copy, so
+                    // sequential shards accumulate correctly while CONCURRENT shards on two
+                    // machines would silently drop each other's backfills (last save wins).
+                    // truedat is single-writer by design; say so here rather than let a
+                    // reasonable-looking parallel run lose work.
+                    Console.WriteLine("  NOTE: --backfill writes the whole catalog on each shard — run shards ONE AT A TIME");
+                    Console.WriteLine("        against a given catalog. Concurrent shards would overwrite each other's backfills.");
+                }
+                if (workList.Count == 0)
+                {
+                    Console.WriteLine("Nothing in this shard's bucket.");
+                    return 0;
+                }
+            }
+
             int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0, backfilled = 0;
             var details = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
@@ -6481,7 +6520,7 @@ namespace Truedat
             // Verify walks the whole catalog recomputing hashes (full audio reads) even
             // without --backfill, so it counts as work-bearing — not merely read-only-fast.
             KeepAwakePump(workMode: true);
-            Parallel.ForEach(allTracks, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
+            Parallel.ForEach(workList, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, kvp =>
             {
                 var path = kvp.Key;
                 var entry = kvp.Value;
@@ -6648,9 +6687,14 @@ namespace Truedat
             }
             KeepAwakeRelease();   // walk + save are over; nothing left to hold awake for
 
+            // Per-shard CSV: a completed shard must be durably done and must not be overwritten
+            // by the next one. Host too, matching the scan's convention, so two machines sharding
+            // the same library directory don't collide.
             var csvPath = Path.Combine(
                 Path.GetDirectoryName(moodsPath) ?? ".",
                 "mbxmoods-verify.csv");
+            if (chunkTotal > 0)
+                csvPath = InsertFilenameSuffix(csvPath, $"{SanitizeForFilename(Environment.MachineName)}.{chunkIndex}of{chunkTotal}");
             try
             {
                 var lines = new List<string> { "status\tpath\tdetail\tbackfilledFields" };
@@ -13234,6 +13278,35 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 Assert(ChunkOwns(@"D:/M/a.flac", 1, 4) == ChunkOwns(@"D:\M\a.flac", 1, 4),
                     "chunk-scope: ownership is separator-normalized, so shards agree across XML dialects");
+
+                // --- resumable verify: the shards must PARTITION the catalog ---------
+                // The whole promise of restartable verify is that running every shard equals
+                // running the unsharded pass. If the union missed an entry, a "completed" set
+                // of shards would silently leave files unverified — worse than the one-shot it
+                // replaces, because the operator believes the library was checked.
+                {
+                    var catalog = new List<string>();
+                    for (int i = 0; i < 500; i++) catalog.Add($@"D:\Music\Artist{i % 37}\track{i}.flac");
+
+                    const int shards = 8;
+                    var seen = new List<string>();
+                    for (int m = 1; m <= shards; m++)
+                        seen.AddRange(catalog.Where(p => ChunkOwns(p, m, shards)));
+
+                    Assert(seen.Count == catalog.Count,
+                        $"verify-chunk: the shards cover the catalog exactly once ({seen.Count} vs {catalog.Count})");
+                    Assert(new HashSet<string>(seen, PathComparer.Instance).Count == catalog.Count,
+                        "verify-chunk: no entry is verified by two shards");
+                    foreach (var p in catalog)
+                        Assert(seen.Contains(p), $"verify-chunk: no entry is missed by every shard ({p})");
+
+                    // A shard can legitimately be empty on a small catalog; that must be a
+                    // no-op, not a failure — the operator still ran a valid slice.
+                    var tiny = new[] { @"D:\M\only.flac" };
+                    int covered = 0;
+                    for (int m = 1; m <= shards; m++) covered += tiny.Count(p => ChunkOwns(p, m, shards));
+                    Assert(covered == 1, "verify-chunk: a single-entry catalog is owned by exactly one shard, the rest are empty");
+                }
 
                 // Ledger scoping, over FilterExclusions itself.
                 var i4Dir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-chunk-{Guid.NewGuid():N}");

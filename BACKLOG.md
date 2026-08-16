@@ -105,8 +105,18 @@ Two candidate approaches (decide at build time — could ship one, or both):
   to record timestamps), turning a read-only audit into a full write. That cost is exactly
   why 2026-08-08 parked it; approach A avoids it entirely.
 
-Backlogged, not authorized — needs an explicit go, and the approach (A / B / both) is an
-open decision.
+**SHIPPED 2026-08-16 — approach A.** `--chunk M/N` now composes with `--verify`; each shard
+writes `mbxmoods-verify.<host>.<M>of<N>.csv` and is durably done. Plain verify stays read-only
+and the schema is untouched, so the 2026-08-08 park's objection never applies. A test pins that
+the shards partition the catalog exactly (union covers every entry exactly once) — without that,
+a "completed" set of shards could silently leave files unverified, which is worse than the
+one-shot it replaces. Implementation note: the shard filters the WALK only, never `allTracks`,
+because `--backfill` saves the whole dictionary and a filtered one would truncate the catalog
+to 1/N.
+
+**Approach B (per-entry `lastVerified`) remains unbuilt and unauthorized**, and its costs stand:
+it changes the locked schema and makes plain verify a writer. Only revisit it if manual sharding
+proves too clumsy in the field — A covers the driving case.
 
 ## Prune catalog entries by exclusion rule — SHIPPED 2026-08-15 as `--prune-excluded`
 

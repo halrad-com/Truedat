@@ -188,6 +188,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           MusicBee instance's <root>\AppData\MBXHub\review\dupes.json.
   --chunk M/N             Split scan across machines via deterministic hash-mod assignment
                           (output auto-suffixed: mbxmoods.<hostname>.json; combine via --merge-moods)
+                          Also composes with --verify, where it serves a different purpose:
+                          making a long verify RESTARTABLE. Each shard verifies its own slice
+                          and writes mbxmoods-verify.<host>.<M>of<N>.csv, so a finished shard is
+                          durably done and an interrupted pass costs one slice, not the whole
+                          run. The shards partition the catalog exactly. With --backfill, run
+                          shards ONE AT A TIME — each save rewrites the whole catalog, so
+                          concurrent shards would overwrite each other's backfills.
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5), rename

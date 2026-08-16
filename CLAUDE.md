@@ -261,7 +261,20 @@ failure, because MBXHub's stdout capture is a bounded async tail and must not be
 
 **Evaluate library-wide, ledger shard-scoped** (I-4). The four pre-scan filters (`FilterRemoteUrls` / `FilterExclusions` / `FilterVideoFiles` / `FilterNonAudio`) deliberately run BEFORE the chunk filter, so `IsExcluded` sees every track and per-rule `MatchCount` is library-wide and identical on every machine — that cross-machine agreement is what makes the stale-rule signal trustworthy, and it must not be "fixed" by moving the chunk filter up. But the ledger is a per-run artifact: `_ledgerScope` (set from `ChunkOwns` in MoodsMode, `_ => true` otherwise) gates the `mbxmoods-skipped.csv` row, the `--audit` line and the printed count in all four filters, so the union of N hostname-suffixed ledgers is the library rather than N copies of it. Removal from the work list stays library-wide — a video in another shard's bucket is not this shard's work either way. Under `--chunk` the printed counts carry ` (this chunk)` and a line states that rule counts are library-wide while the ledger is the shard's share, because the two numbers legitimately disagree. `--merge-moods` still reconciles **only** catalogs, never the CSV ledgers — it is a catalog merger and the ledgers no longer need reconciling.
 
-Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migrate` / `--fixup` / `--verify` / `--merge-moods` / `--synthesize` / `--seed-moods` / `--hash-only`.
+Mutually exclusive with `--analyze-file` / `--file-list` / `--folder` / `--migrate` / `--fixup` / `--merge-moods` / `--synthesize` / `--seed-moods` / `--hash-only`.
+
+**`--verify` is the deliberate exception (2026-08-16)** — there, `--chunk` is what makes an
+interrupted pass restartable rather than a way to spread work across machines. A ~6 TB / 156k
+library over WiFi is an 18-24 hour walk, and one-shot means a NAS blip costs all of it. Each
+shard verifies its `ChunkOwns` slice and writes its own
+`mbxmoods-verify.<host>.<M>of<N>.csv`, so a completed shard is durably done. **The shard filters
+the WALK ONLY, never `allTracks`** — under `--backfill` the save is
+`SaveResults(moodsPath, allTracks)` over the whole dictionary, so a filtered dictionary would
+write a catalog containing just that shard and truncate the file to 1/N. Do not "simplify" it by
+filtering the load. `--backfill` under `--chunk` additionally warns that shards must run
+sequentially: each save rewrites the whole catalog from its own loaded copy, so sequential shards
+accumulate while concurrent ones silently drop each other's backfills (consistent with truedat
+being single-writer by design).
 
 ## Verify mode
 

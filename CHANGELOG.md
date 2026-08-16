@@ -5,6 +5,21 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- **`--verify` is now restartable via `--chunk M/N`.** A whole-catalog verify re-reads every
+  file's audio to recompute its hash; on a ~6 TB / 156k library over WiFi that is an 18-24 hour
+  pass, and it was one-shot — a NAS blip or a power cut and every hour of it was lost, with no
+  resume and no way to shard. Each chunk now verifies its own deterministic slice (the same
+  hash-mod split the scan uses, so the shards partition the catalog exactly — pinned by a test
+  that the union covers every entry exactly once) and writes its own
+  `mbxmoods-verify.<host>.<M>of<N>.csv`, so a finished shard is durably done and the pass can be
+  run in restartable windows. Plain verify stays read-only and the catalog schema is untouched —
+  the checkpoint-timestamp alternative would have changed the locked schema and turned a
+  read-only audit into a 900 MB write, which is why it stayed parked. Under `--backfill` each
+  shard's save rewrites the whole catalog from its own copy, so shards must run one at a time;
+  truedat says so rather than letting a parallel run silently drop work.
+
 ### Fixed
 
 - **A catalog mode that WRITES will no longer act on whatever `mbxmoods.json` happens to be in
