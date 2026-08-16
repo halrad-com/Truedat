@@ -431,6 +431,34 @@ local tidy-up:
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 
+## Which catalog a bare command means
+
+Two resolvers, and they must agree on probe order. `ResolveITunesXml` finds the library for a
+bare scan; `ResolveMoodsCatalog` finds `mbxmoods.json` for every catalog mode. Both probe
+**exe-dir's parent, then exe-dir, then the cwd** — the parent first because the documented
+install is `<library>\truedat\truedat.exe` beside `<library>\mbxmoods.json`. `--apply-exclusions`
+is a third caller and routes through the same discovery. If a fourth surface ever needs to answer
+"which library did they mean", it joins them; it does not invent a fourth answer.
+
+They diverged once and it shipped: the scan auto-discovered while every catalog verb went
+straight to `<cwd>\mbxmoods.json`, so on the recommended layout `truedat` worked and
+`truedat --stats` reported the catalog missing — and, because `ExclusionStore.Resolve` derives
+the exclusion file from the catalog path, the operator's rules went missing with it. Field-reported
+2026-08-15. `ProbeCatalogBesideExe` takes the exe directory as a parameter precisely so the
+self-test drives a real temp layout rather than wherever the test binary lives; probing for the
+CATALOG rather than deriving it from a discovered XML is deliberate, because these modes are
+documented to run on a metadata mirror, which has a catalog and no library XML.
+
+The cwd fallback survives only for modes that cannot destroy anything. A mode that REWRITES the
+catalog (`--compact`, `--prettify`, `--restore`, `--prune-excluded`) calls `IsBareCwdCatalog` and
+**refuses** when nothing anchors the target — no `--moods`, no positional, and nothing discovered
+beside the exe — naming the path it would have hit. It acts on whatever file happens to be in the
+directory you are standing in, with no existence check and no evidence it is a real catalog: a bare
+reformat run from the repo root once found the checked-in test fixture, rewrote it, and left a
+`.bak.zip` and a `.mbxs` behind (2026-08-13, caught only by the build's dirty-stamp). Note the
+guard keys on *discovery came up empty*, not *no arguments were given* — keying it on the arguments
+alone would refuse a correct drop-in install, which is a different way of failing the same operator.
+
 ## Conventions
 
 - **Offline-first.** No runtime network calls. No CDN-fetched assets, no cloud dependencies. Truedat reads files, runs subprocess tools, writes files.

@@ -703,7 +703,8 @@ namespace Truedat
             Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
             Console.WriteLine("  --moods <path>      Moods file for the per-file modes / --verify / --stats (merge target");
             Console.WriteLine("                      for --analyze-file / --file-list / --folder; default mbxmoods.json");
-            Console.WriteLine("                      next to the XML, else current directory)");
+            Console.WriteLine("                      next to the XML, else auto-discovered beside the exe (exe-dir");
+            Console.WriteLine("                      parent, then exe dir), else current directory)");
             Console.WriteLine("  --json-output       With --analyze-file / --file-list: emit the result / run summary as");
             Console.WriteLine("                      JSON on stdout");
             Console.WriteLine("  --chunk M/N         Process shard M of N for two-machine same-library scans. Output");
@@ -2526,7 +2527,7 @@ namespace Truedat
             {
                 // --restore OVERWRITES the destination catalog. Never let it pick that
                 // destination out of the current directory (see IsBareCwdCatalog).
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--restore", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -2576,7 +2577,7 @@ namespace Truedat
             {
                 // --compact / --prettify rewrite the catalog IN PLACE (backup archived first),
                 // so the target must be named, never inherited from the cwd.
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal(compactMode ? "--compact" : "--prettify",
                         Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
@@ -2735,7 +2736,7 @@ namespace Truedat
             if (pruneExcludedMode)
             {
                 // --prune-excluded REMOVES entries and rewrites the catalog. Same rule.
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--prune-excluded", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -8215,9 +8216,61 @@ namespace Truedat
         /// used to create a brand-new exclusion file wherever the operator happened to be
         /// standing and exit 0. Mutating modes must name their target; convenience belongs to
         /// the surfaces that cannot destroy anything.
+        ///
+        /// <paramref name="discoveredCatalog"/> is the result of <see cref="DiscoverCatalogBesideExe"/>:
+        /// a catalog found next to the installed exe is a real anchor, not the cwd fallback, so a
+        /// drop-in install is NOT refused. Kept as a parameter rather than probed in here so this
+        /// stays a pure predicate the self-test can drive through every combination.
         /// </summary>
-        internal static bool IsBareCwdCatalog(string? explicitPath, string? libraryXmlPath)
-            => string.IsNullOrEmpty(explicitPath) && string.IsNullOrEmpty(libraryXmlPath);
+        internal static bool IsBareCwdCatalog(string? explicitPath, string? libraryXmlPath, string? discoveredCatalog)
+            => string.IsNullOrEmpty(explicitPath)
+            && string.IsNullOrEmpty(libraryXmlPath)
+            && string.IsNullOrEmpty(discoveredCatalog);
+
+        /// <summary>
+        /// Find <c>mbxmoods.json</c> next to the installed exe, mirroring the probe order
+        /// <see cref="ResolveITunesXml"/> uses for the library: exe-dir's PARENT first (the
+        /// documented drop-in layout — <c>musicbee\library\truedat\truedat.exe</c> beside
+        /// <c>musicbee\library\mbxmoods.json</c>), then the exe dir itself. Returns null when
+        /// neither holds one; the caller then falls back to the current directory as before.
+        ///
+        /// Why this exists: the zero-arg SCAN has auto-discovered its library since the drop-in
+        /// install pattern shipped, but every catalog verb (<c>--stats</c>, <c>--prune-excluded</c>,
+        /// <c>--list-speech</c>, <c>--snapshot</c>, …) went straight to the cwd — so on the layout
+        /// the README recommends, a bare scan worked and a bare <c>--stats</c> looked inside the
+        /// truedat folder and reported the catalog missing. The exclusion file inherits the same
+        /// directory (<c>ExclusionStore.Resolve</c> derives it from the catalog path), so the rules
+        /// went missing with it. Field-reported 2026-08-15.
+        ///
+        /// Probing for the CATALOG rather than deriving it from a discovered iTunes XML is
+        /// deliberate: these modes are documented to run on a metadata mirror, which has a catalog
+        /// and no library XML. Both probes cover the same two directories anyway, so going via the
+        /// XML would only lose the mirror case. Existence is the evidence — an unchecked path would
+        /// re-create the guess this replaces.
+        /// </summary>
+        internal static string? DiscoverCatalogBesideExe()
+            => ProbeCatalogBesideExe(AppContext.BaseDirectory);
+
+        /// <summary>The probe itself, with the exe directory passed in so the self-test can point it
+        /// at a real temp layout instead of wherever the test binary happens to live.</summary>
+        internal static string? ProbeCatalogBesideExe(string? exeDirRaw)
+        {
+            string exeDir = (exeDirRaw ?? string.Empty)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (exeDir.Length == 0) return null;
+
+            string? exeParent = null;
+            try { exeParent = Path.GetDirectoryName(exeDir); } catch { }
+
+            if (!string.IsNullOrEmpty(exeParent))
+            {
+                var cand = Path.Combine(exeParent!, MoodsFileName);
+                if (File.Exists(cand)) return cand;
+            }
+            var here = Path.Combine(exeDir, MoodsFileName);
+            if (File.Exists(here)) return here;
+            return null;
+        }
 
         /// <summary>Refusal text for a mutating catalog mode that was given no target. Names the
         /// path it would have written to, so the operator can see what they nearly hit.</summary>
@@ -8260,6 +8313,11 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(dir))
                     return Path.Combine(dir!, MoodsFileName);
             }
+
+            // Nothing named at all: look beside the installed exe before assuming the cwd, so the
+            // drop-in layout works for these modes exactly as it already does for a bare scan.
+            var discovered = DiscoverCatalogBesideExe();
+            if (!string.IsNullOrEmpty(discovered)) return discovered;
 
             return Path.Combine(Environment.CurrentDirectory, MoodsFileName);
         }
@@ -14051,11 +14109,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // beside it. Nothing about the resolution was wrong — the fallback simply must not
             // be reachable by a verb that writes.
             {
-                Assert(IsBareCwdCatalog(null, null), "bare-cwd: no --moods and no positional is the cwd fallback");
-                Assert(IsBareCwdCatalog("", ""), "bare-cwd: empty strings count as absent");
-                Assert(!IsBareCwdCatalog(@"D:\lib\mbxmoods.json", null), "bare-cwd: an explicit --moods anchors the target");
-                Assert(!IsBareCwdCatalog(null, @"D:\lib\iTunes Music Library.xml"), "bare-cwd: a positional library XML anchors the target");
-                Assert(!IsBareCwdCatalog(@"D:\a.json", @"D:\b.xml"), "bare-cwd: both given is obviously anchored");
+                Assert(IsBareCwdCatalog(null, null, null), "bare-cwd: no --moods, no positional and nothing beside the exe is the cwd fallback");
+                Assert(IsBareCwdCatalog("", "", ""), "bare-cwd: empty strings count as absent");
+                Assert(!IsBareCwdCatalog(@"D:\lib\mbxmoods.json", null, null), "bare-cwd: an explicit --moods anchors the target");
+                Assert(!IsBareCwdCatalog(null, @"D:\lib\iTunes Music Library.xml", null), "bare-cwd: a positional library XML anchors the target");
+                Assert(!IsBareCwdCatalog(@"D:\a.json", @"D:\b.xml", null), "bare-cwd: both given is obviously anchored");
+
+                // A catalog found beside the installed exe is a real anchor, so the drop-in layout
+                // must NOT be refused — otherwise the discovery fix hands the operator a refusal
+                // instead of the wrong file, which is better but still not the install working.
+                Assert(!IsBareCwdCatalog(null, null, @"D:\MusicBee\Library\mbxmoods.json"),
+                    "bare-cwd: a catalog discovered beside the exe anchors the target");
+                Assert(!IsBareCwdCatalog("", "", @"D:\MusicBee\Library\mbxmoods.json"),
+                    "bare-cwd: discovery anchors even when both args are empty strings");
 
                 // The refusal must NAME the file it would have hit — the whole point is that the
                 // operator can see they were one keystroke from a file they never meant to touch.
@@ -14063,6 +14129,55 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(refusal.IndexOf("--compact", StringComparison.Ordinal) >= 0, "bare-cwd: refusal names the verb");
                 Assert(refusal.IndexOf(@"C:\src\truedat\mbxmoods.json", StringComparison.Ordinal) >= 0,
                     "bare-cwd: refusal names the path it would have written");
+            }
+
+            // --- catalog auto-discovery beside the exe (the drop-in install) ---------------
+            // Field report 2026-08-15: a bare scan found the library (ResolveITunesXml probes the
+            // exe's parent) while a bare --stats / --prune-excluded looked in the truedat folder
+            // and reported the catalog — and, through ExclusionStore.Resolve, the exclusion rules —
+            // missing. Real directories, not a fake predicate: the bug lived in which directory
+            // got probed, so a test that stubs the filesystem would not have caught it.
+            {
+                var probeRoot = Path.Combine(Path.GetTempPath(), "truedat-probe-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var lib = Path.Combine(probeRoot, "Library");
+                    var toolDir = Path.Combine(lib, "truedat");
+                    Directory.CreateDirectory(toolDir);
+                    var libCatalog = Path.Combine(lib, MoodsFileName);
+                    File.WriteAllText(libCatalog, "{}");
+
+                    Assert(ProbeCatalogBesideExe(toolDir) == libCatalog,
+                        "discover: exe in <library>\\truedat\\ finds the catalog in <library>");
+                    Assert(ProbeCatalogBesideExe(toolDir + Path.DirectorySeparatorChar) == libCatalog,
+                        "discover: a trailing separator on the exe dir does not defeat the parent probe");
+
+                    // Parent-first, matching ResolveITunesXml. A catalog inside the tool folder is
+                    // the accident (that is exactly what the repo fixture was); the library's is
+                    // the one meant. Pin the precedence so a future tidy-up cannot silently flip it.
+                    var strayInToolDir = Path.Combine(toolDir, MoodsFileName);
+                    File.WriteAllText(strayInToolDir, "{}");
+                    Assert(ProbeCatalogBesideExe(toolDir) == libCatalog,
+                        "discover: the library's catalog wins over one sitting in the tool folder");
+
+                    // Exe dir only: a flat install where the catalog sits beside the exe.
+                    File.Delete(libCatalog);
+                    Assert(ProbeCatalogBesideExe(toolDir) == strayInToolDir,
+                        "discover: falls back to a catalog in the exe dir when the parent has none");
+
+                    // Neither -> null, which is what keeps the mutating modes refusing.
+                    File.Delete(strayInToolDir);
+                    Assert(ProbeCatalogBesideExe(toolDir) == null, "discover: no catalog either side -> null");
+                    Assert(IsBareCwdCatalog(null, null, ProbeCatalogBesideExe(toolDir)),
+                        "discover: nothing found still routes a mutating mode to the refusal");
+
+                    Assert(ProbeCatalogBesideExe(null) == null, "discover: null exe dir -> null");
+                    Assert(ProbeCatalogBesideExe("") == null, "discover: empty exe dir -> null");
+                }
+                finally
+                {
+                    try { Directory.Delete(probeRoot, true); } catch { }
+                }
             }
 
             // --- --stats sidecar verdict: SidecarStateNote / SidecarAdvice -------------

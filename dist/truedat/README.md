@@ -89,6 +89,8 @@ Output: `mbxmoods.json` (next to the XML file)
 
 **Auto-discovery:** if you omit the positional XML arg, truedat probes (first hit wins): `<exe-dir>\..\iTunes Music Library.xml` (the install-parent case — drop the truedat folder under your library directory and it just works), then `<exe-dir>\iTunes Music Library.xml`, then `.\iTunes Music Library.xml` (cwd). The error message lists the probed locations so a no-hit failure is self-diagnosing.
 
+The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-missing-smfm`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) discover `mbxmoods.json` the same way when you give them no path — `<exe-dir>\..` first, then `<exe-dir>`, then the current directory. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that on the recommended layout a bare `truedat --stats` means the same library a bare `truedat` scan does.
+
 ### Options
 
 `truedat --help` shows the short everyday page; `truedat --help all` lists every
@@ -218,11 +220,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           source is left untouched. Read a catalog with this, --compact to
                           put it back.
                           NOTE: the modes that REWRITE a catalog (--compact, --prettify,
-                          --restore, --prune-excluded) require an explicit target — a path,
-                          --moods, or the library XML as the positional argument. They refuse
-                          rather than fall back to whatever mbxmoods.json happens to sit in the
-                          current directory. Read-only modes (--stats, --list-speech,
-                          --list-missing-smfm) still default to it.
+                          --restore, --prune-excluded) refuse to fall back to whatever
+                          mbxmoods.json happens to sit in the current directory. They accept a
+                          path, --moods, the library XML as the positional argument, or a
+                          catalog auto-discovered beside the exe (see Auto-discovery); with
+                          none of those they refuse and name the file they would have hit.
+                          Read-only modes (--stats, --list-speech, --list-missing-smfm) still
+                          fall back to the current directory.
   --keep-backups N        How many timestamped catalog backups to keep after --fixup / --remap
                           / --merge-moods / --migrate (rotation, never truncation; 0 = keep
                           all; default 5). Backups are compressed .zip — mbxmoods.json is
@@ -244,9 +248,10 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --no-stage              Disable source staging (UNC, mapped network drives, non-ASCII paths);
                           workers read source directly.
   --stage-dir <path>      Override the scratch dir used for staged source copies and
-                          multi-channel downmixes (default %TEMP%\.truedat-stage). Also the
-                          isolation lever if you ever need two truedats on one machine —
-                          see "Run one truedat at a time" below.
+                          multi-channel downmixes (default %TEMP%\.truedat-stage). Point it
+                          somewhere your antivirus exclusion covers — see "Antivirus" below.
+                          Also the isolation lever if you ever need two truedats on one
+                          machine — see "Run one truedat at a time" below.
   --max-duration <secs>   Max track length for Essentia analysis (default 48000 = 800 min —
                           the large-buffer extractor's ChordsDetection ceiling; pass 12000
                           if running the old small-buffer .1 extractor). Longer tracks
@@ -309,6 +314,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
 **After a mass tag edit:** rewriting tags across the library changes every file's mtime without touching audio. Truedat detects this per file at ~64 KB/track (a quick head-hash check) instead of re-reading each file in full, so a full-library rescan after a retag pass finishes in a fraction of the time and re-runs zero analysis. `--no-quick-cache` forces the full per-file audio-hash check instead, and `--verify` remains the full-integrity check against the durable `audioStreamSha256`.
 
 **Network libraries:** when the source is on a UNC share (`\\server\share\…`), a mapped network drive (e.g. `Z:\` mapped to `\\server\share`), or a local path with non-ASCII characters, truedat stages each file once to a local temp copy and runs the 8-9 concurrent per-track workers (and the cache hierarchy's tier-2/4 body reads) against the local copy. Net: 1× full network read per track instead of ~3× full + ≥3× partial. Cache tier-1 (path + mtime equality) doesn't stage — already-cached tracks stay free. Local-ASCII paths read directly. Use `--no-stage` to opt out, or `--stage-dir` to relocate the staging directory (e.g. to a fast scratch volume when `%TEMP%` is on a small SSD). Per-track stage failures fall back to direct read with a one-line warning — scans never abort over a staging hiccup. End-of-scan summary reports `staging: N staged` (or `N staged, M direct-fallback`), with a stderr warning when >5% of attempted stages fell back so a wedged stage-dir is visible.
+
+**Antivirus.** A scan writes one staged copy per track into the staging directory and deletes it
+moments later, so real-time protection sees a stream of short-lived files and scans each one —
+work that buys nothing, since every one of them is a byte-for-byte copy of a file already sitting
+in your library. If you exclude anything, exclude the staging directory: `--stage-dir <path>`
+exists so you can put it somewhere an exclusion covers rather than having to except all of
+`%TEMP%`. Excluding the truedat program folder (or the truedat/essentia/ffmpeg processes) is the
+other half if your scanner is heuristic about unsigned binaries — Essentia in particular decodes
+audio in tight loops and reads like something worth a second look. Neither exclusion is required;
+both are about not paying for the same scan twice.
 
 **Run one truedat at a time.** Truedat is single-instance by design. At startup it sweeps
 leftover scratch files from previous runs — staged copies and downmix WAVs under the staging
@@ -722,7 +737,7 @@ Flags: `--seed-moods`, `--seed-catalog <path>`, `--seed-target <path>` (default:
 
 Place `truedat.exe` and the required tools in the same folder. No additional runtime needed on Windows 10+.
 
-**Recommended layout** for use alongside MusicBee/iTunes: drop the truedat folder under your library directory (e.g. `<library>\truedat\`). The exe will auto-discover the iTunes XML one level up — no need to pass the XML path or `cd` anywhere first. Output (`mbxmoods.json` etc.) lands next to the XML.
+**Recommended layout** for use alongside MusicBee/iTunes: drop the truedat folder under your library directory (e.g. `<library>\truedat\`). The exe will auto-discover the iTunes XML one level up — no need to pass the XML path or `cd` anywhere first. Output (`mbxmoods.json` etc.) lands next to the XML, and the catalog modes (`--stats`, `--prune-excluded`, …) find it there without a path too.
 
 ### Dependencies
 

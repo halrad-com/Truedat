@@ -3,7 +3,7 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+## [0.5.4.9-RC2] — 2026-08-15
 
 ### Added
 
@@ -50,6 +50,25 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   (`--stats`, `--list-speech`, `--list-missing-smfm`) keep the convenience, because they cannot
   destroy anything. Same defect class as the `--apply-exclusions` cwd bug fixed earlier: a
   destructive verb must never inherit its target from wherever the operator is standing.
+- **The catalog modes now find your library the same way a bare scan does.** A bare `truedat`
+  has auto-discovered its library since the drop-in install shipped — it probes the exe's parent
+  directory, which is what makes `<library>\truedat\truedat.exe` work with no arguments. Every
+  catalog mode (`--stats`, `--prune-excluded`, `--list-speech`, `--list-missing-smfm`,
+  `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) skipped that probe
+  and went straight to the current directory, so on the layout the README recommends a bare scan
+  worked while a bare `--stats` looked inside the truedat folder and reported the catalog
+  missing. Because the exclusion file is resolved from the catalog's directory, the operator's
+  rules went missing along with it — the mode ran, found no catalog and no rules, and nothing in
+  the output said *which* directory it had looked in. Both resolvers now share one probe order
+  (exe-dir's parent, then exe-dir, then the current directory). Reported from the field.
+
+### Changed
+
+- **`--stage-dir` is documented as the antivirus answer**, not only as a relocation knob. A scan
+  writes and deletes one staged copy per track, so real-time protection re-scans a stream of
+  short-lived files that are byte-for-byte copies of library files it has already seen; pointing
+  the staging directory somewhere an exclusion covers avoids paying for that twice without
+  having to except all of `%TEMP%`. New "Antivirus" note in the README covers it.
 
 ## [0.5.4.9-RC1] — 2026-08-15
 
