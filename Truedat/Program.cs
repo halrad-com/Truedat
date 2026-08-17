@@ -1150,6 +1150,11 @@ namespace Truedat
         // True once --max-duration is passed explicitly, so --preview's manifest can report
         // whether the ceiling came from a flag or the built-in default rather than guessing.
         internal static bool _maxDurationExplicit;
+        // --long-track-mins: what counts as a "long" track. TWO surfaces read it and have to
+        // agree — --preview's review prompt and the scan progress line's heads-up tag — so it
+        // is one static rather than a 30 duplicated per site. A review prompt, NOT a rule:
+        // nothing is skipped or pruned for being long.
+        internal static int _longTrackMins = 30;
 
         // --preview's review-candidate cap. No flag for this deliberately — the review page
         // (Phase 2b) pages client-side, so there's no operator-facing reason to raise it.
@@ -1964,7 +1969,6 @@ namespace Truedat
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
-            int longTrackMins = 30;            // --long-track-mins: review prompt threshold, NOT a rule
             bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
             string? applyExclusionsPath = null;
             bool verifyBackfill = false;
@@ -2240,7 +2244,7 @@ namespace Truedat
                 }
                 else if (canonical == "long-track-mins" && i + 1 < args.Length)
                 {
-                    if (!int.TryParse(args[++i], out longTrackMins) || longTrackMins <= 0)
+                    if (!int.TryParse(args[++i], out _longTrackMins) || _longTrackMins <= 0)
                     {
                         Console.Error.WriteLine($"Error: --long-track-mins requires a positive integer (minutes), got '{args[i]}'");
                         Environment.ExitCode = 1;
@@ -3023,7 +3027,7 @@ namespace Truedat
                     ExclusionsPath = pvExclPath,
                     MaxDurationSecs = _maxEssentiaDurationSecs,
                     MaxDurationSource = _maxDurationExplicit ? "--max-duration" : "default",
-                    LongTrackSecs = longTrackMins * 60,
+                    LongTrackSecs = _longTrackMins * 60,
                     ReviewCap = PreviewReviewCap,
                     MeasuredRtf = pvRtf,
                     EtaBasisLabel = "catalog-rtf",
@@ -5148,16 +5152,12 @@ namespace Truedat
                         }
 
                         long fileSizeBytes = 0;
-                        var sizeTag = "";
-                        try
-                        {
-                            fileSizeBytes = new FileInfo(scanPath).Length;
-                            var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                            if (sizeMb >= 100) sizeTag = $" [{sizeMb:F0} MB]";
-                        }
-                        catch { }
+                        try { fileSizeBytes = new FileInfo(scanPath).Length; } catch { }
 
-                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{sizeTag}");
+                        // Tag is duration, not bytes — see LongTrackTag for why size was the
+                        // wrong predictor. The stat above stays: RecordAnalyzedBytes and the
+                        // worker fan-out below both need the size.
+                        Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name}{LongTrackTag(t.TotalTimeMs, _longTrackMins)}");
 
                         // Pre-flight: a track past the Essentia ChordsDetection ceiling is a
                         // STRUCTURAL skip, not a failure — a scan cannot analyze it at this
@@ -14276,6 +14276,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ShortFileSkipReason(0, false, 5) == null, "shortfile: unknown duration (0) is not assumed short");
             }
 
+            // --- progress-line long-track tag is DURATION, not file size ---
+            {
+                Assert(LongTrackTag(29 * 60000L + 59000L, 30) == "", "long-track tag: a track under the threshold gets no tag");
+                Assert(LongTrackTag(30 * 60000L, 30) == " [30m00s]", "long-track tag: exactly at the threshold tags (>=)");
+                Assert(LongTrackTag(107 * 60000L, 30) == " [1h47m]", "long-track tag: hours render as 1h47m");
+                Assert(LongTrackTag(25 * 3600000L, 30) == " [1d01h]", "long-track tag: past a day renders as 1d01h");
+                Assert(LongTrackTag(0, 30) == "", "long-track tag: unknown duration gets no tag, not [0m00s]");
+                Assert(LongTrackTag(-1, 30) == "", "long-track tag: negative duration gets no tag");
+                Assert(LongTrackTag(20 * 60000L, 15) == " [20m00s]", "long-track tag: honours a lowered --long-track-mins");
+                Assert(LongTrackTag(20 * 60000L, 30) == "", "long-track tag: the same track is untagged at the default threshold");
+                // The bug this replaced: size predicted nothing. A three-hour talk file is
+                // ~86 MB (never tagged by the old >=100 MB rule) and is the slowest track in
+                // the scan; a six-minute 24/192 FLAC is 139 MB and finishes fast.
+                Assert(LongTrackTag(3 * 3600000L, 30) != "", "long-track tag: a 3h talk file tags regardless of being small on disk");
+                Assert(LongTrackTag(6 * 60000L, 30) == "", "long-track tag: a big-on-disk 6m hi-res track does not tag");
+            }
+
             // --- --preview no-ETA line distinguishes "nothing new" from "no history" (I3) ---
             {
                 Assert(PreviewNoEtaReason(0) == "nothing new to analyze", "preview-eta: New:0 says nothing new to analyze, not 'not estimable' (I3)");
@@ -15634,6 +15651,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (trackDurationSecs > 0 && trackDurationSecs < minSecs)
                 return $"short file: {trackDurationSecs} s < {minSecs} s min (--enableshortfiles to include)";
             return null;
+        }
+
+        /// <summary>
+        /// The progress line's "this one will sit there a while" tag, e.g. " [1h47m]".
+        /// Essentia's cost scales with audio DURATION — the ETA model on the same line is
+        /// duration x RTF — so the heads-up marker has to be duration too. It used to be
+        /// file size >= 100 MB, which predicts neither cost nor anything else useful: a
+        /// three-hour 64 kbps talk file is ~86 MB and never tagged while being the slowest
+        /// track in the scan, and a 139 MB 24/192 FLAC of a six-minute track tagged and
+        /// finished fast.
+        /// Whether a track needs an ffmpeg transcode is deliberately NOT here: essentia has
+        /// to fail (or under-decode) before that is known, which is after this line prints,
+        /// so all three retry paths announce themselves on their own lines instead. Guessing
+        /// from the extension would be exactly the kind of heuristic this scan path spent
+        /// two waves removing.
+        /// Empty below the threshold and when the duration is unknown — "[0m00s]" on every
+        /// track the XML has no Total Time for is worse than no tag at all.
+        /// </summary>
+        internal static string LongTrackTag(long totalTimeMs, int longTrackMins)
+        {
+            if (totalTimeMs <= 0 || longTrackMins <= 0) return "";
+            if (totalTimeMs < (long)longTrackMins * 60000L) return "";
+            return " [" + FormatTimeSpan(TimeSpan.FromMilliseconds(totalTimeMs)) + "]";
         }
 
         /// <summary>Binary per-track health (2026-07-30, "no silent failures"). A track

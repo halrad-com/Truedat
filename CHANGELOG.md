@@ -3,6 +3,21 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Changed
+
+- **The scan progress line flags long tracks, not big ones.** A track was tagged with its size
+  when the file exceeded 100 MB, which predicts nothing an operator cares about: Essentia's cost
+  scales with audio **duration** — the ETA model on the same line is duration × RTF — so a
+  three-hour 64 kbps talk file is ~86 MB and never tagged while being the slowest track in the
+  scan, and a six-minute 24/192 FLAC is 139 MB, tagged, and finished fast. The tag is now the
+  track's duration and appears at or past `--long-track-mins` (default 30), which until now only
+  drove `--preview`'s review prompt and is one threshold shared by both surfaces rather than a
+  second 30 hard-coded in the scan loop. Whether a track needs an ffmpeg transcode is deliberately
+  *not* on this line — essentia has to fail or under-decode before that is known, which is after
+  the line prints, so all three retry paths keep announcing themselves on their own lines.
+
 ## [0.5.4.9-RC2] — 2026-08-15
 
 ### Added
