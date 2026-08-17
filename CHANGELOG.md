@@ -3,7 +3,7 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+## [0.5.4.9-RC3] — 2026-08-16
 
 ### Changed
 
