@@ -682,6 +682,8 @@ namespace Truedat
             Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes ->");
             Console.WriteLine("                      mbxmoods-speech.csv (candidates for an exclusion rule via a decisions");
             Console.WriteLine("                      delta + --apply-exclusions; audio files untouched)");
+            Console.WriteLine("  --list-smfm [path]   Read-only: list entries that HAVE Sony SMFM (12-TONE) data, with");
+            Console.WriteLine("                      the decoded values (bpm, argmax slot, raw scores) -> mbxmoods-smfm.csv");
             Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data");
             Console.WriteLine("                      + coverage -> mbxmoods-smfm-missing.csv");
             Console.WriteLine("  --verify-coverage [path]  Read-only: combine the verify shard receipts beside a");
@@ -786,7 +788,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "list-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -1967,6 +1969,7 @@ namespace Truedat
             bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
             bool verifyCoverageMode = false; // --verify-coverage: combine shard receipts into a coverage proof (read-only, no audio)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
+            bool listSmfmMode = false;         // --list-smfm: read-only list of entries that HAVE Sony 12-TONE data, with the decoded values
             bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
             bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
@@ -2108,6 +2111,7 @@ namespace Truedat
                 else if (canonical == "prune-excluded") pruneExcludedMode = true;
                 else if (canonical == "verify-coverage") verifyCoverageMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
+                else if (canonical == "list-smfm") listSmfmMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -2333,7 +2337,7 @@ namespace Truedat
             // interrupted verify becomes restartable (each shard is durably done), so the
             // two compose rather than conflict. Every other mode here either rewrites the
             // catalog wholesale or has nothing to shard.
-            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
+            if (chunkTotal > 0 && (analyzeFileMode || fileListMode || migrateMode || fixupMode || statsMode || listSpeechMode || listSmfmMissingMode || listSmfmMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || hashOnlyMode || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode))
             {
                 Console.Error.WriteLine("Error: --chunk applies to the default iTunes-XML scan path only.");
                 Environment.ExitCode = 1;
@@ -2419,7 +2423,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || listSmfmMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --transcode is a standalone mode (mutually exclusive with scan/hash/merge/etc).");
                     Environment.ExitCode = 1;
@@ -2431,7 +2435,7 @@ namespace Truedat
 
             if (convertDirMode)
             {
-                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode || compactMode || prettifyMode)
+                if (analyzeFileMode || fileListMode || hashOnlyMode || migrateMode || fixupMode || verifyMode || statsMode || listSpeechMode || listSmfmMissingMode || listSmfmMode || pruneExcludedMode || applyExclusionsMode || duplicatesMode || mergeMode || synthesize || seedMoods || chunkTotal > 0 || previewMode || transcodeMode || snapshotMode || restoreMode || compactMode || prettifyMode)
                 {
                     Console.Error.WriteLine("Error: --convert-dir is a standalone mode (mutually exclusive with scan/hash/transcode/etc).");
                     Environment.ExitCode = 1;
@@ -2783,6 +2787,33 @@ namespace Truedat
                 var smfmTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 LoadExistingMoods(smfmPath!, smfmTracks);
                 RunListMissingSmfm(smfmPath!, smfmTracks.Values);
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --list-smfm: the other half of --list-missing-smfm. Read-only; lists the
+            // entries that DO carry Sony SMFM (12-TONE), with the decoded values, so the
+            // operator can see WHICH files the scan's "+smfm" lines were about. Same path
+            // resolution, same "writes only its CSV" posture.
+            if (listSmfmMode)
+            {
+                string? smfmHavePath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var smfmHaveRefusal);
+                if (smfmHaveRefusal != null)
+                {
+                    Console.Error.WriteLine(smfmHaveRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (!File.Exists(smfmHavePath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {smfmHavePath}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var smfmHaveTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(smfmHavePath!, smfmHaveTracks);
+                RunListSmfm(smfmHavePath!, smfmHaveTracks.Values);
                 Environment.ExitCode = 0;
                 return;
             }
@@ -9070,6 +9101,64 @@ namespace Truedat
             }
         }
 
+        /// <summary>Read-only: list catalog entries that DO carry Sony SMFM (12-TONE),
+        /// with the decoded values. Writes mbxmoods-smfm.csv
+        /// (path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores) next to the
+        /// moods file and prints coverage + a first-20 preview.
+        ///
+        /// The mirror of <see cref="RunListMissingSmfm"/>, and the answer to "the scan said
+        /// +smfm on N tracks — WHICH ones?". The scan's +smfm line is transient console
+        /// output and fires only when a track NEWLY gains SMFM, so it can never be the
+        /// inventory; this is.
+        ///
+        /// The raw scores ride along because they are the only reason to want the list —
+        /// smfmChannel is the argmax SLOT, NOT a mood channel (see SmfmReader), so a
+        /// consumer needs the vector, not the index. Space-separated in one CSV cell to
+        /// keep the column count fixed regardless of slot count.</summary>
+        static void RunListSmfm(string moodsPath, IEnumerable<TrackEntry> entries)
+        {
+            var have = new List<(string Path, string Artist, string Title, string Album, string Codec,
+                                 double? Bpm, int? Channel, int Top, string Scores)>();
+            int total = 0;
+            foreach (var e in entries)
+            {
+                if (e?.Features == null) continue;
+                total++;
+                if (!e.Features.HasSmfm) continue;
+                var sc = e.Features.SmfmScores!;
+                have.Add((e.Features.FilePath ?? "", e.Features.Artist, e.Features.Title,
+                    e.Features.Album, e.FingerprintV1?.Codec ?? "",
+                    e.Features.SmfmBpm, e.Features.SmfmChannel, sc.Max(),
+                    string.Join(" ", sc)));
+            }
+            have.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
+
+            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm.csv");
+            var sb = new StringBuilder();
+            sb.AppendLine("path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores");
+            foreach (var m in have)
+                sb.AppendLine($"{CsvEscape(m.Path)},{CsvEscape(m.Artist)},{CsvEscape(m.Title)},{CsvEscape(m.Album)},{CsvEscape(m.Codec)}," +
+                              $"{(m.Bpm.HasValue ? m.Bpm.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{(m.Channel.HasValue ? m.Channel.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{m.Top.ToString(System.Globalization.CultureInfo.InvariantCulture)},{CsvEscape(m.Scores)}");
+            File.WriteAllText(csvPath, sb.ToString());
+
+            int pct = total > 0 ? (int)(100.0 * have.Count / total) : 0;
+            Console.WriteLine($"Sony SMFM (12-TONE): {have.Count:N0} of {total:N0} tracks ({pct}%) carry 12-TONE data");
+            if (have.Count > 0)
+            {
+                int preview = Math.Min(20, have.Count);
+                foreach (var m in have.Take(preview))
+                    Console.WriteLine($"  {m.Path}");
+                if (have.Count > preview)
+                    Console.WriteLine($"  ... {have.Count - preview:N0} more (see CSV)");
+            }
+            Console.WriteLine();
+            Console.WriteLine($"CSV:    {csvPath}");
+            if (have.Count < total)
+                Console.WriteLine($"The other {total - have.Count:N0}: truedat --list-missing-smfm");
+        }
+
         /// <param name="exclusions">When non-null, entries matching a rule are counted into
         /// <see cref="CatalogStats.ExcludedByRule"/>. **Pass a FRESHLY LOADED set, and never
         /// the scan's live `_exclusions`.** IsExcluded increments each rule's MatchCount, and
@@ -12132,6 +12221,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "smfm-cache: RebuildCacheEntryCore carries SmfmScores forward");
                 Assert(rebuilt.Features.SmfmChannel == 2, "smfm-cache: carries SmfmChannel forward");
                 Assert(rebuilt.Features.SmfmBpm == 128.5, "smfm-cache: carries SmfmBpm forward");
+            }
+
+            // --- --list-smfm: the HAVE side of the SMFM split ---
+            // Pins the CSV contract (one row per SMFM-carrying entry, raw scores in a single
+            // cell) and the split itself: the two listers must never both claim an entry, or
+            // both drop one, which is the only way this pair can lie about coverage.
+            {
+                var lsDir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-listsmfm-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(lsDir);
+                try
+                {
+                    var lsMoods = Path.Combine(lsDir, "mbxmoods.json");
+                    var lsEntries = new List<TrackEntry>
+                    {
+                        // has SMFM, and a comma in the title so CSV quoting is exercised
+                        new TrackEntry { Features = new TrackFeatures {
+                            FilePath = @"D:\M\a.flac", Artist = "A", Title = "One, two", Album = "Al",
+                            SmfmScores = new[] { 10, 255, 30 }, SmfmChannel = 1, SmfmBpm = 128.5 } },
+                        // no SMFM at all
+                        new TrackEntry { Features = new TrackFeatures {
+                            FilePath = @"D:\M\b.flac", Artist = "B", Title = "Two", Album = "Al" } },
+                        // present-but-empty scores == no SMFM (HasSmfm requires Length > 0)
+                        new TrackEntry { Features = new TrackFeatures {
+                            FilePath = @"D:\M\c.mp3", Artist = "C", Title = "Three", Album = "Al",
+                            SmfmScores = new int[0] } },
+                    };
+
+                    RunListSmfm(lsMoods, lsEntries);
+                    var lsCsv = File.ReadAllLines(Path.Combine(lsDir, "mbxmoods-smfm.csv"));
+                    Assert(lsCsv.Length == 2,
+                        $"list-smfm: 3 entries, 1 with SMFM -> header + 1 row (got {lsCsv.Length} lines)");
+                    Assert(lsCsv[0] == "path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores",
+                        $"list-smfm: CSV header is the documented column set (got {lsCsv[0]})");
+                    Assert(lsCsv[1] == "D:\\M\\a.flac,A,\"One, two\",Al,,128.5,1,255,10 255 30",
+                        $"list-smfm: row carries the decoded values, scores space-joined in one cell (got {lsCsv[1]})");
+
+                    // The split is exhaustive and disjoint: every entry lands in exactly one list.
+                    RunListMissingSmfm(lsMoods, lsEntries);
+                    var lsMissing = File.ReadAllLines(Path.Combine(lsDir, "mbxmoods-smfm-missing.csv"));
+                    Assert(lsMissing.Length == 3,
+                        $"list-smfm: the other two entries are the missing list (got {lsMissing.Length} lines)");
+                    Assert((lsCsv.Length - 1) + (lsMissing.Length - 1) == lsEntries.Count,
+                        "list-smfm: have + missing == the catalog (the split cannot lose or double-count an entry)");
+                }
+                finally { try { Directory.Delete(lsDir, true); } catch { } }
             }
 
             // --- duration throughput: Nx realtime arithmetic ---

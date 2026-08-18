@@ -3,6 +3,28 @@
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
+## [Unreleased]
+
+### Added
+
+- **`--list-smfm [path]` — the other half of the SMFM split.** truedat could tell you which
+  catalog entries were *missing* Sony 12-TONE data and could count the ones that had it, but
+  nothing would list them. The gap showed up in the obvious way: a scan prints `+smfm` for a
+  track that newly gains SMFM and `SMFM added: N` in the summary, an operator asks *which
+  files those were*, and the only answer was transient console output — a change notice, not
+  an inventory, silent about every track that already carried it. The new mode writes
+  `mbxmoods-smfm.csv` (path, artist, title, album, codec, smfmBpm, smfmChannel, topScore,
+  scores), read-only over the catalog and resolved through the same ladder as its mirror.
+  The raw score vector is a column because `smfmChannel` is the argmax **slot**, not a mood
+  channel — the index alone is not usable downstream, so the list carries what a consumer
+  actually needs and doubles as the corpus view for format work. Self-tested against
+  `--list-missing-smfm` on the property that matters: the two lists are disjoint and their
+  union is the catalog, so the pair cannot lose or double-count an entry and quietly
+  misreport coverage.
+- **`smfm-tools/check_moods_smfm.py` reports both directions too**, writing
+  `smfm-present.csv` alongside `smfm-missing.csv` (replacing the old `smfm-missing.txt`;
+  path is still column 1 in both). Sibling tooling, not part of `truedat.exe`.
+
 ## [0.5.4.9-RC3] — 2026-08-16
 
 ### Changed
