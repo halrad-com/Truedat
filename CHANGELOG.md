@@ -7,6 +7,39 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
+- **`--list-formats [path]` — what the library is made of, and where.** Every existing report
+  answers a *completeness* question: `--stats` says how much of the catalog has been analyzed,
+  hashed, or tagged. None of them says what is actually **in** it. So an ordinary question —
+  "I still have WMA somewhere, where?" — had no answer short of exporting the catalog and
+  pivoting it by hand. The new mode buckets entries by `fingerprint.v1.codec`, prints each
+  format's count, share and lossy/lossless character, then rolls each format up by folder so a
+  format can be *located* rather than merely counted. Full listing to `mbxmoods-formats.csv`
+  (path, codec, codecRaw, bitrate, sampleRate, bitDepth, fileSize, artist, album, title).
+  Read-only over the catalog, resolved through the same ladder as the other catalog modes, and
+  catalog-only — it runs on a metadata mirror with no audio in reach.
+
+  `bitrate` / `sampleRate` / `bitDepth` ride along as columns rather than becoming a second
+  rollup: "and by bitrate?" is then a pivot table, not another mode to build and maintain.
+
+  **Two buckets deliberately refuse to answer.** `wma` covers WMA *and* WMA Lossless, and
+  `m4a` covers AAC *and* ALAC, because `NormalizeCodec` derives the label from TagLib's MIME
+  type and TagLib cannot cheaply separate either pair — the catalog simply does not carry the
+  distinction. Printing a confident "lossy" over a folder of WMA Lossless would be the report
+  asserting evidence it does not have, so it names the pair and points at the tool that can
+  settle it (`--convert-dir <folder> --wma-lossless-only`, which uses ffprobe on the actual
+  bytes, on the machine holding the audio). Entries predating `fingerprint.v1` carry no codec
+  at all and get their own `(not recorded)` row with the backfill command, rather than a codec
+  inferred from the file extension: a guessed value sitting in the same column as a measured
+  one makes the whole column untrustworthy, and the extension is precisely what a mislabelled
+  file lies about.
+
+  The folder rollup climbs one level above the track's own folder — the artist on an
+  `Artist\Album` tree, so an artist's albums aggregate into one line instead of scattering —
+  and **stops at the volume**: climbing past `\\server\share` or a drive root collapses every
+  library on the box into a single meaningless bucket. Both the rollup and the lossy/lossless
+  classifier are pure functions, so the summary table, the rollup and any future consumer
+  cannot drift into disagreeing.
+
 - **`--list-smfm [path]` — the full Sony SMFM (12-TONE) report.** truedat could tell you which
   catalog entries were *missing* 12-TONE data and could count the ones that had it, but
   nothing would list them. The gap showed up in the obvious way: a scan prints `+smfm` for a
