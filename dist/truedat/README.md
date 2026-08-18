@@ -93,7 +93,7 @@ Output: `mbxmoods.json` (next to the XML file)
 
 In practice that means **anywhere under a MusicBee instance is found** — including running truedat from `<root>\AppData\MBXHub\` — while `<root>\Library` always wins when several candidates exist, and the user's default library is only consulted when nothing instance-relative matched. It is a fixed set of known locations rather than a recursive scan, so it stays fast and predictable.
 
-The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-smfm`, `--list-missing-smfm`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) find `mbxmoods.json` through the **same** ladder when you give them no path. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that a bare `truedat --stats` always means the same library a bare `truedat` scan does, from whichever directory you happen to run them.
+The catalog modes (`--stats`, `--prune-excluded`, `--list-speech`, `--list-smfm`, `--list-missing-smfm`, `--list-formats`, `--snapshot`, `--compact` / `--prettify`, `--restore`, `--verify-coverage`) find `mbxmoods.json` through the **same** ladder when you give them no path. The exclusion file follows the catalog, so `mbxmoods-exclude.json` is found beside it. The upshot is that a bare `truedat --stats` always means the same library a bare `truedat` scan does, from whichever directory you happen to run them.
 
 ### Options
 
@@ -185,6 +185,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           still need Sony tagging" report, not a truedat gap. For that
                           reason it is deliberately absent from the --stats Recommended
                           block, which only ever names gaps a truedat command can close.
+  --list-formats [path]   Read-only: what the library is MADE OF, by codec/container, and
+                          which folders each format lives in. Prints a summary table
+                          (count, share, lossy/lossless) then a per-format folder rollup;
+                          writes mbxmoods-formats.csv (path, codec, codecRaw, bitrate,
+                          sampleRate, bitDepth, fileSize, artist, album, title). Answers
+                          "I still have WMA somewhere — where?", which no coverage report
+                          does: --stats reports how COMPLETE the catalog is, never what is
+                          in it. Bitrate and friends ride along as columns so "and by
+                          bitrate?" is a pivot rather than another mode.
   --prune-excluded [path] Remove catalog entries that an exclusion rule now covers — the
                           ones scanned before the rule existed, which exclusions otherwise
                           only ever keep out of FUTURE scans. Rules are the sole authority:
@@ -1037,6 +1046,10 @@ When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Mu
 `--list-missing-smfm [path]` is the narrower, older report — it lists the `no-smfm` entries only (truedat's internal `HasSmfm` counts an all-zero block as present) with overall coverage, to `mbxmoods-smfm-missing.csv`. Because truedat only *reads* SMFM and never writes it, a missing block means the file has not been through Sony's tagger — a rescan cannot close that gap, which is why that report is a standalone mode rather than an entry in the `--stats` **Recommended** block.
 
 A scan prints `+smfm` for a track that **newly** gains SMFM, and an `SMFM added: N` line in the summary. That is a change notice, not an inventory — it says nothing about the tracks that already had it, and it is gone when the console scrolls. `--list-smfm` is the durable answer to "which files carry it".
+
+`--list-formats [path]` answers a different question from every other report here: not how complete the catalog is, but **what the library is made of**. It buckets entries by `fingerprint.v1.codec`, prints the share each format holds and whether it is lossy or lossless, then rolls each format up by folder — so "I still have WMA somewhere, where?" has a direct answer instead of a spreadsheet exercise. The full listing goes to `mbxmoods-formats.csv`, with `bitrate` / `sampleRate` / `bitDepth` as columns; "and by bitrate?" is a pivot table away rather than another mode.
+
+Two buckets deliberately refuse to guess. `wma` covers **both** WMA and WMA Lossless, and `m4a` covers both AAC and ALAC, because the codec label comes from TagLib's MIME type and TagLib cannot cheaply tell those pairs apart — the catalog simply does not carry the distinction, and printing a confident "lossy" over a folder of WMA Lossless would be the report asserting something it has no evidence for. Resolving it needs ffprobe on the actual bytes, which is what `--convert-dir <folder> --wma-lossless-only` does on the machine holding the audio. Likewise, entries written before `fingerprint.v1` existed carry no codec at all and get their own `(not recorded)` row with the backfill command, rather than a codec inferred from the file extension — a guess sitting in the same column as a measurement makes the whole column untrustworthy, and the extension is precisely what a mislabelled file lies about.
 
 The SMFM format itself is documented in [`smfm-tools/`](smfm-tools/) — an unofficial wire-format spec, a confidence-tiered state of knowledge (including the claims device testing refuted), an SMFM-vs-Essentia comparison, and standalone Python tooling for extracting SMFM data outside truedat.
 
