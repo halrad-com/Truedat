@@ -686,6 +686,9 @@ namespace Truedat
             Console.WriteLine("                      the decoded values (bpm, argmax slot, raw scores) -> mbxmoods-smfm.csv");
             Console.WriteLine("  --list-missing-smfm [path]  Read-only: list entries with no Sony SMFM (12-TONE) data");
             Console.WriteLine("                      + coverage -> mbxmoods-smfm-missing.csv");
+            Console.WriteLine("  --list-formats [path]  Read-only: what the library is made of, by codec/container,");
+            Console.WriteLine("                      and which folders each format lives in -> mbxmoods-formats.csv");
+            Console.WriteLine("                      (bitrate/sampleRate/bitDepth ride along as columns to pivot on)");
             Console.WriteLine("  --verify-coverage [path]  Read-only: combine the verify shard receipts beside a");
             Console.WriteLine("                      catalog and prove the pass actually covered it — every shard run,");
             Console.WriteLine("                      each exactly once, against one catalog state. Answers \"can I trust");
@@ -788,7 +791,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "list-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -1970,6 +1973,7 @@ namespace Truedat
             bool verifyCoverageMode = false; // --verify-coverage: combine shard receipts into a coverage proof (read-only, no audio)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
             bool listSmfmMode = false;         // --list-smfm: read-only list of entries that HAVE Sony 12-TONE data, with the decoded values
+            bool listFormatsMode = false;      // --list-formats: read-only breakdown by codec/container + where each format lives
             bool previewMode = false;          // --preview: work plan + review candidates. Read-only over the CATALOG (analyzes nothing, writes no mbxmoods.json, never touches the exclusion file) — but it DOES write preview.json + the page into the review folder (I-6).
             string? previewOutPath = null;     // optional explicit destination for preview.json
             bool applyExclusionsMode = false;   // --apply-exclusions <path>: merge a decisions delta into mbxmoods-exclude.json
@@ -2112,6 +2116,7 @@ namespace Truedat
                 else if (canonical == "verify-coverage") verifyCoverageMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
                 else if (canonical == "list-smfm") listSmfmMode = true;
+                else if (canonical == "list-formats") listFormatsMode = true;
                 else if (canonical == "backfill") verifyBackfill = true;
                 else if (canonical == "backfill-level" && i + 1 < args.Length)
                 {
@@ -2814,6 +2819,34 @@ namespace Truedat
                 var smfmHaveTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 LoadExistingMoods(smfmHavePath!, smfmHaveTracks);
                 RunListSmfm(smfmHavePath!, smfmHaveTracks.Values);
+                Environment.ExitCode = 0;
+                return;
+            }
+
+            // --list-formats: read-only. What the library is MADE OF, by codec/container, and
+            // which folders each format lives in — the "I have WMA somewhere, where?" question,
+            // which no coverage report answers (--stats reports how COMPLETE the catalog is,
+            // never what is in it). Catalog-only, so it runs on a metadata mirror; same path
+            // resolution and same "writes only its CSV" posture as --list-smfm / --list-speech.
+            if (listFormatsMode)
+            {
+                string? formatsPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var formatsRefusal);
+                if (formatsRefusal != null)
+                {
+                    Console.Error.WriteLine(formatsRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (!File.Exists(formatsPath))
+                {
+                    Console.Error.WriteLine($"Error: moods file not found: {formatsPath}");
+                    Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                var formatTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                LoadExistingMoods(formatsPath!, formatTracks);
+                RunListFormats(formatsPath!, formatTracks.Values);
                 Environment.ExitCode = 0;
                 return;
             }
@@ -9207,6 +9240,149 @@ namespace Truedat
             Console.WriteLine("Filter the state column; truedat only READS SMFM, so no truedat command adds it.");
         }
 
+        /// <summary>The lossy/lossless character of a normalized <see cref="FingerprintV1.Codec"/>
+        /// label. Pure, so the summary table and any future consumer cannot drift.
+        ///
+        /// Three of these are deliberately "either" rather than a guess. <c>wma</c> covers BOTH
+        /// WMA and WMA Lossless and <c>m4a</c> covers both ALAC and AAC, because
+        /// <see cref="NormalizeCodec"/> derives the label from TagLib's MIME type and TagLib
+        /// cannot cheaply tell those pairs apart — the catalog simply does not carry the
+        /// distinction. Printing a confident "lossy" for a folder of WMA Lossless would be the
+        /// report lying about evidence it does not have, so it says which pair it is and lets
+        /// the operator resolve it with ffprobe (--convert-dir) on the box holding the audio.</summary>
+        internal static string FormatKind(string? codec) => (codec ?? "").Trim().ToLowerInvariant() switch
+        {
+            "flac" or "alac" or "wav" or "aiff" or "ape" => "lossless",
+            "mp3" or "aac" or "opus" or "vorbis" or "ogg" or "mpc" => "lossy",
+            "wma" => "lossy or lossless (TagLib cannot tell them apart)",
+            "m4a" => "lossy or lossless (ALAC vs AAC undetermined)",
+            "" => "not recorded — pre-fingerprint.v1 entry",
+            _ => "unrecognized container",
+        };
+
+        /// <summary>The folder a track rolls up to, <paramref name="levelsUp"/> directories above
+        /// the file itself (1 = the file's own folder, 2 = one above it — typically the artist).
+        ///
+        /// Pure string work on separators rather than <see cref="Path.GetDirectoryName"/>, which
+        /// throws on the malformed paths a long-lived catalog accumulates; a report must survive
+        /// its worst row. Climbing STOPS at the volume: a drive root keeps its first segment and
+        /// a UNC path keeps <c>\\server\share</c>, because rolling past those collapses every
+        /// library on the box into one meaningless "\" bucket.</summary>
+        internal static string FolderRollup(string? path, int levelsUp)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "(unknown folder)";
+            var p = PathHelper.NormalizeSeparators(path!.Trim()).TrimEnd('\\');
+            var parts = p.Split('\\');
+            bool unc = p.StartsWith(@"\\", StringComparison.Ordinal);
+            int floor = unc ? 4 : 1;                       // \\srv\share -> ["","","srv","share"]; X:\a -> ["X:","a"]
+            int keep = Math.Max(floor, parts.Length - levelsUp);
+            if (keep >= parts.Length) keep = Math.Max(floor, parts.Length - 1);
+            var joined = string.Join(@"\", parts.Take(keep));
+            return joined.EndsWith(":", StringComparison.Ordinal) ? joined + @"\" : joined;
+        }
+
+        /// <summary>Read-only: what the library is MADE OF, by container/codec, and where each
+        /// format lives. Writes mbxmoods-formats.csv next to the moods file and prints a summary
+        /// table plus a per-format folder rollup. The catalog is the only input, so this runs on
+        /// a metadata mirror with no audio in reach (the --list-speech posture).
+        ///
+        /// The bucket is <c>fingerprint.v1.codec</c> and nothing else. Entries predating
+        /// fingerprint.v1 carry no codec at all and get their own "(not recorded)" row with the
+        /// backfill command, rather than a codec inferred from the file extension: a guessed
+        /// value sitting in the same column as a measured one turns a report into a claim it
+        /// cannot support, and the extension is exactly what a mislabelled file lies about.
+        ///
+        /// Bitrate/sampleRate/bitDepth ride along as CSV columns rather than a second rollup —
+        /// the question "and by bitrate?" is a pivot away, and does not need its own mode.</summary>
+        static void RunListFormats(string moodsPath, IEnumerable<TrackEntry> entries)
+        {
+            const int RollupLevelsUp = 2;   // one above the track's folder — artist level on a Artist\Album tree
+            const int TopFolders = 10;
+
+            var rows = new List<(string Path, string Codec, string CodecRaw, int Bitrate, int SampleRate,
+                                 int BitDepth, long FileSize, string Artist, string Album, string Title)>();
+            foreach (var e in entries)
+            {
+                if (e?.Features == null) continue;
+                var fp = e.FingerprintV1;
+                // "" is the honest bucket for an entry with no fingerprint at all; "other" is
+                // NormalizeCodec's own bucket for a container it recognized and could not name.
+                string codec = fp == null ? "" : (string.IsNullOrWhiteSpace(fp.Codec) ? "other" : fp.Codec.Trim());
+                rows.Add((e.Features.FilePath ?? "", codec, fp?.CodecRaw ?? "", fp?.Bitrate ?? 0,
+                          fp?.SampleRate ?? 0, fp?.BitDepth ?? 0, fp?.FileSize ?? 0,
+                          e.Features.Artist ?? "", e.Features.Album ?? "", e.Features.Title ?? ""));
+            }
+
+            int total = rows.Count;
+            var byCodec = rows.GroupBy(r => r.Codec, StringComparer.OrdinalIgnoreCase)
+                              .OrderByDescending(g => g.Count())
+                              .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                              .ToList();
+
+            // CSV first — codec then path, so filtering the codec column yields contiguous rows.
+            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-formats.csv");
+            var sb = new StringBuilder();
+            sb.AppendLine("path,codec,codecRaw,bitrate,sampleRate,bitDepth,fileSize,artist,album,title");
+            foreach (var r in rows.OrderBy(r => r.Codec, StringComparer.OrdinalIgnoreCase)
+                                  .ThenBy(r => r.Path, StringComparer.OrdinalIgnoreCase))
+                sb.AppendLine($"{CsvEscape(r.Path)},{CsvEscape(r.Codec)},{CsvEscape(r.CodecRaw)}," +
+                              $"{(r.Bitrate > 0 ? r.Bitrate.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{(r.SampleRate > 0 ? r.SampleRate.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{(r.BitDepth > 0 ? r.BitDepth.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{(r.FileSize > 0 ? r.FileSize.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
+                              $"{CsvEscape(r.Artist)},{CsvEscape(r.Album)},{CsvEscape(r.Title)}");
+            File.WriteAllText(csvPath, sb.ToString());
+
+            string Label(string codec) => codec.Length == 0 ? "(not recorded)" : codec;
+            // Floor, so a format one track short of the whole catalog never prints 100%.
+            string Pct(int n) => total > 0 ? $"{(int)Math.Floor(100.0 * n / total),3}%" : "  0%";
+
+            Console.WriteLine($"Formats: {total:N0} catalog entries, {byCodec.Count} distinct");
+            Console.WriteLine();
+            foreach (var g in byCodec)
+            {
+                int n = g.Count();
+                Console.WriteLine($"  {Label(g.Key),-18} {n,9:N0} {Pct(n)}   {FormatKind(g.Key)}");
+                // "other" is a bucket by definition, so name what actually landed in it —
+                // otherwise the one row an operator most wants to look into is the one row
+                // that says the least.
+                if (string.Equals(g.Key, "other", StringComparison.OrdinalIgnoreCase))
+                {
+                    var raws = g.Select(r => r.CodecRaw).Where(s => s.Length > 0)
+                                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(s => s).ToList();
+                    if (raws.Count > 0)
+                        Console.WriteLine($"  {"",-18} {"",9} {"",4}   raw: {string.Join(", ", raws.Take(4))}" +
+                                          (raws.Count > 4 ? $" (+{raws.Count - 4} more)" : ""));
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"Where they are (top {TopFolders} folders per format):");
+            foreach (var g in byCodec)
+            {
+                var folders = g.GroupBy(r => FolderRollup(r.Path, RollupLevelsUp), StringComparer.OrdinalIgnoreCase)
+                               .OrderByDescending(f => f.Count())
+                               .ThenBy(f => f.Key, StringComparer.OrdinalIgnoreCase)
+                               .ToList();
+                Console.WriteLine();
+                Console.WriteLine($"  {Label(g.Key)} — {g.Count():N0} in {folders.Count:N0} folder{(folders.Count == 1 ? "" : "s")}");
+                foreach (var f in folders.Take(TopFolders))
+                    Console.WriteLine($"      {f.Count(),7:N0}  {f.Key}");
+                if (folders.Count > TopFolders)
+                    Console.WriteLine($"      ... {folders.Count - TopFolders:N0} more folder{(folders.Count - TopFolders == 1 ? "" : "s")} (see CSV)");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"CSV:    {csvPath}");
+            Console.WriteLine("Filter the codec column; bitrate/sampleRate/bitDepth ride along for a pivot.");
+            // Advisor lines, and only for gaps a truedat command actually closes.
+            if (byCodec.Any(g => g.Key.Length == 0))
+                Console.WriteLine("(not recorded): --verify --backfill --backfill-level identity fills fingerprint.v1 on those entries.");
+            if (byCodec.Any(g => string.Equals(g.Key, "wma", StringComparison.OrdinalIgnoreCase)))
+                Console.WriteLine("wma: this report cannot separate WMA Lossless from lossy WMA — run" +
+                                  " --convert-dir <folder> --wma-lossless-only on the machine holding the audio (ffprobe decides).");
+        }
+
         /// <param name="exclusions">When non-null, entries matching a rule are counted into
         /// <see cref="CatalogStats.ExcludedByRule"/>. **Pass a FRESHLY LOADED set, and never
         /// the scan's live `_exclusions`.** IsExcluded increments each rule's MatchCount, and
@@ -12330,6 +12506,90 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         $"list-smfm: --list-missing-smfm lists the no-smfm rows only (got {lsMissing.Length} lines)");
                 }
                 finally { try { Directory.Delete(lsDir, true); } catch { } }
+            }
+
+            // --- --list-formats: composition report (what the library is made of, and where) ---
+            // Pins the two pure helpers and the CSV/bucketing contract. The property that makes
+            // the report trustworthy is the same one --list-smfm has: every entry lands in
+            // exactly one bucket, so the rows always sum to the catalog.
+            {
+                // FormatKind: the three "either" answers are deliberate, not gaps to close.
+                Assert(FormatKind("flac") == "lossless", "formats: flac is lossless");
+                Assert(FormatKind("FLAC") == "lossless", "formats: codec match is case-insensitive");
+                Assert(FormatKind("mp3") == "lossy", "formats: mp3 is lossy");
+                Assert(FormatKind("wma").StartsWith("lossy or lossless", StringComparison.Ordinal),
+                    "formats: wma covers WMA and WMA Lossless — the report must not guess which");
+                Assert(FormatKind("m4a").StartsWith("lossy or lossless", StringComparison.Ordinal),
+                    "formats: m4a covers ALAC and AAC — same refusal to guess");
+                Assert(FormatKind("").StartsWith("not recorded", StringComparison.Ordinal),
+                    "formats: no fingerprint means no codec, not an inferred one");
+                Assert(FormatKind("other") == "unrecognized container", "formats: NormalizeCodec's own catch-all");
+
+                // FolderRollup: levelsUp 1 = the file's folder, 2 = one above it.
+                Assert(FolderRollup(@"X:\Music\Sarah\Surfacing\01.wma", 1) == @"X:\Music\Sarah\Surfacing",
+                    "rollup: 1 level up is the track's own folder");
+                Assert(FolderRollup(@"X:\Music\Sarah\Surfacing\01.wma", 2) == @"X:\Music\Sarah",
+                    "rollup: 2 levels up is the folder above it (artist on an Artist\\Album tree)");
+                Assert(FolderRollup(@"X:/Music/Sarah/Surfacing/01.wma", 2) == @"X:\Music\Sarah",
+                    "rollup: forward slashes normalize to the same bucket as backslashes");
+                Assert(FolderRollup(@"\\nas\music\Sarah\Surfacing\01.wma", 2) == @"\\nas\music\Sarah",
+                    "rollup: UNC path climbs normally when there is room above the share");
+                // The floors. Climbing past a volume root would collapse every library on the
+                // box into one bucket, which is the failure mode that makes a rollup useless.
+                Assert(FolderRollup(@"\\nas\music\01.wma", 2) == @"\\nas\music",
+                    "rollup: UNC climb stops at \\\\server\\share, never at \\");
+                Assert(FolderRollup(@"X:\01.wma", 2) == @"X:\",
+                    "rollup: drive climb stops at the drive root");
+                Assert(FolderRollup(null, 2) == "(unknown folder)", "rollup: a pathless entry gets its own bucket");
+                Assert(FolderRollup("   ", 2) == "(unknown folder)", "rollup: blank path likewise");
+                // A malformed path must not take the whole report down with it.
+                Assert(FolderRollup("no-separators-at-all.wma", 2).Length > 0,
+                    "rollup: a path with no separator still yields a bucket (report survives its worst row)");
+
+                var lfDir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-listformats-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(lfDir);
+                try
+                {
+                    var lfMoods = Path.Combine(lfDir, "mbxmoods.json");
+                    var lfEntries = new List<TrackEntry>
+                    {
+                        new TrackEntry { Features = new TrackFeatures {
+                                FilePath = @"X:\M\Sarah\Surfacing\a.wma", Artist = "Sarah", Album = "Surfacing", Title = "Building, a Mystery" },
+                            FingerprintV1 = new FingerprintV1 { Codec = "wma", Bitrate = 192, SampleRate = 44100 } },
+                        new TrackEntry { Features = new TrackFeatures {
+                                FilePath = @"X:\M\Sarah\Mirrorball\b.wma", Artist = "Sarah", Album = "Mirrorball", Title = "Ice" },
+                            FingerprintV1 = new FingerprintV1 { Codec = "wma", Bitrate = 128, SampleRate = 44100 } },
+                        new TrackEntry { Features = new TrackFeatures {
+                                FilePath = @"X:\M\Miles\Kind of Blue\c.flac", Artist = "Miles", Album = "Kind of Blue", Title = "So What" },
+                            FingerprintV1 = new FingerprintV1 { Codec = "flac", SampleRate = 44100, BitDepth = 16 } },
+                        // Pre-fingerprint.v1 entry: no codec recorded anywhere.
+                        new TrackEntry { Features = new TrackFeatures {
+                                FilePath = @"X:\M\Old\d.mp3", Artist = "Old", Album = "Al", Title = "Legacy" } },
+                    };
+
+                    RunListFormats(lfMoods, lfEntries);
+                    var lfCsv = File.ReadAllLines(Path.Combine(lfDir, "mbxmoods-formats.csv"));
+                    Assert(lfCsv.Length == 1 + lfEntries.Count,
+                        $"list-formats: every entry gets exactly one row, so the buckets sum to the catalog (got {lfCsv.Length} lines)");
+                    Assert(lfCsv[0] == "path,codec,codecRaw,bitrate,sampleRate,bitDepth,fileSize,artist,album,title",
+                        $"list-formats: CSV header is the documented column set (got {lfCsv[0]})");
+                    // Sorted codec-then-path: the empty bucket sorts first, then flac, then the wmas.
+                    Assert(lfCsv[1] == "X:\\M\\Old\\d.mp3,,,,,,,Old,Al,Legacy",
+                        $"list-formats: a pre-fingerprint entry reports an EMPTY codec, never one guessed from the .mp3 extension (got {lfCsv[1]})");
+                    Assert(lfCsv[2] == "X:\\M\\Miles\\Kind of Blue\\c.flac,flac,,,44100,16,,Miles,Kind of Blue,So What",
+                        $"list-formats: numeric columns are blank when 0, not \"0\" (got {lfCsv[2]})");
+                    Assert(lfCsv[3].StartsWith("X:\\M\\Sarah\\Mirrorball\\b.wma,wma,", StringComparison.Ordinal)
+                        && lfCsv[4].StartsWith("X:\\M\\Sarah\\Surfacing\\a.wma,wma,", StringComparison.Ordinal),
+                        "list-formats: rows sort by codec then path, so filtering a codec yields contiguous rows");
+                    Assert(lfCsv[4].EndsWith("\"Building, a Mystery\"", StringComparison.Ordinal),
+                        $"list-formats: a comma in a field is CSV-quoted (got {lfCsv[4]})");
+                    // The scenario the report exists for: both WMAs roll up to ONE folder even
+                    // though they sit in different album folders. A rollup at the album level
+                    // would have reported two, which is the answer that does not help.
+                    Assert(FolderRollup(@"X:\M\Sarah\Surfacing\a.wma", 2) == FolderRollup(@"X:\M\Sarah\Mirrorball\b.wma", 2),
+                        "list-formats: two albums by one artist roll up to a single folder bucket");
+                }
+                finally { try { Directory.Delete(lfDir, true); } catch { } }
             }
 
             // --- duration throughput: Nx realtime arithmetic ---
