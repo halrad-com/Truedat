@@ -67,7 +67,7 @@ Python 3.9+, standard library only.
 | `smfm_index.py` | Walk tracks.db → diagnostic CSV, one row per analyzed track with all decoded fields |
 | `flac_smfm_dump.py` | Hex-dump the SMFM block from a single FLAC, list candidate sub-tags |
 | `flac_smfm_diff.py` | Sub-block-by-sub-block diff of two FLAC SMFM payloads |
-| `check_moods_smfm.py` | SMFM coverage report against a truedat `mbxmoods.json`; writes rescan candidates to `smfm-missing.txt` |
+| `check_moods_smfm.py` | SMFM coverage report against a truedat `mbxmoods.json`; writes both directions — `smfm-present.csv` (what HAS it, with the decoded values) and `smfm-missing.csv` (Sony-tagging candidates) |
 
 ## Provenance & confidence
 
