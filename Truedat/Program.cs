@@ -9101,15 +9101,49 @@ namespace Truedat
             }
         }
 
-        /// <summary>Read-only: list catalog entries that DO carry Sony SMFM (12-TONE),
-        /// with the decoded values. Writes mbxmoods-smfm.csv
-        /// (path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores) next to the
-        /// moods file and prints coverage + a first-20 preview.
+        /// <summary>The three SMFM states an entry can be in. A two-way have/haven't split
+        /// hid the middle one: a block Sony WROTE but scored nothing. Those are not untagged
+        /// files — re-running the tagger is the fix for <see cref="NoBlock"/> and is exactly
+        /// what has already been tried for <see cref="NoData"/> — so collapsing them into
+        /// either neighbour gives the operator a work list that is partly wrong whichever way
+        /// it falls. The distinction cost us a live disagreement between truedat and the
+        /// sibling Python reporter, each collapsing it the other way (2026-08-17).</summary>
+        internal enum SmfmState
+        {
+            Data,     // block present, at least one non-zero score — usable
+            NoData,   // block present, every score zero — Sony wrote it and scored nothing
+            NoBlock,  // no SMFM at all — never through Sony's tagger
+        }
+
+        /// <summary>Classify one entry's SMFM. Pure, so the CSV, the counts and any future
+        /// consumer cannot drift into disagreeing about what "has SMFM" means.</summary>
+        internal static SmfmState ClassifySmfm(int[]? scores)
+        {
+            if (scores == null || scores.Length == 0) return SmfmState.NoBlock;
+            foreach (var v in scores) if (v != 0) return SmfmState.Data;
+            return SmfmState.NoData;
+        }
+
+        internal static string SmfmStateName(SmfmState s) => s switch
+        {
+            SmfmState.Data => "data",
+            SmfmState.NoData => "no-data",
+            _ => "no-smfm",
+        };
+
+        /// <summary>Read-only: the full Sony SMFM (12-TONE) report — every catalog entry,
+        /// classified into the three <see cref="SmfmState"/>s, with the decoded values.
+        /// Writes mbxmoods-smfm.csv (path,state,artist,title,album,codec,smfmBpm,smfmChannel,
+        /// topScore,scores) next to the moods file and prints the three counts.
         ///
-        /// The mirror of <see cref="RunListMissingSmfm"/>, and the answer to "the scan said
-        /// +smfm on N tracks — WHICH ones?". The scan's +smfm line is transient console
-        /// output and fires only when a track NEWLY gains SMFM, so it can never be the
-        /// inventory; this is.
+        /// This is the answer to "the scan said +smfm on N tracks — WHICH ones?". The scan's
+        /// +smfm line is transient console output and fires only when a track NEWLY gains
+        /// SMFM, so it can never be the inventory; this is.
+        ///
+        /// Every entry gets a row, rather than only the ones carrying data, because the
+        /// interesting question is usually the split and not either side of it — and because
+        /// one file that accounts for the whole catalog cannot disagree with itself about
+        /// coverage the way two half-reports can.
         ///
         /// The raw scores ride along because they are the only reason to want the list —
         /// smfmChannel is the argmax SLOT, NOT a mood channel (see SmfmReader), so a
@@ -9117,46 +9151,60 @@ namespace Truedat
         /// keep the column count fixed regardless of slot count.</summary>
         static void RunListSmfm(string moodsPath, IEnumerable<TrackEntry> entries)
         {
-            var have = new List<(string Path, string Artist, string Title, string Album, string Codec,
-                                 double? Bpm, int? Channel, int Top, string Scores)>();
-            int total = 0;
+            var rows = new List<(string Path, SmfmState State, string Artist, string Title, string Album,
+                                 string Codec, double? Bpm, int? Channel, int? Top, string Scores)>();
             foreach (var e in entries)
             {
                 if (e?.Features == null) continue;
-                total++;
-                if (!e.Features.HasSmfm) continue;
-                var sc = e.Features.SmfmScores!;
-                have.Add((e.Features.FilePath ?? "", e.Features.Artist, e.Features.Title,
+                var sc = e.Features.SmfmScores;
+                var state = ClassifySmfm(sc);
+                rows.Add((e.Features.FilePath ?? "", state, e.Features.Artist, e.Features.Title,
                     e.Features.Album, e.FingerprintV1?.Codec ?? "",
-                    e.Features.SmfmBpm, e.Features.SmfmChannel, sc.Max(),
-                    string.Join(" ", sc)));
+                    e.Features.SmfmBpm, e.Features.SmfmChannel,
+                    state == SmfmState.NoBlock ? (int?)null : sc!.Max(),
+                    state == SmfmState.NoBlock ? "" : string.Join(" ", sc!)));
             }
-            have.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
+            // State first, so the CSV opens on the rows worth looking at and the no-smfm
+            // bulk sorts to the end; path within a state for a stable diff.
+            rows.Sort((a, b) =>
+            {
+                int c = a.State.CompareTo(b.State);
+                return c != 0 ? c : string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase);
+            });
 
             var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm.csv");
             var sb = new StringBuilder();
-            sb.AppendLine("path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores");
-            foreach (var m in have)
-                sb.AppendLine($"{CsvEscape(m.Path)},{CsvEscape(m.Artist)},{CsvEscape(m.Title)},{CsvEscape(m.Album)},{CsvEscape(m.Codec)}," +
+            sb.AppendLine("path,state,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores");
+            foreach (var m in rows)
+                sb.AppendLine($"{CsvEscape(m.Path)},{SmfmStateName(m.State)},{CsvEscape(m.Artist)},{CsvEscape(m.Title)},{CsvEscape(m.Album)},{CsvEscape(m.Codec)}," +
                               $"{(m.Bpm.HasValue ? m.Bpm.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "")}," +
                               $"{(m.Channel.HasValue ? m.Channel.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")}," +
-                              $"{m.Top.ToString(System.Globalization.CultureInfo.InvariantCulture)},{CsvEscape(m.Scores)}");
+                              $"{(m.Top.HasValue ? m.Top.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")},{CsvEscape(m.Scores)}");
             File.WriteAllText(csvPath, sb.ToString());
 
-            int pct = total > 0 ? (int)(100.0 * have.Count / total) : 0;
-            Console.WriteLine($"Sony SMFM (12-TONE): {have.Count:N0} of {total:N0} tracks ({pct}%) carry 12-TONE data");
-            if (have.Count > 0)
+            int total = rows.Count;
+            int data = rows.Count(r => r.State == SmfmState.Data);
+            int noData = rows.Count(r => r.State == SmfmState.NoData);
+            int noBlock = rows.Count(r => r.State == SmfmState.NoBlock);
+            string Pct(int n) => total > 0 ? $"{(int)Math.Floor(100.0 * n / total),3}%" : "  0%";
+
+            Console.WriteLine($"Sony SMFM (12-TONE): {total:N0} catalog entries");
+            Console.WriteLine($"  with data       {data,9:N0} {Pct(data)}   block present, scored");
+            Console.WriteLine($"  without data    {noData,9:N0} {Pct(noData)}   block present, every score zero (Sony analysed, scored nothing)");
+            Console.WriteLine($"  without SMFM    {noBlock,9:N0} {Pct(noBlock)}   no block — never through Sony's tagger");
+
+            if (data + noData > 0)
             {
-                int preview = Math.Min(20, have.Count);
-                foreach (var m in have.Take(preview))
-                    Console.WriteLine($"  {m.Path}");
-                if (have.Count > preview)
-                    Console.WriteLine($"  ... {have.Count - preview:N0} more (see CSV)");
+                Console.WriteLine();
+                int preview = Math.Min(20, data + noData);
+                foreach (var m in rows.Take(preview))
+                    Console.WriteLine($"  [{SmfmStateName(m.State)}] {m.Path}");
+                if (data + noData > preview)
+                    Console.WriteLine($"  ... {data + noData - preview:N0} more with a block (see CSV)");
             }
             Console.WriteLine();
             Console.WriteLine($"CSV:    {csvPath}");
-            if (have.Count < total)
-                Console.WriteLine($"The other {total - have.Count:N0}: truedat --list-missing-smfm");
+            Console.WriteLine("Filter the state column; truedat only READS SMFM, so no truedat command adds it.");
         }
 
         /// <param name="exclusions">When non-null, entries matching a rule are counted into
@@ -12223,11 +12271,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(rebuilt.Features.SmfmBpm == 128.5, "smfm-cache: carries SmfmBpm forward");
             }
 
-            // --- --list-smfm: the HAVE side of the SMFM split ---
-            // Pins the CSV contract (one row per SMFM-carrying entry, raw scores in a single
-            // cell) and the split itself: the two listers must never both claim an entry, or
-            // both drop one, which is the only way this pair can lie about coverage.
+            // --- --list-smfm: the three-state SMFM report ---
+            // Pins the classifier, the CSV contract, and the property that makes the report
+            // trustworthy: every entry appears exactly once, so the three counts always sum
+            // to the catalog and cannot quietly misreport coverage.
             {
+                // The classifier first — pure, and the thing every other surface reads.
+                Assert(ClassifySmfm(null) == SmfmState.NoBlock, "smfm-state: null scores -> no-smfm");
+                Assert(ClassifySmfm(new int[0]) == SmfmState.NoBlock, "smfm-state: empty array -> no-smfm");
+                Assert(ClassifySmfm(new[] { 0, 0, 0 }) == SmfmState.NoData,
+                    "smfm-state: all-zero scores -> no-data (a block Sony wrote but scored nothing)");
+                Assert(ClassifySmfm(new[] { 0, 0, 1 }) == SmfmState.Data,
+                    "smfm-state: one non-zero score anywhere -> data (not just the first slot)");
+
                 var lsDir = Path.Combine(Path.GetTempPath(), $".truedat-selftest-listsmfm-{Guid.NewGuid():N}");
                 Directory.CreateDirectory(lsDir);
                 try
@@ -12235,35 +12291,43 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var lsMoods = Path.Combine(lsDir, "mbxmoods.json");
                     var lsEntries = new List<TrackEntry>
                     {
-                        // has SMFM, and a comma in the title so CSV quoting is exercised
+                        // scored, and a comma in the title so CSV quoting is exercised
                         new TrackEntry { Features = new TrackFeatures {
                             FilePath = @"D:\M\a.flac", Artist = "A", Title = "One, two", Album = "Al",
                             SmfmScores = new[] { 10, 255, 30 }, SmfmChannel = 1, SmfmBpm = 128.5 } },
-                        // no SMFM at all
+                        // no block at all
                         new TrackEntry { Features = new TrackFeatures {
                             FilePath = @"D:\M\b.flac", Artist = "B", Title = "Two", Album = "Al" } },
-                        // present-but-empty scores == no SMFM (HasSmfm requires Length > 0)
+                        // block present, every score zero — the state a have/haven't split hid
                         new TrackEntry { Features = new TrackFeatures {
                             FilePath = @"D:\M\c.mp3", Artist = "C", Title = "Three", Album = "Al",
-                            SmfmScores = new int[0] } },
+                            SmfmScores = new[] { 0, 0, 0 }, SmfmBpm = 90.0 } },
                     };
 
                     RunListSmfm(lsMoods, lsEntries);
                     var lsCsv = File.ReadAllLines(Path.Combine(lsDir, "mbxmoods-smfm.csv"));
-                    Assert(lsCsv.Length == 2,
-                        $"list-smfm: 3 entries, 1 with SMFM -> header + 1 row (got {lsCsv.Length} lines)");
-                    Assert(lsCsv[0] == "path,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores",
+                    Assert(lsCsv.Length == 1 + lsEntries.Count,
+                        $"list-smfm: every entry gets a row, so the counts always sum to the catalog (got {lsCsv.Length} lines)");
+                    Assert(lsCsv[0] == "path,state,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores",
                         $"list-smfm: CSV header is the documented column set (got {lsCsv[0]})");
-                    Assert(lsCsv[1] == "D:\\M\\a.flac,A,\"One, two\",Al,,128.5,1,255,10 255 30",
-                        $"list-smfm: row carries the decoded values, scores space-joined in one cell (got {lsCsv[1]})");
+                    Assert(lsCsv[1] == "D:\\M\\a.flac,data,A,\"One, two\",Al,,128.5,1,255,10 255 30",
+                        $"list-smfm: data row carries the decoded values, scores space-joined in one cell (got {lsCsv[1]})");
+                    Assert(lsCsv[2] == "D:\\M\\c.mp3,no-data,C,Three,Al,,90,,0,0 0 0",
+                        $"list-smfm: no-data row keeps the block's values and reports topScore 0 (got {lsCsv[2]})");
+                    Assert(lsCsv[3] == "D:\\M\\b.flac,no-smfm,B,Two,Al,,,,,",
+                        $"list-smfm: no-smfm row leaves every SMFM column empty (got {lsCsv[3]})");
+                    // State ordering is load-bearing: the rows worth acting on must not be
+                    // buried under the no-smfm bulk on a real catalog.
+                    Assert(lsCsv[1].Contains(",data,") && lsCsv[2].Contains(",no-data,") && lsCsv[3].Contains(",no-smfm,"),
+                        "list-smfm: rows sort data, then no-data, then no-smfm");
 
-                    // The split is exhaustive and disjoint: every entry lands in exactly one list.
+                    // The middle state is exactly where truedat's own HasSmfm splits differently:
+                    // it counts an all-zero block as present, so --list-missing-smfm lists only
+                    // the no-smfm rows. Pinned so the two reports' relationship stays stated.
                     RunListMissingSmfm(lsMoods, lsEntries);
                     var lsMissing = File.ReadAllLines(Path.Combine(lsDir, "mbxmoods-smfm-missing.csv"));
-                    Assert(lsMissing.Length == 3,
-                        $"list-smfm: the other two entries are the missing list (got {lsMissing.Length} lines)");
-                    Assert((lsCsv.Length - 1) + (lsMissing.Length - 1) == lsEntries.Count,
-                        "list-smfm: have + missing == the catalog (the split cannot lose or double-count an entry)");
+                    Assert(lsMissing.Length == 2,
+                        $"list-smfm: --list-missing-smfm lists the no-smfm rows only (got {lsMissing.Length} lines)");
                 }
                 finally { try { Directory.Delete(lsDir, true); } catch { } }
             }

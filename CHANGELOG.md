@@ -7,23 +7,47 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Added
 
-- **`--list-smfm [path]` — the other half of the SMFM split.** truedat could tell you which
-  catalog entries were *missing* Sony 12-TONE data and could count the ones that had it, but
+- **`--list-smfm [path]` — the full Sony SMFM (12-TONE) report.** truedat could tell you which
+  catalog entries were *missing* 12-TONE data and could count the ones that had it, but
   nothing would list them. The gap showed up in the obvious way: a scan prints `+smfm` for a
   track that newly gains SMFM and `SMFM added: N` in the summary, an operator asks *which
   files those were*, and the only answer was transient console output — a change notice, not
   an inventory, silent about every track that already carried it. The new mode writes
-  `mbxmoods-smfm.csv` (path, artist, title, album, codec, smfmBpm, smfmChannel, topScore,
-  scores), read-only over the catalog and resolved through the same ladder as its mirror.
-  The raw score vector is a column because `smfmChannel` is the argmax **slot**, not a mood
-  channel — the index alone is not usable downstream, so the list carries what a consumer
-  actually needs and doubles as the corpus view for format work. Self-tested against
-  `--list-missing-smfm` on the property that matters: the two lists are disjoint and their
-  union is the catalog, so the pair cannot lose or double-count an entry and quietly
-  misreport coverage.
-- **`smfm-tools/check_moods_smfm.py` reports both directions too**, writing
-  `smfm-present.csv` alongside `smfm-missing.csv` (replacing the old `smfm-missing.txt`;
-  path is still column 1 in both). Sibling tooling, not part of `truedat.exe`.
+  `mbxmoods-smfm.csv` (path, **state**, artist, title, album, codec, smfmBpm, smfmChannel,
+  topScore, scores), read-only over the catalog and resolved through the same ladder as the
+  other catalog modes.
+
+  It reports **three** states, not two. Building it surfaced a real disagreement: truedat's
+  internal `HasSmfm` counts an all-zero score vector as present, while the sibling Python
+  reporter counted it as missing — each collapsing the same file into the opposite bucket.
+  Neither is wrong, because the file is genuinely a third thing: a block Sony **wrote** and
+  **scored nothing**. So the report names it. `data` = block present and scored, `no-data` =
+  block present, every score zero, `no-smfm` = no block at all. The distinction is
+  operational, not cosmetic — re-running Sony's tagger is the fix for `no-smfm` and is
+  exactly what has already been tried for `no-data`, so collapsing them either way hands the
+  operator a work list that is partly wrong. Classification lives in one pure function
+  (`ClassifySmfm`) so the CSV, the counts and any future consumer cannot drift apart.
+
+  Every entry gets a row rather than only the ones carrying data, so the three counts always
+  sum to the catalog — one file that accounts for everything cannot disagree with itself
+  about coverage the way two half-reports can, which is the failure this whole change came
+  out of. The raw score vector is a column because `smfmChannel` is the argmax **slot**, not
+  a mood channel: the index alone is not usable downstream, so the list carries what a
+  consumer actually needs and doubles as the corpus view for format work.
+- **`smfm-tools/check_moods_smfm.py` reports the same three states**, writing
+  `smfm-data.csv` / `smfm-no-data.csv` / `smfm-no-smfm.csv` (replacing the old
+  `smfm-missing.txt`; path is still column 1 in each). Its classifier mirrors truedat's
+  `ClassifySmfm`, which is what closed the disagreement above. Sibling tooling, not part of
+  `truedat.exe`.
+- **`smfm-tools/smfm_strip_copy.py`** — copy a FLAC or MP3 **without** its SMFM block. The
+  source is opened read-only and a new file is written; truedat has never modified an audio
+  file and this does not change that, which is why it is sibling tooling rather than a verb.
+  Audio frames are copied byte-for-byte, so the copy keeps the same `audioStreamSha256` as
+  the source (the FLAC hash is frame-anchored, the MP3 invariant region excludes the ID3v2
+  tag) — truedat sees the stripped copy as the same track and cross-SHA re-keys it instead of
+  re-analyzing, which is what makes it usable as a control copy for format work. Both
+  properties are asserted before anything is written. WMA and M4A are refused by name rather
+  than silently passed through.
 
 ## [0.5.4.9-RC3] — 2026-08-16
 

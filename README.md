@@ -159,15 +159,23 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           file and prints a count + preview. The speech verdict is still
                           -untuned, so real music with talk-like shape (ambient, field
                           recordings, spoken intros) can appear here; review before excluding.
-  --list-smfm [path]      Read-only: list catalog entries that DO carry Sony SMFM (12-TONE)
-                          data, with the decoded values. Writes mbxmoods-smfm.csv (path,
-                          artist, title, album, codec, smfmBpm, smfmChannel, topScore,
-                          scores) and prints coverage + a preview. This is the answer to
-                          "the scan reported +smfm on N tracks — which ones?": that scan
-                          line is transient console output and fires only when a track
-                          NEWLY gains SMFM, so it is a change notice, not an inventory.
-                          The raw score vector rides along because smfmChannel is the
-                          argmax SLOT, not a mood channel — a consumer needs the vector.
+  --list-smfm [path]      Read-only: the full Sony SMFM (12-TONE) report. Every catalog
+                          entry, classified into one of three states, with the decoded
+                          values. Writes mbxmoods-smfm.csv (path, state, artist, title,
+                          album, codec, smfmBpm, smfmChannel, topScore, scores) and prints
+                          the three counts.
+                            data     block present, at least one non-zero score
+                            no-data  block present, every score zero — Sony wrote the
+                                     block and scored nothing. NOT an untagged file:
+                                     re-tagging is the fix for no-smfm and is exactly
+                                     what has already been tried here
+                            no-smfm  no block at all — never through Sony's tagger
+                          This is the answer to "the scan reported +smfm on N tracks —
+                          which ones?": that scan line is transient console output and
+                          fires only when a track NEWLY gains SMFM, so it is a change
+                          notice, not an inventory. The raw score vector rides along
+                          because smfmChannel is the argmax SLOT, not a mood channel —
+                          a consumer needs the vector.
   --list-missing-smfm [path]
                           Read-only: list catalog entries carrying no Sony SMFM (12-TONE)
                           data, with overall coverage (present / total / %). Writes
@@ -1024,7 +1032,9 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 
 When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Music Center — truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant raw slot index), and `smfmBpm` (Sony's tempo estimate). These are nullable and omitted when absent. The per-slot *channel names* are deliberately **not** emitted: a 2026-06-27 live device test refuted the old slot→name mapping (the device's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so any interpreted mood label is derived downstream by MBXHub, not by truedat. These keys were renamed from `sensme*` on 2026-06-28 — `--migrate` converts existing libraries (with backup), and the reader still accepts the old keys for un-migrated files.
 
-Two read-only modes report the split, and between them they account for every catalog entry. `--list-smfm [path]` lists the entries that **have** SMFM, with the decoded values, to `mbxmoods-smfm.csv` — including the raw score vector, because `smfmChannel` is the argmax slot rather than a mood channel, so anything downstream needs the vector and not the index. `--list-missing-smfm [path]` reports the entries that carry no SMFM block, with overall coverage, to `mbxmoods-smfm-missing.csv`. Because truedat only *reads* SMFM and never writes it, a missing block means the file has not been through Sony's tagger — a rescan cannot close that gap, which is why that report is a standalone mode rather than an entry in the `--stats` **Recommended** block.
+`--list-smfm [path]` is the full report: every catalog entry, one row each, in `mbxmoods-smfm.csv` with a `state` column. There are **three** states, not two — `data` (block present and scored), `no-data` (block present, every score zero) and `no-smfm` (no block at all). The middle one is the reason the report exists in this shape: a file Sony analysed but scored nothing is not an untagged file, and collapsing it into either neighbour hands you a work list that is partly wrong whichever way it falls. Re-running the tagger is the fix for `no-smfm` and is precisely what has already been tried for `no-data`. The raw score vector is a column because `smfmChannel` is the argmax slot rather than a mood channel, so anything downstream needs the vector and not the index.
+
+`--list-missing-smfm [path]` is the narrower, older report — it lists the `no-smfm` entries only (truedat's internal `HasSmfm` counts an all-zero block as present) with overall coverage, to `mbxmoods-smfm-missing.csv`. Because truedat only *reads* SMFM and never writes it, a missing block means the file has not been through Sony's tagger — a rescan cannot close that gap, which is why that report is a standalone mode rather than an entry in the `--stats` **Recommended** block.
 
 A scan prints `+smfm` for a track that **newly** gains SMFM, and an `SMFM added: N` line in the summary. That is a change notice, not an inventory — it says nothing about the tracks that already had it, and it is gone when the console scrolls. `--list-smfm` is the durable answer to "which files carry it".
 

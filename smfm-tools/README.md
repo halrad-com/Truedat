@@ -67,7 +67,7 @@ Python 3.9+, standard library only.
 | `smfm_index.py` | Walk tracks.db → diagnostic CSV, one row per analyzed track with all decoded fields |
 | `flac_smfm_dump.py` | Hex-dump the SMFM block from a single FLAC, list candidate sub-tags |
 | `flac_smfm_diff.py` | Sub-block-by-sub-block diff of two FLAC SMFM payloads |
-| `check_moods_smfm.py` | SMFM coverage report against a truedat `mbxmoods.json`; writes both directions — `smfm-present.csv` (what HAS it, with the decoded values) and `smfm-missing.csv` (Sony-tagging candidates) |
+| `check_moods_smfm.py` | SMFM coverage report against a truedat `mbxmoods.json`, split three ways — `smfm-data.csv` (block present and scored), `smfm-no-data.csv` (block present, every score zero), `smfm-no-smfm.csv` (Sony-tagging candidates). Classification mirrors truedat's `ClassifySmfm`; `truedat --list-smfm` reports the same split in one file |
 | `smfm_strip_copy.py` | Copy a FLAC/MP3 **without** its SMFM block. Never modifies the source; audio frames are copied byte-for-byte, so the copy keeps the same `audioStreamSha256` and truedat treats it as the same track. `--self-test` runs synthetic-container regressions |
 
 ## Provenance & confidence

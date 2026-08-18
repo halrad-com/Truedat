@@ -1,31 +1,73 @@
 #!/usr/bin/env python3
-"""Report SMFM coverage inside a truedat mbxmoods.json — BOTH directions.
+"""Report SMFM coverage inside a truedat mbxmoods.json - all three states.
 
-Per audio extension: how many track entries have smfmScores populated vs not
-(reads the legacy sensmeScores key as fallback for un-migrated files).
+An entry is in exactly one state, matching truedat's own ClassifySmfm so the
+two reporters cannot disagree about what "has SMFM" means:
 
-Writes two CSVs next to this script (or into <out_dir> if given):
+  data     block present, at least one non-zero score - usable
+  no-data  block present, every score zero - Sony wrote the block and scored
+           nothing. NOT an untagged file: re-running the tagger is the fix for
+           no-smfm and is exactly what has already been tried here
+  no-smfm  no block at all - never through Sony's tagger
 
-  smfm-present.csv  the files that HAVE SMFM, with the decoded values
-                    (path,ext,artist,title,album,smfmBpm,smfmChannel,
-                     topScore,scores)
-  smfm-missing.csv  the files that LACK it — rescan / Sony-tagging candidates
-                    (path,ext,artist,title,album)
+Reads the legacy sensmeScores/sensmeChannel keys as a fallback for
+un-migrated catalogs.
 
-Path is column 1 in both, so `cut -d, -f1` still gives a plain path list
+Writes three CSVs next to this script (or into <out_dir> if given), one per
+state, each: path,ext,artist,title,album,smfmBpm,smfmChannel,topScore,scores
+
+  smfm-data.csv     smfm-no-data.csv     smfm-no-smfm.csv
+
+Path is column 1 in all three, so `cut -d, -f1` gives a plain path list
 (this replaces the old smfm-missing.txt).
 
-By default `missing` counts only SMFM-CONTAINER extensions (flac/mp3/wma) —
-the formats Sony's tagger can actually write into. Pass --all to list every
-entry without SMFM regardless of container.
+By default the no-smfm list counts only SMFM-CONTAINER extensions
+(flac/mp3/wma) - the formats Sony's tagger can actually write into. Pass
+--all to list every entry without a block regardless of container.
 
-truedat only READS SMFM; nothing in it writes SMFM into a file. So a missing
-row is a Sony-tagging gap, not a truedat gap — rescanning will not close it.
+truedat only READS SMFM; nothing in it writes SMFM into a file. So a no-smfm
+row is a Sony-tagging gap, not a truedat gap - rescanning will not close it.
 
-Unofficial tooling — see SMFM-KNOWLEDGE.md for what the values mean.
-Usage: python check_moods_smfm.py <path\\to\\mbxmoods.json> [out_dir] [--all]
+The exe reports the same split in one file: truedat --list-smfm
+
+Unofficial tooling - see SMFM-KNOWLEDGE.md for what the values mean.
+Usage: python check_moods_smfm.py <path/to/mbxmoods.json> [out_dir] [--all]
 """
 import csv, json, os, sys, collections
+
+DATA, NO_DATA, NO_SMFM = 'data', 'no-data', 'no-smfm'
+
+
+def classify(scores):
+    """Mirror of truedat's ClassifySmfm. Keep these two in step."""
+    if not isinstance(scores, list) or len(scores) == 0:
+        return NO_SMFM
+    return DATA if any(v for v in scores) else NO_DATA
+
+
+def self_test():
+    failures = []
+
+    def check(cond, name):
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}")
+        if not cond:
+            failures.append(name)
+
+    check(classify(None) == NO_SMFM, 'classify: None -> no-smfm')
+    check(classify([]) == NO_SMFM, 'classify: empty list -> no-smfm')
+    check(classify([0, 0, 0]) == NO_DATA, 'classify: all-zero -> no-data')
+    check(classify([0, 0, 1]) == DATA, 'classify: a non-zero anywhere -> data')
+    check(classify('nope') == NO_SMFM, 'classify: a non-list is treated as absent')
+    print()
+    if failures:
+        print(f'{len(failures)} FAILED')
+        return 1
+    print('All self-tests passed.')
+    return 0
+
+
+if '--self-test' in sys.argv:
+    sys.exit(self_test())
 
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 flags = {a for a in sys.argv[1:] if a.startswith('--')}
@@ -34,9 +76,6 @@ if not args:
 MOODS = args[0]
 OUT_DIR = args[1] if len(args) > 1 else os.path.dirname(os.path.abspath(__file__))
 ALL_EXTS = '--all' in flags
-
-OUT_PRESENT = os.path.join(OUT_DIR, 'smfm-present.csv')
-OUT_MISSING = os.path.join(OUT_DIR, 'smfm-missing.csv')
 
 SMFM_EXTS = {'.flac', '.mp3', '.wma'}
 
@@ -47,79 +86,78 @@ with open(MOODS, 'r', encoding='utf-8') as f:
 tracks = data.get('tracks', {})
 print(f"trackCount header={data.get('trackCount')}  parsed={len(tracks)}", flush=True)
 
-# per ext: [total, has_smfm, has_smfmbpm]
-stat = collections.defaultdict(lambda: [0, 0, 0])
-present = []   # files carrying SMFM, with decoded values
-missing = []   # files lacking smfmScores (containers only unless --all)
+# per ext: [total, data, no_data, no_smfm]
+stat = collections.defaultdict(lambda: [0, 0, 0, 0])
+rows = {DATA: [], NO_DATA: [], NO_SMFM: []}
 slot_hist = collections.Counter()
-
-
-def meta(e):
-    """artist/title/album are top-level keys on a truedat track entry."""
-    return (e.get('artist') or '', e.get('title') or '', e.get('album') or '')
-
+skipped_non_container = 0
 
 for path, e in tracks.items():
     ext = os.path.splitext(path)[1].lower()
+    sc = e.get('smfmScores')
+    if sc is None:
+        sc = e.get('sensmeScores')            # legacy key, pre --migrate
+    slot = e.get('smfmChannel')
+    if slot is None:
+        slot = e.get('sensmeChannel')         # legacy key
+    state = classify(sc)
+
     s = stat[ext]
     s[0] += 1
-    sm = e.get('smfmScores')
-    if sm is None:
-        sm = e.get('sensmeScores')  # legacy key, pre --migrate
-    has_smfm = isinstance(sm, list) and len(sm) > 0 and any(v for v in sm)
-    if has_smfm:
-        s[1] += 1
-        slot = e.get('smfmChannel')
-        if slot is None:
-            slot = e.get('sensmeChannel')  # legacy key
+    s[1 + [DATA, NO_DATA, NO_SMFM].index(state)] += 1
+
+    if state == NO_SMFM and not (ALL_EXTS or ext in SMFM_EXTS):
+        skipped_non_container += 1
+        continue
+    if state == DATA:
         slot_hist[slot] += 1
-        artist, title, album = meta(e)
-        present.append((path, ext, artist, title, album,
-                        e.get('smfmBpm'), slot, max(sm),
-                        ' '.join(str(v) for v in sm)))
-    elif ALL_EXTS or ext in SMFM_EXTS:
-        artist, title, album = meta(e)
-        missing.append((path, ext, artist, title, album))
-    if e.get('smfmBpm') is not None:
-        s[2] += 1
 
-present.sort(key=lambda r: r[0].lower())
-missing.sort(key=lambda r: r[0].lower())
+    rows[state].append((
+        path, ext, e.get('artist') or '', e.get('title') or '', e.get('album') or '',
+        e.get('smfmBpm'), slot,
+        max(sc) if state != NO_SMFM else None,
+        ' '.join(str(v) for v in sc) if state != NO_SMFM else '',
+    ))
 
-print(f"\n{'ext':<8}{'entries':>9}{'smfm':>9}{'cover%':>9}{'smfmBpm':>9}")
-pt = ps = 0
+for k in rows:
+    rows[k].sort(key=lambda r: r[0].lower())
+
+print(f"\n{'ext':<8}{'entries':>9}{'data':>9}{'no-data':>9}{'no-smfm':>9}")
+pt = pd = 0
 for ext in sorted(stat):
-    tot, smfm, bpm = stat[ext]
+    tot, d, nd, ns = stat[ext]
     tag = ' (SMFM container)' if ext in SMFM_EXTS else ''
     if ext in SMFM_EXTS:
-        pt += tot; ps += smfm
-    cov = (smfm/tot*100) if tot else 0
-    print(f"{ext:<8}{tot:>9}{smfm:>9}{cov:>8.1f}%{bpm:>9}{tag}")
+        pt += tot; pd += d
+    print(f"{ext:<8}{tot:>9}{d:>9}{nd:>9}{ns:>9}{tag}")
 
-print(f"\nSMFM-container entries (flac+mp3+wma): {ps}/{pt} have SMFM = {(ps/pt*100 if pt else 0):.1f}%")
-print(f"Have SMFM (all extensions): {len(present)}")
-print(f"Missing SMFM ({'all extensions' if ALL_EXTS else 'SMFM containers only'}): {len(missing)}")
+total = len(tracks)
+n_data, n_nodata = len(rows[DATA]), len(rows[NO_DATA])
+n_nosmfm = len(rows[NO_SMFM])
+print(f"\nSony SMFM (12-TONE): {total} catalog entries")
+print(f"  with data     {n_data:>9}   block present, scored")
+print(f"  without data  {n_nodata:>9}   block present, every score zero")
+print(f"  without SMFM  {n_nosmfm:>9}   no block"
+      + (f" ({skipped_non_container} non-container entries not listed; --all includes them)"
+         if skipped_non_container else ""))
+print(f"\nSMFM-container entries (flac+mp3+wma) with data: {pd}/{pt}"
+      f" = {(pd/pt*100 if pt else 0):.1f}%")
 
-# smfmChannel is the argmax SLOT of the 10 mood-model scores — NOT a SensMe
+# smfmChannel is the argmax SLOT of the 10 mood-model scores - NOT a SensMe
 # channel (see SMFM-KNOWLEDGE.md); histogram is diagnostic only.
-print(f"\nsmfmChannel (argmax slot) distribution:")
+print(f"\nsmfmChannel (argmax slot) distribution, scored entries only:")
 for slot in sorted(slot_hist, key=lambda x: (x is None, x)):
     print(f"  slot {slot}: {slot_hist[slot]:>7}")
 
-
-def write_csv(path, header, rows):
-    with open(path, 'w', encoding='utf-8', newline='') as fh:
-        w = csv.writer(fh)
-        w.writerow(header)
-        w.writerows(rows)
-    print(f"wrote {len(rows):>7} rows -> {path}")
-
+HEADER = ['path', 'ext', 'artist', 'title', 'album',
+          'smfmBpm', 'smfmChannel', 'topScore', 'scores']
 
 print()
-write_csv(OUT_PRESENT,
-          ['path', 'ext', 'artist', 'title', 'album',
-           'smfmBpm', 'smfmChannel', 'topScore', 'scores'],
-          present)
-write_csv(OUT_MISSING,
-          ['path', 'ext', 'artist', 'title', 'album'],
-          missing)
+for state, name in ((DATA, 'smfm-data.csv'), (NO_DATA, 'smfm-no-data.csv'),
+                    (NO_SMFM, 'smfm-no-smfm.csv')):
+    out = os.path.join(OUT_DIR, name)
+    with open(out, 'w', encoding='utf-8', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(HEADER)
+        w.writerows(rows[state])
+    print(f"wrote {len(rows[state]):>7} rows -> {out}")
