@@ -31,7 +31,10 @@ Four I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `Write
 
 - 2 dp: dB/LU values (`loudnessMomentary`, `loudnessShortTerm`, `replayGain`, `beatsLoudness`, `hpcpCrest`, `hfc`), `spectralComplexity`.
 - 1 dp: Hz (`spectralRolloff`).
-- 6 dp: tiny spectral values (`spectralDecrease`, `spectralEnergy*`).
+- 6 dp: tiny spectral values (`spectralEnergy*`).
+- 12 dp: `spectralDecrease` — it lives at ~1e-9, so 6 dp rounded **every track to 0.000000**
+  from 2026-02-13 until `8c06ec2`. Do not "tidy" it back into the 6-dp group; the extra
+  places are the whole signal.
 
 Don't regress to a uniform 6 dp — it inflates JSON size without analytic value.
 
