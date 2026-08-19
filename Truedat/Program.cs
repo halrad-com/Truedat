@@ -15296,6 +15296,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(SafeDbl(node, "spectralFlatness") == 0.2496, "repair: writes the same value the cache path derives");
                 Assert(!RepairSpectralFlatness(node), "repair: idempotent — a second pass changes nothing");
 
+                // The repaired value must SERIALIZE short. Asserting the double alone passes even
+                // when the text is the net48 G17 artifact, which is how ~500 KB of "0.0675" ->
+                // "0.067500000000000004" noise reached a live 72k catalog before anyone looked.
+                var textNode = JsonNode.Parse("{\"spectralFlatness\":0,\"barkFlatness\":0.0675,\"erbFlatness\":0.0675,\"melFlatness\":0.0675}")!.AsObject();
+                RepairSpectralFlatness(textNode);
+                // Anchored on the delimiter, NOT Contains(":0.0675") — that substring is also a
+                // prefix of "0.067500000000000004", so a containment check passes on the very bug
+                // it is meant to catch.
+                Assert(textNode.ToJsonString().StartsWith("{\"spectralFlatness\":0.0675,", StringComparison.Ordinal),
+                    "repair: writes the SHORTEST number text, not the G17 artifact");
+                Assert(!textNode.ToJsonString().Contains("0.067500000000000004"),
+                    "repair: no G17 tail in the emitted text");
+
                 var noBands = JsonNode.Parse("{\"spectralFlatness\":0}")!.AsObject();
                 Assert(!RepairSpectralFlatness(noBands), "repair: no bands -> no change (never invents a value)");
                 Assert(SafeDbl(noBands, "spectralFlatness") == 0.0, "repair: leaves the core field present at 0");
@@ -16106,7 +16119,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 SafeDbl(trackData, "erbFlatness"),
                 SafeDbl(trackData, "melFlatness"));
             if (derived == 0) return false;   // no bands stored, or bands are genuinely ~0
-            trackData["spectralFlatness"] = derived;
+            // Write through the same shortest-number convention the scan writer uses. Assigning
+            // the raw double emits the net48 G17 artifact ("0.067500000000000004" for 0.0675) —
+            // bit-identical but ~13 junk chars per repaired entry, which on a 72k catalog is
+            // half a megabyte of noise and reads as false precision on a 4-dp value.
+            // Parsed (not JsonValue.Create) so the node is JsonElement-backed exactly like one
+            // loaded from the catalog: a decimal-backed JsonValue is invisible to SafeDbl's
+            // TryGetValue<double>, which would make the entry read as still-zero and re-repair
+            // on EVERY --fixup — rewriting the whole catalog each run.
+            var text = TryShortestDecimal(derived, out var shortest)
+                ? shortest.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : derived.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            trackData["spectralFlatness"] = JsonNode.Parse(text);
             return true;
         }
 
