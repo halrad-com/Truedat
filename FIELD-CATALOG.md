@@ -74,7 +74,8 @@ high level — what MBXHub uses it for.
 | `loudnessMomentary` | loudness envelope | num | level feature; base re-scan canary |
 | `loudnessShortTerm`, `replayGain` | loudness envelope | num | level features |
 | `silenceRate20dB/30dB/60dB` | `lowlevel.silence_rate_*` | num | structure feature; `silenceRate30dB` is a speech-detection input |
-| `spectralRolloff/Complexity/Entropy/Kurtosis/Skewness/Spread/StrongPeak/Decrease/Energy` + 4 `spectralEnergyBand*` | `lowlevel.spectral_*` | num | spectral-timbre features |
+| `spectralRolloff/Complexity/Entropy/Kurtosis/Skewness/Spread/StrongPeak/Energy` + 4 `spectralEnergyBand*` | `lowlevel.spectral_*` | num | spectral-timbre features |
+| `spectralDecrease` | `lowlevel.spectral_decrease.mean` | num | spectral tilt (slope of amplitude vs frequency; negative ⇒ energy concentrated low). **Stored at 12 dp — the values sit at ~1e-9, and 6 dp rounds every track to `0.000000`** (the 2026-02-13 → 2026-08-11 bug). A stored exact `0` therefore means *annihilated by rounding*, not *measured zero* — the field is omit-when-missing, so a genuinely absent value is omitted rather than zeroed. Not repairable from the catalog: unlike `spectralFlatness` this is a direct extractor read, and the raw JSON is deleted at parse, so recovery needs a full re-analysis. No consumer today. |
 | `spectralContrastCoeffs[]` / `spectralContrastValleys[]` | `lowlevel.spectral_contrast_*` | num[] | timbre features; `Coeffs` is a re-scan wave marker |
 | `gfcc[]` | `lowlevel.gfcc.mean` | num[] | gammatone timbre feature (MFCC complement) |
 | `hfc` | `lowlevel.hfc.mean` | num | timbre feature |
