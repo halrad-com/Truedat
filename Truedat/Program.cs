@@ -6214,7 +6214,7 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!)) survivingByHash[sha!] = kv.Key;
             }
 
-            int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0, strippedEntries = 0;
+            int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0, strippedEntries = 0, reflattened = 0;
             var newTracks = new JsonObject();
             var orphanedEntries = new List<(string OldPath, string Artist, string Title)>();
 
@@ -6232,6 +6232,10 @@ namespace Truedat
                 foreach (var ex in FieldPolicy.ExcludedFieldNames)
                     if (trackData.Remove(ex)) strippedThis = true;
                 if (strippedThis) strippedEntries++;
+                // Phantom-zero repair: re-derive spectralFlatness from the per-band flatnesses
+                // already on the entry. Same placement rationale as the strip above — runs on
+                // every entry, and orphans are dropped afterwards anyway. Costs no IO.
+                if (RepairSpectralFlatness(trackData)) reflattened++;
                 var normalizedOldPath = PathHelper.NormalizeSeparators(oldPath);
 
                 if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
@@ -6321,6 +6325,7 @@ namespace Truedat
             Console.WriteLine($"  Unanalyzed:  {unanalyzed} (in library, no mood data)");
             Console.WriteLine($"  Total out:   {newTracks.Count}");
             if (strippedEntries > 0) Console.WriteLine($"  Stripped:    {strippedEntries} (excluded field removed, e.g. bpmHistogram)");
+            if (reflattened > 0) Console.WriteLine($"  Reflattened: {reflattened} (spectralFlatness re-derived from stored bands)");
 
             if (orphanedEntries.Count > 0 && orphanedEntries.Count <= 20)
             {
@@ -6352,7 +6357,7 @@ namespace Truedat
                 return;
             }
 
-            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0)
+            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0 || reflattened > 0)
             {
                 var bakPath = BackupCatalogCompressed(moodsPath);
                 Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
@@ -15269,6 +15274,37 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(Opt2(-5.13925e-09, 12) != Opt2(-8.80901e-09, 12), "decrease: 12 dp keeps distinct e-9 values distinct");
             }
 
+            // --- phantom-zero REPAIR (2026-08-19): the repoint above could not reach the entries
+            // that needed it. Gate-current + phantom-zero entries are unreachable by any scan, so
+            // both write surfaces that can see the stored bands now re-derive from them. ---
+            {
+                // Cache-reuse copy: a phantom zero heals from the bands the entry already carries.
+                var pinned = new TrackFeatures { SpectralFlatness = 0, BarkFlatness = 0.2396, ErbFlatness = 0.2498, MelFlatness = 0.2594 };
+                Assert(HealSpectralFlatness(pinned) == 0.2496, "heal: phantom 0 re-derived from the stored bands");
+
+                // A real value is never touched — re-deriving off already-rounded bands would
+                // churn the last decimal across a healthy catalog for no gain.
+                var healthy = new TrackFeatures { SpectralFlatness = 0.2496, BarkFlatness = 0.10, ErbFlatness = 0.10, MelFlatness = 0.10 };
+                Assert(HealSpectralFlatness(healthy) == 0.2496, "heal: a real value is left alone, not re-derived");
+
+                // No bands stored -> 0 stands (core field must stay present; 0 is the honest answer).
+                Assert(HealSpectralFlatness(new TrackFeatures { SpectralFlatness = 0 }) == 0.0, "heal: no bands -> 0 stands");
+
+                // JSON twin (--fixup) agrees with the TrackFeatures path on the same inputs.
+                var node = JsonNode.Parse("{\"spectralFlatness\":0,\"barkFlatness\":0.2396,\"erbFlatness\":0.2498,\"melFlatness\":0.2594}")!.AsObject();
+                Assert(RepairSpectralFlatness(node), "repair: reports the entry as changed");
+                Assert(SafeDbl(node, "spectralFlatness") == 0.2496, "repair: writes the same value the cache path derives");
+                Assert(!RepairSpectralFlatness(node), "repair: idempotent — a second pass changes nothing");
+
+                var noBands = JsonNode.Parse("{\"spectralFlatness\":0}")!.AsObject();
+                Assert(!RepairSpectralFlatness(noBands), "repair: no bands -> no change (never invents a value)");
+                Assert(SafeDbl(noBands, "spectralFlatness") == 0.0, "repair: leaves the core field present at 0");
+
+                var realNode = JsonNode.Parse("{\"spectralFlatness\":0.4062,\"barkFlatness\":0.10}")!.AsObject();
+                Assert(!RepairSpectralFlatness(realNode), "repair: a real value is not overwritten");
+                Assert(SafeDbl(realNode, "spectralFlatness") == 0.4062, "repair: real value survives untouched");
+            }
+
             // --- phantom-key detector (2026-08-11): NavDbl flags a never-resolved extractor path ----
             // Would have caught spectral_flatness_db on day one instead of hiding for six months.
             {
@@ -16027,6 +16063,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (erb.HasValue) { sum += erb.Value; n++; }
             if (mel.HasValue) { sum += mel.Value; n++; }
             return n > 0 ? Math.Round(sum / n, 4) : 0.0;
+        }
+
+        /// <summary>
+        /// Heal a phantom-zero <c>spectralFlatness</c> on a CACHE-REUSE copy, re-deriving it from
+        /// the per-band flatnesses the same entry already carries. Cache hits copy stored features
+        /// forward verbatim, so without this an entry written before the 8c06ec2 repoint keeps its
+        /// phantom 0 through every future scan — and cannot be nudged out of it, because neither
+        /// spectralFlatness nor the bands are re-extract canary markers.
+        ///
+        /// Only a stored 0 is touched. A non-zero value came from the fixed write path off these
+        /// same bands; re-deriving it from the already-rounded stored bands would churn the last
+        /// decimal place for no gain. When no band is present, 0 stands — it is the honest answer
+        /// and the field is core/always-present.
+        /// </summary>
+        internal static double HealSpectralFlatness(TrackFeatures sf)
+            => sf.SpectralFlatness != 0
+                ? sf.SpectralFlatness
+                : DeriveSpectralFlatness(sf.BarkFlatness, sf.ErbFlatness, sf.MelFlatness);
+
+        /// <summary>
+        /// JSON-facing twin of <see cref="HealSpectralFlatness"/>, for <c>--fixup</c> — repairs an
+        /// existing catalog entry in place from the bands already stored on it. No audio, no
+        /// Essentia, no re-analysis: the three band values were never broken and are on disk.
+        ///
+        /// This exists because the repoint alone could not reach the entries that needed it. The
+        /// refresh gate began requiring <c>spectralContrastCoeffs</c> on 2026-08-10 01:23
+        /// (605dd66) and the repoint landed 2026-08-11 00:29 (8c06ec2), so a --refresh-features
+        /// pass run in that ~23 h window wrote the batch-2 marker AND a phantom 0. Those entries
+        /// satisfy HasCurrentFeatures, so no scan and no --refresh-features will ever re-derive
+        /// them. Measured 2026-08-19 on a 72,129-entry catalog: 72,041 phantom zeros, of which at
+        /// least 71,971 were gate-current — 99.8% of the catalog, permanently pinned.
+        ///
+        /// Returns true when the entry was changed.
+        /// </summary>
+        internal static bool RepairSpectralFlatness(JsonObject trackData)
+        {
+            var stored = SafeDbl(trackData, "spectralFlatness");
+            if (stored.HasValue && stored.Value != 0) return false;   // real value — leave it alone
+            var derived = DeriveSpectralFlatness(
+                SafeDbl(trackData, "barkFlatness"),
+                SafeDbl(trackData, "erbFlatness"),
+                SafeDbl(trackData, "melFlatness"));
+            if (derived == 0) return false;   // no bands stored, or bands are genuinely ~0
+            trackData["spectralFlatness"] = derived;
+            return true;
         }
 
         static string[] ParseCsvLine(string line)
@@ -19592,7 +19673,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     SpectralCentroid = sf.SpectralCentroid, SpectralFlux = sf.SpectralFlux,
                     Loudness = sf.Loudness, Danceability = sf.Danceability,
                     OnsetRate = sf.OnsetRate, ZeroCrossingRate = sf.ZeroCrossingRate,
-                    SpectralRms = sf.SpectralRms, SpectralFlatness = sf.SpectralFlatness,
+                    SpectralRms = sf.SpectralRms, SpectralFlatness = HealSpectralFlatness(sf),
                     Dissonance = sf.Dissonance, PitchSalience = sf.PitchSalience,
                     ChordsChangesRate = sf.ChordsChangesRate, Mfcc = sf.Mfcc,
                     DynamicRange = sf.DynamicRange,

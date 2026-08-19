@@ -136,6 +136,35 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ### Fixed
 
+- **`spectralFlatness` phantom zeros are now repaired, not just prevented.** The 2026-08-11
+  repoint fixed the *write* path but could not reach the entries that needed it, and measurement
+  showed that was nearly all of them: on a 72,129-entry catalog, **72,041 entries carried a
+  phantom `0`**, and at least **71,971 of those were also gate-current** — 99.8% of the catalog,
+  unreachable by any existing flag. The cause was a 23-hour ordering accident: the refresh gate
+  began requiring `spectralContrastCoeffs` on 2026-08-10 01:23, the repoint landed 2026-08-11
+  00:29, so a `--refresh-features` pass run between them wrote the batch-2 marker *and* a phantom
+  zero. Those entries satisfy `HasCurrentFeatures`, so neither a normal scan nor
+  `--refresh-features` would ever re-derive them — permanently pinned.
+
+  Both write surfaces that can see the stored bands now re-derive from them, so the value is
+  written correctly wherever it is written rather than only on a fresh analysis. `--fixup`
+  repairs existing entries in place (`RepairSpectralFlatness`, reported as `Reflattened:` in the
+  results block), and the cache-reuse copy heals a phantom zero as it copies
+  (`HealSpectralFlatness` in `RebuildCacheEntryCore`) so an ordinary scan fixes it too. **No
+  audio, no Essentia, no re-analysis** — `barkFlatness`/`erbFlatness`/`melFlatness` were never
+  broken and are present on 100% of entries; the repair is pure arithmetic over data already on
+  disk.
+
+  Only a stored `0` is touched: a non-zero value came from the fixed write path off these same
+  bands, and re-deriving it from the already-rounded stored bands would churn the last decimal
+  place across a healthy catalog for no gain. An entry with no bands keeps `0` — the field is
+  core/always-present and `0` is the honest answer there.
+
+  **`spectralDecrease` is not repairable this way** and is unaffected: its raw extractor value is
+  gone (the per-track extractor JSON is deleted at parse) and what is stored is the already-
+  annihilated `0.000000`, so there is no on-disk input to re-derive from. Those entries need a
+  genuine re-analysis, which the same gate still blocks.
+
 - **Verify now refuses when the library is unreachable, instead of reporting every entry
   MISSING.** `File.Exists` cannot tell a deleted file from a downed NAS, an unplugged external
   drive, or WiFi dropping — so an offline volume produced a run that *completed* with thousands
