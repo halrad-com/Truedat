@@ -5,6 +5,11 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+## [0.5.4.9-RC5] — 2026-08-19
+
+Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, so the
+`--list-formats` work tagged there is recorded here rather than left unattributed.
+
 ### Added
 
 - **`--list-formats [path]` — what the library is made of, and where.** Every existing report
