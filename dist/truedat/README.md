@@ -194,6 +194,21 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           does: --stats reports how COMPLETE the catalog is, never what is
                           in it. Bitrate and friends ride along as columns so "and by
                           bitrate?" is a pivot rather than another mode.
+  --strip-smfm [path]     Remove the Sony SMFM (12-TONE) fields from every catalog entry.
+                          Removes DATA, not entries: every track and every other field
+                          survives. Both key generations go (smfm* and the legacy sensme*
+                          the reader still falls back to), a compressed backup is written
+                          first, the rewrite is atomic, and the .mbxs sidecar is
+                          regenerated — the hub boots sidecar-first, so a hand edit of the
+                          JSON would change nothing at runtime. Prints how many entries
+                          carry SCORED 12-TONE data before acting: those drop to the
+                          essentia-only mood head, which is the weaker one for valence,
+                          and that count is wildly library-dependent (~2% of one library,
+                          93% of another) so it is reported as a count, never a share you
+                          have to remember. Add --dry-run to report and write nothing.
+                          SMFM is READ from the file's Sony tag and never computed, so a
+                          later analysis of a file still carrying the block puts it back —
+                          scan with --no-smfm if the removal is meant to stay.
   --prune-excluded [path] Remove catalog entries that an exclusion rule now covers — the
                           ones scanned before the rule existed, which exclusions otherwise
                           only ever keep out of FUTURE scans. Rules are the sole authority:
@@ -295,6 +310,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
+  --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
+                          and the --refresh-smfm backfill alike (omits the smfm* fields).
+                          Unlike its two siblings above this saves no meaningful time: SMFM
+                          is read from the file's tag, never computed. It exists to make a
+                          --strip-smfm durable, because without it the next cache MISS on
+                          any file still carrying the Sony block puts the data straight
+                          back. Refuses to run alongside --refresh-smfm: one forces the
+                          re-read the other suppresses, and a silent no-op is worse than a
+                          refusal.
   --file-md5              Maintain the whole-file fileMd5 field (default off). Off means it is
                           never written: fresh analysis omits it, cache-tier refreshes drop it,
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
@@ -663,6 +687,37 @@ a completed run that pruned nothing.
 
 Entries removed this way come back if the file is still in your library and you later drop the
 rule — the next scan re-analyzes it like any other track.
+
+### Removing one specific entry
+
+When you know exactly which entry has to go, naming it is the direct route — you do not have to
+write a rule first:
+
+```
+truedat --prune-entry "D:\Music\Artist\Album\03 Track.flac" --dry-run   # report, write nothing
+truedat --prune-entry "D:\Music\Artist\Album\03 Track.flac"             # remove it
+```
+
+Repeat the flag to remove several in one pass. Matching uses the catalog's **own** path
+comparer, so case and slash direction don't decide whether your path is the right one —
+`d:/music/…/03 track.flac` finds the same entry — and the report echoes the catalog's spelling
+so you can see exactly what matched. A path that matches nothing is listed by name and the run
+exits non-zero: a typo, a stale path or the wrong catalog must never read like a completed
+removal. Like the other catalog verbs it writes a rotated `.zip` backup first, swaps atomically,
+and regenerates the `.mbxs` sidecar.
+
+**It removes the entry, not the file, and it is not durable on its own.** An entry is a scan
+*result*: the file is still in your library, so the next scan analyzes it again and the entry
+comes back. That is the right behaviour for a one-off — an entry written from a bad analysis, a
+duplicate you have since dealt with — and the wrong one if you meant "never again". For that,
+the authority is a rule: add a `file` / `exclude` rule through `--apply-exclusions` (then
+`--prune-excluded` retires the entry, or `--prune-entry` does it now). The run prints this
+caveat every time rather than leaving you to discover it at the next scan.
+
+Ground truth here is *you*, not the filesystem. Unlike `--fixup` it never asks whether the file
+exists, so it works on a metadata mirror and on entries whose volume is offline — and for the
+same reason it needs no reachability probe, since it cannot mistake a downed share for a
+deletion when it never consults the share at all.
 
 Edit the file by hand, or merge changes into it:
 
@@ -1050,6 +1105,12 @@ A scan prints `+smfm` for a track that **newly** gains SMFM, and an `SMFM added:
 `--list-formats [path]` answers a different question from every other report here: not how complete the catalog is, but **what the library is made of**. It buckets entries by `fingerprint.v1.codec`, prints the share each format holds and whether it is lossy or lossless, then rolls each format up by folder — so "I still have WMA somewhere, where?" has a direct answer instead of a spreadsheet exercise. The full listing goes to `mbxmoods-formats.csv`, with `bitrate` / `sampleRate` / `bitDepth` as columns; "and by bitrate?" is a pivot table away rather than another mode.
 
 Two buckets deliberately refuse to guess. `wma` covers **both** WMA and WMA Lossless, and `m4a` covers both AAC and ALAC, because the codec label comes from TagLib's MIME type and TagLib cannot cheaply tell those pairs apart — the catalog simply does not carry the distinction, and printing a confident "lossy" over a folder of WMA Lossless would be the report asserting something it has no evidence for. Resolving it needs ffprobe on the actual bytes, which is what `--convert-dir <folder> --wma-lossless-only` does on the machine holding the audio. Likewise, entries written before `fingerprint.v1` existed carry no codec at all and get their own `(not recorded)` row with the backfill command, rather than a codec inferred from the file extension — a guess sitting in the same column as a measurement makes the whole column untrustworthy, and the extension is precisely what a mislabelled file lies about.
+
+`--strip-smfm [path]` is the removal side, and it exists because removal used to be a one-way door in the wrong direction. SMFM is *read* from the file's Sony tag and never computed, and the refresh path returns early when the tag is absent — so `--refresh-smfm` can backfill but structurally cannot **clear**. Strip the block out of the file itself (which `smfm-tools` does, deliberately preserving the audio frames so `audioStreamSha256` is unchanged and truedat still recognises the track) and the catalog takes a cache hit and carries the stale scores indefinitely, while `--list-smfm` keeps reporting the entry as tagged. `--strip-smfm` removes the fields from every entry — both key generations, since the reader still falls back to the legacy `sensme*` names — leaving every track and every other field in place. It backs up first, rewrites atomically, and **regenerates the `.mbxs` sidecar**, which is the step that makes it a mode rather than a hand edit: the hub boots sidecar-first, so editing the JSON alone changes nothing at runtime.
+
+It prints what it is about to cost before it acts — specifically how many entries carry *scored* 12-TONE data, since those drop to the essentia-only mood head (the weaker one for valence). That number is reported as a count rather than a percentage because the same command has wildly different blast radius per library: a couple of percent of one, nearly all of another. `--dry-run` reports and writes nothing.
+
+Pair it with `--no-smfm` if the removal is meant to stay. On its own a strip is undone by ordinary work — SMFM comes from the file's tag, so the next cache **miss** on any file still carrying the Sony block puts the data straight back. `--no-smfm` sits beside `--no-bitusage` / `--no-hf-analysis` and closes every read route, the `--refresh-smfm` backfill included; it refuses to run alongside `--refresh-smfm`, because the two contradict and a silent no-op is worse than a refusal.
 
 The SMFM format itself is documented in [`smfm-tools/`](smfm-tools/) — an unofficial wire-format spec, a confidence-tiered state of knowledge (including the claims device testing refuted), an SMFM-vs-Essentia comparison, and standalone Python tooling for extracting SMFM data outside truedat.
 
