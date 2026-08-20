@@ -1,9 +1,11 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
+
+## [0.5.4.9-RC6] — 2026-08-19
 
 ### Added
 
@@ -30,10 +32,6 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
   file exists, so it runs on a metadata mirror and on entries whose volume is offline — and for
   that same reason it needs no reachability probe, since it cannot mistake a downed share for a
   deletion when it never consults the share.
-
-## [0.5.4.9-RC6] — 2026-08-19
-
-### Added
 
 - **`--strip-smfm [path]` — removing Sony 12-TONE data from a catalog was impossible.** Three
   SMFM flags existed (`--list-smfm`, `--list-missing-smfm`, `--refresh-smfm`) and none of them
