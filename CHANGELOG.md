@@ -5,6 +5,32 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- **`--prune-entry <path>` (repeatable) — remove one specific catalog entry.** Removing a known
+  entry meant writing a `file` exclusion rule and running `--prune-excluded`, which works but
+  conflates two different acts: a rule is a standing *policy* decision about future scans, and
+  sometimes the need is just "this one entry is wrong, take it out". This is the targeted
+  counterpart to `--prune-excluded` — that verb acts on rules and removes whatever they cover,
+  this one removes exactly what you named.
+
+  Matching uses `PathComparer`, the catalog's **own** key comparer, so case and slash direction
+  cannot decide whether a path is the right one, and the report echoes the *catalog's* spelling
+  rather than the operator's so what matched is visible. A path that matches nothing is listed by
+  name and the run exits non-zero — a typo, a stale path or the wrong catalog must never read
+  like a completed removal. One entry named twice is removed once. Rotated `.zip` backup, atomic
+  swap, sidecar regenerated, `--dry-run` reports and writes nothing.
+
+  **It removes the ENTRY, not the file, and says so every run.** An entry is a scan *result*, so
+  the file is still in the library and the next scan analyzes it again — durability needs a rule,
+  which is what the printed note points at. Presenting a removal as permanent when the next scan
+  undoes it is the same shape of silent failure `--strip-smfm` had before `--no-smfm` existed.
+
+  Ground truth is the operator, not the filesystem: unlike `--fixup` it never asks whether the
+  file exists, so it runs on a metadata mirror and on entries whose volume is offline — and for
+  that same reason it needs no reachability probe, since it cannot mistake a downed share for a
+  deletion when it never consults the share.
+
 ## [0.5.4.9-RC6] — 2026-08-19
 
 ### Added

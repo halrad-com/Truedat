@@ -688,6 +688,37 @@ a completed run that pruned nothing.
 Entries removed this way come back if the file is still in your library and you later drop the
 rule — the next scan re-analyzes it like any other track.
 
+### Removing one specific entry
+
+When you know exactly which entry has to go, naming it is the direct route — you do not have to
+write a rule first:
+
+```
+truedat --prune-entry "D:\Music\Artist\Album\03 Track.flac" --dry-run   # report, write nothing
+truedat --prune-entry "D:\Music\Artist\Album\03 Track.flac"             # remove it
+```
+
+Repeat the flag to remove several in one pass. Matching uses the catalog's **own** path
+comparer, so case and slash direction don't decide whether your path is the right one —
+`d:/music/…/03 track.flac` finds the same entry — and the report echoes the catalog's spelling
+so you can see exactly what matched. A path that matches nothing is listed by name and the run
+exits non-zero: a typo, a stale path or the wrong catalog must never read like a completed
+removal. Like the other catalog verbs it writes a rotated `.zip` backup first, swaps atomically,
+and regenerates the `.mbxs` sidecar.
+
+**It removes the entry, not the file, and it is not durable on its own.** An entry is a scan
+*result*: the file is still in your library, so the next scan analyzes it again and the entry
+comes back. That is the right behaviour for a one-off — an entry written from a bad analysis, a
+duplicate you have since dealt with — and the wrong one if you meant "never again". For that,
+the authority is a rule: add a `file` / `exclude` rule through `--apply-exclusions` (then
+`--prune-excluded` retires the entry, or `--prune-entry` does it now). The run prints this
+caveat every time rather than leaving you to discover it at the next scan.
+
+Ground truth here is *you*, not the filesystem. Unlike `--fixup` it never asks whether the file
+exists, so it works on a metadata mirror and on entries whose volume is offline — and for the
+same reason it needs no reachability probe, since it cannot mistake a downed share for a
+deletion when it never consults the share at all.
+
 Edit the file by hand, or merge changes into it:
 
 ```

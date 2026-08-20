@@ -701,6 +701,13 @@ namespace Truedat
             Console.WriteLine("                      12-TONE data before acting — those lose the fused mood model's");
             Console.WriteLine("                      SMFM input. Add --dry-run to report and write nothing. SMFM is");
             Console.WriteLine("                      read from file tags, so scan with --no-smfm to keep it removed.");
+            Console.WriteLine("  --prune-entry <path>  Remove exactly this catalog entry. Repeat the flag for");
+            Console.WriteLine("                      several. Matching ignores case and slash direction (the");
+            Console.WriteLine("                      catalog's own path comparer); a path that matches nothing is");
+            Console.WriteLine("                      reported by name and exits non-zero. Backs up first;");
+            Console.WriteLine("                      --dry-run reports and writes nothing. Removes the ENTRY, not");
+            Console.WriteLine("                      the file — a later scan analyzes it again and the entry comes");
+            Console.WriteLine("                      back, so add a file exclusion rule to keep it out.");
             Console.WriteLine("  --prune-excluded [path]  Remove catalog entries matching an exclusion rule — the");
             Console.WriteLine("                      entries scanned before the rule existed, which exclusions only");
             Console.WriteLine("                      ever kept out of FUTURE scans. include rules still win; backs up");
@@ -804,7 +811,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "prune-entry", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -834,7 +841,7 @@ namespace Truedat
             "convert-dir", "compression-level",
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
-            "restore", "keep-backups",
+            "restore", "keep-backups", "prune-entry",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -1984,6 +1991,7 @@ namespace Truedat
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool stripSmfmMode = false;     // --strip-smfm: remove the Sony 12-TONE fields from every catalog entry (JSON only, no XML; --dry-run reports)
+            var pruneEntryPaths = new List<string>();  // --prune-entry <path>: repeatable; remove exactly these catalog entries by path
             bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
             bool verifyCoverageMode = false; // --verify-coverage: combine shard receipts into a coverage proof (read-only, no audio)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
@@ -2128,6 +2136,7 @@ namespace Truedat
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
                 else if (canonical == "strip-smfm") stripSmfmMode = true;
+                else if (canonical == "prune-entry" && i + 1 < args.Length) pruneEntryPaths.Add(args[++i]);
                 else if (canonical == "prune-excluded") pruneExcludedMode = true;
                 else if (canonical == "verify-coverage") verifyCoverageMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
@@ -2921,6 +2930,29 @@ namespace Truedat
                     return;
                 }
                 RunStripSmfm(stripPath!, dryRun);
+                return;
+            }
+
+            // --prune-entry <path>: remove exactly the named catalog entries. The
+            // targeted counterpart to --prune-excluded, which acts on RULES; here the
+            // operator names the entry itself. Catalog only, so it runs on a metadata
+            // mirror. Mutates (backup first); --dry-run reports and writes nothing.
+            if (pruneEntryPaths.Count > 0)
+            {
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                {
+                    Console.Error.WriteLine(BareCwdRefusal("--prune-entry", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                string? peCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var peRefusal);
+                if (peRefusal != null)
+                {
+                    Console.Error.WriteLine(peRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                RunPruneEntry(peCatalog!, pruneEntryPaths, dryRun);
                 return;
             }
 
@@ -8049,6 +8081,169 @@ namespace Truedat
             RegenerateSidecar(moodsPath);
         }
 
+        // -- Targeted entry removal (--prune-entry) ---------------------------
+
+        /// <summary>What <c>--prune-entry</c> resolved. Matched and unmatched are both
+        /// carried because a named path that hit nothing is a FAILED REQUEST, not a
+        /// no-op: the operator asserted an entry exists, and reporting only the
+        /// successes would let a typo read as a completed removal.</summary>
+        internal sealed class EntryPrunePlan
+        {
+            /// <summary>Catalog keys to remove, in catalog order. These are the CATALOG's
+            /// spelling of the path, not the operator's — matching is separator- and
+            /// case-insensitive, so the two can legitimately differ.</summary>
+            public List<string> Matched { get; } = new List<string>();
+            /// <summary>Requested paths that matched no entry, as typed.</summary>
+            public List<string> Unmatched { get; } = new List<string>();
+        }
+
+        /// <summary>Pure planner for <c>--prune-entry</c>. Matching is
+        /// <see cref="PathComparer"/> — the catalog's OWN key comparer — so a path the
+        /// operator types with forward slashes or different casing resolves to the same
+        /// entry the catalog itself would, and this verb cannot develop its own private
+        /// notion of when two paths are the same one.
+        ///
+        /// A path given twice (or two spellings of one path) removes one entry once:
+        /// duplicates in the request are not duplicate removals.</summary>
+        internal static EntryPrunePlan PlanEntryPrune(JsonObject tracks, IEnumerable<string> requested)
+        {
+            var plan = new EntryPrunePlan();
+            // Index the catalog once by its own comparer, so N requests cost one pass
+            // rather than N scans of a 150k-entry catalog.
+            var index = new Dictionary<string, string>(PathComparer.Instance);
+            foreach (var kv in tracks)
+                if (!index.ContainsKey(kv.Key)) index[kv.Key] = kv.Key;
+
+            var already = new HashSet<string>(PathComparer.Instance);
+            foreach (var raw in requested)
+            {
+                var want = (raw ?? "").Trim().Trim('"');
+                if (want.Length == 0) continue;
+                if (!index.TryGetValue(want, out var key)) { plan.Unmatched.Add(want); continue; }
+                if (!already.Add(key)) continue;   // same entry named twice
+                plan.Matched.Add(key);
+            }
+            return plan;
+        }
+
+        /// <summary>
+        /// <c>--prune-entry &lt;path&gt;</c> (repeatable) — remove exactly the named
+        /// entries from the catalog. The targeted counterpart to
+        /// <c>--prune-excluded</c>: that one acts on RULES and removes whatever they
+        /// cover, this one removes the entry the operator named and nothing else.
+        ///
+        /// It is deliberately NOT durable, and says so. An entry is a scan RESULT, so
+        /// removing it changes nothing about what the next scan will do — the file is
+        /// still in the library and will simply be analyzed again. Only a rule in
+        /// <c>mbxmoods-exclude.json</c> keeps it out, which is why the run points at
+        /// <c>--apply-exclusions</c> whenever the removal is meant to stay. Presenting a
+        /// removal as permanent when the next scan undoes it is the same shape of silent
+        /// failure the SMFM strip had before <c>--no-smfm</c> existed.
+        ///
+        /// Ground truth here is the OPERATOR, not the filesystem: unlike <c>--fixup</c>
+        /// this never asks whether the file exists, so it works on a metadata mirror and
+        /// on entries whose volume is offline. That is also why it needs no reachability
+        /// probe — it cannot mistake a downed share for a deletion, because it never
+        /// consults the share at all.
+        /// </summary>
+        static void RunPruneEntry(string moodsPath, List<string> requested, bool dryRun)
+        {
+            Console.WriteLine("=== Prune Entry Mode ===");
+            Console.WriteLine("Removes the named catalog entries. Audio files are never touched.");
+            if (dryRun) Console.WriteLine("DRY RUN — reporting only, nothing will be written.");
+            Console.WriteLine();
+
+            if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
+
+            Console.WriteLine($"Loading: {moodsPath}");
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            JsonObject? root;
+            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            catch (JsonException)
+            {
+                Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
+                Console.WriteLine("  --prune-entry operates on mbxmoods.json — point it at your mbxmoods.json file,");
+                Console.WriteLine("  not the iTunes XML.");
+                Environment.ExitCode = 2;
+                return;
+            }
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
+            var tracks = root["tracks"]?.AsObject();
+            if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); Environment.ExitCode = 2; return; }
+            int totalEntries = tracks.Count;
+
+            var plan = PlanEntryPrune(tracks, requested);
+
+            Console.WriteLine();
+            Console.WriteLine("=== Results ===");
+            Console.WriteLine($"  {"Entries:",-22}{totalEntries,9:N0}");
+            Console.WriteLine($"  {"Requested:",-22}{requested.Count,9:N0}");
+            Console.WriteLine($"  {(dryRun ? "Would remove:" : "Removed:"),-22}{plan.Matched.Count,9:N0}");
+            if (plan.Unmatched.Count > 0)
+                Console.WriteLine($"  {"Not in catalog:",-22}{plan.Unmatched.Count,9:N0}");
+
+            if (plan.Matched.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine(dryRun ? "Entries that would be removed:" : "Entries removed:");
+                foreach (var key in plan.Matched)
+                {
+                    var data = tracks[key] as JsonObject;
+                    var artist = data != null ? SafeStr(data, "artist") : null;
+                    var title  = data != null ? SafeStr(data, "title") : null;
+                    Console.WriteLine($"  {artist ?? "?"} - {title ?? "?"}: {key}");
+                }
+            }
+
+            // A named path that hit nothing is reported by name and costs a non-zero exit.
+            // Silence here would let a typo, a stale path or the wrong catalog read exactly
+            // like a successful removal.
+            if (plan.Unmatched.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Not found in this catalog (nothing removed for these):");
+                foreach (var miss in plan.Unmatched) Console.WriteLine($"  {miss}");
+                Console.WriteLine("  Path matching ignores case and slash direction, so a miss means the entry is");
+                Console.WriteLine("  genuinely absent — check the catalog with --stats, or that this is the right one.");
+                Environment.ExitCode = 1;
+            }
+
+            if (plan.Matched.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Nothing to remove.");
+                if (Environment.ExitCode == 0) Environment.ExitCode = 2;
+                return;
+            }
+
+            // The durability caveat, stated every time. An entry is a scan RESULT: removing
+            // it does not change what the next scan does, and the file will simply be
+            // analyzed again. Only a rule keeps it out.
+            Console.WriteLine();
+            Console.WriteLine("Note: this removes the catalog ENTRY, not the file — a later scan will analyze");
+            Console.WriteLine("      it again and the entry comes back. To keep it out, add a file exclusion");
+            Console.WriteLine("      rule (kind:file, action:exclude) via --apply-exclusions.");
+
+            if (dryRun)
+            {
+                Console.WriteLine();
+                Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                return;
+            }
+
+            foreach (var key in plan.Matched) tracks.Remove(key);
+
+            var bakPath = BackupCatalogCompressed(moodsPath);
+            Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
+            root["trackCount"] = tracks.Count;
+            StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
+            var tmpPath = moodsPath + ".tmp";
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            AtomicReplace(tmpPath, moodsPath);
+            Console.WriteLine($"Updated: {moodsPath} ({tracks.Count:N0} tracks)");
+            RegenerateSidecar(moodsPath);
+        }
+
         /// <summary>
         /// <c>--prune-excluded [path]</c> — retire catalog entries that an exclusion rule
         /// now covers. Exclusions gate FUTURE scanning; they have never retired an entry
@@ -12829,6 +13024,56 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 foreach (var k in new[] { "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
                                           "sensmeScores", "sensmeChannel", "sensmeChannelName" })
                     Assert(SmfmJsonKeys.Contains(k), $"strip-smfm: SmfmJsonKeys covers the reader key {k}");
+            }
+
+            // --- --prune-entry: targeted removal by path ---
+            // The two properties that make a named removal safe: it resolves a path the
+            // same way the catalog itself does (so "it didn't match" never means "your
+            // slashes were wrong"), and a path that hits nothing is reported rather than
+            // silently succeeding — a typo must not read like a completed removal.
+            {
+                var peDoc = JsonNode.Parse(@"{
+                  ""D:\\M\\a.flac"": { ""artist"": ""A"", ""title"": ""One"" },
+                  ""D:\\M\\b.flac"": { ""artist"": ""B"", ""title"": ""Two"" },
+                  ""D:\\M\\c.mp3"":  { ""artist"": ""C"", ""title"": ""Three"" }
+                }")!.AsObject();
+
+                // First() rather than [0] throughout: an assert that THROWS on a regression
+                // aborts every assert after it in this block, so a single real failure would
+                // hide the rest of the evidence. Found the hard way mutation-checking this
+                // very block — the mutant produced one FAIL and swallowed four more.
+                string PeFirst(EntryPrunePlan p) => p.Matched.Count > 0 ? p.Matched[0] : "(none)";
+
+                var peHit = PlanEntryPrune(peDoc, new[] { @"D:\M\b.flac" });
+                Assert(peHit.Matched.Count == 1 && PeFirst(peHit) == @"D:\M\b.flac" && peHit.Unmatched.Count == 0,
+                    "prune-entry: an exact path matches exactly one entry");
+
+                // Same entry, spelled the way an operator might actually type it.
+                var peLoose = PlanEntryPrune(peDoc, new[] { "d:/m/B.FLAC" });
+                Assert(peLoose.Matched.Count == 1 && peLoose.Unmatched.Count == 0,
+                    $"prune-entry: case and slash direction do not decide whether a path matches (matched {peLoose.Matched.Count})");
+                Assert(PeFirst(peLoose) == @"D:\M\b.flac",
+                    $"prune-entry: the plan carries the CATALOG's spelling, not the operator's (got {PeFirst(peLoose)})");
+
+                var peQuoted = PlanEntryPrune(peDoc, new[] { "  \"D:\\M\\b.flac\"  " });
+                Assert(peQuoted.Matched.Count == 1, "prune-entry: surrounding whitespace and quotes are tolerated");
+
+                var peMiss = PlanEntryPrune(peDoc, new[] { @"D:\M\nope.flac" });
+                Assert(peMiss.Matched.Count == 0 && peMiss.Unmatched.Count == 1,
+                    "prune-entry: a path that matches nothing is reported, never silently dropped");
+
+                var peMixed = PlanEntryPrune(peDoc, new[] { @"D:\M\a.flac", @"D:\M\nope.flac", @"D:/M/C.MP3" });
+                Assert(peMixed.Matched.Count == 2 && peMixed.Unmatched.Count == 1,
+                    $"prune-entry: a partial request removes what it can and still reports the miss (matched {peMixed.Matched.Count}, missed {peMixed.Unmatched.Count})");
+
+                var peDupe = PlanEntryPrune(peDoc, new[] { @"D:\M\a.flac", @"d:/m/a.flac" });
+                Assert(peDupe.Matched.Count == 1 && peDupe.Unmatched.Count == 0,
+                    $"prune-entry: one entry named twice is removed once, not twice (matched {peDupe.Matched.Count}, missed {peDupe.Unmatched.Count})");
+
+                Assert(peDoc.Count == 3, "prune-entry: PlanEntryPrune is pure — planning removes nothing");
+                foreach (var k in peMixed.Matched) peDoc.Remove(k);
+                Assert(peDoc.Count == 1 && peDoc.ContainsKey(@"D:\M\b.flac"),
+                    "prune-entry: removal takes the named entries and leaves the rest");
             }
 
             // --- --list-formats: composition report (what the library is made of, and where) ---
