@@ -693,6 +693,14 @@ namespace Truedat
             Console.WriteLine("                      catalog and prove the pass actually covered it — every shard run,");
             Console.WriteLine("                      each exactly once, against one catalog state. Answers \"can I trust");
             Console.WriteLine("                      this verify?\", not \"is the audio sound\" (that's the CSV).");
+            Console.WriteLine("  --strip-smfm [path]  Remove Sony 12-TONE (SMFM) fields from every catalog entry.");
+            Console.WriteLine("                      Removes DATA, not entries — every track and every other field");
+            Console.WriteLine("                      stays. Backs up first, rewrites atomically and regenerates the");
+            Console.WriteLine("                      .mbxs sidecar (the hub boots sidecar-first, so a hand edit of the");
+            Console.WriteLine("                      JSON would change nothing). Prints how many entries carry scored");
+            Console.WriteLine("                      12-TONE data before acting — those lose the fused mood model's");
+            Console.WriteLine("                      SMFM input. Add --dry-run to report and write nothing. SMFM is");
+            Console.WriteLine("                      read from file tags, so scan with --no-smfm to keep it removed.");
             Console.WriteLine("  --prune-excluded [path]  Remove catalog entries matching an exclusion rule — the");
             Console.WriteLine("                      entries scanned before the rule existed, which exclusions only");
             Console.WriteLine("                      ever kept out of FUTURE scans. include rules still win; backs up");
@@ -735,6 +743,11 @@ namespace Truedat
             Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
             Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
             Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
+            Console.WriteLine("  --no-smfm           Suppress every Sony 12-TONE (SMFM) read (omits smfm* JSON fields).");
+            Console.WriteLine("                      SMFM comes from the file's tag, not from analysis, so this is what");
+            Console.WriteLine("                      makes a --strip-smfm durable: without it the next cache MISS on a");
+            Console.WriteLine("                      file still carrying the block puts the data straight back.");
+            Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
@@ -791,7 +804,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
+            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -804,7 +817,7 @@ namespace Truedat
             "no-quick-cache", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
-            "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "version", "v",
+            "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
         };
@@ -1018,6 +1031,7 @@ namespace Truedat
         // threaded yet — touching one source of truth is enough.
         internal static bool _noBitUsage   { get => _stageOpts.NoBitUsage;   set => _stageOpts.NoBitUsage   = value; }
         internal static bool _noHfAnalysis { get => _stageOpts.NoHfAnalysis; set => _stageOpts.NoHfAnalysis = value; }
+        internal static bool _noSmfm       { get => _stageOpts.NoSmfm;       set => _stageOpts.NoSmfm       = value; }
 
         // Tier-1.5 tags-only quick cache (head-64k evidence check on mtime drift).
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
@@ -1969,6 +1983,7 @@ namespace Truedat
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
+            bool stripSmfmMode = false;     // --strip-smfm: remove the Sony 12-TONE fields from every catalog entry (JSON only, no XML; --dry-run reports)
             bool pruneExcludedMode = false; // --prune-excluded: retire catalog entries an exclusion rule now covers (JSON + rules only, no XML; --dry-run reports)
             bool verifyCoverageMode = false; // --verify-coverage: combine shard receipts into a coverage proof (read-only, no audio)
             bool listSmfmMissingMode = false;  // --list-missing-smfm: read-only list of entries with no Sony 12-TONE data
@@ -2112,6 +2127,7 @@ namespace Truedat
                 else if (canonical == "json") jsonOutput = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
                 else if (canonical == "list-speech") listSpeechMode = true;
+                else if (canonical == "strip-smfm") stripSmfmMode = true;
                 else if (canonical == "prune-excluded") pruneExcludedMode = true;
                 else if (canonical == "verify-coverage") verifyCoverageMode = true;
                 else if (canonical == "list-missing-smfm") listSmfmMissingMode = true;
@@ -2283,6 +2299,7 @@ namespace Truedat
                 }
                 else if (canonical == "no-bitusage") _noBitUsage = true;
                 else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
+                else if (canonical == "no-smfm") _noSmfm = true;
                 else if (canonical == "version" || canonical == "v")
                 {
                     Console.WriteLine(VersionInfo.Display);
@@ -2317,6 +2334,17 @@ namespace Truedat
             }
 
             _audit = auditLog;
+
+            // --refresh-smfm forces an SMFM re-read on cache hits; --no-smfm suppresses
+            // every SMFM read. Together the refresh silently does nothing, which is the
+            // failure mode this repo keeps paying for — refuse rather than no-op.
+            if (_refreshSmfm && _noSmfm)
+            {
+                Console.Error.WriteLine("Error: --refresh-smfm cannot be combined with --no-smfm —");
+                Console.Error.WriteLine("  one forces SMFM to be re-read, the other suppresses every SMFM read.");
+                Environment.ExitCode = 1;
+                return;
+            }
 
             if (selfTest)
             {
@@ -2865,6 +2893,34 @@ namespace Truedat
                     return;
                 }
                 Environment.ExitCode = RunVerifyCoverage(vcPath!);
+                return;
+            }
+
+            // --strip-smfm: remove the Sony 12-TONE (SMFM) fields from every catalog
+            // entry. Entries and every other field survive — this removes DATA, not
+            // tracks, which is why it is not a sibling of --prune-excluded's removal
+            // class. Catalog only (no XML, no audio), so it runs on a metadata mirror.
+            // Mutates the catalog (compressed rotated backup first, atomic swap,
+            // sidecar regenerated); --dry-run reports the counts and writes nothing.
+            if (stripSmfmMode)
+            {
+                // Rewrites the catalog, so it takes the same anchor rule as --compact /
+                // --prune-excluded: refuse to act on whatever mbxmoods.json happens to
+                // be in the directory the operator is standing in.
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                {
+                    Console.Error.WriteLine(BareCwdRefusal("--strip-smfm", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                string? stripPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var stripRefusal);
+                if (stripRefusal != null)
+                {
+                    Console.Error.WriteLine(stripRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                RunStripSmfm(stripPath!, dryRun);
                 return;
             }
 
@@ -4443,11 +4499,12 @@ namespace Truedat
             }
 
             // Signal-extraction opt-outs — only print when at least one is set.
-            if (_noBitUsage || _noHfAnalysis)
+            if (_noBitUsage || _noHfAnalysis || _noSmfm)
             {
                 string bu = _noBitUsage   ? "DISABLED" : "enabled";
                 string hf = _noHfAnalysis ? "DISABLED" : "enabled";
-                Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf}");
+                string sm = _noSmfm       ? "DISABLED" : "enabled";
+                Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf} smfm={sm}");
             }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
             if (essentiaExe != null) ReportExtractorBuild(essentiaExe);
@@ -7371,6 +7428,10 @@ namespace Truedat
         /// gains SMFM) instead of on every rescan of an already-tagged track.</summary>
         static bool ApplySmfmInPlace(TrackFeatures f, string filePath, int[]? priorScores = null)
         {
+            // --no-smfm suppresses every ingest route, including the --refresh-smfm
+            // backfill on cache hits. Guarded here rather than at the call sites so a
+            // future caller cannot reopen the door by forgetting the check.
+            if (_noSmfm) return false;
             var smfm = SmfmReader.TryRead(filePath);
             if (!smfm.HasValue) return false;
             f.SmfmScores      = smfm.Value.Scores;
@@ -7793,6 +7854,199 @@ namespace Truedat
                 });
             }
             return victims;
+        }
+
+        // -- SMFM strip (--strip-smfm) ----------------------------------------
+
+        /// <summary>Every JSON key an SMFM block can occupy, BOTH name generations.
+        /// The read path (<see cref="ParseTrackFeaturesFromJson"/>) falls back to the
+        /// legacy <c>sensme*</c> keys for un-migrated libraries, so a strip that removed
+        /// only the <c>smfm*</c> keys would leave entries that still read as having
+        /// 12-TONE data — the exact "removed it and it is still there" failure this mode
+        /// exists to end. <c>sensmeBpm</c> has no read fallback but is listed anyway:
+        /// leaving it behind would leave visible SMFM residue in the catalog.</summary>
+        internal static readonly string[] SmfmJsonKeys = new[]
+        {
+            "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
+            "sensmeScores", "sensmeChannel", "sensmeChannelName", "sensmeBpm",
+        };
+
+        /// <summary>What <c>--strip-smfm</c> would do. Counts are entries, never
+        /// percentages: the same command is ~2% of one library and 93% of another, and
+        /// a percentage is the form nobody can act on.</summary>
+        internal sealed class SmfmStripPlan
+        {
+            /// <summary>Entry paths carrying at least one SMFM key (in catalog order).</summary>
+            public List<string> Victims { get; } = new List<string>();
+            /// <summary>Of those, entries whose scores are present and non-zero — the ones
+            /// that lose the fused mood model's SMFM input and drop to the essentia-only
+            /// head. This is the number with a downstream consequence.</summary>
+            public int WithData { get; set; }
+            /// <summary>Block present, every score zero — Sony wrote it and scored nothing.</summary>
+            public int WithNoData { get; set; }
+            /// <summary>Entries carrying legacy <c>sensme*</c> keys (an un-migrated catalog).</summary>
+            public int LegacyKeyed { get; set; }
+        }
+
+        /// <summary>Read an entry's SMFM scores from raw JSON, new key then legacy —
+        /// the same precedence as the parse path, so the plan cannot count an entry as
+        /// scoreless that the reader would hand to the model.</summary>
+        internal static int[]? SmfmScoresFromJson(JsonObject data)
+        {
+            var node = (data.TryGetPropertyValue("smfmScores", out var n1) ? n1 : null)
+                    ?? (data.TryGetPropertyValue("sensmeScores", out var n2) ? n2 : null);
+            if (!(node is JsonArray arr)) return null;
+            var scores = new List<int>(arr.Count);
+            foreach (var el in arr)
+            {
+                try { scores.Add(el!.GetValue<int>()); }
+                catch { return null; }   // malformed array — treat as no usable scores
+            }
+            return scores.ToArray();
+        }
+
+        /// <summary>Pure planner for <c>--strip-smfm</c>. Split from the IO for the same
+        /// reason <see cref="PlanExclusionPrune"/> is: this is the half that costs the
+        /// operator data, so it is pinned by tests rather than read out of a write path.
+        /// Does NOT mutate — the caller strips only after reporting.</summary>
+        internal static SmfmStripPlan PlanSmfmStrip(JsonObject tracks)
+        {
+            var plan = new SmfmStripPlan();
+            foreach (var kv in tracks)
+            {
+                var data = kv.Value as JsonObject;
+                if (data == null) continue;
+                bool carries = false, legacy = false;
+                foreach (var key in SmfmJsonKeys)
+                {
+                    if (!data.ContainsKey(key)) continue;
+                    carries = true;
+                    if (key.StartsWith("sensme", StringComparison.Ordinal)) legacy = true;
+                }
+                if (!carries) continue;
+                plan.Victims.Add(kv.Key);
+                if (legacy) plan.LegacyKeyed++;
+                switch (ClassifySmfm(SmfmScoresFromJson(data)))
+                {
+                    case SmfmState.Data:   plan.WithData++;   break;
+                    case SmfmState.NoData: plan.WithNoData++; break;
+                }
+            }
+            return plan;
+        }
+
+        /// <summary>Remove every SMFM key from one entry. Returns true if anything was
+        /// removed. Key-by-key removal (not a rebuild) so field order and every other
+        /// field survive untouched.</summary>
+        internal static bool StripSmfmFromEntry(JsonObject data)
+        {
+            bool changed = false;
+            foreach (var key in SmfmJsonKeys)
+                if (data.Remove(key)) changed = true;
+            return changed;
+        }
+
+        /// <summary>
+        /// <c>--strip-smfm [path]</c> — remove the Sony 12-TONE (SMFM) fields from every
+        /// catalog entry. Removes DATA, never entries: every other field and every track
+        /// survives, which is what separates this from <c>--prune-excluded</c>.
+        ///
+        /// It exists because removal was a one-way door in the wrong direction. SMFM is
+        /// READ from the file's Sony tag and never computed, and
+        /// <see cref="ApplySmfmInPlace"/> returns early when the tag is absent — so
+        /// <c>--refresh-smfm</c> backfills but structurally cannot clear. Strip the block
+        /// out of the FILE (smfm-tools does exactly that, deliberately preserving
+        /// audioStreamSha256 so truedat keeps recognising the track) and the catalog
+        /// takes a cache hit and carries the stale scores forever.
+        ///
+        /// The sidecar is why this is a mode and not a hand edit: the hub boots
+        /// SIDECAR-FIRST from the <c>.mbxs</c>, which carries the scores and a derived
+        /// hasSmfm, so editing the JSON alone changes nothing at runtime. Regenerating it
+        /// is a required step, not a courtesy.
+        ///
+        /// Pair with <c>--no-smfm</c> to make it stay stripped: without that switch the
+        /// next cache MISS on any file still carrying the Sony block puts the data back.
+        /// </summary>
+        static void RunStripSmfm(string moodsPath, bool dryRun)
+        {
+            Console.WriteLine("=== Strip SMFM Mode ===");
+            Console.WriteLine("Removes Sony 12-TONE (SMFM) fields from catalog entries. Entries, other fields");
+            Console.WriteLine("and audio files are never touched.");
+            if (dryRun) Console.WriteLine("DRY RUN — reporting only, nothing will be written.");
+            Console.WriteLine();
+
+            if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
+
+            Console.WriteLine($"Loading: {moodsPath}");
+            var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+            JsonObject? root;
+            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            catch (JsonException)
+            {
+                Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
+                Console.WriteLine("  --strip-smfm operates on mbxmoods.json — point it at your mbxmoods.json file,");
+                Console.WriteLine("  not the iTunes XML.");
+                Environment.ExitCode = 2;
+                return;
+            }
+            if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
+            var tracks = root["tracks"]?.AsObject();
+            if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+            int totalEntries = tracks.Count;
+
+            var plan = PlanSmfmStrip(tracks);
+
+            Console.WriteLine();
+            Console.WriteLine("=== Results ===");
+            Console.WriteLine($"  {"Entries:",-24}{totalEntries,9:N0}");
+            Console.WriteLine($"  {(dryRun ? "Would strip SMFM from:" : "Stripped SMFM from:"),-24}{plan.Victims.Count,9:N0}");
+            Console.WriteLine($"  {"Untouched:",-24}{totalEntries - plan.Victims.Count,9:N0}");
+            if (plan.Victims.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"    carrying scored 12-TONE data: {plan.WithData,9:N0}   <- these lose the fused mood model's SMFM input");
+                Console.WriteLine($"    block present but all-zero:   {plan.WithNoData,9:N0}");
+                if (plan.LegacyKeyed > 0)
+                    Console.WriteLine($"    on legacy sensme* keys:       {plan.LegacyKeyed,9:N0}   (un-migrated entries; stripped too)");
+            }
+
+            if (plan.Victims.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("No catalog entry carries SMFM — nothing to strip.");
+                return;
+            }
+
+            if (plan.WithData > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"Note: {plan.WithData:N0} entr{(plan.WithData == 1 ? "y" : "ies")} will drop to the essentia-only mood head,");
+                Console.WriteLine("      which is the weaker one for valence. SMFM is read from the file's Sony tag,");
+                Console.WriteLine("      so a later analysis of a file that still carries the block puts it back —");
+                Console.WriteLine("      scan with --no-smfm if the removal is meant to stay.");
+            }
+
+            if (dryRun)
+            {
+                Console.WriteLine();
+                Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                return;
+            }
+
+            int stripped = 0;
+            foreach (var path in plan.Victims)
+                if (tracks[path] is JsonObject data && StripSmfmFromEntry(data)) stripped++;
+
+            var bakPath = BackupCatalogCompressed(moodsPath);
+            Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
+            StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
+            var tmpPath = moodsPath + ".tmp";
+            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            AtomicReplace(tmpPath, moodsPath);
+            Console.WriteLine($"Updated: {moodsPath} ({stripped:N0} entr{(stripped == 1 ? "y" : "ies")} stripped, {tracks.Count:N0} tracks kept)");
+            // Required, not cosmetic: the hub boots sidecar-first, so an un-regenerated
+            // .mbxs would keep serving the SMFM this run just removed.
+            RegenerateSidecar(moodsPath);
         }
 
         /// <summary>
@@ -8658,6 +8912,11 @@ namespace Truedat
             public string StageDir { get; set; } = Path.Combine(Path.GetTempPath(), ".truedat-stage");
             public bool NoBitUsage { get; set; }
             public bool NoHfAnalysis { get; set; }
+            // SMFM is READ from the file's Sony tag, never computed, so unlike its two
+            // siblings this switch costs nothing to leave on — it exists to make a
+            // --strip-smfm durable. Without it the next cache MISS on any file still
+            // carrying the Sony block puts the data straight back.
+            public bool NoSmfm { get; set; }
         }
 
         /// <summary>
@@ -10748,7 +11007,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var (hr, hm, hs) = ComputeHfAnalysis(readPath, _ffmpegPath.Value, out var hfNa);
                 return (hr, hm, hs, hfNa);
             }, ((double?)null, (string?)null, (HfSpectralStructure?)null, true));
-            var smfmTask = Task.Run(() => SmfmReader.TryRead(readPath));
+            var smfmTask = ConditionalTask<SmfmReader.SmfmResult?>(stageOpts.NoSmfm, () => SmfmReader.TryRead(readPath), null);
 
             Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
 
@@ -12513,6 +12772,65 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { Directory.Delete(lsDir, true); } catch { } }
             }
 
+            // --- --strip-smfm: removing SMFM DATA without touching entries ---
+            // The property that makes this mode safe is that it is a field-level removal:
+            // every entry survives, every non-SMFM field survives, and the reader must
+            // agree the SMFM is gone afterwards. That last one is the pin that matters —
+            // the parse path falls back to the legacy sensme* keys, so a stripper that
+            // knew only the smfm* names would leave entries still reading as tagged.
+            {
+                var stripDoc = JsonNode.Parse(@"{
+                  ""D:\\M\\a.flac"": { ""artist"": ""A"", ""bpm"": 128.0, ""smfmScores"": [10, 255, 30], ""smfmChannel"": 1, ""smfmBpm"": 128.5 },
+                  ""D:\\M\\b.flac"": { ""artist"": ""B"", ""bpm"": 90.0 },
+                  ""D:\\M\\c.mp3"":  { ""artist"": ""C"", ""smfmScores"": [0, 0, 0], ""smfmBpm"": 90.0 },
+                  ""D:\\M\\d.wma"":  { ""artist"": ""D"", ""sensmeScores"": [5, 0, 0], ""sensmeChannel"": 0, ""sensmeChannelName"": ""x"" }
+                }")!.AsObject();
+
+                var stripPlan = PlanSmfmStrip(stripDoc);
+                Assert(stripPlan.Victims.Count == 3,
+                    $"strip-smfm: only entries carrying an SMFM key are victims (got {stripPlan.Victims.Count})");
+                Assert(!stripPlan.Victims.Contains(@"D:\M\b.flac"), "strip-smfm: an entry with no SMFM is never touched");
+                Assert(stripPlan.WithData == 2, $"strip-smfm: scored entries counted separately — they lose the model input (got {stripPlan.WithData})");
+                Assert(stripPlan.WithNoData == 1, $"strip-smfm: an all-zero block counts as no-data, not data (got {stripPlan.WithNoData})");
+                Assert(stripPlan.LegacyKeyed == 1, $"strip-smfm: legacy sensme* entries are counted and stripped too (got {stripPlan.LegacyKeyed})");
+                // The planner reports; it must not remove.
+                Assert(((JsonObject)stripDoc[@"D:\M\a.flac"]!).ContainsKey("smfmScores"),
+                    "strip-smfm: PlanSmfmStrip is pure — reporting removes nothing");
+
+                foreach (var vp in stripPlan.Victims) StripSmfmFromEntry((JsonObject)stripDoc[vp]!);
+
+                Assert(stripDoc.Count == 4, $"strip-smfm: removes DATA, never entries (got {stripDoc.Count} entries)");
+                var strippedA = (JsonObject)stripDoc[@"D:\M\a.flac"]!;
+                Assert(strippedA.Count == 2 && strippedA["artist"]!.GetValue<string>() == "A" && strippedA["bpm"]!.GetValue<double>() == 128.0,
+                    $"strip-smfm: every non-SMFM field on a stripped entry survives (got {strippedA.Count} fields)");
+                Assert(PlanSmfmStrip(stripDoc).Victims.Count == 0, "strip-smfm: idempotent — a second pass finds nothing");
+                Assert(!StripSmfmFromEntry((JsonObject)stripDoc[@"D:\M\b.flac"]!),
+                    "strip-smfm: StripSmfmFromEntry reports no change on an entry without SMFM");
+
+                // Reader agreement, both key generations. This is what "removed" has to mean:
+                // not "the smfm* keys are gone" but "the parse path no longer sees SMFM".
+                foreach (var vp in new[] { @"D:\M\a.flac", @"D:\M\d.wma" })
+                {
+                    using var rd = JsonDocument.Parse(stripDoc[vp]!.ToJsonString());
+                    var reread = ParseTrackFeaturesFromJson(rd.RootElement);
+                    Assert(!reread.HasSmfm && reread.SmfmScores == null && reread.SmfmChannel == null
+                           && reread.SmfmChannelName == null && reread.SmfmBpm == null,
+                        $"strip-smfm: the reader sees no SMFM after a strip ({vp})");
+                }
+                // And the same reader DOES see it before a strip on the legacy keys — otherwise
+                // the assert above would pass for the wrong reason (a fallback that never fired).
+                {
+                    using var pre = JsonDocument.Parse(@"{""sensmeScores"":[5,0,0],""sensmeChannel"":0}");
+                    Assert(ParseTrackFeaturesFromJson(pre.RootElement).HasSmfm,
+                        "strip-smfm: the reader's legacy sensme* fallback is live, so stripping it is load-bearing");
+                }
+
+                // Every key the reader can resolve SMFM from must be in the strip list.
+                foreach (var k in new[] { "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
+                                          "sensmeScores", "sensmeChannel", "sensmeChannelName" })
+                    Assert(SmfmJsonKeys.Contains(k), $"strip-smfm: SmfmJsonKeys covers the reader key {k}");
+            }
+
             // --- --list-formats: composition report (what the library is made of, and where) ---
             // Pins the two pure helpers and the CSV/bucketing contract. The property that makes
             // the report trustworthy is the same one --list-smfm has: every entry lands in
@@ -12960,6 +13278,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(res.HasValue && res.Value.Scores[0] == 10 && res.Value.Scores[9] == 100,
                         $"smfm m4a: per-channel averages [10..100] (got [{(res.HasValue ? string.Join(",", res.Value.Scores) : "")}])");
                     Assert(res.HasValue && res.Value.Channel == 9, $"smfm m4a: argmax channel is 9 (got {res?.Channel})");
+
+                    // --no-smfm must close the --refresh-smfm ingest route as well as the
+                    // fan-out one. Same file, same reader, only the switch differs — so a
+                    // guard deleted from ApplySmfmInPlace fails here by name instead of
+                    // silently re-populating a catalog the operator just stripped.
+                    var ingested = new TrackFeatures();
+                    Assert(ApplySmfmInPlace(ingested, tmpM4a) && ingested.HasSmfm,
+                        "no-smfm: by default ApplySmfmInPlace ingests the block");
+                    var prevNoSmfm = _noSmfm;
+                    _noSmfm = true;
+                    try
+                    {
+                        var blocked = new TrackFeatures();
+                        Assert(!ApplySmfmInPlace(blocked, tmpM4a), "no-smfm: --no-smfm refuses the SMFM ingest");
+                        Assert(blocked.SmfmScores == null && blocked.SmfmChannel == null && blocked.SmfmBpm == null,
+                            "no-smfm: --no-smfm leaves every SMFM field untouched");
+                    }
+                    finally { _noSmfm = prevNoSmfm; }
                 }
                 finally { try { File.Delete(tmpM4a); } catch { } }
 

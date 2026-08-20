@@ -5,6 +5,46 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+## [0.5.4.9-RC6] — 2026-08-19
+
+### Added
+
+- **`--strip-smfm [path]` — removing Sony 12-TONE data from a catalog was impossible.** Three
+  SMFM flags existed (`--list-smfm`, `--list-missing-smfm`, `--refresh-smfm`) and none of them
+  removed anything. Refresh structurally *cannot*: `ApplySmfmInPlace` returns early when the
+  file has no SMFM block, so it backfills but never clears. Combined with `smfm-tools` being
+  able to copy a file *without* its SMFM block — deliberately preserving the audio frames so
+  `audioStreamSha256` is unchanged — that was a one-way door pointing the wrong way: strip the
+  file, rescan, and truedat takes a cache hit and carries the old scores indefinitely while
+  `--list-smfm` still reports the entry as tagged. The tool that removes SMFM from the files was
+  the one guaranteeing the catalog never noticed.
+
+  The new mode removes **data, not entries** — every track and every other field survives, which
+  is what separates it from `--prune-excluded`'s removal class. It strips **both key
+  generations** (`smfm*` and the legacy `sensme*` the reader still falls back to, so a stripped
+  entry cannot keep reading as tagged through the fallback), writes a compressed rotated backup
+  first, swaps atomically, and **regenerates the `.mbxs` sidecar**. That last step is why this is
+  a mode and not a hand edit: the hub boots sidecar-first, so editing the JSON alone changes
+  nothing at runtime.
+
+  It reports the cost before paying it — how many entries carry *scored* 12-TONE data, since
+  those drop to the essentia-only mood head, the weaker one for valence. As a **count, never a
+  share**: the same command is a couple of percent of one library and 93% of another, and a
+  percentage is the form nobody can act on. `--dry-run` reports and writes nothing. Catalog-only
+  (no XML, no audio), so it runs on a metadata mirror, and it takes the same anchor rule as the
+  other catalog-rewriting verbs — it will not act on whatever `mbxmoods.json` happens to be in
+  the directory you are standing in.
+
+- **`--no-smfm` — because a strip alone is not durable.** SMFM is *read* from the file's Sony
+  tag and never computed, so a stripped catalog refills on the next real analysis of any file
+  that still carries the block: the strip is undone by ordinary work. This switch sits beside
+  `--no-bitusage` / `--no-hf-analysis` and closes every read route — the cache-miss fan-out and
+  the `--refresh-smfm` backfill alike (guarded inside `ApplySmfmInPlace` rather than at its call
+  sites, so a future caller cannot reopen the door by forgetting the check). Unlike its two
+  siblings it saves no meaningful time; it is what turns a one-off cleanup into a decision. It
+  **refuses** to run alongside `--refresh-smfm`: one forces the re-read the other suppresses, and
+  a silent no-op is exactly the failure mode this repo keeps paying for.
+
 ## [0.5.4.9-RC5] — 2026-08-19
 
 Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, so the
