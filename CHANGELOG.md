@@ -1,9 +1,9 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
-## [Unreleased]
+
 
 ## [0.5.4.9-RC7] — 2026-08-21
 
@@ -15,29 +15,24 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
 - **`truedat.config.json` — persistent defaults for the tuning flags.** Everything was a
   command-line flag, so a machine-level preference had to be retyped on every invocation or
   wrapped in a batch file. One file, beside the exe, no discovery ladder.
-
   Precedence is one rule: **explicit flag > config > built-in default**. It works by resolving
   the file before the argument loop and injecting the settings as leading arguments, so the
   operator's own tokens overwrite what config seeded — the alternative, consulting config at
   each use site, would re-implement that precedence dozens of times and drift. A `false`
   boolean emits nothing at all: false means the built-in default, and most of these flags have
   no opposite form.
-
   Keys **are** flag names, so there is no second vocabulary and no mapping table. The
   consequence to know: a negative flag stays negative, so "always skip SMFM" is
   `"no-smfm": true`.
-
   Fails loud in both directions, matching rules already in force elsewhere. An unparseable
   file **refuses the run** rather than falling back to defaults — working while the operator
   believes their settings apply is the silent-wrong failure, the same ruling
   `mbxmoods-exclude.json` follows — and the file is left untouched rather than "repaired",
   since rewriting it would discard their settings on top of ignoring them. An unknown or
   mistyped key refuses too and names the intended one, matching the unrecognized-flag policy.
-
   Settable is an allowlist holding **knobs only, never a verb and never a target path**. A
   config that could turn a bare `truedat` into `--strip-smfm`, or aim `--moods` elsewhere,
   would let a file nobody re-read decide what runs and what it runs against.
-
   `--config` reads and writes it, `--config reset` removes it naming what it discards,
   `--no-config` ignores it for one run, and `--paths` carries a row naming the file and what
   is in force. `--self-test` ignores it unconditionally — a suite whose results depend on the
@@ -47,13 +42,11 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   ends.** A scan only ever *adds* and *updates*; it never removes. So after every scan the
   catalog is a superset of what is on disk, holding entries for files that are gone, and it
   stays that way until someone remembers to run `--fixup`.
-
   It runs fixup as a **child process**, which is the design rather than an implementation
   detail: fixup loads the whole catalog again, and doing that inside a finished scan stacks it
   on the dictionary, the parsed library and whatever the collector has not returned, at the
   moment the process is already at its peak. A child starts from an empty address space and is
   exactly what the operator would have run by hand.
-
   Two refusals, both because the reconcile would be *wrong* rather than merely unhelpful:
   under `--chunk` each shard rewrites the whole catalog from its own copy, so concurrent shards
   would silently drop each other's work; and with no library XML there is nothing to reconcile
@@ -71,14 +64,12 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   empty fingerprint, and a failed track gets **no catalog entry** — so a millisecond of
   contention permanently cost that file its place until someone noticed and ran
   `--retry-errors`.
-
   The gate is now in one place, immediately after the copy, rather than in any single reader:
   fingerprint, sha, TagLib, Essentia and both ffmpeg pipes all read the same staged file.
   Retries only on `ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION` — a blanket retry would
   burn the backoff ladder on access-denied and disk-full across every track in a scan while
   changing nothing. On exhaustion it falls back to reading direct from the source, so a locked
   temp file costs one slower read instead of the track.
-
   **It also names the holder.** The bare OS message cites a GUID temp path and no process,
   which cannot tell an operator whether the cause is antivirus, a sync client or truedat
   itself. The Windows Restart Manager is queried and the answer distinguishes "could not
@@ -102,7 +93,6 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   Int32.MaxValue (~2.1 GB)"* — true of a `byte[]` and wrong of a `string`, which is UTF-16 and
   therefore hits the same 2 GB object limit at about **half** the file size. Measured:
   1,000,000,000 bytes reads fine, 1,150,000,000 throws `OutOfMemoryException`.
-
   So a catalog between roughly 1.07 GB and the 1.9 GB split threshold was legal to *write* and
   impossible to open with `--fixup`, `--remap`, `--migrate`, `--merge-moods`, `--prune-*` or
   `--strip-smfm` — precisely the failure a split threshold exists to prevent. Fixed at the
@@ -110,7 +100,6 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   exists and every verb shares the same byte ceiling as the scan's own loader. The relationship
   between the two limits is now pinned by the self-test, because both are hand-edited and
   nothing else compared them.
-
 
 ## [0.5.4.9-RC6] — 2026-08-19
 
@@ -122,19 +111,16 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   sometimes the need is just "this one entry is wrong, take it out". This is the targeted
   counterpart to `--prune-excluded` — that verb acts on rules and removes whatever they cover,
   this one removes exactly what you named.
-
   Matching uses `PathComparer`, the catalog's **own** key comparer, so case and slash direction
   cannot decide whether a path is the right one, and the report echoes the *catalog's* spelling
   rather than the operator's so what matched is visible. A path that matches nothing is listed by
   name and the run exits non-zero — a typo, a stale path or the wrong catalog must never read
   like a completed removal. One entry named twice is removed once. Rotated `.zip` backup, atomic
   swap, sidecar regenerated, `--dry-run` reports and writes nothing.
-
   **It removes the ENTRY, not the file, and says so every run.** An entry is a scan *result*, so
   the file is still in the library and the next scan analyzes it again — durability needs a rule,
   which is what the printed note points at. Presenting a removal as permanent when the next scan
   undoes it is the same shape of silent failure `--strip-smfm` had before `--no-smfm` existed.
-
   Ground truth is the operator, not the filesystem: unlike `--fixup` it never asks whether the
   file exists, so it runs on a metadata mirror and on entries whose volume is offline — and for
   that same reason it needs no reachability probe, since it cannot mistake a downed share for a
@@ -149,7 +135,6 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   file, rescan, and truedat takes a cache hit and carries the old scores indefinitely while
   `--list-smfm` still reports the entry as tagged. The tool that removes SMFM from the files was
   the one guaranteeing the catalog never noticed.
-
   The new mode removes **data, not entries** — every track and every other field survives, which
   is what separates it from `--prune-excluded`'s removal class. It strips **both key
   generations** (`smfm*` and the legacy `sensme*` the reader still falls back to, so a stripped
@@ -157,7 +142,6 @@ whose log carried a staged-file lock error and a handful of "silent" failures.
   first, swaps atomically, and **regenerates the `.mbxs` sidecar**. That last step is why this is
   a mode and not a hand edit: the hub boots sidecar-first, so editing the JSON alone changes
   nothing at runtime.
-
   It reports the cost before paying it — how many entries carry *scored* 12-TONE data, since
   those drop to the essentia-only mood head, the weaker one for valence. As a **count, never a
   share**: the same command is a couple of percent of one library and 93% of another, and a
@@ -193,10 +177,8 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   (path, codec, codecRaw, bitrate, sampleRate, bitDepth, fileSize, artist, album, title).
   Read-only over the catalog, resolved through the same ladder as the other catalog modes, and
   catalog-only — it runs on a metadata mirror with no audio in reach.
-
   `bitrate` / `sampleRate` / `bitDepth` ride along as columns rather than becoming a second
   rollup: "and by bitrate?" is then a pivot table, not another mode to build and maintain.
-
   **Two buckets deliberately refuse to answer.** `wma` covers WMA *and* WMA Lossless, and
   `m4a` covers AAC *and* ALAC, because `NormalizeCodec` derives the label from TagLib's MIME
   type and TagLib cannot cheaply separate either pair — the catalog simply does not carry the
@@ -208,7 +190,6 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   inferred from the file extension: a guessed value sitting in the same column as a measured
   one makes the whole column untrustworthy, and the extension is precisely what a mislabelled
   file lies about.
-
   The folder rollup climbs one level above the track's own folder — the artist on an
   `Artist\Album` tree, so an artist's albums aggregate into one line instead of scattering —
   and **stops at the volume**: climbing past `\\server\share` or a drive root collapses every
@@ -225,7 +206,6 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   `mbxmoods-smfm.csv` (path, **state**, artist, title, album, codec, smfmBpm, smfmChannel,
   topScore, scores), read-only over the catalog and resolved through the same ladder as the
   other catalog modes.
-
   It reports **three** states, not two. Building it surfaced a real disagreement: truedat's
   internal `HasSmfm` counts an all-zero score vector as present, while the sibling Python
   reporter counted it as missing — each collapsing the same file into the opposite bucket.
@@ -236,18 +216,19 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   exactly what has already been tried for `no-data`, so collapsing them either way hands the
   operator a work list that is partly wrong. Classification lives in one pure function
   (`ClassifySmfm`) so the CSV, the counts and any future consumer cannot drift apart.
-
   Every entry gets a row rather than only the ones carrying data, so the three counts always
   sum to the catalog — one file that accounts for everything cannot disagree with itself
   about coverage the way two half-reports can, which is the failure this whole change came
   out of. The raw score vector is a column because `smfmChannel` is the argmax **slot**, not
   a mood channel: the index alone is not usable downstream, so the list carries what a
   consumer actually needs and doubles as the corpus view for format work.
+
 - **`smfm-tools/check_moods_smfm.py` reports the same three states**, writing
   `smfm-data.csv` / `smfm-no-data.csv` / `smfm-no-smfm.csv` (replacing the old
   `smfm-missing.txt`; path is still column 1 in each). Its classifier mirrors truedat's
   `ClassifySmfm`, which is what closed the disagreement above. Sibling tooling, not part of
   `truedat.exe`.
+
 - **`smfm-tools/smfm_strip_copy.py`** — copy a FLAC or MP3 **without** its SMFM block. The
   source is opened read-only and a new file is written; truedat has never modified an audio
   file and this does not change that, which is why it is sibling tooling rather than a verb.
@@ -321,7 +302,6 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   00:29, so a `--refresh-features` pass run between them wrote the batch-2 marker *and* a phantom
   zero. Those entries satisfy `HasCurrentFeatures`, so neither a normal scan nor
   `--refresh-features` would ever re-derive them — permanently pinned.
-
   Both write surfaces that can see the stored bands now re-derive from them, so the value is
   written correctly wherever it is written rather than only on a fresh analysis. `--fixup`
   repairs existing entries in place (`RepairSpectralFlatness`, reported as `Reflattened:` in the
@@ -330,12 +310,10 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   audio, no Essentia, no re-analysis** — `barkFlatness`/`erbFlatness`/`melFlatness` were never
   broken and are present on 100% of entries; the repair is pure arithmetic over data already on
   disk.
-
   Only a stored `0` is touched: a non-zero value came from the fixed write path off these same
   bands, and re-deriving it from the already-rounded stored bands would churn the last decimal
   place across a healthy catalog for no gain. An entry with no bands keeps `0` — the field is
   core/always-present and `0` is the honest answer there.
-
   **`spectralDecrease` is not repairable this way** and is unaffected: its raw extractor value is
   gone (the per-track extractor JSON is deleted at parse) and what is stored is the already-
   annihilated `0.000000`, so there is no on-disk input to re-derive from. Those entries need a
@@ -350,6 +328,7 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   point rather than mislabelling the remainder. Nothing is written on either path — no CSV, no
   receipt, and no backfill computed against a half-read library. Same guard `--fixup` has had;
   verify was the gap.
+
 - **A catalog mode that WRITES will no longer act on whatever `mbxmoods.json` happens to be in
   the current directory.** `--compact`, `--prettify`, `--restore` and `--prune-excluded` fell
   back to `<cwd>\mbxmoods.json` when given no path — no existence check, no evidence the file
@@ -359,6 +338,7 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   (`--stats`, `--list-speech`, `--list-missing-smfm`) keep the convenience, because they cannot
   destroy anything. Same defect class as the `--apply-exclusions` cwd bug fixed earlier: a
   destructive verb must never inherit its target from wherever the operator is standing.
+
 - **The catalog modes now find your library the same way a bare scan does.** A bare `truedat`
   has auto-discovered its library since the drop-in install shipped — it probes the exe's parent
   directory, which is what makes `<library>\truedat\truedat.exe` work with no arguments. Every
@@ -370,6 +350,7 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   rules went missing along with it — the mode ran, found no catalog and no rules, and nothing in
   the output said *which* directory it had looked in. Both resolvers now share one probe order
   (exe-dir's parent, then exe-dir, then the current directory). Reported from the field.
+
 - **truedat run from MusicBee's hub data folder now finds the library.** `<root>\AppData\MBXHub\`
   is a natural place to keep the tool and run it from, but the library sits two levels up and
   across at `<root>\Library`, which neither the exe's parent nor the exe's own directory reaches.
@@ -377,6 +358,7 @@ Covers everything since RC3: **v0.5.4.9-RC4 shipped without its own section**, s
   subfolder — the exact inverse of the mapping that already takes a library to its hub folder, so
   the two encode one layout rather than two guesses. Nearest-first, so a catalog in the folder you
   run from still wins; bounded, so it cannot wander into an unrelated library.
+
 - **The catalog is found anywhere under a MusicBee instance**, including the instance's
   `AppData\` subfolders, and `%APPDATA%\MusicBee` is checked last for a non-portable install
   (whose data sits there while the program lives in Program Files, so nothing instance-relative
