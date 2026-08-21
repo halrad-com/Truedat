@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat ships as stage tags on `main` — `DV` (design validation), `EV` (engineering
@@ -18,17 +18,7 @@ first, and it is public.
 For what the code actually does, read the `0.5.4.9-RC7` section below — it is unchanged
 and not restated here. Since that tag, only documentation has moved:
 
-- **The compressed-live-catalog backlog item is now recorded as mutually exclusive with
-  MBXHub's catalog span index**, rather than "gated on restfulbee, consumer-first". That
-  wording asked whether the hub *could read* a compressed catalog — it could, so the gate
-  read as satisfiable, and whoever picked it up would have shipped it. Wrong question:
-  MBXHub now boots its mood cache by seeking byte offsets into the live catalog, and a
-  DEFLATE stream has no addressable byte N, so compressing the live file would not slow
-  that down — it would delete it. The constraint is recorded in both repos so neither has
-  to remember it alone. Compressed backups and snapshots are unaffected; nothing seeks
-  into those.
-- Changelog no longer carries an `[Unreleased]` heading — there is no release state for
-  it to describe.
+- 
 
 ## [0.5.4.9-RC7] — 2026-08-21
 
