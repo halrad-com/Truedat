@@ -5,6 +5,113 @@ Truedat versions are release-candidate tags (`vX.Y.Z-RCn`) on `main`.
 
 ## [Unreleased]
 
+## [0.5.4.9-RC7] — 2026-08-21
+
+Four fixes and one new facility, all from a single field report: a 155,726-track scan
+whose log carried a staged-file lock error and a handful of "silent" failures.
+
+### Added
+
+- **`truedat.config.json` — persistent defaults for the tuning flags.** Everything was a
+  command-line flag, so a machine-level preference had to be retyped on every invocation or
+  wrapped in a batch file. One file, beside the exe, no discovery ladder.
+
+  Precedence is one rule: **explicit flag > config > built-in default**. It works by resolving
+  the file before the argument loop and injecting the settings as leading arguments, so the
+  operator's own tokens overwrite what config seeded — the alternative, consulting config at
+  each use site, would re-implement that precedence dozens of times and drift. A `false`
+  boolean emits nothing at all: false means the built-in default, and most of these flags have
+  no opposite form.
+
+  Keys **are** flag names, so there is no second vocabulary and no mapping table. The
+  consequence to know: a negative flag stays negative, so "always skip SMFM" is
+  `"no-smfm": true`.
+
+  Fails loud in both directions, matching rules already in force elsewhere. An unparseable
+  file **refuses the run** rather than falling back to defaults — working while the operator
+  believes their settings apply is the silent-wrong failure, the same ruling
+  `mbxmoods-exclude.json` follows — and the file is left untouched rather than "repaired",
+  since rewriting it would discard their settings on top of ignoring them. An unknown or
+  mistyped key refuses too and names the intended one, matching the unrecognized-flag policy.
+
+  Settable is an allowlist holding **knobs only, never a verb and never a target path**. A
+  config that could turn a bare `truedat` into `--strip-smfm`, or aim `--moods` elsewhere,
+  would let a file nobody re-read decide what runs and what it runs against.
+
+  `--config` reads and writes it, `--config reset` removes it naming what it discards,
+  `--no-config` ignores it for one run, and `--paths` carries a row naming the file and what
+  is in force. `--self-test` ignores it unconditionally — a suite whose results depend on the
+  operator's settings is not testing the build.
+
+- **`--fixup-after-scan` (and the matching config key) — reconcile the catalog when the scan
+  ends.** A scan only ever *adds* and *updates*; it never removes. So after every scan the
+  catalog is a superset of what is on disk, holding entries for files that are gone, and it
+  stays that way until someone remembers to run `--fixup`.
+
+  It runs fixup as a **child process**, which is the design rather than an implementation
+  detail: fixup loads the whole catalog again, and doing that inside a finished scan stacks it
+  on the dictionary, the parsed library and whatever the collector has not returned, at the
+  moment the process is already at its peak. A child starts from an empty address space and is
+  exactly what the operator would have run by hand.
+
+  Two refusals, both because the reconcile would be *wrong* rather than merely unhelpful:
+  under `--chunk` each shard rewrites the whole catalog from its own copy, so concurrent shards
+  would silently drop each other's work; and with no library XML there is nothing to reconcile
+  against. A non-zero child exit is propagated, never swallowed — exit 3 is fixup **refusing**
+  because a library root was unreachable, which must not read as "reconciled".
+
+### Fixed
+
+- **A staged copy locked for a few milliseconds no longer costs the track its catalog entry.**
+  Staged copies are written into `%LOCALAPPDATA%\Temp` and opened by the worker fan-out
+  moments later, so anything watching that directory — a scan-on-close antivirus above all,
+  equally a backup agent or a sync client — holds the new file briefly and every reader races
+  the same window. Reported from the field as *"The process cannot access the file … because
+  it is being used by another process"*. The scan-health gate then failed the track for an
+  empty fingerprint, and a failed track gets **no catalog entry** — so a millisecond of
+  contention permanently cost that file its place until someone noticed and ran
+  `--retry-errors`.
+
+  The gate is now in one place, immediately after the copy, rather than in any single reader:
+  fingerprint, sha, TagLib, Essentia and both ffmpeg pipes all read the same staged file.
+  Retries only on `ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION` — a blanket retry would
+  burn the backoff ladder on access-denied and disk-full across every track in a scan while
+  changing nothing. On exhaustion it falls back to reading direct from the source, so a locked
+  temp file costs one slower read instead of the track.
+
+  **It also names the holder.** The bare OS message cites a GUID temp path and no process,
+  which cannot tell an operator whether the cause is antivirus, a sync client or truedat
+  itself. The Windows Restart Manager is queried and the answer distinguishes "could not
+  query" from "none visible to this process" — a SYSTEM-level holder such as a virus scanner
+  is not reported to an unelevated process, and collapsing those two answers would point the
+  operator in the opposite direction. Recovered contention is counted separately in the
+  staging summary, because it succeeded and cost only latency — but a non-zero count is the
+  signal that `--stage-dir` should move the staging directory somewhere unwatched.
+
+- **A silent track above 44.1 kHz is no longer failed for a signal that silence cannot
+  produce.** `ComputeBitUsage` already reported *not applicable* when its window was pure
+  silence; `ComputeHfAnalysis` did not, so the scan-health gate read "applicable but absent"
+  and failed the track on `hf` — and a failed track gets no catalog entry. It was decided by
+  container: the sample-rate check short-circuits first, so identical silent content passed at
+  44.1 kHz and lost its entry at 96 kHz. Silence is a property of the *content*, not a
+  component failure.
+
+- **Catalog verbs no longer break on a catalog the writer considers legal.** Eight loaders
+  read the whole file with `File.ReadAllText`, and the threshold that decides when a catalog
+  is split into parts was set from a note reading *"one string / byte[], which caps at
+  Int32.MaxValue (~2.1 GB)"* — true of a `byte[]` and wrong of a `string`, which is UTF-16 and
+  therefore hits the same 2 GB object limit at about **half** the file size. Measured:
+  1,000,000,000 bytes reads fine, 1,150,000,000 throws `OutOfMemoryException`.
+
+  So a catalog between roughly 1.07 GB and the 1.9 GB split threshold was legal to *write* and
+  impossible to open with `--fixup`, `--remap`, `--migrate`, `--merge-moods`, `--prune-*` or
+  `--strip-smfm` — precisely the failure a split threshold exists to prevent. Fixed at the
+  cause: catalog loads now parse straight from the stream, so the intermediate string never
+  exists and every verb shares the same byte ceiling as the scan's own loader. The relationship
+  between the two limits is now pinned by the self-test, because both are hand-edited and
+  nothing else compared them.
+
+
 ## [0.5.4.9-RC6] — 2026-08-19
 
 ### Added
