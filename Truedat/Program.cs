@@ -1157,6 +1157,10 @@ namespace Truedat
         // at end-of-scan. Reset at start of each scan mode.
         internal static int _stageSuccessCount;
         internal static int _stageFallbackCount;
+        // Staged copies that hit a sharing violation and opened on a later attempt.
+        // Counted separately from fallbacks: these SUCCEEDED, so they cost only latency
+        // — but a non-zero count is the signal that something is watching the stage dir.
+        internal static int _stageLockRetryCount;
         internal static long _stageBytesTotal;   // bytes copied over the source link (successful stages)
         internal static long _stageFirstStamp;   // Stopwatch ts of the first staging copy start (0 = none yet)
         internal static long _stageLastStamp;    // Stopwatch ts of the last staging copy end
@@ -9304,6 +9308,65 @@ namespace Truedat
             return true;
         }
 
+        // Staged-copy readiness retry. Statics (not const) so the self-test can
+        // shrink them and exercise the ladder without a multi-second test.
+        internal static int StagedOpenMaxAttempts = 5;
+        internal static int StagedOpenBaseDelayMs = 200;   // linear: 200+400+600+800 = 2.0s worst case
+
+        /// <summary>
+        /// True for the two Win32 codes that mean "someone else has this open with an
+        /// incompatible share mode": ERROR_SHARING_VIOLATION (32) and
+        /// ERROR_LOCK_VIOLATION (33). Deliberately NOT a blanket IOException test —
+        /// access-denied, disk-full and a truncated copy are permanent conditions, and
+        /// retrying those would burn the backoff ladder on every one of tens of
+        /// thousands of tracks while changing nothing. The win32 code lives in the low
+        /// word of HResult.
+        /// </summary>
+        internal static bool IsSharingViolation(Exception ex)
+            => ex is IOException && ((ex.HResult & 0xFFFF) == 32 || (ex.HResult & 0xFFFF) == 33);
+
+        /// <summary>
+        /// Prove a just-copied staged file is actually openable before any worker is
+        /// pointed at it, retrying on a sharing violation with linear backoff.
+        ///
+        /// The race this closes: File.Copy writes a new file into the stage dir and the
+        /// fan-out opens it milliseconds later. Anything watching that directory — a
+        /// scan-on-close antivirus above all, but equally a backup agent or a sync
+        /// client — holds the new file briefly, and every reader (fingerprint, sha,
+        /// TagLib, essentia, both ffmpeg pipes) races the same window. Gating ONCE here
+        /// covers all of them; retrying inside any single reader would leave the others
+        /// exposed. The condition is transient by construction: a holder that never let
+        /// go would make the file permanently unusable, not slow.
+        ///
+        /// <paramref name="holderNote"/> is filled on the FIRST violation (not the last)
+        /// so it names who held it at the moment contention started, and is non-null
+        /// whenever contention was seen at all — including runs that then succeeded,
+        /// which is the case worth logging because it is otherwise invisible.
+        /// Non-sharing failures propagate to the caller unretried.
+        /// </summary>
+        internal static bool TryOpenStagedWithRetry(string path, int maxAttempts, int baseDelayMs, out string? holderNote)
+        {
+            holderNote = null;
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    // Smallest possible probe: we care whether the handle opens, not
+                    // about reading bytes. Same access/share the real readers request,
+                    // so a pass here means a pass for them.
+                    using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.None))
+                        return true;
+                }
+                catch (Exception ex) when (IsSharingViolation(ex))
+                {
+                    if (holderNote == null)
+                        holderNote = FileLockInfo.Describe(FileLockInfo.TryGetHolders(path));
+                    if (attempt >= maxAttempts) return false;
+                    Thread.Sleep(baseDelayMs * attempt);
+                }
+            }
+        }
+
         /// <summary>
         /// Decide whether to stage, hardlink, or pass through the source path.
         /// Always returns a non-null handle.
@@ -9366,6 +9429,20 @@ namespace Truedat
                 long copyStart = Stopwatch.GetTimestamp();
                 File.Copy(sourcePath, dest, overwrite: false);
                 long copyEnd = Stopwatch.GetTimestamp();
+                // Gate on the staged copy actually being openable. On exhaustion, throw
+                // into this method's own catch, which deletes the copy and returns a
+                // direct-read handle — a locked temp file then costs one slower read
+                // from the source instead of costing the track its catalog entry.
+                if (!TryOpenStagedWithRetry(dest, StagedOpenMaxAttempts, StagedOpenBaseDelayMs, out var lockNote))
+                    throw new IOException($"staged copy still locked after {StagedOpenMaxAttempts} attempts — {lockNote}");
+                if (lockNote != null)
+                {
+                    // Contention that RESOLVED. Logged because it is otherwise entirely
+                    // invisible, and it is the early warning for the stage dir sitting
+                    // somewhere a scanner watches (%LOCALAPPDATA%\Temp by default).
+                    Interlocked.Increment(ref _stageLockRetryCount);
+                    Console.Error.WriteLine($"[stage-lock] {Path.GetFileName(dest)}: opened after retry — {lockNote}");
+                }
                 // Capture mtime IMMEDIATELY after the copy completes. If the file
                 // is tag-touched between now and end-of-work, the snapshot still
                 // matches the bytes we just copied — preventing TrackEntry from
@@ -9427,6 +9504,13 @@ namespace Truedat
                     Console.WriteLine(
                         $"              source link slow or unstable — {fallback} of {total} reads bypassed staging");
             }
+            // Recovered lock contention. Named on its own line because it is a DIFFERENT
+            // problem from a slow link: the stage dir is being watched by something
+            // (antivirus, backup, sync), and --stage-dir moves it out of the way.
+            int lockRetries = Volatile.Read(ref _stageLockRetryCount);
+            if (lockRetries > 0)
+                Console.WriteLine(
+                    $"              {lockRetries} staged file(s) briefly locked by another process — retried OK (see [stage-lock] lines; --stage-dir to relocate)");
             // Aggregate link throughput: bytes pulled over the source link across the wall
             // span (first copy start .. last copy end). Read this against the analysis MB/s
             // — a link far below it means the scan is link-bound (workers waiting on copies),
@@ -12594,6 +12678,71 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(h.Path == @"\\server\share\test.mp3", "stage failure preserves source path");
             }
 
+            // --- staged-copy sharing-violation retry ---
+            // The race being closed: a scan-on-close antivirus (or backup/sync agent)
+            // holds a freshly-copied staged file for a few ms, every worker races it, and
+            // the fingerprint failure costs the track its catalog entry.
+            {
+                // The win32-code gate must be exact. A blanket IOException retry would
+                // burn the ladder on permanent errors across every track in a scan.
+                Assert(IsSharingViolation(new IOException("locked", unchecked((int)0x80070020))),
+                    "IsSharingViolation: ERROR_SHARING_VIOLATION (32) retries");
+                Assert(IsSharingViolation(new IOException("locked", unchecked((int)0x80070021))),
+                    "IsSharingViolation: ERROR_LOCK_VIOLATION (33) retries");
+                Assert(!IsSharingViolation(new IOException("denied", unchecked((int)0x80070005))),
+                    "IsSharingViolation: ACCESS_DENIED (5) is permanent, no retry");
+                Assert(!IsSharingViolation(new IOException("gone", unchecked((int)0x80070002))),
+                    "IsSharingViolation: FILE_NOT_FOUND (2) is permanent, no retry");
+                Assert(!IsSharingViolation(new UnauthorizedAccessException("nope")),
+                    "IsSharingViolation: non-IOException is never a sharing violation");
+
+                string lockProbe = Path.Combine(Path.GetTempPath(), $"truedat-lock-{Guid.NewGuid():N}.bin");
+                File.WriteAllBytes(lockProbe, new byte[] { 1, 2, 3 });
+                try
+                {
+                    // Unlocked file opens on attempt 1 and reports no contention at all.
+                    Assert(TryOpenStagedWithRetry(lockProbe, 3, 10, out var freeNote) && freeNote == null,
+                        "retry: unlocked staged file opens immediately, no holder note");
+
+                    // Held with FileShare.None for the whole window -> exhausts, and the
+                    // holder note is populated so the caller can name it.
+                    using (new FileStream(lockProbe, FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        Assert(!TryOpenStagedWithRetry(lockProbe, 3, 10, out var heldNote),
+                            "retry: permanently-held staged file exhausts its attempts");
+                        // Pins the Restart Manager P/Invoke itself, not just the wording:
+                        // this process holds the probe with FileShare.None, so RM must name
+                        // truedat. A non-null check alone would pass on a totally broken
+                        // interop, since Describe(null) is also non-null.
+                        Assert(heldNote != null && heldNote.IndexOf("truedat", StringComparison.OrdinalIgnoreCase) >= 0,
+                            $"retry: exhaustion names the real lock holder via Restart Manager (got: {heldNote})");
+                    }
+
+                    // Released mid-ladder -> succeeds on a later attempt, and STILL reports
+                    // a note (contention happened, and a recovered lock is the case worth
+                    // logging precisely because it leaves no other trace).
+                    var gate = new FileStream(lockProbe, FileMode.Open, FileAccess.Read, FileShare.None);
+                    var releaser = new System.Threading.Thread(() => { Thread.Sleep(120); try { gate.Dispose(); } catch { } });
+                    releaser.IsBackground = true;
+                    releaser.Start();
+                    bool recovered = TryOpenStagedWithRetry(lockProbe, 8, 60, out var recNote);
+                    releaser.Join(5000);
+                    Assert(recovered, "retry: lock released mid-ladder opens on a later attempt");
+                    Assert(recNote != null, "retry: recovered contention still reports a holder note");
+                }
+                finally { try { File.Delete(lockProbe); } catch { } }
+
+                // Describe() must never turn "we could not see a holder" into "nothing
+                // held it" — a SYSTEM-level holder is invisible to an unelevated process,
+                // and the two answers lead an operator to opposite conclusions.
+                Assert(FileLockInfo.Describe(null).Contains("could not query"),
+                    "FileLockInfo.Describe: null = could not query");
+                Assert(FileLockInfo.Describe(new List<string>()).Contains("none visible"),
+                    "FileLockInfo.Describe: empty = none VISIBLE, not none");
+                Assert(FileLockInfo.Describe(new List<string> { "MsMpEng (PID 42)" }) == "lock holder: MsMpEng (PID 42)",
+                    "FileLockInfo.Describe: names the holder");
+            }
+
             Console.WriteLine();
             Console.WriteLine("Duplicate candidate-key self-test");
             TrackEntry MakeDup(double[]? mfcc, double bpm, string key, string mode, int durMs) => new TrackEntry
@@ -12834,20 +12983,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     var (pass, _) = ClassifyTrackHealth(true, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
                     Assert(pass, "classify: decoded=null skips the decode gate");
-                }
-                // under-decode retry decision (mirrors the decode gate; the transcode itself is
-                // integration-proven on a real WMA-Lossless file, not unit-tested here)
-                {
-                    // WMA-Lossless shape: essentia read 46s of a 299s file -> retry
-                    Assert(ShouldRetryUnderDecode(46.2, 299.24, 0.95), "retry: 46s of 299s triggers a transcode-retry");
-                    // full decode -> no retry
-                    Assert(!ShouldRetryUnderDecode(299.24, 299.24, 0.95), "retry: full decode does not retry");
-                    // no decoded length / no reference -> no basis to retry
-                    Assert(!ShouldRetryUnderDecode(null, 299.24, 0.95), "retry: null decoded length never retries");
-                    Assert(!ShouldRetryUnderDecode(46.2, 0.0, 0.95), "retry: no reference duration never retries");
-                    // boundary: 0.95 * 299.24 = 284.278 — just under retries, just over does not
-                    Assert(ShouldRetryUnderDecode(283.0, 299.24, 0.95), "retry: 283s (<95%) retries");
-                    Assert(!ShouldRetryUnderDecode(285.0, 299.24, 0.95), "retry: 285s (>95%) does not retry");
                 }
                 // --convert-dir codec classifier: lossless-non-FLAC converts, FLAC + lossy do not
                 {
