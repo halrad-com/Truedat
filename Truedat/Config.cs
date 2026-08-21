@@ -68,6 +68,11 @@ namespace Truedat
             new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Help = "duration that tags a track as long" },
             new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Help = "skip tracks longer than this (seconds)" },
             new Setting { Key = "stage-dir",       Kind = Kind.Text, Help = "where staged copies are written" },
+            // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
+            // (as a child process). It earns its place because "keep the catalog matching what
+            // is on disk" is a standing policy, not a per-invocation decision — and it removes
+            // nothing a hand-run --fixup would not, with the same guards and the same refusals.
+            new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Help = "reconcile the catalog against disk after a full scan" },
         };
 
         private static readonly Dictionary<string, Setting> ByKey =

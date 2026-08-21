@@ -827,7 +827,7 @@ namespace Truedat
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
-            "config", "no-config",
+            "config", "no-config", "fixup-after-scan",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1196,6 +1196,11 @@ namespace Truedat
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
         // skipped structurally so they don't churn Essentia or clutter mbxmoods-errors.csv.
         internal static bool _enableShortFiles;
+
+        // --fixup-after-scan: reconcile the catalog against disk once the scan finishes.
+        // A scan only adds and updates, so without this the catalog keeps entries for files
+        // that are gone. Runs as a child process (see RunPostScanFixup).
+        internal static bool _fixupAfterScan;
 
         // --refresh-smfm: force SMFM to be re-read on cache hits (the pre-2026-08-04 behavior).
         // Default off — cache hits carry the stored SMFM forward (RebuildCacheEntryCore) instead
@@ -2290,6 +2295,7 @@ namespace Truedat
                 // runs on the raw args). They are listed here only so the unrecognized-flag
                 // guard does not reject them.
                 else if (canonical == "no-config") { }
+                else if (canonical == "fixup-after-scan") _fixupAfterScan = true;
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
@@ -5893,6 +5899,102 @@ namespace Truedat
 
             if (failed > 0)
                 Environment.ExitCode = 1;
+
+            // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
+            // catalog is a superset of what is on disk, holding entries for files that are
+            // gone. Reconciling that is --fixup's job, and this runs it automatically when
+            // the operator has asked for it.
+            if (_fixupAfterScan)
+                RunPostScanFixup(xmlPath, moodsPath, chunkTotal);
+        }
+
+        /// <summary>
+        /// Run --fixup as a CHILD PROCESS after a scan, not inline.
+        ///
+        /// The reason is memory, and it is not theoretical. RunFixup does
+        /// File.ReadAllText(catalog) — on a 584 MB catalog that is a ~1.17 GB string,
+        /// because .NET strings are UTF-16 — and then builds a JsonNode DOM on top of it,
+        /// which is an object per value. Standalone that is fine: it is the only thing in
+        /// the process. Inline after a scan it lands on top of a live allTracks dictionary,
+        /// the parsed library, and whatever the GC has not returned, at the exact moment
+        /// the process is already at its peak. The libraries most in need of reconciling
+        /// are the ones where that tips over.
+        ///
+        /// A child process starts from an empty address space and is exactly what the
+        /// operator would have run by hand. The cost is one process start.
+        ///
+        /// Refuses under --chunk: each shard loads and rewrites the WHOLE catalog from its
+        /// own copy, so concurrent shards would silently drop each other's work — the same
+        /// reason --backfill already warns that shards must run sequentially.
+        /// </summary>
+        internal enum PostScanFixup { Run, SkipChunked, SkipNoLibrary }
+
+        /// <summary>
+        /// Whether a finished scan should hand off to --fixup. Pure, and extracted from
+        /// RunPostScanFixup so it can be pinned: the rest of that method starts a process,
+        /// which a self-test cannot exercise, and an unpinned skip rule is one that silently
+        /// stops skipping.
+        ///
+        /// Two refusals, both about the reconcile being WRONG rather than merely unhelpful:
+        /// under --chunk each shard loads and rewrites the whole catalog from its own copy,
+        /// so concurrent shards would silently drop each other's work; and with no library
+        /// XML there is nothing to reconcile against.
+        /// </summary>
+        internal static PostScanFixup DecidePostScanFixup(int chunkTotal, string? xmlPath)
+        {
+            if (chunkTotal > 0) return PostScanFixup.SkipChunked;
+            if (string.IsNullOrEmpty(xmlPath)) return PostScanFixup.SkipNoLibrary;
+            return PostScanFixup.Run;
+        }
+
+        static void RunPostScanFixup(string? xmlPath, string moodsPath, int chunkTotal)
+        {
+            Console.WriteLine();
+            var decision = DecidePostScanFixup(chunkTotal, xmlPath);
+            if (decision == PostScanFixup.SkipChunked)
+            {
+                Console.WriteLine("Skipping post-scan fixup: --chunk shards each rewrite the whole catalog.");
+                Console.WriteLine("  Run  truedat --fixup  once, after every shard has finished.");
+                return;
+            }
+            if (decision == PostScanFixup.SkipNoLibrary)
+            {
+                Console.WriteLine("Skipping post-scan fixup: no library XML was resolved for this run.");
+                return;
+            }
+
+            string exe = Process.GetCurrentProcess().MainModule?.FileName ?? "truedat.exe";
+            Console.WriteLine("=== Post-scan fixup ===");
+            Console.WriteLine($"  {Path.GetFileName(exe)} --fixup \"{xmlPath}\" --moods \"{moodsPath}\"");
+            Console.WriteLine("  (separate process: fixup loads the whole catalog again, and doing that");
+            Console.WriteLine("   inside a finished scan stacks it on memory the scan still holds)");
+            Console.WriteLine();
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exe,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                psi.Arguments = $"--fixup {PathHelper.QuoteArg(xmlPath!)} --moods {PathHelper.QuoteArg(moodsPath)}";
+                using var proc = Process.Start(psi);
+                if (proc == null) { Console.Error.WriteLine("Post-scan fixup: could not start truedat."); Environment.ExitCode = 1; return; }
+                proc.WaitForExit();
+                if (proc.ExitCode != 0)
+                {
+                    // Surface it rather than swallowing: exit 3 is fixup REFUSING because a
+                    // library root was unreachable, which is precisely the case an operator
+                    // must not read as "reconciled".
+                    Console.Error.WriteLine($"Post-scan fixup exited {proc.ExitCode} — the catalog was NOT reconciled.");
+                    Environment.ExitCode = proc.ExitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Post-scan fixup failed to run: {ex.Message}");
+                Environment.ExitCode = 1;
+            }
         }
 
         // Known-bad: fullwidth Unicode substitutions for OS-illegal filename characters.
@@ -12953,6 +13055,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "config: --config refuses to set a verb");
                 }
                 finally { try { Directory.Delete(cfgDir, true); } catch { } }
+
+                // Post-scan fixup: both refusals are about the reconcile being WRONG, not
+                // merely unhelpful, so they are pinned rather than left to a code comment.
+                Assert(DecidePostScanFixup(0, @"C:\lib\Music Library.xml") == PostScanFixup.Run,
+                    "fixup-after-scan: a normal full scan hands off to fixup");
+                Assert(DecidePostScanFixup(3, @"C:\lib\Music Library.xml") == PostScanFixup.SkipChunked,
+                    "fixup-after-scan: refuses under --chunk (shards would drop each other's rewrites)");
+                Assert(DecidePostScanFixup(0, null) == PostScanFixup.SkipNoLibrary,
+                    "fixup-after-scan: refuses with no library XML (nothing to reconcile against)");
+                Assert(DecidePostScanFixup(0, "") == PostScanFixup.SkipNoLibrary,
+                    "fixup-after-scan: an empty library path is treated as absent, not as a path");
 
                 Assert(CanonicalFlag("--no-config") == "no-config" && CanonicalFlag("-no-config") == "no-config"
                        && CanonicalFlag("/no-config") == "no-config" && CanonicalFlag("bare") == "bare",
