@@ -1182,15 +1182,30 @@ namespace Truedat
         internal static long ErrorLogMaxBytes = 5 * 1024 * 1024;   // static (not const) so the self-test can lower it
         static bool _errorLogHeaderWritten;   // per run: header + rotation happen on the first failure logged
 
-        // Catalog part-roll threshold. A single catalog whose serialized size approaches ~2 GB can
-        // no longer be LOADED: LoadExistingMoods (JsonDocument.Parse) and every --fixup / --migrate /
-        // --remap / --merge-moods path materialize the whole file into one string / byte[], which
-        // caps at Int32.MaxValue (~2.1 GB). So SaveResults SPLITS an over-limit catalog into numbered
-        // parts (mbxmoods.json.1, .2, …), each a complete catalog kept under this line (deliberate
-        // margin below the wall), and the multi-part reader stitches them back. INVARIANT: a catalog
-        // is EITHER a single mbxmoods.json OR the numbered parts, never both. Static (not const) so
-        // the self-test can lower it to force a split over a handful of tracks.
-        internal static long CatalogMaxBytes = 1_900_000_000L;   // ~1.9 GB, ~200 MB under the ~2.1 GB .NET wall
+        // The ceiling every catalog loader shares: a single .NET object caps at 2 GB, and each
+        // loader materializes the file as ONE buffer. Byte-based readers therefore top out near
+        // 2.1 GB of file — JsonDocument.Parse(Stream) in LoadExistingMoods, ReadAllBytes in
+        // --compact/--prettify, and LoadCatalogRoot for every other verb.
+        //
+        // This constant is deliberately not "2 GB". The original note here said the loaders
+        // "materialize the whole file into one string / byte[], which caps at Int32.MaxValue
+        // (~2.1 GB)" — true of a byte[] and WRONG of a string, because a .NET string is UTF-16 and
+        // an ASCII catalog costs 2 bytes per character, hitting the same object limit at about
+        // HALF the file size. Measured on this runtime (4.0.30319.42000, no gcAllowVeryLargeObjects):
+        // File.ReadAllText took 1,000,000,000 bytes fine and threw OutOfMemoryException at
+        // 1,150,000,000. Eight verbs read that way, so catalogs between ~1.07 GB and the old
+        // 1.9 GB threshold were legal to WRITE and impossible to fixup/migrate/remap/merge —
+        // the one thing a part-roll threshold exists to prevent. LoadCatalogRoot now parses
+        // straight from the stream and the doubling is gone, so the margin below is real again.
+        internal const long CatalogLoadMaxBytes = 2_100_000_000L;
+
+        // Catalog part-roll threshold. SaveResults SPLITS an over-limit catalog into numbered parts
+        // (mbxmoods.json.1, .2, …), each a complete catalog kept under this line, and the multi-part
+        // reader stitches them back. INVARIANT — pinned by the self-test — this stays below
+        // CatalogLoadMaxBytes, so what truedat writes is always something truedat can read.
+        // A catalog is EITHER a single mbxmoods.json OR the numbered parts, never both. Static
+        // (not const) so the self-test can lower it to force a split over a handful of tracks.
+        internal static long CatalogMaxBytes = 1_900_000_000L;   // ~200 MB under the load ceiling
 
         // --enableshortfiles: scan very short files that are skipped by default. Off by
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
@@ -6482,6 +6497,33 @@ namespace Truedat
                && orphaned > MassOrphanFloor
                && orphaned > totalEntries * MassOrphanFraction;
 
+        /// <summary>
+        /// Load a catalog's root object WITHOUT materializing the file as a string.
+        ///
+        /// This exists because File.ReadAllText has a ceiling half as high as the one the
+        /// part-roll threshold was set against. A .NET string is UTF-16, so an ASCII catalog
+        /// costs 2 bytes per character and hits the 2 GB single-object limit at roughly
+        /// 1.07 GB of FILE. Measured on this runtime (4.0.30319.42000, no
+        /// gcAllowVeryLargeObjects): 1,000,000,000 bytes reads fine, 1,150,000,000 bytes
+        /// throws OutOfMemoryException. A byte[] has no such doubling, which is why the
+        /// original note ("one string / byte[], which caps at Int32.MaxValue") was right
+        /// about --compact's ReadAllBytes and wrong about the other eight loaders.
+        ///
+        /// Parsing straight from the stream never builds the intermediate string at all, so
+        /// every catalog verb now shares the same ~2 GB byte ceiling as the scan's own
+        /// LoadExistingMoods, and CatalogMaxBytes is once again a threshold that guarantees
+        /// what truedat writes is something truedat can read.
+        ///
+        /// Throws exactly what the string form threw — JsonException on malformed content,
+        /// IO exceptions on a missing or unreadable file — so existing callers' catch blocks
+        /// are unchanged. UTF-8 only (with or without BOM), which is what SaveResults writes.
+        /// </summary>
+        internal static JsonObject? LoadCatalogRoot(string path, JsonDocumentOptions docOptions)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan);
+            return JsonNode.Parse(fs, null, docOptions)?.AsObject();
+        }
+
         static void RunFixup(string xmlPath, string moodsPath)
         {
             Console.WriteLine("=== Fixup Mode ===");
@@ -6490,9 +6532,8 @@ namespace Truedat
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
 
             Console.WriteLine($"Loading moods: {moodsPath}");
-            var json = File.ReadAllText(moodsPath);
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
-            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            var root = LoadCatalogRoot(moodsPath, docOptions);
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
@@ -6755,8 +6796,7 @@ namespace Truedat
             JsonObject? root;
             try
             {
-                var json = File.ReadAllText(moodsPath);
-                root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+                root = LoadCatalogRoot(moodsPath, docOptions);
             }
             catch (JsonException)
             {
@@ -6977,7 +7017,7 @@ namespace Truedat
             {
                 try
                 {
-                    var root = JsonNode.Parse(File.ReadAllText(f))?.AsObject();
+                    var root = LoadCatalogRoot(f, default);
                     if (root == null) { Console.WriteLine($"  skipped (unreadable): {Path.GetFileName(f)}"); continue; }
                     ulong Hex(string? s) => string.IsNullOrEmpty(s) ? 0
                         : ulong.TryParse(s, System.Globalization.NumberStyles.HexNumber,
@@ -7905,8 +7945,7 @@ namespace Truedat
                 }
 
                 Console.WriteLine($"Loading: {source}");
-                var json = File.ReadAllText(source);
-                var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+                var root = LoadCatalogRoot(source, docOptions);
                 if (root == null)
                 {
                     Console.WriteLine($"  Invalid JSON: {source}");
@@ -8041,9 +8080,8 @@ namespace Truedat
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
 
             Console.WriteLine($"Loading: {moodsPath}");
-            var json = File.ReadAllText(moodsPath);
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
-            var root = JsonNode.Parse(json, null, docOptions)?.AsObject();
+            var root = LoadCatalogRoot(moodsPath, docOptions);
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
@@ -8279,7 +8317,7 @@ namespace Truedat
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
-            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            try { root = LoadCatalogRoot(moodsPath, docOptions); }
             catch (JsonException)
             {
                 Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
@@ -8425,7 +8463,7 @@ namespace Truedat
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
-            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            try { root = LoadCatalogRoot(moodsPath, docOptions); }
             catch (JsonException)
             {
                 Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
@@ -8587,7 +8625,7 @@ namespace Truedat
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
-            try { root = JsonNode.Parse(File.ReadAllText(moodsPath), null, docOptions)?.AsObject(); }
+            try { root = LoadCatalogRoot(moodsPath, docOptions); }
             catch (JsonException)
             {
                 Console.WriteLine($"Not a valid moods JSON file: {moodsPath}");
@@ -13055,6 +13093,42 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "config: --config refuses to set a verb");
                 }
                 finally { try { Directory.Delete(cfgDir, true); } catch { } }
+
+                // The write threshold must stay under the load ceiling, or truedat can produce a
+                // catalog it cannot open. That is not hypothetical: the threshold was set from a
+                // ceiling that was right for a byte[] and twice too high for a string, and it left
+                // a ~1.07-1.9 GB window where every ReadAllText verb died on a legal catalog. The
+                // relationship is pinned rather than trusted to a comment, because both numbers
+                // are edited by hand and nothing else compares them.
+                Assert(CatalogMaxBytes < CatalogLoadMaxBytes,
+                    $"catalog: the part-roll threshold ({CatalogMaxBytes:N0}) stays under the load ceiling ({CatalogLoadMaxBytes:N0})");
+
+                // A catalog written at the threshold must round-trip through the SHARED loader —
+                // the streaming one, not a string. Proves the helper on real catalog shape; the
+                // size itself is covered by the invariant above rather than by allocating 2 GB.
+                {
+                    string lcDir = Path.Combine(Path.GetTempPath(), $"truedat-load-{Guid.NewGuid():N}");
+                    Directory.CreateDirectory(lcDir);
+                    try
+                    {
+                        string lcPath = Path.Combine(lcDir, "mbxmoods.json");
+                        File.WriteAllText(lcPath, "{\"trackCount\":2,\"tracks\":{\"a\":{\"bpm\":120},\"b\":{\"bpm\":90}}}");
+                        var lcRoot = LoadCatalogRoot(lcPath, new JsonDocumentOptions
+                        { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+                        Assert(lcRoot != null && lcRoot["tracks"]?.AsObject().Count == 2,
+                            "catalog: LoadCatalogRoot parses straight from the stream, no intermediate string");
+
+                        // Malformed content must still surface as JsonException — every caller's
+                        // catch block depends on that and none of them were changed.
+                        File.WriteAllText(lcPath, "{ not json ");
+                        bool threwJson = false;
+                        try { LoadCatalogRoot(lcPath, default); }
+                        catch (JsonException) { threwJson = true; }
+                        catch { }
+                        Assert(threwJson, "catalog: LoadCatalogRoot still throws JsonException on malformed content");
+                    }
+                    finally { try { Directory.Delete(lcDir, true); } catch { } }
+                }
 
                 // Post-scan fixup: both refusals are about the reconcile being WRONG, not
                 // merely unhelpful, so they are pinned rather than left to a code comment.
