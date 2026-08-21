@@ -827,6 +827,7 @@ namespace Truedat
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
+            "config", "no-config",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -848,6 +849,113 @@ namespace Truedat
         /// null when nothing is close enough to be a plausible typo. Threshold:
         /// distance &lt;= 2 for names under 10 chars, &lt;= 3 otherwise; unknowns
         /// shorter than 3 chars never suggest (everything is 1 edit from them).</summary>
+        /// <summary>
+        /// `--config` — read and write the persistent flag defaults. Handled before the
+        /// argument loop and always returns, so config administration can never be mixed
+        /// into a scan invocation.
+        ///
+        ///   truedat --config                  show what is in force
+        ///   truedat --config &lt;key&gt; &lt;value&gt;   set it
+        ///   truedat --config reset            remove the file
+        ///
+        /// Writes on demand only. Nothing is created as a side effect of an unrelated run.
+        /// </summary>
+        static void RunConfigCommand(string[] args)
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, TruedatConfig.FileName);
+
+            // Tokens after --config, minus the flag itself.
+            var rest = new List<string>();
+            bool seen = false;
+            foreach (var a in args)
+            {
+                if (!seen && string.Equals(CanonicalFlag(a), "config", StringComparison.OrdinalIgnoreCase)) { seen = true; continue; }
+                if (seen) rest.Add(a);
+            }
+
+            if (rest.Count == 1 && string.Equals(rest[0], "reset", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!File.Exists(path)) { Console.WriteLine($"Nothing to reset - {path} does not exist."); return; }
+                // Name what is discarded. A reset that silently empties the file is how an
+                // operator loses a setting they tuned months ago and never notices.
+                var probe = TruedatConfig.Load(AppDomain.CurrentDomain.BaseDirectory);
+                Console.WriteLine($"Removing {path}");
+                foreach (var kv in probe.Values) Console.WriteLine($"  discarding  {kv.Key} = {kv.Value}");
+                try { File.Delete(path); Console.WriteLine("Done."); }
+                catch (Exception ex) { Console.Error.WriteLine($"Error: {ex.Message}"); Environment.ExitCode = 1; }
+                return;
+            }
+
+            if (rest.Count >= 2)
+            {
+                if (!TruedatConfig.TrySet(path, rest[0], string.Join(" ", rest.Skip(1)), out var setErr))
+                {
+                    Console.Error.WriteLine($"Error: {setErr}");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Console.WriteLine($"Set {rest[0]} in {path}");
+                return;
+            }
+
+            if (rest.Count == 1)
+            {
+                Console.Error.WriteLine($"Error: --config {rest[0]} needs a value (e.g. truedat --config {rest[0]} true).");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            // Bare --config: what is in force, then everything settable. Self-describing on
+            // purpose - the list of keys IS the documentation.
+            var cfg = TruedatConfig.Load(AppDomain.CurrentDomain.BaseDirectory);
+            Console.WriteLine("=== truedat configuration ===");
+            Console.WriteLine($"  file: {path}{(File.Exists(path) ? "" : "   (not present)")}");
+            Console.WriteLine();
+            if (cfg.Errors.Count > 0)
+            {
+                Console.WriteLine("  NOT USABLE - a run would refuse to start:");
+                foreach (var e in cfg.Errors) Console.WriteLine("    " + e);
+                Console.WriteLine();
+                Environment.ExitCode = 1;
+            }
+            if (cfg.Values.Count == 0)
+                Console.WriteLine("  No settings in force - every flag uses its built-in default.");
+            else
+            {
+                Console.WriteLine("  In force:");
+                foreach (var s in TruedatConfig.Settings)
+                    if (cfg.Values.TryGetValue(s.Key, out var v))
+                        Console.WriteLine($"    {s.Key,-18} {v}");
+            }
+            Console.WriteLine();
+            Console.WriteLine("  Settable (a typed flag always wins over these):");
+            foreach (var s in TruedatConfig.Settings)
+            {
+                string type = s.Kind == TruedatConfig.Kind.Bool ? "true|false"
+                    : s.Kind == TruedatConfig.Kind.Int ? $"{s.Min}..{s.Max}" : "<text>";
+                Console.WriteLine($"    {s.Key,-18} {type,-14} {s.Help}");
+            }
+            Console.WriteLine();
+            Console.WriteLine("  truedat --config <key> <value>   set it");
+            Console.WriteLine("  truedat --config reset           remove the file");
+            Console.WriteLine("  truedat --no-config              ignore it for one run");
+        }
+
+        /// <summary>
+        /// Windows-friendly flag normalization: accept `-foo`, `/foo` AND `--foo`, so the
+        /// matchers compare a bare name once instead of three times. Positional args (no
+        /// leading dash/slash) pass through raw. Shared with the pre-parse config scan so
+        /// `--no-config` / `-no-config` / `/no-config` cannot be recognised by one and
+        /// missed by the other.
+        /// </summary>
+        internal static string CanonicalFlag(string arg)
+        {
+            if (arg == null) return "";
+            if (arg.StartsWith("--")) return arg.Substring(2);
+            if (arg.Length > 1 && (arg[0] == '-' || arg[0] == '/')) return arg.Substring(1);
+            return arg;
+        }
+
         static string? SuggestFlag(string canonical)
         {
             if (string.IsNullOrEmpty(canonical) || canonical.Length < 3) return null;
@@ -1979,9 +2087,61 @@ namespace Truedat
             }
         }
 
+        // Config files that fed this run, and the merged values — held for --paths and the
+        // run header. Empty when no config file exists, which is the untouched default.
+        internal static readonly List<string> _configFilesRead = new List<string>();
+        internal static readonly Dictionary<string, string> _configValues =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         static void MainCore(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
+
+            // --- persistent flag defaults -----------------------------------
+            // Resolved BEFORE parsing and injected as leading arguments, which is what makes
+            // `explicit flag > config > built-in default` true without touching a use site:
+            // the parser assigns as it goes, so the operator's own tokens simply overwrite
+            // what config seeded. The alternative — consulting config at each use site —
+            // would re-implement that precedence dozens of times and drift.
+            //
+            // Two escapes are read from the RAW args first, because both must work even when
+            // the config file is the thing that is broken.
+            // --self-test verifies BUILT-IN behaviour, so it must never inherit the operator's
+            // settings — a suite whose results depend on a config file is not a self-test. Found
+            // by the suite itself: a machine config carrying "no-smfm": true turned the
+            // ApplySmfmInPlace default assertion red on an unmodified binary.
+            bool noConfig = args.Any(a =>
+            {
+                var c = CanonicalFlag(a);
+                return string.Equals(c, "no-config", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c, "self-test", StringComparison.OrdinalIgnoreCase);
+            });
+            bool configVerb = args.Any(a => string.Equals(CanonicalFlag(a), "config", StringComparison.OrdinalIgnoreCase));
+            if (configVerb) { RunConfigCommand(args); return; }
+            if (!noConfig)
+            {
+                var exeDir = AppDomain.CurrentDomain.BaseDirectory;
+                var cfg = TruedatConfig.Load(exeDir);
+                if (cfg.Errors.Count > 0)
+                {
+                    // Refuse. Running with settings the operator believes are in force but
+                    // are not is the silent-wrong failure this file exists to prevent — the
+                    // same ruling mbxmoods-exclude.json already carries. Nothing is written
+                    // and nothing is "repaired": their file is left exactly as it is.
+                    Console.Error.WriteLine("Error: truedat configuration is not usable.");
+                    foreach (var e in cfg.Errors) Console.Error.WriteLine("  " + e);
+                    Console.Error.WriteLine();
+                    Console.Error.WriteLine("Fix the file, or run with --no-config to ignore it for one run.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                if (cfg.Values.Count > 0)
+                {
+                    if (cfg.FileRead != null) _configFilesRead.Add(cfg.FileRead);
+                    foreach (var kv in cfg.Values) _configValues[kv.Key] = kv.Value;
+                    args = TruedatConfig.BuildArgs(cfg.Values).Concat(args).ToArray();
+                }
+            }
 
             // Default leaves 2 cores for the foreground so a background scan isn't a hog.
             // `-p max` or an explicit `-p N` (including N > core count) overrides this.
@@ -2113,10 +2273,7 @@ namespace Truedat
                 // legacy `--foo`. The matchers below all compare against the bare
                 // name so authors don't have to repeat themselves three times.
                 // Positional args (no leading dash/slash) bypass this and stay raw.
-                string canonical;
-                if (arg.StartsWith("--"))      canonical = arg.Substring(2);
-                else if (arg.Length > 1 && (arg[0] == '-' || arg[0] == '/')) canonical = arg.Substring(1);
-                else                            canonical = arg;
+                string canonical = CanonicalFlag(arg);
 
                 if (canonical == "?" || canonical == "h" || canonical == "help")
                 {
@@ -2129,6 +2286,10 @@ namespace Truedat
                         i++;
                     }
                 }
+                // Both are consumed before this loop (RunConfigCommand returns; the loader
+                // runs on the raw args). They are listed here only so the unrecognized-flag
+                // guard does not reject them.
+                else if (canonical == "no-config") { }
                 else if (canonical == "fixup") fixupMode = true;
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
@@ -9259,6 +9420,19 @@ namespace Truedat
 
             Add("staging", "staging", _stageOpts?.StageDir ?? "",
                 "staged copies, downmixes and the extractor's output JSON; --stage-dir moves all three");
+
+            // Config belongs here for the same reason every other row does: a settings file
+            // that changes what a run does without appearing on the one surface built to
+            // answer "what will this invocation actually use" recreates exactly the
+            // invisible-until-wrong failure --paths exists to remove. Both candidates are
+            // listed even when absent, so the operator can see WHERE to put one.
+            Add("config", "config",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, TruedatConfig.FileName),
+                _configValues.Count > 0
+                    ? "in force: " + string.Join(", ", TruedatConfig.Settings
+                        .Where(s => _configValues.ContainsKey(s.Key))
+                        .Select(s => $"{s.Key}={_configValues[s.Key]}"))
+                    : "flag defaults — none set, every flag uses its built-in default");
             return entries;
         }
 
@@ -12700,6 +12874,89 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 Assert(h.Method == "direct", $"stage failure falls back to direct (got {h.Method})");
                 Assert(h.Path == @"\\server\share\test.mp3", "stage failure preserves source path");
+            }
+
+            // --- persistent flag defaults (truedat.config.json) ---
+            {
+                // THE structural invariant: every settable key must be a real flag. Config
+                // works by injecting "--<key>" ahead of the operator's arguments, so a key
+                // the parser does not know would be rejected as an unrecognized flag and
+                // make the config file unusable — from the operator's side, indistinguishable
+                // from truedat being broken.
+                foreach (var s in TruedatConfig.Settings)
+                    Assert(KnownFlags.Contains(s.Key, StringComparer.OrdinalIgnoreCase),
+                        $"config: settable key \"{s.Key}\" is a real flag");
+
+                // Knobs only. A config that could select a MODE or repoint a TARGET would let
+                // a file nobody re-read decide what runs and what it runs against.
+                foreach (var forbidden in new[] { "strip-smfm", "prune-excluded", "fixup", "migrate",
+                                                  "restore", "verify", "moods", "output", "exclusions", "chunk" })
+                    Assert(TruedatConfig.Find(forbidden) == null,
+                        $"config: \"{forbidden}\" is NOT settable (verbs and targets stay on the command line)");
+
+                string cfgDir = Path.Combine(Path.GetTempPath(), $"truedat-cfg-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(cfgDir);
+                try
+                {
+                    // No file at all is the untouched default, and must not be an error.
+                    var none = TruedatConfig.Load(cfgDir);
+                    Assert(none.Errors.Count == 0 && none.Values.Count == 0,
+                        "config: an absent file is not an error and sets nothing");
+
+                    string cfgFile = Path.Combine(cfgDir, TruedatConfig.FileName);
+                    File.WriteAllText(cfgFile, "{ \"keep-backups\": 3, \"no-smfm\": false, \"parallel\": 12 }");
+                    var loaded = TruedatConfig.Load(cfgDir);
+                    Assert(loaded.Errors.Count == 0 && loaded.Values.Count == 3, "config: a valid file loads every key");
+
+                    // BuildArgs is what makes precedence work — a false bool must emit NOTHING
+                    // (there is no negated form to emit, and false means "the built-in default").
+                    var built = TruedatConfig.BuildArgs(loaded.Values);
+                    Assert(!built.Contains("--no-smfm"), "config: a false boolean emits no argument at all");
+                    Assert(built.Contains("--keep-backups") && built.Contains("3"), "config: an int emits flag + value");
+                    var pi = Array.IndexOf(built, "--parallel");
+                    Assert(pi >= 0 && pi + 1 < built.Length && built[pi + 1] == "12",
+                        "config: a value follows its own flag immediately");
+
+                    // Refuse, never fall back to defaults and never rewrite the file.
+                    File.WriteAllText(cfgFile, "{ oops,, }");
+                    Assert(TruedatConfig.Load(cfgDir).Errors.Count > 0,
+                        "config: unparseable file is an ERROR, not a silent default");
+                    Assert(File.ReadAllText(cfgFile).Contains("oops"),
+                        "config: a refused file is left exactly as the operator wrote it");
+
+                    // A typo used to be indistinguishable from a setting that did nothing.
+                    File.WriteAllText(cfgFile, "{ \"refresh_features\": true }");
+                    var typo = TruedatConfig.Load(cfgDir);
+                    Assert(typo.Errors.Count > 0 && typo.Errors[0].Contains("refresh-features"),
+                        "config: an unknown key errors AND names the intended one");
+
+                    // Out-of-range must be caught at LOAD: the parser only consumes a value-flag's
+                    // value when it is valid, so a bad number would be left as a stray token and
+                    // silently become the positional library path.
+                    File.WriteAllText(cfgFile, "{ \"parallel\": 99999 }");
+                    Assert(TruedatConfig.Load(cfgDir).Errors.Count > 0,
+                        "config: out-of-range value is rejected at load, never passed to the parser");
+                    File.WriteAllText(cfgFile, "{ \"no-smfm\": \"yes\" }");
+                    Assert(TruedatConfig.Load(cfgDir).Errors.Count > 0,
+                        "config: a non-boolean for a boolean key is rejected");
+
+                    // Round-trip: anything TrySet writes must load cleanly, or a setting can be
+                    // saved and then refuse to start the program.
+                    File.Delete(cfgFile);
+                    Assert(TruedatConfig.TrySet(cfgFile, "stage-dir", @"D:\stage me", out _), "config: TrySet writes a text value");
+                    Assert(TruedatConfig.TrySet(cfgFile, "parallel", "8", out _), "config: TrySet preserves earlier keys");
+                    var back = TruedatConfig.Load(cfgDir);
+                    Assert(back.Errors.Count == 0, "config: a file written by --config loads cleanly");
+                    Assert(back.Values["stage-dir"] == @"D:\stage me" && back.Values["parallel"] == "8",
+                        "config: round-trip keeps both values, backslashes intact");
+                    Assert(!TruedatConfig.TrySet(cfgFile, "strip-smfm", "true", out var vErr) && vErr.Contains("unknown"),
+                        "config: --config refuses to set a verb");
+                }
+                finally { try { Directory.Delete(cfgDir, true); } catch { } }
+
+                Assert(CanonicalFlag("--no-config") == "no-config" && CanonicalFlag("-no-config") == "no-config"
+                       && CanonicalFlag("/no-config") == "no-config" && CanonicalFlag("bare") == "bare",
+                    "config: --x / -x / /x normalize identically, positionals stay raw");
             }
 
             // --- staged-copy sharing-violation retry ---
@@ -20675,7 +20932,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         }
 
         /// <summary>Strip filename-hostile characters from a hostname for use in a path.</summary>
-        static string SanitizeForFilename(string raw)
+        internal static string SanitizeForFilename(string raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return "host";
             var bad = Path.GetInvalidFileNameChars();
