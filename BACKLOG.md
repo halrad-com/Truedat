@@ -154,8 +154,25 @@ makes compression the right lever and makes anything fancier unnecessary.
 
 Constraints (pin the choices):
 - **Live `mbxmoods.json` stays plain JSON** for the base feature — MBXHub's tolerant reader
-  consumes it as plain JSON; compressing the live file is the stretch below, gated on MBXHub.
-  Base feature compresses backups/snapshots only.
+  consumes it as plain JSON. Base feature compresses backups/snapshots only.
+
+  **The stretch is MUTUALLY EXCLUSIVE with MBXHub's catalog span index (2026-08-21).** The
+  old wording — "gated on MBXHub, consumer-first" — asked whether the hub could *read* a
+  compressed catalog, and the answer to that is yes, which is why it reads as a gate that
+  can be satisfied. It is the wrong question. MBXHub now boots its mood cache from a
+  **byte-offset index** into the live catalog (`CatalogSpanIndex`, shipped 2026-08-21): it
+  keeps ~20 bytes per track and seeks one record on demand instead of holding the catalog in
+  memory. **You cannot seek to an arbitrary byte in a DEFLATE stream** — position N is not
+  addressable without inflating everything before it — so compressing the live file does not
+  degrade that index, it deletes it, and hands the hub back the whole-catalog memory cost
+  this stretch was never meant to touch.
+
+  So the real gate is a **trade**, not a permission: taking this stretch means first
+  replacing the span index with a mechanism that survives compression — a per-record-framed
+  container, or spans expressed as decompressed offsets plus a framing index — and that work
+  belongs to whoever picks this up. Recorded on the MBXHub side too (`CatalogSpanIndex` class
+  doc and their plan §8c) so neither repo has to remember it alone. Backups and snapshots are
+  unaffected: nothing seeks into those.
 - **Zero new dependencies** — net48 ships both `System.IO.Compression.ZipArchive`/`ZipFile`
   and `GZipStream`/`DeflateStream`. Brotli/zstd are not in net48 without a NuGet → out.
 - **Prefer ZIP over gz on write (Windows-first rationale).** Both use DEFLATE (same ratio),

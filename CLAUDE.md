@@ -330,10 +330,15 @@ stream ↔ `FileStream`), O(1) memory like `SaveResults`; net48 ships `ZipArchiv
 so **zero new dependencies** (only a framework `<Reference Include="System.IO.Compression" />` —
 `GZipStream` lives in `System.dll` and already worked, but the ZIP container types don't).
 
-- **The live `mbxmoods.json` stays PLAIN JSON.** MBXHub's tolerant reader consumes it as plain
-  JSON, so a compressed live catalog is a cross-repo contract change — the BACKLOG stretch,
-  gated on restfulbee, consumer-first. This half is backups + snapshots only. Do not compress
-  the live file here.
+- **The live `mbxmoods.json` stays PLAIN JSON — and as of 2026-08-21 that is a hard constraint,
+  not a sequencing gate.** MBXHub boots its mood cache from a byte-offset index into the live
+  catalog (`CatalogSpanIndex`), keeping ~20 bytes per track and seeking one record on demand.
+  A DEFLATE stream has no addressable byte N, so compressing the live file does not slow that
+  index down, it removes it. The BACKLOG stretch therefore is not "gated on restfulbee,
+  consumer-first" — that phrasing asked whether the hub *could read* a compressed catalog (it
+  could), which is the wrong question. Taking the stretch means first replacing the span index
+  with something that survives compression. This half is backups + snapshots only, which
+  nothing seeks into. Do not compress the live file here.
 - **Backups (automatic).** The four mutating modes (`--fixup`, `--remap`, `--merge-moods`,
   `--migrate`) call `BackupCatalogCompressed` instead of `File.Copy`: it writes
   `mbxmoods.json.bak.<ts>.zip` and rotates to keep the newest `--keep-backups N` (default 5,
