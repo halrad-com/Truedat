@@ -11586,6 +11586,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static (double? HfEnergyRatio, string? HfEnergyMethod, HfSpectralStructure? Structure) ComputeHfAnalysis(string filePath, string? ffmpegExe)
             => ComputeHfAnalysis(filePath, ffmpegExe, out _);
 
+        /// <summary>
+        /// The outcome when an HF pass decoded audio but produced no window with finite
+        /// structural metrics. Pure and extracted precisely so it is testable: the live
+        /// path needs ffmpeg, a >44.1 kHz source and a silent file, so the decision would
+        /// otherwise ship unpinned.
+        ///
+        /// Two genuinely different cases hide behind "no valid windows":
+        ///   • some total energy, no finite structure -> a real ratio, no structure block.
+        ///     The measurement succeeded and said "no HF signal"; APPLICABLE.
+        ///   • zero total energy -> pure silence. There is nothing to measure and never
+        ///     was, which is a property of the CONTENT; NOT APPLICABLE, exactly as
+        ///     ComputeBitUsage already reports for its own silence case (count==0).
+        ///
+        /// Collapsing the second into the first is what cost silent tracks their catalog
+        /// entry: the scan-health gate read "applicable but absent" and failed them on
+        /// `hf`. And only above 44.1 kHz, since the sample-rate check short-circuits
+        /// below that — so the same silent content passed or failed by container.
+        /// </summary>
+        internal static (double? Ratio, string? Method, bool NotApplicable) HfNoValidWindowsOutcome(
+            double sumHfEnergy, double sumTotalEnergy, string method)
+        {
+            if (sumTotalEnergy <= 0) return (null, null, true);
+            return (Math.Round(sumHfEnergy / sumTotalEnergy, 6), method, false);
+        }
+
         /// <summary>Overload for the scan-health gate (2026-07-30). notApplicable=true
         /// covers the by-design absences: no ffmpeg, source at/below 44.1 kHz (no
         /// Nyquist headroom), or TagLib refusing the file (no sample rate to read —
@@ -11809,10 +11834,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             const string method = "managed-fft-radix2-30s-mid-native";
             if (windowsValid == 0)
             {
-                // Got audio bytes but no windows produced finite metrics (silent / all-DC).
-                // Treat as analysis-success-but-no-signal: return zero ratio, no structure.
-                double? ratio = sumTotalEnergy > 0 ? (double?)Math.Round(sumHfEnergy / sumTotalEnergy, 6) : null;
-                return (ratio, ratio.HasValue ? method : null, null);
+                var outcome = HfNoValidWindowsOutcome(sumHfEnergy, sumTotalEnergy, method);
+                notApplicable = outcome.NotApplicable;
+                return (outcome.Ratio, outcome.Method, null);
             }
 
             double hfRatio = sumTotalEnergy > 0 ? sumHfEnergy / sumTotalEnergy : 0;
@@ -12983,6 +13007,45 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     var (pass, _) = ClassifyTrackHealth(true, null, 224.4, 0.95, true, true, false, true, false, true, false, true);
                     Assert(pass, "classify: decoded=null skips the decode gate");
+                }
+                // The HF decision itself (the gate asserts below only prove the gate
+                // OBEYS applicability — they cannot see whether ComputeHfAnalysis sets
+                // it, which is where the bug actually lived).
+                {
+                    var silent = HfNoValidWindowsOutcome(0.0, 0.0, "m");
+                    Assert(silent.NotApplicable && !silent.Ratio.HasValue && silent.Method == null,
+                        "hf: zero total energy (pure silence) reports notApplicable, no ratio");
+                    var noStructure = HfNoValidWindowsOutcome(0.25, 1.0, "m");
+                    Assert(!noStructure.NotApplicable && noStructure.Ratio == 0.25 && noStructure.Method == "m",
+                        "hf: energy present but no finite structure stays APPLICABLE with a real ratio");
+                }
+                // A silent hi-res track: HF produced no ratio, but silence is a CONTENT
+                // limitation, so ComputeHfAnalysis reports notApplicable and the gate must
+                // not fail the track. Pinned as a pair — the same absence WITH applicability
+                // is a genuine failure — because the whole point of the tri-state is that
+                // "absent" alone cannot decide, and collapsing it cost silent >44.1kHz files
+                // their catalog entry while identical 44.1kHz content passed.
+                {
+                    var silent = ClassifyTrackHealth(true, 30.0, 30.0, 0.95, true, true, false, true, false, true, /*hfApplicable*/ false, /*hfOk*/ false);
+                    Assert(silent.Pass && silent.Failed.Count == 0,
+                        "classify: silent track (hf notApplicable) passes — silence is content, not failure");
+                    var broken = ClassifyTrackHealth(true, 30.0, 30.0, 0.95, true, true, false, true, false, true, /*hfApplicable*/ true, /*hfOk*/ false);
+                    Assert(!broken.Pass && broken.Failed.Contains("hf"),
+                        "classify: applicable-but-absent hf still fails (the tri-state's other half)");
+                }
+                // under-decode retry decision (mirrors the decode gate; the transcode itself is
+                // integration-proven on a real WMA-Lossless file, not unit-tested here)
+                {
+                    // WMA-Lossless shape: essentia read 46s of a 299s file -> retry
+                    Assert(ShouldRetryUnderDecode(46.2, 299.24, 0.95), "retry: 46s of 299s triggers a transcode-retry");
+                    // full decode -> no retry
+                    Assert(!ShouldRetryUnderDecode(299.24, 299.24, 0.95), "retry: full decode does not retry");
+                    // no decoded length / no reference -> no basis to retry
+                    Assert(!ShouldRetryUnderDecode(null, 299.24, 0.95), "retry: null decoded length never retries");
+                    Assert(!ShouldRetryUnderDecode(46.2, 0.0, 0.95), "retry: no reference duration never retries");
+                    // boundary: 0.95 * 299.24 = 284.278 — just under retries, just over does not
+                    Assert(ShouldRetryUnderDecode(283.0, 299.24, 0.95), "retry: 283s (<95%) retries");
+                    Assert(!ShouldRetryUnderDecode(285.0, 299.24, 0.95), "retry: 285s (>95%) does not retry");
                 }
                 // --convert-dir codec classifier: lossless-non-FLAC converts, FLAC + lossy do not
                 {
