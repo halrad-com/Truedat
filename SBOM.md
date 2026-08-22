@@ -77,8 +77,15 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | Component | Version | License | Purpose |
 |-----------|---------|---------|---------|
-| ffmpeg.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | Audio downmixing, decode retry, bitUsage / HF analysis, `--transcode` |
-| ffprobe.exe | 7.1 (2026-02-09 git build) | GPL-3.0+ | `--transcode` source-property matching |
+| ffmpeg.exe | git master `2026-08-20-git-7d77562d2a-full_build` (gcc 16.1.0, MSYS2) | GPL-3.0+ | Audio downmixing, decode retry, bitUsage / HF analysis, `--transcode` |
+| ffprobe.exe | git master `2026-08-20-git-7d77562d2a-full_build` (gcc 16.1.0, MSYS2) | GPL-3.0+ | `--transcode` source-property matching |
+
+**Binaries:** the exact copies used are carried on the repo's `truedat-deps` branch (Git LFS), with a SHA-256 recorded per file in its `README.md`:
+
+| File | SHA-256 |
+|------|---------|
+| `ffmpeg.exe` | `9c6b03ec0c5b5efc6c471ec81d3bdc99b50d88c0cdefbfe0cb6e1b55e28cd331` |
+| `ffprobe.exe` | `307a1f169d1e3c0c099aa3eb384a5de53b1a489ccb9b9a4c2d3082b8bf1d2188` |
 
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
