@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -314,12 +314,10 @@ namespace Truedat
                 ["tracks"] = mergedTracks
             };
 
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            var json = root.ToJsonString(options);
-
-            // Atomic write: write to temp, then replace
+            // Atomic write: write to temp, then replace. Streamed rather than
+            // materialized as one string — a seeded catalog is library-scale.
             var tmpPath = _moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, json, Encoding.UTF8);
+            Program.WriteCatalogDom(root, tmpPath, indented: true);
             if (File.Exists(_moodsPath))
                 File.Replace(tmpPath, _moodsPath, null);
             else

@@ -5926,10 +5926,11 @@ namespace Truedat
         /// <summary>
         /// Run --fixup as a CHILD PROCESS after a scan, not inline.
         ///
-        /// The reason is memory, and it is not theoretical. RunFixup does
-        /// File.ReadAllText(catalog) — on a 584 MB catalog that is a ~1.17 GB string,
-        /// because .NET strings are UTF-16 — and then builds a JsonNode DOM on top of it,
-        /// which is an object per value. Standalone that is fine: it is the only thing in
+        /// The reason is memory, and it is not theoretical. RunFixup builds a JsonNode DOM
+        /// over the whole catalog — an object per value, several times the file's size in
+        /// managed heap. (The intermediate ~1.17 GB UTF-16 string this comment used to cite
+        /// is gone: loads parse from the stream, and the write goes through WriteCatalogDom.
+        /// The DOM itself was always the larger half.) Standalone that is fine: it is the only thing in
         /// the process. Inline after a scan it lands on top of a live allTracks dictionary,
         /// the parsed library, and whatever the GC has not returned, at the exact moment
         /// the process is already at its peak. The libraries most in need of reconciling
@@ -6524,12 +6525,97 @@ namespace Truedat
             return JsonNode.Parse(fs, null, docOptions)?.AsObject();
         }
 
+        /// <summary>
+        /// Phase timer + stat collector for the catalog verbs (--fixup / --remap / --migrate /
+        /// --merge-moods / --strip-smfm / --prune-*). The point is diagnosis, not decoration:
+        /// these verbs print a result count and nothing about the run that produced it, so
+        /// "why did that take twenty minutes" had no answer but guesswork. A fixup over a
+        /// network library spends nearly all its wall-clock in ONE place — the per-entry
+        /// filesystem check — while a local one spends it compressing the backup and rebuilding
+        /// the sidecar, and the two look identical from outside.
+        ///
+        /// Every phase reports its own elapsed time; per-entry loops report a rate (the number
+        /// that separates a slow link from a slow disk); and Note() carries the sizes, because
+        /// "3.2 GB catalog" explains a slow run that a duration alone only describes.
+        ///
+        /// Reported on EVERY exit that did work, refusals included: a refusal after a full
+        /// sweep is exactly when an operator needs to know where the time went.
+        /// </summary>
+        sealed class PhaseReport
+        {
+            readonly List<KeyValuePair<string, TimeSpan>> _phases = new List<KeyValuePair<string, TimeSpan>>();
+            readonly List<KeyValuePair<string, string>> _notes = new List<KeyValuePair<string, string>>();
+            readonly Stopwatch _total = Stopwatch.StartNew();
+
+            /// <summary>Record the phase that just finished, restart the clock for the next one,
+            /// and hand back the elapsed time formatted for the line being printed.</summary>
+            public string Mark(string name, Stopwatch phase)
+            {
+                var elapsed = phase.Elapsed;
+                _phases.Add(new KeyValuePair<string, TimeSpan>(name, elapsed));
+                phase.Restart();
+                return Format(elapsed);
+            }
+
+            /// <summary>Record a non-time fact about the run (sizes, counts, ratios).</summary>
+            public void Note(string label, string value) =>
+                _notes.Add(new KeyValuePair<string, string>(label, value));
+
+            /// <summary>Size of a file that may not exist — a missing file notes as a dash rather
+            /// than throwing, since a report must never be the thing that fails a run.</summary>
+            public void NoteFileSize(string label, string path, string suffix = "")
+            {
+                try
+                {
+                    var fi = new FileInfo(path);
+                    Note(label, fi.Exists ? Bytes(fi.Length) + suffix : "—");
+                }
+                catch { Note(label, "—"); }
+            }
+
+            public static string Format(TimeSpan t) =>
+                  t.TotalSeconds >= 60 ? $"{(int)t.TotalMinutes}m {t.Seconds}s"
+                : t.TotalSeconds >= 1 ? $"{t.TotalSeconds:F1}s"
+                : $"{t.TotalMilliseconds:F0}ms";
+
+            public static string Bytes(long b) =>
+                  b >= 1L << 30 ? $"{b / (double)(1L << 30):F2} GB"
+                : b >= 1L << 20 ? $"{b / (double)(1L << 20):F1} MB"
+                : $"{b / 1024.0:F0} KB";
+
+            /// <summary>Entries per second — the diagnostic half of a per-entry phase. Guarded
+            /// against a zero interval so a tiny catalog prints a dash instead of infinity.</summary>
+            public static string Rate(int items, TimeSpan t) =>
+                t.TotalSeconds < 0.001 ? "—" : $"{items / t.TotalSeconds:N0}/s";
+
+            public void Report()
+            {
+                Console.WriteLine();
+                Console.WriteLine("=== Run report ===");
+                foreach (var n in _notes)
+                    Console.WriteLine($"  {n.Key,-24}{n.Value}");
+                if (_notes.Count > 0 && _phases.Count > 0) Console.WriteLine();
+                foreach (var p in _phases)
+                    Console.WriteLine($"  {p.Key,-24}{Format(p.Value),10}");
+                Console.WriteLine($"  {"total",-24}{Format(_total.Elapsed),10}");
+            }
+        }
+
         static void RunFixup(string xmlPath, string moodsPath)
         {
             Console.WriteLine("=== Fixup Mode ===");
             Console.WriteLine();
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
+
+            // Fixup has no per-track console output on the common path, so a long run is
+            // indistinguishable from a hung one, and "why is fixup slow" had no answer but
+            // guesswork. Every phase is timed and reported: the sweep and the reconcile carry a
+            // rate, because on a network library those two ARE the run, and their rate is the
+            // difference between a slow link and a slow catalog.
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
 
             Console.WriteLine($"Loading moods: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
@@ -6538,11 +6624,11 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
             int totalEntries = tracks.Count;  // captured before the loop drains `tracks`
-            Console.WriteLine($"Moods entries: {tracks.Count}");
+            Console.WriteLine($"Moods entries: {tracks.Count:N0}   ({timing.Mark("load catalog", phase)})");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var library = ITunesParser.Parse(xmlPath, out _);
-            Console.WriteLine($"Library tracks: {library.Count}");
+            Console.WriteLine($"Library tracks: {library.Count:N0}   ({timing.Mark("parse library XML", phase)})");
 
             // --- Library reachability guard (before any orphan decision) ---
             // A fixup decides "this file is gone" from the filesystem, and both
@@ -6569,6 +6655,8 @@ namespace Truedat
                 .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _)))
                 .ToList();
             var (refuseReach, downSummary) = EvaluateReachability(probedRoots);
+            Console.WriteLine($"Library roots: {probedRoots.Count} probed, {probedRoots.Count(p => p.Reachable)} reachable"
+                              + $"   ({timing.Mark("probe library roots", phase)})");
             if (refuseReach && !_forceClean)
             {
                 Console.WriteLine();
@@ -6578,6 +6666,7 @@ namespace Truedat
                 Console.WriteLine($"  {downSummary}");
                 Console.WriteLine("Nothing was written, no backup made. Re-run with the library mounted,");
                 Console.WriteLine("or pass --force-clean to purge entries for a volume you know is gone.");
+                timing.Report();
                 Environment.ExitCode = 3;
                 return;
             }
@@ -6598,28 +6687,71 @@ namespace Truedat
                 list.Add(t);
             }
 
+            // ONE existence sweep, not two. Two consumers need "does this path still exist":
+            // the content-hash index just below, and the reconcile loop's Unchanged test. They
+            // used to ask the filesystem separately, so every catalog entry cost two identical
+            // File.Exists calls for one piece of information — invisible on a local disk, and
+            // minutes of pure waiting on a 156k-entry library over SMB, where each call is a
+            // network round-trip. The sweep records the answer once and both consumers read it.
+            //
+            // Sampling existence up front (rather than per entry, later) is why the gone-branch
+            // below CONFIRMS with a fresh File.Exists before acting: a path that read gone here
+            // but exists by the time we would drop its entry was a blip during the sweep, not a
+            // deletion. Only apparently-gone entries pay for that, so the common case stays at
+            // one call per entry.
+            var existsOnDisk = new HashSet<string>(PathComparer.Instance);
+
             // Content-hash index of entries whose file STILL EXISTS on disk. Lets us drop
             // an entry whose own file is gone but whose audio survives at another path (the
             // kept copy of a deleted duplicate) instead of keeping a dead entry via a stale
             // XML filename match.
             var survivingByHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            Console.WriteLine($"Checking {totalEntries:N0} files on disk...");
+            int swept = 0;
+            var tick = Stopwatch.StartNew();
             foreach (var kv in tracks)
             {
                 if (kv.Value == null) continue;
-                if (!File.Exists(PathHelper.NormalizeSeparators(kv.Key))) continue;
+                var probePath = PathHelper.NormalizeSeparators(kv.Key);
+                swept++;
+                // Heartbeat on TIME, not on a count: the whole point is the case where each call
+                // is slow, and a per-N-entries tick goes quiet for exactly as long as the problem
+                // is bad. Two seconds is often enough to see it moving, rare enough not to spam a
+                // local run that finishes in one.
+                if (tick.Elapsed.TotalSeconds >= 2)
+                {
+                    Console.WriteLine($"  {swept:N0} / {totalEntries:N0} checked   ({PhaseReport.Rate(swept, phase.Elapsed)})");
+                    tick.Restart();
+                }
+                if (!File.Exists(probePath)) continue;
+                existsOnDisk.Add(probePath);
                 var sha = kv.Value.AsObject()["audioStreamSha256"]?.GetValue<string>();
                 if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!)) survivingByHash[sha!] = kv.Key;
             }
+            // The rate is the diagnosis. Tens of thousands per second is a local disk; a few
+            // hundred is a network share, and on a 156k-entry library that is the whole run.
+            var sweepRate = PhaseReport.Rate(swept, phase.Elapsed);
+            Console.WriteLine($"On disk: {existsOnDisk.Count:N0} of {totalEntries:N0}"
+                              + $"   ({timing.Mark("check files on disk", phase)}, {sweepRate})");
 
             int unchanged = 0, remapped = 0, orphaned = 0, resolvedByHash = 0, strippedEntries = 0, reflattened = 0;
             var newTracks = new JsonObject();
             var orphanedEntries = new List<(string OldPath, string Artist, string Title)>();
 
+            Console.WriteLine($"Reconciling {totalEntries:N0} entries...");
+            int reconciled = 0;
+            tick.Restart();
             foreach (var kv in tracks.ToList())
             {
                 var oldPath = kv.Key;
                 var trackNode = kv.Value;
                 if (trackNode == null) continue;
+                reconciled++;
+                if (tick.Elapsed.TotalSeconds >= 2)
+                {
+                    Console.WriteLine($"  {reconciled:N0} / {totalEntries:N0} reconciled   ({PhaseReport.Rate(reconciled, phase.Elapsed)})");
+                    tick.Restart();
+                }
                 tracks.Remove(oldPath); // detach from old parent so it can be re-parented
                 var trackData = trackNode.AsObject();
                 // Registry cut: strip any excluded field (e.g. bpmHistogram) so existing catalogs
@@ -6635,7 +6767,7 @@ namespace Truedat
                 if (RepairSpectralFlatness(trackData)) reflattened++;
                 var normalizedOldPath = PathHelper.NormalizeSeparators(oldPath);
 
-                if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
+                if (existsOnDisk.Contains(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
 
                 // The file reads gone — but the up-front guard only proved the volume was
                 // up when the run STARTED. A NAS can drop mid-reconcile, and from that
@@ -6653,9 +6785,24 @@ namespace Truedat
                     Console.WriteLine($"  at:   {oldPath}");
                     Console.WriteLine($"  root: {ReachabilityRoot(normalizedOldPath)} stopped answering ({midRunErr})");
                     Console.WriteLine("Nothing was written, no backup made. Re-run with the library mounted.");
+                    // The reconcile stopped part-way, so its phase was never Marked — record what
+                    // it managed before the drop, or the report would attribute that time to
+                    // nothing and only the total would show it.
+                    timing.Mark("reconcile (stopped)", phase);
+                    timing.Note("reconciled before drop", $"{reconciled:N0} of {totalEntries:N0}");
+                    timing.Report();
                     Environment.ExitCode = 3;
                     return;
                 }
+
+                // Confirm the absence against the filesystem before acting on it. The sweep
+                // sampled existence once, up front; the root is proven healthy right now by the
+                // probe above, so a path that reads present here was simply mid-blip during the
+                // sweep. Everything below this line DROPS or RE-KEYS the entry, which is not a
+                // thing to do on a stale reading. Only apparently-gone entries reach here, so
+                // this restores the old code's two-readings-before-dropping without restoring
+                // its second full sweep.
+                if (File.Exists(normalizedOldPath)) { newTracks[normalizedOldPath] = trackData; unchanged++; continue; }
 
                 var filename = Path.GetFileName(normalizedOldPath);
                 var moodArtist = trackData["artist"]?.GetValue<string>() ?? "";
@@ -6709,6 +6856,9 @@ namespace Truedat
                 }
                 else { orphaned++; orphanedEntries.Add((oldPath, moodArtist, moodTitle)); }
             }
+            var reconcileRate = PhaseReport.Rate(reconciled, phase.Elapsed);
+            Console.WriteLine($"Reconciled {reconciled:N0} entries"
+                              + $"   ({timing.Mark("reconcile", phase)}, {reconcileRate})");
 
             var moodPaths = new HashSet<string>(newTracks.Select(kv => kv.Key), PathComparer.Instance);
             int unanalyzed = library.Count(t => !moodPaths.Contains(t.Location));
@@ -6750,22 +6900,34 @@ namespace Truedat
                 Console.WriteLine("more like a flaky link or an unintended bulk delete than routine cleanup.");
                 Console.WriteLine("Nothing was written, no backup made. Verify the library, then re-run —");
                 Console.WriteLine("or pass --force-clean if you really intend to remove these entries.");
+                timing.Report();
                 Environment.ExitCode = 3;
                 return;
             }
 
             if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0 || reflattened > 0)
             {
+                // The write tail is timed separately from the reconcile because they fail and
+                // slow down for unrelated reasons: compressing ~900 MB is CPU, the swap and the
+                // sidecar are disk. A run that is slow at the tail is not a run that is slow
+                // per entry, and the summary should not make an operator guess which.
+                phase.Restart();
                 var bakPath = BackupCatalogCompressed(moodsPath);
-                Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
+                Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}   ({timing.Mark("compress backup", phase)})");
                 root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
                 var tmpPath = moodsPath + ".tmp";
-                File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+                WriteCatalogDom(root, tmpPath);
                 AtomicReplace(tmpPath, moodsPath);
-                Console.WriteLine($"Updated: {moodsPath}");
+                Console.WriteLine($"Updated: {moodsPath}   ({timing.Mark("write catalog", phase)})");
                 RegenerateSidecar(moodsPath);
+                timing.Mark("regenerate sidecar", phase);
+                timing.NoteFileSize("catalog out", moodsPath, $", {newTracks.Count:N0} entries");
+                timing.NoteFileSize("backup", bakPath);
+                timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
             }
             else { Console.WriteLine(); Console.WriteLine("All paths valid, no changes needed."); }
+
+            timing.Report();
         }
 
         /// <summary>
@@ -6792,6 +6954,10 @@ namespace Truedat
             if (string.Equals(oldPrefix, newPrefix, StringComparison.Ordinal))
             { Console.WriteLine("Old prefix equals new prefix; nothing to do."); return; }
 
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
+
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
             try
@@ -6811,6 +6977,11 @@ namespace Truedat
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); Environment.ExitCode = 2; return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+            // Remap touches no filesystem — it is a pure key rewrite — so its cost is the
+            // catalog's size, start to finish. Reported anyway: the backup + write + sidecar
+            // tail is the same tail --fixup has, and it is where the seconds actually go.
+            timing.Mark("load catalog", phase);
+            timing.Note("entries in", $"{tracks.Count:N0}");
             Console.WriteLine($"Moods entries: {tracks.Count}");
 
             int remapped = 0, unchanged = 0, collided = 0;
@@ -6861,24 +7032,32 @@ namespace Truedat
             }
             Console.WriteLine($"  Total out:  {newTracks.Count}");
 
+            timing.Mark("rewrite keys", phase);
+
             if (remapped == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("No entries matched the old prefix; no changes written.");
+                timing.Report();
                 return;
             }
 
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine();
-            Console.WriteLine($"Backup: {bakPath}");
+            Console.WriteLine($"Backup: {bakPath}   ({timing.Mark("compress backup", phase)})");
             root["tracks"] = newTracks;
             root["trackCount"] = newTracks.Count;
             StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            WriteCatalogDom(root, tmpPath);
             AtomicReplace(tmpPath, moodsPath);
-            Console.WriteLine($"Updated: {moodsPath}");
+            Console.WriteLine($"Updated: {moodsPath}   ({timing.Mark("write catalog", phase)})");
             RegenerateSidecar(moodsPath);
+            timing.Mark("regenerate sidecar", phase);
+            timing.NoteFileSize("catalog out", moodsPath, $", {newTracks.Count:N0} entries");
+            timing.NoteFileSize("backup", bakPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
+            timing.Report();
         }
 
         /// <summary>
@@ -7931,6 +8110,12 @@ namespace Truedat
             Console.WriteLine("=== Merge Moods ===");
             Console.WriteLine();
 
+            // Merge reads N catalogs and writes one, so its cost sits on the load side — and
+            // with shard files on a share, on how fast those arrive. Each source is timed by
+            // name, which is what separates a slow merge from one slow shard.
+            var timing = new PhaseReport();
+            var phase = Stopwatch.StartNew();
+
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             var mergedTracks = new JsonObject();
             int totalLoaded = 0;
@@ -7945,6 +8130,7 @@ namespace Truedat
                 }
 
                 Console.WriteLine($"Loading: {source}");
+                phase.Restart();
                 var root = LoadCatalogRoot(source, docOptions);
                 if (root == null)
                 {
@@ -7968,13 +8154,17 @@ namespace Truedat
                     count++;
                 }
                 totalLoaded += count;
-                Console.WriteLine($"  {count:N0} entries");
+                // Timed per source, by filename: a merge of hostname-suffixed shards is exactly
+                // where one slow source hides inside an otherwise-normal total.
+                Console.WriteLine($"  {count:N0} entries   ({timing.Mark("load " + Path.GetFileName(source), phase)})");
             }
 
             Console.WriteLine();
             Console.WriteLine($"Total loaded:    {totalLoaded:N0}");
             Console.WriteLine($"Duplicates:      {duplicatesOverwritten:N0} (later source wins)");
             Console.WriteLine($"Merged entries:  {mergedTracks.Count:N0}");
+            timing.Note("merged entries", $"{mergedTracks.Count:N0}");
+            timing.Note("duplicates", $"{duplicatesOverwritten:N0} (later source wins)");
 
             // Backup if output already exists
             if (File.Exists(outputPath))
@@ -7992,11 +8182,17 @@ namespace Truedat
             StampCatalogHeader(result, DateTime.UtcNow.ToString("o"));
 
             var tmpPath = outputPath + ".tmp";
-            File.WriteAllText(tmpPath, result.ToJsonString(new JsonSerializerOptions { WriteIndented = false }), Encoding.UTF8);
+            phase.Restart();
+            WriteCatalogDom(result, tmpPath);
             AtomicReplace(tmpPath, outputPath);
+            timing.Mark("write catalog", phase);
             RegenerateSidecar(outputPath);
+            timing.Mark("regenerate sidecar", phase);
 
             Console.WriteLine($"Written: {outputPath}");
+            timing.NoteFileSize("catalog out", outputPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(outputPath, ".mbxs"));
+            timing.Report();
             Console.WriteLine();
             return 0;
         }
@@ -8079,12 +8275,19 @@ namespace Truedat
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); return; }
 
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
+
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             var root = LoadCatalogRoot(moodsPath, docOptions);
             if (root == null) { Console.WriteLine("Invalid JSON in moods file."); return; }
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
+
+            timing.Mark("load catalog", phase);
+            timing.Note("entries in", $"{tracks.Count:N0}");
 
             int stripped = 0, renamed = 0, md5Stripped = 0, legacyStripped = 0, total = tracks.Count;
             foreach (var kv in tracks)
@@ -8128,18 +8331,29 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
+                timing.Mark("scan entries", phase);
+                timing.Report();
                 return;
             }
 
+            timing.Mark("scan entries", phase);
             root["trackCount"] = tracks.Count;
+            phase.Restart();
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            timing.Mark("compress backup", phase);
+            WriteCatalogDom(root, tmpPath);
             AtomicReplace(tmpPath, moodsPath);
+            timing.Mark("write catalog", phase);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count} tracks)");
             RegenerateSidecar(moodsPath);
+            timing.Mark("regenerate sidecar", phase);
+            timing.NoteFileSize("catalog out", moodsPath, $", {tracks.Count:N0} entries");
+            timing.NoteFileSize("backup", bakPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
+            timing.Report();
         }
 
         /// <summary>One catalog entry an exclusion rule would remove. Carries the rule
@@ -8314,6 +8528,10 @@ namespace Truedat
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
 
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
+
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
@@ -8330,6 +8548,8 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
             int totalEntries = tracks.Count;
+            timing.Mark("load catalog", phase);
+            timing.Note("entries in", $"{totalEntries:N0}");
 
             var plan = PlanSmfmStrip(tracks);
 
@@ -8351,6 +8571,7 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("No catalog entry carries SMFM — nothing to strip.");
+                timing.Report();
                 return;
             }
 
@@ -8367,6 +8588,7 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                timing.Report();
                 return;
             }
 
@@ -8374,16 +8596,24 @@ namespace Truedat
             foreach (var path in plan.Victims)
                 if (tracks[path] is JsonObject data && StripSmfmFromEntry(data)) stripped++;
 
+            phase.Restart();
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            timing.Mark("compress backup", phase);
+            WriteCatalogDom(root, tmpPath);
             AtomicReplace(tmpPath, moodsPath);
+            timing.Mark("write catalog", phase);
             Console.WriteLine($"Updated: {moodsPath} ({stripped:N0} entr{(stripped == 1 ? "y" : "ies")} stripped, {tracks.Count:N0} tracks kept)");
             // Required, not cosmetic: the hub boots sidecar-first, so an un-regenerated
             // .mbxs would keep serving the SMFM this run just removed.
             RegenerateSidecar(moodsPath);
+            timing.Mark("regenerate sidecar", phase);
+            timing.NoteFileSize("catalog out", moodsPath, $", {tracks.Count:N0} entries");
+            timing.NoteFileSize("backup", bakPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
+            timing.Report();
         }
 
         // -- Targeted entry removal (--prune-entry) ---------------------------
@@ -8460,6 +8690,10 @@ namespace Truedat
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
 
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
+
             Console.WriteLine($"Loading: {moodsPath}");
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             JsonObject? root;
@@ -8476,6 +8710,8 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); Environment.ExitCode = 2; return; }
             int totalEntries = tracks.Count;
+            timing.Mark("load catalog", phase);
+            timing.Note("entries in", $"{totalEntries:N0}");
 
             var plan = PlanEntryPrune(tracks, requested);
 
@@ -8517,6 +8753,7 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to remove.");
+                timing.Report();
                 if (Environment.ExitCode == 0) Environment.ExitCode = 2;
                 return;
             }
@@ -8533,20 +8770,29 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                timing.Report();
                 return;
             }
 
             foreach (var key in plan.Matched) tracks.Remove(key);
 
+            phase.Restart();
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             root["trackCount"] = tracks.Count;
             StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            timing.Mark("compress backup", phase);
+            WriteCatalogDom(root, tmpPath);
             AtomicReplace(tmpPath, moodsPath);
+            timing.Mark("write catalog", phase);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count:N0} tracks)");
             RegenerateSidecar(moodsPath);
+            timing.Mark("regenerate sidecar", phase);
+            timing.NoteFileSize("catalog out", moodsPath, $", {tracks.Count:N0} entries");
+            timing.NoteFileSize("backup", bakPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
+            timing.Report();
         }
 
         /// <summary>
@@ -8575,6 +8821,10 @@ namespace Truedat
             Console.WriteLine();
 
             if (!File.Exists(moodsPath)) { Console.WriteLine($"No moods file found: {moodsPath}"); Environment.ExitCode = 2; return; }
+
+            var timing = new PhaseReport();
+            timing.NoteFileSize("catalog in", moodsPath);
+            var phase = Stopwatch.StartNew();
 
             // --no-exclusions bypasses the very rules this mode acts on: obeying it would
             // prune nothing while looking like a completed run. Refuse instead.
@@ -8638,8 +8888,13 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
             int totalEntries = tracks.Count;
+            timing.Mark("load catalog", phase);
+            timing.Note("entries in", $"{totalEntries:N0}");
+            timing.Note("rules in force", $"{exclusions.Rules.Count}");
 
             var victims = PlanExclusionPrune(tracks, exclusions);
+            timing.Mark("match rules", phase);
+            timing.Note(dryRun ? "would prune" : "pruned", $"{victims.Count:N0}");
 
             Console.WriteLine();
             Console.WriteLine("=== Results ===");
@@ -8672,6 +8927,7 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("No catalog entry matches an exclusion rule — nothing to prune.");
+                timing.Report();
                 return;
             }
 
@@ -8679,20 +8935,29 @@ namespace Truedat
             {
                 Console.WriteLine();
                 Console.WriteLine("DRY RUN — nothing was written. Re-run without --dry-run to apply.");
+                timing.Report();
                 return;
             }
 
             foreach (var v in victims) tracks.Remove(v.Path);
 
+            phase.Restart();
             var bakPath = BackupCatalogCompressed(moodsPath);
             Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}");
             root["trackCount"] = tracks.Count;
             StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
             var tmpPath = moodsPath + ".tmp";
-            File.WriteAllText(tmpPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            timing.Mark("compress backup", phase);
+            WriteCatalogDom(root, tmpPath);
             AtomicReplace(tmpPath, moodsPath);
+            timing.Mark("write catalog", phase);
             Console.WriteLine($"Updated: {moodsPath} ({tracks.Count:N0} tracks)");
             RegenerateSidecar(moodsPath);
+            timing.Mark("regenerate sidecar", phase);
+            timing.NoteFileSize("catalog out", moodsPath, $", {tracks.Count:N0} entries");
+            timing.NoteFileSize("backup", bakPath);
+            timing.NoteFileSize("sidecar", Path.ChangeExtension(moodsPath, ".mbxs"));
+            timing.Report();
         }
 
         // -- Catalog backup compression + snapshot/restore ---------------------
@@ -16541,6 +16806,46 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(SafeDbl(realNode, "spectralFlatness") == 0.4062, "repair: real value survives untouched");
             }
 
+            // --- WriteCatalogDom: the DOM-mutating verbs' writer -------------------------------
+            // Every catalog-rewriting verb (--fixup / --remap / --migrate / --merge-moods /
+            // --strip-smfm / --prune-*) writes through this one helper. It replaced
+            // root.ToJsonString(), which built the whole catalog as a single UTF-16 string and
+            // therefore hit the 2 GB object limit at roughly HALF the file size the byte-oriented
+            // split threshold allows — the write-side twin of the loader bug fixed in RC7. What a
+            // test can pin is the part a regression would silently change: the bytes.
+            {
+                var tmp = Path.Combine(Path.GetTempPath(), "truedat-domwrite-" + Guid.NewGuid().ToString("N") + ".json");
+                try
+                {
+                    // A 12-dp number is the canary: spectralDecrease lives at ~1e-9, so a writer that
+                    // re-formats numbers instead of copying their text annihilates it to 0.
+                    var root = JsonNode.Parse(
+                        "{\"version\":\"1.0\",\"trackCount\":1,\"tracks\":{\"D:\\\\M\\\\é.flac\":" +
+                        "{\"artist\":\"É\",\"spectralDecrease\":-1.234e-09,\"bpm\":120.5}}}")!.AsObject();
+                    WriteCatalogDom(root, tmp);
+
+                    var bytes = File.ReadAllBytes(tmp);
+                    Assert(bytes.Length > 0 && !(bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF),
+                        "WriteCatalogDom: no BOM — same bytes-on-disk shape as the scan's own writer");
+                    var text = Encoding.UTF8.GetString(bytes);
+                    Assert(text.Contains("-1.234e-09"),
+                        "WriteCatalogDom: number TEXT is copied verbatim, not re-formatted (spectralDecrease survives)");
+                    Assert(!text.Contains("\n"), "WriteCatalogDom: compact by default, like the live catalog");
+
+                    using var back = JsonDocument.Parse(bytes);
+                    var tracksEl = back.RootElement.GetProperty("tracks");
+                    Assert(back.RootElement.GetProperty("trackCount").GetInt32() == 1,
+                        "WriteCatalogDom: header survives the round-trip");
+                    Assert(tracksEl.EnumerateObject().Count() == 1, "WriteCatalogDom: entry survives the round-trip");
+                    var entry = tracksEl.EnumerateObject().First();
+                    Assert(entry.Name == "D:\\M\\é.flac",
+                        "WriteCatalogDom: a non-ASCII path key round-trips (UTF-8 out, UTF-8 in)");
+                    Assert(entry.Value.GetProperty("artist").GetString() == "É",
+                        "WriteCatalogDom: non-ASCII values round-trip");
+                }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+
             // --- phantom-key detector (2026-08-11): NavDbl flags a never-resolved extractor path ----
             // Would have caught spectral_flatness_db on day one instead of hiding for six months.
             {
@@ -17740,6 +18045,34 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             root["version"] = "1.0";
             root["generatedAt"] = generatedAt;
             root["generatedBy"] = VersionInfo.Display;
+        }
+
+        /// <summary>
+        /// Stream a catalog DOM to <paramref name="tmpPath"/> with Utf8JsonWriter — the same way
+        /// SaveResults streams the scan's own output, and the write-side counterpart of the
+        /// streaming loaders.
+        ///
+        /// The DOM-mutating verbs used to write through root.ToJsonString(), which materializes the
+        /// WHOLE catalog as one UTF-16 string: ~900 MB of JSON is ~1.8 GB of chars in a single
+        /// object, and a string hits the 2 GB object limit at about HALF the file size the
+        /// byte-oriented split threshold assumes. That is the same asymmetry that made a catalog
+        /// legal to write and impossible to load before the loaders were streamed — it just sat on
+        /// the other side of the swap. Writing through the DOM's own WriteTo keeps memory bounded by
+        /// the writer's buffer instead of the catalog, so every verb shares the scan writer's ceiling.
+        ///
+        /// Flushes to stable storage before returning, matching SaveResults: the caller's atomic
+        /// swap must not be able to install a file whose tail is still in the OS write cache.
+        /// </summary>
+        internal static void WriteCatalogDom(JsonObject root, string tmpPath, bool indented = false)
+        {
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+            {
+                using (var jw = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = indented }))
+                {
+                    root.WriteTo(jw);
+                }
+                fs.Flush(flushToDisk: true);
+            }
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -633,12 +633,10 @@ namespace Truedat
                 ["tracks"] = moodsDict
             };
 
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            var json = root.ToJsonString(options);
-
-            // Atomic write
+            // Atomic write. Streamed rather than materialized as one string — a
+            // synthetic library runs to hundreds of thousands of entries.
             var tmpPath = moodsOutputPath + ".tmp";
-            File.WriteAllText(tmpPath, json, System.Text.Encoding.UTF8);
+            Program.WriteCatalogDom(root, tmpPath, indented: true);
             AtomicReplace(tmpPath, moodsOutputPath);
 
             Console.WriteLine($"  Wrote {allTracks.Count:N0} mood entries to {moodsOutputPath}");
