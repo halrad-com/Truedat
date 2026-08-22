@@ -17,6 +17,13 @@ high level — what MBXHub uses it for.
 
 ---
 
+## Track metadata (always present)
+
+| Field | Source | Type | MBXHub use |
+|---|---|---|---|
+| `artist` / `title` / `album` | iTunes XML (library scan) or TagLib (per-file modes) | str | display, dedup grouping |
+| `genre` | same | str | genre exclusion rules, the `Speech (genre label)` count, hub-side filtering |
+
 ## Core features (always present)
 
 | Field | Extractor source | Type | MBXHub use |
@@ -98,6 +105,8 @@ high level — what MBXHub uses it for.
 | `hiresGenuine` / `hiresConfidence` | fake-hi-res verdict | authenticity signal |
 | `lossyTranscodeLikely` / `lossyTranscodeConfidence` | transcode verdict | authenticity signal |
 | `speechLikely` / `speechConfidence` / `speechMethod` | talk-vs-music classification | tracks classified `speechLikely == "yes"` are excluded from AutoQ picking |
+| `prov` | compact provenance-defect codes, `+`-joined — `pad16` (16-bit content in a 24-bit container), `tc` (lossy re-encoded from lossy); `up44`/`lossy` reserved for the Tier 1 ceiling detector. Absent on a clean track | authenticity signal |
+| `content` | non-music content class — `speech` (byte-cheap alias of `speechLikely == "yes"`) or `silence`; a `?` suffix marks low confidence. Absent on a clean track | content signal |
 | `method` | algorithm/threshold tag | provenance |
 
 ## Sony SMFM (12-TONE) (nullable — read from file tags, not computed)
@@ -109,11 +118,20 @@ high level — what MBXHub uses it for.
 | `smfmChannelName` | always null (device-refuted) | not used |
 | `smfmBpm` | Sony GBPM | tempo reference |
 
+## Catalog header (once per file, not per track)
+
+| Field | Meaning |
+|---|---|
+| `generatedBy` | the truedat build version that wrote the catalog |
+| `generatedAt` | UTC ISO-8601 write timestamp |
+| `trackCount` | entries in `tracks` (per part when the catalog is split) |
+| `partIndex` / `totalTracks` | present only on multi-part catalogs (`mbxmoods.json.1`, `.2`, …), which readers merge transparently |
+
 ## Identity / housekeeping
 
 | Field | Meaning | MBXHub use |
 |---|---|---|
-| `audioStreamSha256` | content identity (frame-anchored for FLAC) | cross-system content key / dedup |
+| `audioStreamSha256` (+`audioStreamSha256Source`) | content identity — the source key reads `flac-frames` when the hash is frame-anchored | cross-system content key / dedup |
 | `fingerprint.v1{...}` | composite identity (codec/props/LAME tag) | dedup, verify; authenticity verdict input |
 | `fileMd5` | whole-file MD5 (only written under `--file-md5`) | none (MBXHub indexes `audioStreamSha256`) |
 | `lastModified`, `analysisDuration` | housekeeping | scan cache / ETA |

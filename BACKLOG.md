@@ -1,277 +1,108 @@
 # Truedat Backlog
 
+Open work only. Shipped items live in `CHANGELOG.md`.
+
 ## Queued work — next sprint
 
-1. **diffycat — cross-copy Library Reconcile** (was "mood diff engine"; **spec-ready,
-   queued for next sprint**). Answer "what is actually different between the 5–6
-   `robocopy /MIR` mirror libraries" whose counts disagree (filesystem vs MusicBee vs
-   iTunes XML vs `mbxmoods.json`). Read-only `truedat --inventory` + `--reconcile`: a
-   **single ledger that explains every count gap**, filesystem-anchored (canonical relpath
-   + `audioStreamSha256`), audio-identity + SMFM-from-catalog **drift explainer**
+1. **diffycat — cross-copy library reconcile** (spec-ready). Answer "what is actually
+   different between the 5–6 `robocopy /MIR` mirror libraries" whose counts disagree
+   (filesystem vs MusicBee vs iTunes XML vs `mbxmoods.json`). Read-only `--inventory` +
+   `--reconcile`: a single ledger that explains every count gap, filesystem-anchored
+   (canonical relpath + `audioStreamSha256`), an audio-identity + SMFM drift explainer
    (audio-identical metadata drift → transplant, SMFM outranks tags; vs real audio
    divergence), and a `reconcile-decisions.json` (exclude-file idiom) that converges the
-   ledger to zero. Sync stays **outside** the binary (robocopy + SMFM transplant), proven
-   by re-reconcile-to-zero. Guardrail: single ledger, offline/static files, no DB/federation
-   (the 2026-05-04 decouple lesson). **L0 filesystem + SMFM/audio drift explainer = MVP;**
-   L1 tag-content diff deferred. Spec:
-   `docs/superpowers/specs/2026-08-02-library-reconcile-design.md`; resume:
-   `docs/SESSION-RESUME-2026-08-03-diffycat.md`. **Next step:** invoke writing-plans at
-   sprint start (Beyond Compare / Python-diag options considered and set aside — it's a
-   truedat mode).
+   ledger to zero. Sync stays **outside** the binary (robocopy + SMFM transplant), proven by
+   re-reconcile-to-zero. Guardrail: single ledger, offline/static files, no DB/federation.
+   L0 filesystem + drift explainer = MVP; L1 tag-content diff deferred. Spec and resume doc
+   in the local `docs/` tree. Next step: invoke writing-plans at sprint start.
 
 2. **Tier 1 detection — spectral-ceiling + cliff detector** (`prov: up44` / `lossy`).
    The one new measurement that closes both the 44.1→48k upsample gap and the
-   lossy-laundering gap (lossy history inside a lossless container — tracked nowhere
-   until now). Accumulate mean mag² per FFT bin across windows (reusing the
-   `ComputeHfAnalysis` loop), measure where the spectrum actually ends (**ceiling**)
-   and how sharply (**cliff**): resampler/codec anti-alias filters are near-brickwall,
-   naturally dark music rolls off gradually — the steepness gate is what answers the
-   false-positive failure that killed Signal D. Must run on lossless at ANY rate/depth
-   (44.1k FLAC is *the* laundering container and is exactly where HF analysis refuses
-   today). Honest `unknown` expected on streaming-derived 48k material (codec masking
-   is physics). The `prov` code plumbing + `+`-joiner shipped in v0.5.4.8-RC1 and is
-   waiting for these codes. Full method sketch in the 2026-08-12 detection review
-   (local design notes). Needs operator go.
+   lossy-laundering gap (lossy history inside a lossless container). Accumulate mean mag²
+   per FFT bin across windows (reusing the `ComputeHfAnalysis` loop), measure where the
+   spectrum ends (**ceiling**) and how sharply (**cliff**): resampler and codec anti-alias
+   filters are near-brickwall, naturally dark music rolls off gradually — the steepness gate
+   is what answers the false-positive failure that killed Signal D. Must run on lossless at
+   ANY rate/depth (44.1k FLAC is *the* laundering container and is exactly where HF analysis
+   refuses today). Honest `unknown` expected on streaming-derived 48k material. The `prov`
+   code plumbing shipped in v0.5.4.8-RC1 and is waiting for these codes. Needs operator go.
 
-3. **Catalog number-text bloat — G17 doubles** (small, mechanical, tens of MB).
-   Values are already `Math.Round`-ed to 2–6 dp, but most decimals have no exact
-   binary double, and on net48 System.Text.Json lacks the shortest-round-trip
-   formatter (.NET Core 3+ only) so it prints 17 significant digits:
-   `0.10100000000000001` (19 chars) instead of `0.101` (5) — confirmed live in the
-   2026-08-13 catalog. The extra digits are a pure formatting artifact: parsing either
-   string yields the IDENTICAL double, so no consumer sees a different value. Fix:
-   cast the already-rounded double to `decimal` at the writer helpers
-   (`jw.WriteNumber(name, (decimal)v)` in `WriteOpt`/`Opt` sites) — decimal
-   serializes as the short form. Estimated ~10–15% off the compact catalog. Verify a
-   handful of boundary values round-trip and the self-tests' pinned JSON still match.
-
-4. **v3 `.mbxs` fixture for restfulbee** (chore, small). rb said go (2026-08-12);
-   generate a small synthetic v3 sidecar (178 B records) + matching mini-catalog so
-   their hub-side v3 reader lands against a known-good file. Their lane after that:
-   sidecar-only boot (the mood-JSON parse is ~95% of hub boot time).
-
-The rest of the 2026-07-30 queue shipped (pushed through `562d09c`): T6 ffmpeg
-`ApplyCpuLimit`, T1 `Monitor.TryEnter` periodic save + separate errors-CSV lock,
-T2 memoized-hash handoff into `RunSourceWorkers` + `--file-md5`-gated MD5, scan
-health pass/fail with `FailedComponents`, duration-normalized `Nx realtime`
-throughput, and exclusion playlists (`mbxmoods-exclude` discovery +
-`--exclude-playlist` + playlist input to `--apply-exclusions`).
+3. **v3 `.mbxs` fixture for restfulbee** (chore, small). Generate a small synthetic v3
+   sidecar (178 B records) + matching mini-catalog so the hub-side v3 reader lands against a
+   known-good file. Their lane after that: sidecar-only boot.
 
 ## Extractor build detection (parked 2026-07-30)
 
-Truedat cannot tell which Essentia extractor build it is running — `.1`/`.2`/`.3`
-all report the same library version string, but they differ in the ChordsDetection
-length ceiling (~12,172 s small-buffer vs ~48,695 s large-buffer) and, since `.3`,
-in speed (-O2). With `--max-duration` defaulting to 48000, a box still carrying the
-old `.1` extractor silently feeds >200-min tracks to a binary that dies at ~12,172 s
-(per-track FAILED, sticky in the errors CSV).
+Truedat cannot tell which Essentia extractor build it is running — `.1`/`.2`/`.3` all report
+the same library version string, but they differ in the ChordsDetection length ceiling
+(~12,172 s small-buffer vs ~48,695 s large-buffer) and, since `.3`, in speed (-O2). With
+`--max-duration` defaulting to 48000, a box still carrying the old `.1` extractor silently
+feeds >200-min tracks to a binary that dies at ~12,172 s (per-track FAILED, sticky in the
+errors CSV).
 
-Proposed: hash the extractor exe once at scan start (~20 ms, MD5) and look it up in
-a small built-in table of known builds (`.1` `05c4c77b…`, `.2` `f52e166e…`, `.3`
-`6c6e2737…` — canonical list in `essentia-build/OUTPUT-BUILDS.md`); print the build
-+ its real ceiling in the scan header; warn (or cap) when the effective
-`--max-duration` exceeds what the detected build survives. Unknown hash → say
-"unknown extractor build" and trust the flag. An explicit `--max-duration` always
-wins. Keep the table beside the version constants so a new build is a one-line add.
+Proposed: hash the extractor exe once at scan start (~20 ms, MD5) against a small built-in
+table of known builds (canonical list in `essentia-build/OUTPUT-BUILDS.md`); print the build
+and its real ceiling in the scan header; warn or cap when the effective `--max-duration`
+exceeds what the detected build survives. Unknown hash → say so and trust the flag. An
+explicit `--max-duration` always wins.
 
 Operator-parked; do not build without an explicit go.
 
-## Resumable / interruptible verify (backlogged 2026-08-14 — field-driven)
+## Compressed live catalog — stretch
 
-`--verify` is a whole-catalog one-shot: it re-reads every file's audio region to
-recompute `audioStreamSha256`, holds results in memory, and writes
-`mbxmoods-verify.csv` (and, under `--backfill`, the moods file) only at the end. Kill
-it or lose power mid-run and all progress is lost — the next run starts from zero. It's
-also mutually exclusive with `--chunk`, so it can't be sharded for restartability either.
+The backup/snapshot half shipped 2026-08-09 (`CatalogArchive`, compressed rotated backups,
+`--snapshot`, `--restore`). The live-catalog half is unbuilt.
 
-**Field driver (Trev, 2026-08-14):** a ~6 TB / ~156K library verified over WiFi5 (866
-Mbps link) ran an 18–24 hr pass that saturated the link the whole time; summer
-thunderstorms blip the NAS/router, and with no pause/resume a blip means starting from
-zero. This is the concrete need the 2026-08-08 park was waiting on.
+**It is mutually exclusive with MBXHub's catalog span index (2026-08-21).** The hub boots
+its mood cache from a byte-offset index into the live catalog (`CatalogSpanIndex`): ~20 bytes
+per track, seeking one record on demand. You cannot seek to an arbitrary byte in a DEFLATE
+stream, so compressing the live file does not degrade that index — it deletes it, and hands
+the hub back the whole-catalog memory cost this stretch was never meant to touch. The gate is
+therefore a **trade, not a permission**: taking it means first replacing the span index with
+something that survives compression (a per-record-framed container, or spans as decompressed
+offsets plus a framing index). Recorded on the MBXHub side too.
 
-Two candidate approaches (decide at build time — could ship one, or both):
+If it is ever taken, the consumer-side constraints restfulbee set (2026-08-09) stand:
 
-- **A. Chunking — wire `--chunk M/N` into `--verify`.** Each shard verifies its own
-  hash-mod subset (the deterministic `ChunkOwns` split already used for scanning) and
-  writes a hostname/chunk-suffixed CSV; a completed shard is durably done, so the operator
-  runs the pass in restartable slices across quiet windows. **Lightest option — no schema
-  change, plain verify stays read-only**; it only lifts the `--verify`/`--chunk`
-  mutual-exclusion. This is the approach that dodges the schema-lock objection that parked
-  the item, and it's the better first cut for Trev's exact case.
-- **B. Checkpoints — per-entry `lastVerified` timestamp.** Written on an OK result so
-  verify can skip entries verified within the last N days and auto-resume over the
-  un-verified remainder — no manual sharding. **Cost: this changes the locked schema
-  (2026-07-11 rule) AND makes *plain* verify a writer** (it must save the ~900 MB catalog
-  to record timestamps), turning a read-only audit into a full write. That cost is exactly
-  why 2026-08-08 parked it; approach A avoids it entirely.
+1. **All consumers, not just the hub** — the AutoQ model tooling reads `mbxmoods.json`
+   directly and would break silently at the next retrain.
+2. **Sniff must tolerate BOM + leading whitespace** — `PK` → ZIP, `1F 8B` → gz, else skip
+   optional BOM/whitespace and expect `{`.
+3. **Decompress as a Stream, not a string/byte[]** — the hub parses with a streaming
+   `Utf8JsonReader` inside MusicBee's process; a decompress-to-string trades the disk win
+   for a multi-hundred-MB allocation spike.
+4. **Atomicity becomes load-bearing** — a truncated ZIP fails at the container layer with no
+   partial-data fallback, worse than a half-written plain JSON.
 
-**SHIPPED 2026-08-16 — approach A.** `--chunk M/N` now composes with `--verify`; each shard
-writes `mbxmoods-verify.<host>.<M>of<N>.csv` and is durably done. Plain verify stays read-only
-and the schema is untouched, so the 2026-08-08 park's objection never applies. A test pins that
-the shards partition the catalog exactly (union covers every entry exactly once) — without that,
-a "completed" set of shards could silently leave files unverified, which is worse than the
-one-shot it replaces. Implementation note: the shard filters the WALK only, never `allTracks`,
-because `--backfill` saves the whole dictionary and a filtered one would truncate the catalog
-to 1/N.
+Deliberately not: delta/diff archives, zstd/brotli (not in net48).
 
-**Approach B (per-entry `lastVerified`) remains unbuilt and unauthorized**, and its costs stand:
-it changes the locked schema and makes plain verify a writer. Only revisit it if manual sharding
-proves too clumsy in the field — A covers the driving case.
+## Verify checkpoints (approach B) — unbuilt, unauthorized
 
-## Prune catalog entries by exclusion rule — SHIPPED 2026-08-15 as `--prune-excluded`
-
-Closed the gap that exclusion rules gate *future* scanning but never retired entries scanned
-before a rule existed (or before the exclusion feature shipped) — field-driven by Trev
-(2026-08-14): stale-but-excluded entries that could never be refreshed, plus a batch of 1 hr+
-tracks he wanted excluded *and* dropped from the catalog.
-
-Shipped as a **dedicated verb**, not a branch of `--fixup`: fixup needs the iTunes XML and
-reconciles *paths* against the filesystem, while this needs neither (genre comes from the
-catalog entry, so it runs on a metadata mirror) — and growing a second removal class onto an
-existing destructive verb would have changed what `--fixup` costs without the operator typing
-anything new. Guardrails as designed: `include` still wins, `--dry-run` prints the exact
-removal list and writes nothing, a compressed rotated backup precedes the atomic swap, the
-`.mbxs` sidecar is regenerated, and `--no-exclusions` is *refused* rather than obeyed.
-
-**The distinction that made it on-side holds in the shipped code and must keep holding:** it
-prunes on **operator-written rules** (evidence), never on a classification (heuristic). The
-heuristic-purge class stays deleted (`CLAUDE.md`, Heuristics → Evidence). "Prune the
-speech-likely entries" is that class wearing this verb's clothes — the answer is to write a
-rule and run this, not to teach it to classify.
-
-## Compressed LIVE catalog — stretch (backup/snapshot half SHIPPED 2026-08-09)
-
-**Status (2026-08-09): the safe half SHIPPED.** `CatalogArchive` (own file) is the shared
-compress/decompress helper (ZIP-on-write, sniffing read for zip/gz/plain). Backups at the four
-mutating sites are now compressed + rotated (`--keep-backups N`, default 5); `--snapshot [path]`
-and `--restore <archive>` are implemented; `+System.IO.Compression` framework reference added
-(no new NuGet dep). See `CLAUDE.md` "Catalog backups & snapshots". The **compressed-live-catalog
-stretch below remains unbuilt** — still gated on restfulbee/MBXHub consumer-first sequencing.
-
-`mbxmoods.json` is ~900 MB at 156K entries. It's repetitive text (~85 field names +
-numeric strings repeated per track), so it gzips ~8–10× → ~100–130 MB. That single fact
-makes compression the right lever and makes anything fancier unnecessary.
-
-Constraints (pin the choices):
-- **Live `mbxmoods.json` stays plain JSON** for the base feature — MBXHub's tolerant reader
-  consumes it as plain JSON. Base feature compresses backups/snapshots only.
-
-  **The stretch is MUTUALLY EXCLUSIVE with MBXHub's catalog span index (2026-08-21).** The
-  old wording — "gated on MBXHub, consumer-first" — asked whether the hub could *read* a
-  compressed catalog, and the answer to that is yes, which is why it reads as a gate that
-  can be satisfied. It is the wrong question. MBXHub now boots its mood cache from a
-  **byte-offset index** into the live catalog (`CatalogSpanIndex`, shipped 2026-08-21): it
-  keeps ~20 bytes per track and seeks one record on demand instead of holding the catalog in
-  memory. **You cannot seek to an arbitrary byte in a DEFLATE stream** — position N is not
-  addressable without inflating everything before it — so compressing the live file does not
-  degrade that index, it deletes it, and hands the hub back the whole-catalog memory cost
-  this stretch was never meant to touch.
-
-  So the real gate is a **trade**, not a permission: taking this stretch means first
-  replacing the span index with a mechanism that survives compression — a per-record-framed
-  container, or spans expressed as decompressed offsets plus a framing index — and that work
-  belongs to whoever picks this up. Recorded on the MBXHub side too (`CatalogSpanIndex` class
-  doc and their plan §8c) so neither repo has to remember it alone. Backups and snapshots are
-  unaffected: nothing seeks into those.
-- **Zero new dependencies** — net48 ships both `System.IO.Compression.ZipArchive`/`ZipFile`
-  and `GZipStream`/`DeflateStream`. Brotli/zstd are not in net48 without a NuGet → out.
-- **Prefer ZIP over gz on write (Windows-first rationale).** Both use DEFLATE (same ratio),
-  both zero-dep, but Windows Explorer opens `.zip` natively while `.gz` needs a third-party
-  tool. ZIP is also a container, so a snapshot can bundle catalog + manifest + exclude file
-  in one double-clickable archive.
-- **Self-describing on read — accept zip, gz, and plain.** Sniff first bytes: `PK` (`50 4B`)
-  → ZIP (read entry `mbxmoods.json`), `1F 8B` → gz, `{` → plain. Backward-compatible and
-  reversible; the same sniff serves the stretch (MBXHub uses it too).
-- Streaming (`Utf8JsonWriter → ZipArchive entry stream / GZipStream → FileStream`) keeps it
-  O(1) memory like `SaveResults`; atomic write is unchanged (stage `.tmp`, `ReplaceFile` swap).
-
-Two surfaces:
-1. **Backup (automatic, now compressed + rotated).** The mutating modes (`--fixup`,
-   `--remap`, `--merge-moods`, `--migrate`) each drop a permanent `mbxmoods.json.bak.<ts>`
-   full copy that ACCUMULATES — the footprint pain. Write them compressed (~120 MB vs 900 MB)
-   and add keep-last-N rotation (`--keep-backups N`, default ~5). Rotation, **never silent
-   truncation** (same ruling as `mbxmoods-skipped.csv`).
-2. **Snapshot (deliberate).** New `--snapshot [path]`: streams the current catalog into a
-   `mbxmoods-snapshot-<ts>.zip` (read-only over the live file) — bundling the catalog + a
-   manifest (`trackCount`, `generatedAt`, content hash) + `mbxmoods-exclude.json`, so the
-   archive is a complete, self-verifying, restorable state in one file.
-
-Restore: a `--restore <archive>` mode (sniffs zip/gz/plain), or just document extract → rename.
-
-Deliberately NOT: delta/diff archives (fragile, complex; full DEFLATE is already ~90%
-smaller — KISS); zstd/brotli on net48.
-
-Footprint: one shared compress/decompress helper (format-sniffing read + ZIP-default write)
-wired into the 4 backup sites + a new `--snapshot` arg (+ optional `--restore`) + the
-rotation sweep. No schema change, no new dependency.
-
-**Stretch — compressed live catalog.** Could replace the live `mbxmoods.json` with a
-compressed form (ZIP entry `mbxmoods.json`, or `.json.gz`). Over a share-hosted catalog this
-is a net win (load ~120 MB + inflate beats reading 900 MB); locally on NVMe it's ~a wash
-(disk traded for CPU). **Blocker: MBXHub also reads this file**, so it's a cross-repo
-contract change — needs a heads-up to restfulbee and must be **consumer-first** (MBXHub adds
-the format-sniffing read *before* truedat ever writes compressed), using the same magic-byte
-sniff so old plain catalogs still load and the change is reversible. Costs: the catalog stops
-being greppable/jq-able without extracting, and forecloses any future streaming/mmap read
-(everything loads it whole today, so no loss now). Do not build the stretch without an
-explicit go AND restfulbee coordination.
-
-**restfulbee ACK + consumer-side constraints (2026-08-09).** MBXHub:architect approved the
-sniff-reader and ZIP-over-gz direction and consumer-first sequencing, and added four
-constraints the stretch spec must honor:
-1. **ALL consumers, not just the hub.** MBXHub's reader is not the only plain-JSON consumer
-   of `mbxmoods.json` — the AutoQ model tooling reads it directly (`restfulbee/tools/
-   calibrate-valence-arousal.py` and friends). Compressed-live would break those silently at
-   the next retrain. The consumer-first gate must count the python tooling too, not only the
-   hub reader.
-2. **Sniff must tolerate BOM + leading whitespace.** Don't test the first byte for `{` —
-   catalogs appear with a UTF-8 BOM (`EF BB BF`) and occasional leading whitespace. Order:
-   `PK` → ZIP; `1F 8B` → gz; else skip optional BOM + whitespace, then expect `{`.
-3. **Decompress as a Stream, not a string/byte[].** MBXHub parses with a streaming
-   `Utf8JsonReader` to avoid materializing ~900 MB in a net48 plugin sharing MusicBee's
-   process. The sniff must hand the JSON layer a `Stream` (`ZipArchiveEntry.Open()` /
-   `GZipStream`) with the streaming parse behind it — a decompress-to-string would trade the
-   disk win for a multi-hundred-MB allocation spike. Same discipline applies on truedat's read.
-4. **Atomicity becomes load-bearing, not just good practice.** A truncated ZIP fails at the
-   container layer with a poor error and no partial-data fallback, worse than a half-written
-   plain JSON. temp-file + atomic replace is mandatory for compressed-live; state it in the spec.
-
-When greenlit, ping restfulbee:architect — they'll spec the reader change against MoodCache's
-actual read path (the same tolerant reader that handles the `sensme*`→`smfm*` rename) so the
-sniff lands in one place, not at every call site.
+Per-entry `lastVerified` timestamps so verify auto-resumes over the un-verified remainder
+without manual sharding. Its costs stand: it changes the locked schema and makes *plain*
+verify a writer (saving the whole catalog to record timestamps), turning a read-only audit
+into a full write. `--chunk M/N` on `--verify` (shipped 2026-08-16) covers the driving case;
+only revisit this if manual sharding proves too clumsy in the field.
 
 ## Scan policy — next items
 
-The exclusion mechanism, `--preview`, the review page and the heuristics→evidence
-rewrite all shipped in v0.5.4.4. What's left:
-
-- **`speech` as a fourth exclusion rule kind.** `{"kind":"speech","action":"exclude"}`
-  beside `folder`/`genre`/`file`, parsed and matched by `ExclusionSet`, merged through
-  the existing generic `--apply-exclusions` (so MBXHub needs nothing new), under the same
-  include-always-wins layering. **The constraint is the design, not a limitation:**
-  exclusions are evaluated at scan time against the XML work list, *before* analysis,
-  but `speechLikely` derives from Essentia features that only exist *after* it. So a
-  speech rule cannot gate a track nobody has analysed yet. Honest semantics are
-  **analyse once, classify, excluded thereafter** — the rule set and the catalog
-  co-evolve and the work shrinks every pass. Rejected alternative: gating on a cheap
-  pre-analysis proxy (duration + codec) — that is a heuristic deciding, which is exactly
-  what this arc removed.
-- **`--log [path]`** — tee console output to a file *without* `--audit`'s per-track
-  verbosity. Today the only way to keep a run's output is `--audit`, which couples
-  "persist my output" to "tell me about every skipped track"; an operator who just wants
-  the final summary after the window closes gets a much noisier file than they asked for.
-  `TeeWriter` and the plumbing already exist — `--audit` would become "verbose, implies
-  `--log`". This also removes most of the reason to want a pause-at-exit in the launcher.
-- **`mbxmoods-skipped.csv` growth.** It appends every run by design (README documents the
-  cross-run history as intentional, and that history is the diagnostic value). On a large
-  library with many structural skips this grows without bound. **Ruled 2026-07-26: leave
-  as documented.** If it ever needs solving, the answer is keep-last-N *rotation*, never
-  per-run truncation — rotation preserves the documented semantics, truncation silently
-  deletes a record the docs promise.
-- **`--apply-exclusions` concurrency.** The write is atomic and takes a cross-process lock,
-  so truedat cannot lose another truedat's rules. Nothing can serialise it against a text
-  editor saving over the file; the `.bak` remains the recovery path there. Recorded so the
-  gap is known rather than assumed closed.
+- **`speech` as a fourth exclusion rule kind.** `{"kind":"speech","action":"exclude"}` beside
+  `folder`/`genre`/`file`, parsed and matched by `ExclusionSet`, merged through the existing
+  `--apply-exclusions`, under the same include-always-wins layering. **The constraint is the
+  design:** exclusions are evaluated against the XML work list *before* analysis, but
+  `speechLikely` derives from features that exist only *after* it — so a speech rule cannot
+  gate a track nobody has analysed. Honest semantics are **analyse once, classify, excluded
+  thereafter**: the rule set and the catalog co-evolve and the work shrinks every pass.
+  Rejected alternative: gating on a cheap pre-analysis proxy (duration + codec) — that is a
+  heuristic deciding, which is exactly what the Heuristics → Evidence arc removed.
+- **`--log [path]`** — tee console output to a file *without* `--audit`'s per-track verbosity.
+  Today the only way to keep a run's output is `--audit`, which couples "persist my output" to
+  "tell me about every skipped track". `TeeWriter` and the plumbing already exist; `--audit`
+  would become "verbose, implies `--log`".
+- **`--apply-exclusions` concurrency.** The write is atomic and takes a cross-process lock, so
+  truedat cannot lose another truedat's rules; nothing can serialise it against a text editor
+  saving over the file, and the `.bak` remains the recovery path. Recorded so the gap is known
+  rather than assumed closed.
 
 ## Speech → transcription
 
@@ -282,432 +113,118 @@ podcast-vs-audiobook is provenance and provenance is not in the audio. **There w
 
 Transcription is the direction detection points at. Not started, and it changes the tuning
 question: today the thresholds favour precision because a `"yes"` once drove a destructive
-prune (the danceability < 0.50 gate exists because that purge took Charlie Parker, NIN and
-Travis). As a *transcription selector* the cost matrix inverts — a false positive wastes
-one transcode, a false negative means a recording is never transcribed — so the gates want
+prune. As a *transcription selector* the cost matrix inverts — a false positive wastes one
+transcode, a false negative means a recording is never transcribed — so the gates want
 loosening, but deliberately: a method-tag bump against a labelled set, not drift. Binding
-constraints: offline-first (never cloud ASR) and the three-tier Python rule, so it ships as
-an opt-in sibling tool on the `vam-tools/` / `smfm-tools/` precedent, never a runtime
-dependency of the scanner. Segment-level speech/music boundaries would need real extraction
-— i.e. a rescan — unlike the write-time verdict.
+constraints: offline-first (never cloud ASR) and the three-tier Python rule, so it ships as an
+opt-in sibling tool on the `vam-tools/` / `smfm-tools/` precedent, never a runtime dependency
+of the scanner. Segment-level speech/music boundaries would need real extraction — i.e. a
+rescan — unlike the write-time verdict.
 
-## Duplicate review workflow
+## Duplicate review — make it great
 
-**Shipped (see CHANGELOG 5.3.9):** exact + probable detection, keeper recommendation
-(quality > SMFM-tagged > genuine-over-fake-hi-res), the offline interactive review page
-(default output + clickable link), chunk-based include model, folder-pair rollup with
-side-by-side A/B compare, per-file audition, click-to-open folders, track length,
-fake-hi-res badge, `album`/`smfm`/`fakeHires` in `mbxmoods-duplicates.json`, `--manifest`
-for the companion web UI, and the `--fixup` disk-verify + hash-resolve fixes.
-
-**Remaining — make review great** (fuller list in the local dedupe design notes):
+Detection, keeper recommendation, the offline interactive page, the folder-pair rollup and the
+`--manifest` companion all shipped (5.3.9). Remaining:
 
 - **Triage speed:** keyboard nav; reviewed-state + "unreviewed only" filter with progress;
-  search box; sort by reclaimable space; per-group + running wasted-space totals.
-- **Keeper signals:** prefer the in-library copy (has a trackId) and higher playcount /
-  rating; prefer canonical folder structure over `download/` / `tmp/`; configurable
-  keeper order; flag ambiguous keepers.
-- **Detection quality:** similarity/confidence score on probable groups; split
-  strong-vs-loose probable; guard against live-vs-studio false pairs (duration/dynamics
-  delta); whole-album duplicate rollup.
+  search box; sort by reclaimable space; per-group and running wasted-space totals.
+- **Keeper signals:** prefer the in-library copy and higher playcount / rating; prefer
+  canonical folder structure over `download/` / `tmp/`; configurable keeper order; flag
+  ambiguous keepers.
+- **Detection quality:** similarity/confidence score on probable groups; split strong-vs-loose
+  probable; guard against live-vs-studio false pairs (duration/dynamics delta); whole-album
+  duplicate rollup.
 - **Safety:** pre-build dry-run summary (what the `.m3u8` will contain + size); keeper
   exists-on-disk check; cross-group safety (a keeper is never a loser elsewhere).
 - **SMFM:** show channel/GBPM; flag groups where no copy carries SMFM.
 
-## Authenticity-data plumbing — Phase 2.5 (bitUsage) + Phase 3 (spectralCeiling)
+## Cross-encode duplicate precision — segmented MFCC
 
-Builds on the shipped Phase 1 (`bitDepth` + `encoder` in `fingerprint.v1` +
-`--verify --backfill`, see
-[`docs/plans/2026-05-18-data-plumbing-phase1.md`](docs/plans/2026-05-18-data-plumbing-phase1.md))
-and Phase 2 (MP3 LAME tag block, see
-[`docs/plans/2026-05-18-data-plumbing-phase2.md`](docs/plans/2026-05-18-data-plumbing-phase2.md)).
+`--duplicates`' probable tier quantizes the stored *aggregate* (mean) MFCC, so two different
+songs sharing mean timbre, length, key and tempo can collide: great recall, imperfect
+precision, hence review-and-confirm rather than blind delete. The precision fix is **segmented
+MFCC** — N equal-*fraction* segments (~8 → 104 numbers, vs chromaprint's thousands) —
+recovering chromaprint's temporal discrimination at a fraction of the size, alignment-tolerant.
+It needs a new extraction and a nullable schema field (`mfccSegments`), so it is the upgrade
+path only if cross-encode dedup goes first-class.
 
-**~~Phase 2.5 — `bitUsage` block~~ DONE** (commits below). ffmpeg-pipe PCM walk
-over 30 s mid-track; emits `lowestNonZeroBit`, `bottomBitActivity`,
-`effectiveBits`, `samplesAnalyzed`, `method`. Wired as a 5th concurrent task
-in all three scan paths (`--analyze-file`, `--file-list`/`--folder`,
-MoodsMode). Cache hits preserve cached values; legacy entries pick it up on
-the next full scan (not added to the re-extract canary — would force
-unwanted Essentia re-runs across the whole library on first upgrade).
-**Detection-only valid for codec ∈ {flac, alac, wav, aiff} claiming
-`bitDepth ≥ 24`** — lossy decode floods the LSBs with reconstruction noise,
-so the metric is meaningless for MP3/AAC and Phase 4's verdict block must
-gate it accordingly. See
-[`docs/plans/2026-05-18-data-plumbing-phase2.5.md`](docs/plans/2026-05-18-data-plumbing-phase2.5.md).
+Facts that drive the design, so they are not re-derived: MFCC comes from decoded PCM, so
+lossless↔lossless transcodes produce identical features and are **invisible to
+`audioStreamSha256`** (which hashes the compressed bytes) — the real win unique to a feature
+hash. Lossy transcodes shift MFCC slightly; quantization absorbs that, and its granularity is
+the precision/recall knob. Never hash the authenticity/HF/`bitUsage`/loudness fields — those
+are designed to differ between a lossless file and its lossy copy.
 
-**~~Phase 3 — `hfEnergyRatio`~~ DONE** (commits below). Two concurrent ffmpeg
-passes per track (total RMS + `highpass=f=22050` filtered RMS) at the source's
-native sample rate; emits `hfEnergyRatio` (0..1) and `hfEnergyMethod` (frozen
-tag). Only populated when `sourceSampleRate > 44100` (CD-rate files have no
-Nyquist headroom). Catches spectral fake-hi-res that `bitUsage` alone can't —
-an upsampler that adds dither fools `bitUsage` but can't fabricate energy
-above the original Nyquist. The originally-planned full `spectralCeilingHz`
-(via FFT) was descoped to this single-number ratio: ~30 LOC vs ~300, zero new
-deps (ffmpeg's `highpass` filter does the work), one number that's easy to
-threshold. If finer-grained spectral data is needed later, a real FFT pass
-can be added as Phase 5+. See
-[`docs/plans/2026-05-18-data-plumbing-phase3.md`](docs/plans/2026-05-18-data-plumbing-phase3.md).
+## Authenticity — remaining detection gaps
 
-**~~Phase 4 — `truedat.*` verdict block (corpus1-tuned)~~ DONE**. Implementation
-shipped: TruedatVerdict class, ComputeTruedatVerdict helper, four-string-enum
-output (`yes` / `no` / `unknown` / `n/a`), multi-signal weighted voting with ±0.7
-threshold, codec-aware applicability gates, inline emission at write time so
-threshold changes don't require rescans, `--audit` per-signal vote+weight trace.
+Phases 1–5 shipped; current method tag `truedat-v1-fft-corpus1-2026-05-18`, scorecard 23/23
+hi-res and 21/23 transcode on corpus-1. What is left, roughly by value/cost:
 
-**Corpus-validated** against a 23-file hand-built test set at
-`%USERPROFILE%\Music\_truedat-corpus\` covering real hi-res (Pink Floyd Animals
-24/192, Pink Floyd The Wall 24/96, Foo Fighters 24/96 with shaped dither, NIN
-24/96, Sleepy Lagoon 24/48), genre-diverse CD-rate FLACs + WAV, ffmpeg-upsampled
-fake hi-res, real-LAME 320 originals (via standalone `lame.exe 3.100`),
-128→320 and 320→320 LAME chains, Lavc native transcode, CDDA-narrow-band
-false-positive case, and LP-rip MP3s with custom encoder strings. Final
-scorecard: **20/23 (87%) hi-res, 21/23 (91%) transcode**.
+1. **Encoder string whitelist/blacklist** (helps LP rips, EAC, dBpoweramp).
+2. **ML weight tuning spike** — once enough hand-reviewed tracks accumulate (~200+ per
+   question), run a logistic regression against the verdict-input features and use the learned
+   coefficients as **better starting thresholds for the explicit voter**. Keep the explicit
+   voting algorithm (debuggable, tunable, no retraining loop); same output schema, no consumer
+   change. Full ML inference in production stays deferred — the explicit voter is the
+   labeled-data accumulator first.
+3. **AAC ESDS-box encoder fingerprint** — the MP3 LAME-tag equivalent for AAC/M4A.
+4. **Verdict-only re-emit mode** — tune thresholds on a 70k library without a rescan.
+5. **LAME→LAME re-encode chain detection** — the remaining transcode gap: a second LAME encode
+   rewrites the Xing tag and masks the source, so both chain cases verdict "no".
+6. **`hfSpectralStructure.imagingSymmetry` is emitted but unused in the vote** — Lanczos
+   suppression neutralized it on corpus-1; kept for future-corpus tuning.
 
-**Tuning applied** based on corpus findings: dropped spectralRolloff (Signal D —
-false-positives on naturally narrow-band music); dropped `bitrate >= 256`
-inner gate on Signal B (VBR `--preset extreme` dips below 256 on simple
-content); method tag bumped from `truedat-v1-untuned-2026-05-18` to
-**`truedat-v1-corpus1-2026-05-18`**.
+### Detection challenges that must inform any new signal
 
-**5 remaining mismatches are documented signal-gap limitations** (NOT bugs):
-- ~~3 hi-res misses: ffmpeg-upsampled fake 24/96/192 verdict "yes"~~
-  **Closed by Phase 5** — see entry below. All 3 now verdict "unknown"
-  (block suppressed); no longer falsely classified as real.
-- 2 transcode misses: LAME→LAME re-encode chains verdict "no" — second LAME
-  encode rewrites Xing tag masking source. Needs cascade-encode artifact
-  detection (Phase 5+).
-
-Plan: [`docs/plans/2026-05-18-data-plumbing-phase4.md`](docs/plans/2026-05-18-data-plumbing-phase4.md).
-Validation review: [`docs/reviews/2026-05-18-phase4-corpus-validation.md`](docs/reviews/2026-05-18-phase4-corpus-validation.md).
-
-**~~Phase 5 — FFT-based hi-res signal (`hfSpectralStructure`)~~ DONE**.
-Hand-rolled radix-2 Cooley-Tukey FFT in `Truedat/Fft.cs` (~135 LOC, pure-
-managed, zero new deps). `ComputeHfAnalysis` replaces `ComputeHfEnergyRatio`:
-single ffmpeg s32le pipe, 4096-sample Hann-windowed 50%-overlap walk over
-the same 30s mid-track segment — net **−1 subprocess per track** vs Phase 3
-(was 2 RMS passes, now 1 FFT pipe). Emits `hfSpectralStructure: { flatness,
-peakToMean, imagingSymmetry, method }` alongside a bin-sharp `hfEnergyRatio`.
-Signal F (weight 0.35, lossless-only gate) added to the hi-res verdict.
-`hfEnergyRatio` Phase-3 thresholds retuned: bin-sharp values run 3 orders
-of magnitude below the old IIR-leaked values, so the `+1` threshold dropped
-from 0.001 to 1e-5 and the unreliable `-1` vote was dropped entirely
-(Signal F handles fake detection). Method tag bumped to
-**`truedat-v1-fft-corpus1-2026-05-18`**. Corpus re-validation: 5/5 real
-hi-res still verdict "yes"; 3/3 ffmpeg-upsampled fakes flipped from "yes"
-to "unknown" (block suppressed) — clean win on the gap that motivated the
-phase. Transcode verdicts unchanged (Signal F is hi-res only). Inline
-`--self-test` flag verifies the FFT primitive (Parseval, synthetic tones,
-Hann cache, error handling). New scorecard: **23/23 hi-res classified
-correctly** (5 yes + 3 unknown + 15 n/a), transcode unchanged at 21/23.
-Plan: [`docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md`](docs/plans/2026-05-18-data-plumbing-phase5-fft-hires-signal.md).
-
-**Phase 5+ candidates** (ordered roughly value/cost — full discussion in resume doc):
-1. ~~FFT-based hi-res signal to close the ffmpeg-upsample-fake gap~~ DONE (Phase 5)
-2. Encoder string whitelist/blacklist (helps LP rips, EAC, dBpoweramp)
-3. ML weight tuning spike (sklearn logistic regression → calibrated thresholds)
-4. DSD/DSF codec support (currently fails analysis) — **P4, deferred**.
-   Phase 5.1 catches `.dsf` / `.dff` / `.dsd` cleanly at scan entry: rows
-   land in `mbxmoods-skipped.csv` with reason `unsupported codec: DSD`,
-   and no entry in `mbxmoods.json` or `mbxmoods-errors.csv`. (The summary
-   line that reported these was relabelled on 2026-07-26 — it counted every
-   structural skip while naming only DSD.) User-visible failures are gone; full DSD-to-PCM
-   support (likely via an ffmpeg `dsd2pcm` bridge) is still P4.
-5. AAC ESDS-box encoder fingerprint (MP3 LAME tag equivalent for AAC/M4A)
-6. Verdict-only re-emit mode (tune thresholds on a 70k library without rescan)
-7. LAME→LAME re-encode chain detection (the remaining transcode gap)
-
-**Mood-enhancement axes** (decided 2026-05-18 — most are cross-repo handoffs
-or deferred; see [`docs/plans/2026-05-18-mood-axes-mbxhub-handoff.md`](docs/plans/2026-05-18-mood-axes-mbxhub-handoff.md)
-for the Path A architecture):
-
-| Axis | Owner | Status |
+| Case | Why naive detectors fail | What is needed |
 |---|---|---|
-| **Tension** (P1) | MBXHub `mood-formulas` spec | In flight via dispatch B-20260518-204500 — all inputs already in `mbxmoods.json`; Path A |
-| **Dominance** (P1) | MBXHub `mood-formulas` spec | Same dispatch as Tension; ships as a follow-on commit per "one at a time" |
-| **Genre fingerprint** | — | **CUT.** Existing ID3 `genre` tag is already in `mbxmoods.json`; audio-derived prediction would need ~50-200 MB Essentia SVM models that would blow up the single-exe distribution. |
-| **Section-aware mood** (P2) | Truedat extraction | Parked — structural schema change (per-section arrays vs scalars); needs MBXHub-side consumer changes and a new validation corpus. Future phase. |
-| **VADER lyrical sentiment** | — | **PARKED indefinitely.** Lyrics supply chain — runtime fetching is off-limits per offline-first invariant; library coverage = whatever fraction has tagged USLT/SYLT (low). Revisit only if a lyrics-curation flow exists upstream. |
+| **False positive on CDDA / "Fakin the Funk"-style rips** | Naive spectral rolloff sees the ~15 kHz ceiling and flags it, ignoring that the rip is genuinely from a low-HF source (pre-1985 recording, dark master) | LAME-tag absence on a non-Xing MP3 **plus** rolloff, never either alone. A genuine rip with a real LAME tag and `lowpassHz: 19500` must not be flagged because the *music* lacks 16 kHz content. |
+| **False negative on 320→320 transcode** | The second encoder preserves the first's lowpass character; spectral evidence is gone | Encoder fingerprint is the only handle — original 320k from LAME has `Mp3LameTag.version: "LAME3.x"`; a transcode typically has no LAME tag (ffmpeg) or a different version. Music CRC drift is a secondary tell. |
+| **False negative on 128→320 transcode** | The second encoder can add HF noise above what the source had, making rolloff look wide enough | Same handle. Also: a surviving source LAME tag reading `lowpassHz: 16000` on a "320k" file is definitive regardless of spectral measurement. |
+| **Genuine 16-bit FLAC with low HF** | Spectral-only detection sees a 15 kHz ceiling and calls it fake | Never apply hi-res detection below a claimed `bitDepth` of 24. The detection is about the *claim*, not generic spectral analysis. |
+| **Upsampled CD with dither added** | Dither in the upsample chain restores LSB activity, defeating a naive `lowestNonZeroBit ≥ 16` | A real evasion, so detection is probabilistic: `bitUsage.bottomBitActivity` distribution (real 24-bit is more uniform) + content above 22 kHz (dither cannot fabricate it) + encoder forensics. |
 
-**Phase 5 — ML-derived weights for the explicit voter** (spike, not a
-rewrite): once the explicit voter from Phase 4 is running on the live
-library, every scanned track becomes a candidate for a labeled corpus.
-After ~200+ hand-reviewed tracks per question accumulate, run a
-logistic-regression spike in Python (sklearn) against the verdict-input
-features. The learned coefficients become **better starting thresholds
-for the explicit voter** — keep the explicit voting algorithm (debuggable,
-tunable, no retraining loop), just feed it ML-derived weights instead of
-hand-picked ones. Same output schema, no consumer change. Full ML
-inference in production is deferred further still — the explicit voter
-is the labeled-data accumulator first.
+Standing rules these produce: vote and weight over signals rather than a single threshold;
+refuse to verdict on weak or contradictory signals (`unknown`, never a guess); gate by codec so
+hi-res checks only touch claimed-lossless ≥24-bit and transcode checks only MP3/AAC; and treat
+naturally-low-HF corpora as a legitimate class, not a defect.
 
-### Known detection challenges (must inform Phase 4 design)
+## Mood axes still parked
 
-Single-signal heuristics fail in well-documented ways. Real-world cases the
-verdict block must handle without making them worse:
+| Axis | Status |
+|---|---|
+| **Section-aware mood** | Parked — a structural schema change (per-section arrays vs scalars), needs MBXHub-side consumer changes and a new validation corpus. |
+| **VADER lyrical sentiment** | Parked indefinitely — runtime lyric fetching is off-limits under offline-first, and library coverage is whatever fraction carries tagged USLT/SYLT (low). Revisit only if a lyrics-curation flow exists upstream. |
 
-| Case | Why naive detectors fail | What we need |
-|---|---|---|
-| **False positive on CDDA / "Fakin the Funk"-style rips** | Naive spectral-rolloff sees the ~15 kHz ceiling and flags it as transcoded; ignores that the rip is genuinely from a low-HF source (pre-1985 recording, deliberately rolled-off master, dark instrumentation) | LAME-tag absence on a non-Xing MP3 + spectral rolloff is the joint signal, not either alone. A genuine CDDA-→MP3 rip with a real LAME tag and `lowpassHz: 19500` shouldn't be flagged just because the *music* lacks 16+ kHz content. |
-| **False negative on 320→320 transcode** | Second encoder preserves the first's lowpass character; spectral evidence is gone | Encoder fingerprint is the only handle — original 320k from LAME has `Mp3LameTag.version: "LAME3.x"`; transcoded 320k typically has either no LAME tag (ffmpeg) or a *different* LAME version (re-encoded via lame). Music CRC drift across the file is a secondary tell. |
-| **False negative on 128→320 transcode** | Second encoder can introduce HF noise above what the source had, making rolloff look "wide enough" | Same as above — LAME tag absence + Lavc/Lavf encoder string. Also: if the source LAME tag survived re-muxing (rare), `lowpassHz: 16000` on a "320k" file is a definitive flag regardless of spectral measurement. |
-| **Genuine 16-bit FLAC with low HF** | Spectral-only detection would see "ceiling at 15 kHz" and call it fake | Don't apply hi-res detection to anything claiming `bitDepth < 24`. The detection is about the *bit depth claim*, not generic spectral analysis. |
-| **Upsampled CD with dither added** | Adding dither in the upsample chain restores LSB activity, defeating naive `lowestNonZeroBit ≥ 16` | This is a real evasion. Detection becomes probabilistic. Multiple signals needed: `bitUsage.bottomBitActivity` distribution (real 24-bit is more uniform), `spectralCeilingHz` (Phase 3 — content above 22 kHz can't be faked by dither), encoder string forensics. |
+## DSD / non-PCM format support
 
-**Implications for the verdict block:**
-
-1. **Voting / weighting over signals**, not a single threshold. Each signal
-   votes (yes/no/abstain) with a confidence weight. Verdict combines them.
-2. **Refuse to verdict** when signals are weak / contradictory — emit
-   `truedat.confidence: low` rather than guess.
-3. **Codec-aware gating**: hi-res checks only apply to claimed-lossless
-   claimed-≥24-bit files. Transcode checks only apply to MP3/AAC. Don't
-   waste signal on inapplicable measurements.
-4. **Treat older-recording corpora differently** (informed by genre /
-   year metadata when available): "naturally low HF" is a legitimate
-   class that mustn't be falsely flagged.
-
-**Test corpus is needed.** Per the user's feedback (2026-05-18), we need
-ground-truth pairs labeled by hand to validate the verdict block before
-shipping. At minimum: a CDDA rip flagged by naive detectors but genuine
-(e.g. Fakin the Funk), a known-good 24/96, a known-fake 24/96, a 128→320
-transcode, a 320→320 transcode, a deliberately-rolled-off modern
-production. Build this in Phase 4's planning sprint, not now.
-
-## ~~UNC source staging + experimental-signal opt-outs~~ DONE
-
-Shipped 2026-06-09. Three changes in one feature branch (`feat/source-staging`,
-8 commits, fast-forwarded to main):
-
-- **UNC source staging.** `OpenStagedSource` copies UNC-sourced (and
-  hardlink-failed local-source) audio files once to
-  `%TEMP%\.truedat-stage\<guid>.<ext>`, then the 8-9 concurrent workers per
-  track all read from the local copy. Wired at all three fan-out sites:
-  `--analyze-file`, `--file-list`, MoodsMode. Net: 1× full network read per
-  track instead of ~3× full + ≥3× partial. GUID-based ASCII-only staged
-  filename also eliminates the 8.3 / non-ASCII downstream-tool footgun on
-  UNC paths (hardlinks can't span volumes, so the existing
-  `TryCreateHardlink` mitigation didn't help UNC). Per-track `using`-based
-  cleanup keeps steady-state disk footprint at `parallel_worker_count`
-  files; `CleanupOrphanedFiles` sweeps the staging dir at startup for
-  crash-recovery.
-- **Failure semantics: robocopy-style.** Per-track stage failures emit a
-  single `  Warning:` stderr line, append a row to the errors CSV, and
-  fall through to a direct read — scans never abort. Unwritable
-  `--stage-dir` at startup is a hard error before the scan begins.
-- **`--no-bitusage` and `--no-hf-analysis` opt-outs.** Suppress
-  `ComputeBitUsage` / `ComputeHfAnalysis` at all three fan-out sites. JSON
-  schema unchanged (same omit-when-null shape as the ffmpeg-absent case).
-  The `truedat` verdict block still emits but with a reduced signal set —
-  Signal A drops with `--no-bitusage`; Signals B + F drop with
-  `--no-hf-analysis`. Cache canary is **not** widened to recognise these
-  as "partial" — the fields are explicitly optional, matching the existing
-  ffmpeg-absent install pattern; backfill via
-  `--verify --backfill --backfill-level features`.
-
-Flags: `--no-stage`, `--stage-dir <path>`, `--no-bitusage`,
-`--no-hf-analysis` (documented in both `--help` blocks).
-
-**Review-fix follow-on (shipped 2026-06-09 as `fix(scan)` 353919d on
-`feat/source-staging-fixes`, fast-forwarded to main):**
-- Mapped network drives (`Z:\` mapped to `\\server\share`) now stage too —
-  per-root memoized `DriveInfo.DriveType == Network` check.
-- `SourceHandle.SourceLastWriteUtc` snapshot captured inside
-  `OpenStagedSource` immediately after `File.Copy`; recorded as
-  `TrackEntry.LastModified` so a tag touch between copy and persist can't
-  invalidate the recorded mtime against the analyzed bytes.
-- Staged extension sanitized to `.bin` when the source ext isn't ASCII
-  printable.
-- Cache tiers 2/3/4 + cache-miss share one lazily-opened staged copy via
-  `EnsureStagedSrc()` instead of re-reading the source N times across the
-  network. Tier-1 (path-mtime hit) still skips staging entirely.
-- Three near-identical per-track fan-outs collapsed into a shared
-  `RunSourceWorkers` helper returning a `WorkerResults` bundle.
-- End-of-scan `staging: N staged [, M direct-fallback]` summary; stderr
-  warning when >5% of stages fall back so wedged stage-dirs surface
-  visibly instead of silently slow.
-
-## ~~Opus support via ffmpeg transcode~~ DONE
-
-Two changes layered on the existing ffmpeg-transcode pattern (the one that
-already handled `more than 2 channels` downmix):
-
-- **Scan-side retry on `Unsupported codec`** in `AnalyzeWithEssentia`. When
-  essentia's `AudioLoader` rejects a file (e.g. every `.opus` track —
-  this essentia build lacks libopus), `DownmixToStereo` transcodes the
-  source to a stereo WAV and `AnalyzeWithEssentiaCore` re-runs against
-  the WAV. Reactive (not preemptive on `.opus` extension) so it picks
-  up future unsupported codecs without rewiring; failed first attempt
-  is ~0.1s so the overhead is negligible. Same temp-WAV cleanup as the
-  multi-channel branch.
-
-- **Standalone `--transcode` utility mode**: `--transcode <in>
-  --transcode-out <out.flac> [--sample-rate N] [--bit-depth 16|24]`.
-  Pure ffmpeg-driven opus/other → uncompressed FLAC. Defaults to source
-  sample rate / bit depth via `ProbeAudio`; falls back to 48000/24 when
-  the source reports float-internal (opus's container has no bit
-  depth). FLAC native sample formats — `s16` for 16-bit, `s32` with
-  `-bits_per_raw_sample 24` for 24-bit; `-compression_level 0`.
-  Timeout 300s matching `DownmixToStereo`. No essentia, no cache, no
-  mbxmoods.json. Mutually exclusive with all other standalone modes.
-
-Acceptance: opus file that previously exited 1 in 0.1s with
-`AudioLoader: Unsupported codec!` now analyzes end-to-end (exit 0, the full
-feature set populated, `fingerprint.v1.codec="opus"`,
-`audioStreamSha256` set). Reduces (but doesn't close) the broader
-"DSD / Non-PCM Format Support" item below — DSD likely errors with a
-different essentia string and may need its own trigger.
-
-Commits: `b9ebdc7` (code), `e4f1205` (binary).
-
-## ~~Phase 2 hash-first identity (Track A)~~ DONE
-
-`--hash-only --level fingerprint|stream` CLI for identity-only passes without
-Essentia. `fingerprint.v1` composite (pathTail + fileSize + audio props + 64 KB
-invariant-region MD5) is the ms-scale peer-pull ping primitive; `stream` level
-adds durable `audioStreamSha256` over the audio region. Default Essentia scans
-ride-along both `fingerprint.v1` and `audioStreamSha256` via two concurrent
-tasks, so every full scan emits an identity-complete row — not just
-`--hash-only --level stream` runs. (The fan-out described here as six tasks was
-accurate in 2026-04: `audioMd5` and `chromaprint` were removed with the legacy
-fingerprint pipeline in v5.4.0, and `fileMd5` became opt-in behind `--file-md5`
-on 2026-07-11.) Zero new deps. Wire format frozen
-at `docs/reference/identity-wire-format.md`; consumed by the MetaServer side
-(Phase 2 Track B, separate repo).
-
-Commits: `a6a0fe7` (Track A CLI + fingerprint.v1 ride-along), `10a2940`
-(audioStreamSha256 ride-along in default mode), `eb241a3` (wire-format +
-CLAUDE.md sync).
-
-## ~~Seed mbxmoods.json from AcousticBrainz/MusicBrainz~~ DONE
-
-Implemented `--seed-moods` command: bulk seeds mbxmoods.json from AcousticBrainz
-pre-computed features via normalized artist+title matching (confidence 0.6). Tiered
-confidence model never downgrades existing data. Also implemented `--synthesize` for
-generating 430k-track synthetic test libraries. Python pipeline (`catalog-prep.py`)
-handles download with SHA-256 manifest, retry/backoff, and atomic outputs.
-
-Design: `docs/plans/2026-02-26-ab-seeding-and-robustness-design.md`
-
-**Future:** MBXHub Shell integration for background incremental seeding (.6 sprint),
-MBID tag lookup (tier 2).
-
-## ~~Batch File-List Analysis~~ DONE
-
-Implemented `--file-list <path>` flag: reads file paths from a text file (one per
-line, UTF-8, # comments), processes them in parallel via existing Essentia
-infrastructure, POSTs per-track to `--meta-server`. Exit code 1 for partial
-failures with JSON summary on stdout.
-
-Plan: `docs/plans/2026-03-22-file-list-flag.md`
-
-## ~~Concurrent fileMd5 + audioMd5 + chromaprint in Mood Analysis~~ DONE
-
-Mood analysis now runs Essentia extraction, file MD5, audio MD5
-(`essentia_streaming_md5.exe`), and chromaprint (`fpcalc.exe`)
-concurrently per track via `Task.WaitAll`, so wall-clock is
-`max(analysis, slowest-hash)` rather than sum. `TrackEntry` gains an
-`AudioMd5` field; `mbxmoods.json` now emits `audioMd5` alongside
-`fileMd5` (omitted when the MD5 tool is absent). MetaServer receives
-all three identity tiers in one pass (`fileMd5`, `audioMd5`,
-`chromaprint` + `chromaprintDuration`), satisfying its path → fileMd5 →
-audioMd5 → chromaprint → metadataKey lookup walk without requiring a
-separate `--fingerprint` run. Cache re-extract gate requires `audioMd5`
-when `md5Exe` is available so rescans backfill it on pre-hash entries.
-
-Commits: `a4424fe` (extended features), `e7cc22a` (review + fixes),
-`e24a4d9` (inline fileMd5 + audioMd5 + chromaprint).
-
-## ~~Extended Essentia Feature Set~~ DONE
-
-Added 40 extended acoustic descriptors to `TrackFeatures` and `mbxmoods.json`:
-loudness envelope (momentary, short-term, replay gain, DR/LRA), silence profile
-(20/30/60 dB), spectral shape (rolloff, complexity, entropy, kurtosis, skewness,
-spread, strong peak, decrease, energy + 4 energybands), high-frequency content,
-Bark/ERB/Mel band shape statistics (crest, flatness, kurtosis, skewness, spread),
-and rhythm/tonal aggregates (beats loudness, chords strength, HPCP crest + entropy).
-
-All 40 are nullable — writer omits missing keys, reader tolerates older entries that
-pre-date the set. Round-trip covers extract → mbxmoods.json → MetaServer ingest →
-cache preservation. Commits: `72d8e65` (DR), `a4424fe` (extended 39).
-
-Review: `docs/reviews/2026-04-18-extended-features-review.md`
-
-## Duplicate detection (cross-encode) without chromaprint
-
-Chromaprint (`fpcalc`) was the signal that matched *same recording, different
-encode/format* (FLAC vs MP3, V0 vs 320, resample). It was demoted to legacy-only
-chiefly for output size (~5–8 KB/track → hundreds of MB across a large library),
-then removed with the rest of the legacy fingerprint pipeline on 2026-07-11.
-Captured here so the design isn't re-derived. Detector would be a read-only
-JSON post-pass (no rescan/decode), sibling to `--verify` / `--merge-moods`,
-emitting clusters with a suggested keeper — never auto-deletes.
-
-Tiers, by difficulty:
-- **Exact, free, zero false-positive** — bucket by `fileMd5` (byte-identical
-  copies) and `audioStreamSha256` (same decoded audio, different container/tags).
-  truedat already does this *internally* (cross-MD5/SHA cache re-keying); just
-  never surfaced as a user report. Ship first — catches most real dupes.
-- **Cross-encode (the chromaprint gap)** — approximate with a **quantized-feature
-  hash** over the encode-robust descriptors already emitted (`mfcc[]`, `bpm`
-  octave-folded, `key`/`mode`). Quantize → hash → group; the hash is the blocking
-  key (O(n), no pairwise). EXCLUDE the authenticity/HF/`bitUsage`/loudness fields
-  — those are designed to differ between a lossless file and its lossy copy.
-
-Key facts that drive the design (don't re-learn):
-- MFCC is computed from *decoded PCM*, not stored metadata. **Lossless↔lossless
-  transcodes decode to identical PCM → identical features → exact feature-hash
-  match — and these are INVISIBLE to `audioStreamSha256`** (which hashes the
-  *compressed* bytes; FLAC vs ALAC differ). Real win unique to the feature-hash.
-- **Lossy** transcodes alter the spectrum (that's how they save bits), so MFCC
-  shifts slightly — raw hash won't collide; *quantization* absorbs the
-  perturbation. Granularity = the precision/recall knob.
-- **Precision ceiling**: truedat stores *aggregate* (mean) MFCC, so two different
-  songs sharing mean timbre+length+key+tempo can collide. → great recall,
-  imperfect precision → review-and-confirm, not blind delete.
-- **The precision fix = segmented MFCC** (N equal-*fraction* segments, ~8 → 104
-  numbers vs chromaprint's thousands). Recovers chromaprint's temporal
-  discrimination at a fraction of the size, alignment-tolerant. Requires a NEW
-  extraction + nullable schema field (`mfccSegments`) — not "current state."
-  This is the upgrade path if cross-encode dedup ever goes first-class.
-
-Analysis detail in the local (gitignored) plans tree:
-`2026-06-13-dedup-without-chromaprint.md`.
-
-## DSD / Non-PCM Format Support
-
-Convert DSD, multi-channel, and other non-PCM formats via ffmpeg before Essentia
-analysis. Design doc at `docs/dsd-conversion-plan.md`.
+`.dsf` / `.dff` / `.dsd` are caught cleanly at scan entry today — a row in
+`mbxmoods-skipped.csv` with reason `unsupported codec: DSD`, no catalog entry and no error
+row — so there are no user-visible failures. Full DSD-to-PCM support (likely an ffmpeg
+`dsd2pcm` bridge) is still unbuilt and P4.
 
 ## SpeechTagSniffer's MaxId3Walk evidence ceiling
 
-`Truedat/SpeechTagSniffer.cs:65` caps the ID3v2 walk at `MaxId3Walk = 128 * 1024`
-(~128 KB); the bailout at `:123` means a marker frame (`PCST`/`WFED`/`TGID`/`TCON`)
-positioned after that point in the tag is never reached. Since the 2026-07-25
-Heuristics → Evidence rewrite, `SpeechTagSniffer` no longer skips or prunes anything —
-informing a human via `--preview` is its **only** job — so a cap that silently truncates
-evidence deserves a deliberate decision rather than the accident it currently is.
+`Truedat/SpeechTagSniffer.cs` caps the ID3v2 walk at `MaxId3Walk = 128 KB`, so a marker frame
+(`PCST`/`WFED`/`TGID`/`TCON`) positioned after that point is never reached. Since the
+Heuristics → Evidence rewrite the sniffer no longer skips or prunes anything — informing a
+human via `--preview` is its only job — so a cap that silently truncates evidence deserves a
+deliberate decision rather than the accident it currently is.
 
-Proven live: an XTC MP3 in the `D:` test corpus carries a 703 KB `APIC` (embedded
-artwork) frame that trips the malformed-frame bailout at ~132 KB; any marker placed
-after it is unreachable. That specific file is a clean negative (no speech markers,
-just `TCON="Rock"` past the artwork), so nothing is known to be silently missed today —
-but the ceiling is real and will bind on some future file with large artwork ahead of a
-genuine marker frame.
+Proven live: an XTC MP3 in the test corpus carries a 703 KB `APIC` frame that trips the
+malformed-frame bailout at ~132 KB; any marker after it is unreachable. That file is a clean
+negative, so nothing is known to be missed today, but the ceiling will bind on some future
+file with large artwork ahead of a genuine marker.
 
-Pre-existing (predates the sniffer rewrite) and deliberately preserved verbatim through
-it — raise with the operator whether to grow the cap, skip over an oversized non-text
-frame instead of bailing, or leave it. Do not change the cap without that decision.
+Raise with the operator whether to grow the cap, skip over an oversized non-text frame instead
+of bailing, or leave it. Do not change it without that decision.
 
-## Scan-summary perf diagnostics (LOW priority)
+## Scan-summary perf diagnostics (low priority)
 
 Add CPU + disk-IO lines to the end-of-scan summary so a run self-reports whether it was
-CPU-bound or IO-bound. Motivated by a 2026-07-14 storage benchmark: analysis time was
-flat at ~59 s/track across WiFi / LAN / USB HDD / SSD, pointing to an on-box (CPU)
-bottleneck — the scan runs `ProcessorCount-2` uncapped Essentia subprocesses, each doing
-a heavy multi-pass FFT workload, so storage location barely moves the needle. These lines
-turn that inference into a measured, per-run fact.
-
-Target output (near the existing `Peak mem` line):
+CPU-bound or IO-bound. Motivated by a 2026-07-14 storage benchmark: analysis time was flat at
+~59 s/track across WiFi / LAN / USB HDD / SSD, pointing at an on-box bottleneck — the scan runs
+`ProcessorCount-2` uncapped Essentia subprocesses, each a heavy multi-pass FFT workload.
 
 ```
   CPU:        avg 96%   peak 100%          (all cores)
@@ -715,18 +232,15 @@ Target output (near the existing `Peak mem` line):
   Disk write: avg 0.3 MB/s peak 12 MB/s    (72 MB total)
 ```
 
-- **Existing Windows counters only** — `System.Diagnostics.PerformanceCounter` (in net48,
-  no P/Invoke, no new deps): `Processor(_Total)\% Processor Time`,
-  `PhysicalDisk(_Total)\Disk Read Bytes/sec`, `Disk Write Bytes/sec`.
-- Sample ~1 s on a background thread; track avg + peak. "Total bytes" falls out of
-  integrating the rate already being sampled — not a separate counter.
-- Use `_Total` (whole box), **not** per-process: the real disk IO happens inside the
-  Essentia/ffmpeg **child** processes, so a `Process\truedat` counter reads ~0 and would
-  mislead. This makes the numbers system-wide — fine on a dedicated benchmark box, noisy
-  on a busy workstation (worth a note in the output).
-- Wrap counter creation in try/catch and degrade to `unavailable` — a diagnostic must
-  never abort a scan. Discard the first `.NextValue()` (rate counters return 0 on the
-  first read).
+- **Existing Windows counters only** — `System.Diagnostics.PerformanceCounter` (in net48, no
+  P/Invoke, no new deps): `Processor(_Total)\% Processor Time`, `PhysicalDisk(_Total)\Disk Read
+  Bytes/sec`, `Disk Write Bytes/sec`. Sample ~1 s on a background thread, track avg + peak;
+  total bytes falls out of integrating the rate.
+- Use `_Total`, **not** per-process: the real disk IO happens inside the Essentia/ffmpeg child
+  processes, so a `Process\truedat` counter reads ~0 and would mislead. System-wide numbers are
+  fine on a dedicated box and noisy on a busy workstation — worth saying so in the output.
+- Wrap counter creation in try/catch and degrade to `unavailable`; a diagnostic must never
+  abort a scan. Discard the first `.NextValue()`.
 
-Interpretation: CPU ≈ 100% + disk read low ⇒ CPU-bound (scale out via `--chunk`); CPU low
-+ disk high ⇒ IO-bound. Observability only, not a functional gap — hence LOW.
+Interpretation: CPU ≈ 100% with low disk read ⇒ CPU-bound (scale out via `--chunk`); low CPU
+with high disk ⇒ IO-bound. Observability only, hence low.
