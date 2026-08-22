@@ -1068,7 +1068,7 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "analysisDuration": 4.2,
       "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
       "audioStreamSha256": "3a0be88f7ea54faa66f9e092ac40e0820197377d59a1b2c8c2d3a4b5c6d7e8f9",
-      "audioStreamSha256Source": "invariant",
+      "audioStreamSha256Source": "flac-frames",
       "fingerprint": {
         "v1": {
           "fileSize": 8421376,
@@ -1130,15 +1130,25 @@ When the source file carries a Sony SMFM block (embedded by Sony Music Center) t
 
 truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, made durable by `--no-smfm`. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
 
+### `fingerprint.v1.codec` — two buckets that refuse to guess
+
+`wma` covers both WMA and WMA Lossless, and `m4a` covers both AAC and ALAC. The label comes from TagLib's MIME type, which cannot cheaply tell those pairs apart, so the catalog does not carry the distinction — and `--list-formats` printing a confident "lossy" over a folder of WMA Lossless would assert what it has no evidence for. Resolving it needs ffprobe on the bytes, which is what `--convert-dir <folder> --wma-lossless-only` does on the machine holding the audio. Entries predating `fingerprint.v1` carry no codec at all and get a `(not recorded)` row rather than one inferred from the file extension — the extension is precisely what a mislabelled file lies about.
+
 ### Identity fields
 
 - **`fileMd5`** — MD5 of the file bytes. Written **only** under `--file-md5`; nothing downstream consumes it.
-- **`audioStreamSha256`** — SHA-256 of the invariant audio region, and the identity MBXHub indexes on. `audioStreamSha256Source` records the anchor: `invariant`, or `flac-frames` for FLAC, where the metadata blocks sit *inside* TagLib's region and would otherwise drift the hash on an ordinary retag.
+- **`audioStreamSha256`** — SHA-256 of the invariant audio region, and the identity MBXHub indexes on. It survives moves, renames and tag edits. `audioStreamSha256Source` names the anchor **only when it is not the default**: `flac-frames` for FLAC (whose metadata blocks sit *inside* TagLib's region, so an ordinary retag would otherwise drift the hash) or `whole-file` when invariant bounds were unavailable. Absent means the plain invariant region. Computed concurrently with Essentia in pure-managed code — per-track wall-clock is `max(analysis, slowest-hash)`, not the sum.
 - **`fingerprint.v1`** — cheap composite (file size, path tail, audio properties, 64 KB head MD5) that drives the quick cache tier. `bitDepth` and `encoder` are what let a file's claimed format be cross-checked against its content — a 320 kbps MP3 whose `encoder` reads `LAME3.100` and whose LAME tag lowpasses at 16 kHz is not what it claims. For MP3 the nested `mp3LameTag` block is populated when a Xing/Info+LAME header is present.
 
 ### Authenticity blocks
 
-`bitUsage` (lossless containers claiming ≥24-bit), `hfEnergyRatio` + `hfEnergyMethod`, and `hfSpectralStructure` (both when the source rate exceeds 44.1 kHz) are the measured inputs to the verdict below — bottom-bit occupancy, energy above 22.05 kHz, and the shape of that HF band. Each is omitted where the codec or sample rate makes it meaningless, and all three need ffmpeg. Backfill with `--verify --backfill --backfill-level features`.
+Three independent measured signals feed the verdict below. Each is omitted where the codec or sample rate makes it meaningless, all three need ffmpeg, and all three backfill with `--verify --backfill --backfill-level features`.
+
+- **`bitUsage`** — lossless containers claiming ≥24-bit only. A 30 s mid-track ffmpeg PCM walk builds a trailing-zeros histogram of the s32le samples. `lowestNonZeroBit` is where signal actually starts: true 24-bit lands at ~7–8 after ffmpeg's alignment, 16-bit content padded to 24 lands at ~16. Plus `bottomBitActivity` (non-zero fraction at the resolution boundary), `effectiveBits` (continuous, clipped to [0, 32]), `samplesAnalyzed` and `method`. A ~5 ms TagLib peek gates applicability *before* the decode, so lossy files never cost 30 s to learn nothing.
+- **`hfEnergyRatio`** (+ `hfEnergyMethod`) — fraction of energy above 22.05 kHz, at the source's native rate, via a radix-2 FFT over 4096-sample Hann frames at 50 % overlap. Only when `sourceSampleRate > 44100`; CD-rate files have no headroom there. This catches what `bitUsage` cannot: an upsampler adding dither produces plausible LSB activity but cannot fabricate energy above the original Nyquist. Genuine 24/96 lands ~1e-5; upsampled-from-44.1 lands at literal 0.
+- **`hfSpectralStructure`** — `flatness`, `peakToMean`, `imagingSymmetry` from that same FFT pass. Upsampled fakes show very low flatness and high peak-to-mean (80–180) — a few narrow imaging spikes in an otherwise empty band — while genuine HF is either broadband (orchestral, ~0.5) or peaky but uncorrelated with the mid band (cymbals). `imagingSymmetry` is emitted but currently unused in the vote.
+
+For MP3, `fingerprint.v1.mp3LameTag` carries the Xing/Info+LAME header when present. `lowpassHz` is the **strongest transcode tell** — a "320 kbps" MP3 low-passed at 16 kHz was almost certainly built from a 128 kbps source. Also `version`, `vbrMethod`, `encoderDelay` / `encoderPadding`, `musicCrc`, `infoTagRevision`. Parsed pure-managed from the first ~8 KB. ffmpeg re-encodes (`Lavc…`) usually carry no LAME tag at all, and that absence is itself a soft signal.
 
 ### Authenticity verdict (`truedat.*` block)
 
