@@ -1168,71 +1168,39 @@ Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exact
 
 The block is **omitted** when no verdict decided `"yes"`/`"no"` **and** no `prov`/`content` code is set (legacy entries without `fingerprint.v1`, weird-codec files, entries lacking signal). The `prov`/`content` half matters: a mostly-silent track decides no yes/no axis, so an axes-only rule would suppress its own flag. Run `--verify --backfill` to populate the authenticity inputs; `speechLikely` needs no backfill — it is computed from features already present, so it fills in the next time each entry is saved.
 
-Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — corpus-1 tuning showed this discipline avoided false flips on peaky-but-genuine cymbal content.
+Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped: it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — that discipline is what keeps it from flipping peaky-but-genuine cymbal content.
 
 `speechLikely` classifies talk content vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight` and `keyVotes` strength. `"yes"` additionally requires two gates: the zero-crossing signal must fire on its own (a tone or ambient bed shares talk's shape on the other signals but sits low on zcr), and `danceability < 0.50` (sparse, live and free-form *instrumental* music craters on every other signal exactly like speech; genuine speech measures 0.00, real-music false positives ran 0.66–1.10). Either gate demotes to `"unknown"`, never `"no"`. Review the `"yes"` set with `--list-speech`. `speechMethod` carries its own tag, independent of the authenticity `method` — the two verdict families tune on separate schedules.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
-**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). Consumers should treat verdicts as high-confidence-but-not-perfect (see the gaps below); the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
+**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`.** The tag identifies the threshold generation, so a consumer can tell which algorithm produced a stored verdict; it bumps to `truedat-v1-…-YYYY-MM-DD` whenever the thresholds are retuned. Treat verdicts as high-confidence but not proof — see what each check misses, below.
 
-### How well the verdicts work, and where they don't
+### What each check catches, and what it misses
 
-Two different questions, with very different evidence behind them.
+Truedat measures the audio rather than trusting the file's label. Each check below votes; no
+single one decides, and when they disagree the verdict is `"unknown"`.
 
-**Is it right?** The only accuracy evidence is corpus-1 — 23 hand-labeled files, 23/23 correct on the hi-res question, with the lossless-24-bit subset that actually exercises the vote at 8/8. That is a calibration set, not a validation set: it is small, it was chosen, and the thresholds were tuned against it. The speech verdict has no labeled corpus at all, which is why its tag still reads `-untuned`. Treat every verdict as high-confidence-but-not-proof.
+| Check | Measures | Catches | Blind to |
+|---|---|---|---|
+| `bitUsage.lowestNonZeroBit` | Which bit the signal actually starts on | 16-bit content padded into a 24-bit container — a CD sold as hi-res | An upsample with dither added, which refills the low bits |
+| `bitUsage.effectiveBits` | How many bits carry information | A 24-bit label with ~13 bits behind it | Same — dither raises this too |
+| `hfEnergyRatio` | Energy above 22.05 kHz | A hi-res file with an empty top octave | Music that never had ultrasonic content; never decides alone |
+| `hfSpectralStructure` | Shape of that band — flatness, peak-to-mean | Narrow imaging spikes left by a cheap resampler | A good resampler, which leaves no spikes to find |
+| `mp3LameTag.lowpassHz` | The cutoff the encoder chose | "320 kbps" built from a 128 kbps source | Anything not MP3; MP3s with no Xing/LAME header |
+| `encoder` string | What wrote the file | ffmpeg re-encodes, which carry no LAME tag | A second LAME pass, which rewrites the tag and hides the first |
 
-**Does it commit?** That can be measured on a real library. On a ~5,000-entry mixed library (mp3 + flac, snapshot mid-scan):
+Applicability is gated, not guessed: bit checks run only on lossless files claiming 24-bit,
+high-frequency checks only above 44.1 kHz, and the transcode checks only on MP3. Outside those,
+the answer is `"n/a"` rather than a verdict from a measurement that means nothing there.
 
-| Axis | yes | no | unknown | n/a | no block |
-|------|-----|----|---------|-----|----------|
-| `hiresGenuine` | 21.3 % | 0.1 % | 0.1 % | 17.5 % | 60.9 % |
-| `lossyTranscodeLikely` | 1.5 % | 4.4 % | 5.0 % | 28.2 % | 60.9 % |
-| `speechLikely` | 0 % | 15.8 % | 23.3 % | — | 60.9 % |
-
-The shape is deliberate: the panel abstains rather than accuses. Note `hiresGenuine: "no"` at 0.1 % — truedat will confirm a hi-res claim far more readily than it will call one fake, because a false accusation costs the operator more than a shrug.
-
-#### What actually works: two independent claims
-
-A hi-res file makes two separable claims — "this was sampled at 96 kHz" and "this carries 24 bits of information" — and **upsampling can only fake the first**. Resampling 44.1→96 gives you the rate for free, but it cannot put information into low bits that never held any. That independence is why the bought-hi-res case is the strongest thing truedat does.
-
-Seven files in one test library, all sold as 24/96 FLAC, all caught:
-
-```
-sr=96000  bitDepth=24  lowestNonZeroBit=15  effectiveBits=13.3  hfEnergyRatio=1e-06
-```
-
-Signal starts at bit 15 — 16-bit content padded into a 24-bit container — about 13 bits carry real information, and there is essentially nothing above 22.05 kHz. Genuine files in the same library sit at `lowestNonZeroBit=7`. Verdict `"no"`, confidence 0.6. That is a CD upsold as hi-res, identified without a reference copy.
-
-**The converse does not hold, and this is the important caveat.** Absence of ultrasonic content is not evidence of fakery. In that same library 240 lossless above-CD-rate entries read `hfEnergyRatio = 0`, and 217 of them show genuine 24-bit occupancy — analog-sourced or gently mastered music with nothing above 22 kHz to begin with. Those are real hi-res files that happen to be quiet up top, and a detector keying on HF absence alone would have condemned every one of them. The seven fakes were caught by the **bit** signal instead; their HF reading (~1e-06) is not even the lowest in the library.
-
-#### The gaps
-
-**Platform normalization.** A verdict describes the file in front of it, not its history. Upload anything to YouTube and it returns at 48 kHz, because that is the video audio baseline — a 44.1 kHz CD rip goes in and a genuine 48 kHz file comes out. Nothing about it is a lie: the container says 48 kHz, the decode is 48 kHz, and downloaded it is a perfectly valid 48 kHz file. What has been erased is that it was ever anything else.
-
-What survives is not the original but *the distribution's own fingerprint* — the platform encoder imposes its own lowpass, so the rolloff sits where that encoder put it rather than where the music ended. Real signal, worth chasing, but it identifies the pipeline rather than the provenance and it moves whenever platforms change encoders.
-
-**Detecting 44.1→48 without a reference is weak, and the measurements say so.** Three compounding reasons:
-
-1. *The band is a sliver.* At 48 kHz everything above 22.05 kHz is just 22.05–24 kHz. At 96 kHz there is 22.05–48 kHz to work with.
-2. *Zero is already the norm there.* 192 of 222 measured 48 kHz entries read `hfEnergyRatio` **exactly 0**; at 96 kHz only 90 of 564 do. A signal that reads zero on 86 % of the population separates nothing.
-3. *A lossy step erases it first.* If the file passed through a streaming encoder, its lowpass already cut below 22.05 kHz — the 44.1 evidence was gone before the file reached you.
-
-**The transcode axis only speaks MP3.** It votes on the encoder string and the LAME tag, which exist only for MP3. On that library every AAC, Opus, Vorbis and WMA entry returned `n/a` or no block at all — precisely the formats streaming platforms serve.
-
-**A lossless container proves nothing about its contents.** FLAC encoded from a lossy decode is bit-exact to what it was handed, and 44.1 kHz FLAC is where laundered audio lands — which is exactly where the HF analysis declines to run today, since there is no Nyquist headroom to measure.
-
-**`spectralRolloff` was tried and dropped.** It fired on naturally low-HF material: a quiet acoustic recording looks like a lowpass if all you measure is where the energy stops. The signal is real; separating it from genuinely dark music is the unsolved part, and it is why `imagingSymmetry` is emitted but not voted — a good resampler leaves no mirror images to find.
-
-**LAME-to-LAME chains verdict `"no"`** — the second encode rewrites the Xing tag and hides the first.
-
-#### Now, and where it is heading
-
-**Now:** truedat answers *"is this hi-res claim honest?"* well, because that question has two independent physical signals behind it and faking both is hard. It answers *"has this been through a lossy encoder?"* only for MP3, and only where the encoder left a tag. It cannot answer *"was this once 44.1 kHz?"* at all.
-
-**The target** is one additional measurement rather than more voting: a spectral **ceiling and cliff** detector — where the spectrum ends, and how *sharply* it ends. Resampler and codec anti-alias filters are near-brickwall; naturally dark music rolls off gradually. Steepness is the discriminator that `spectralRolloff` lacked, and it is what makes the difference between "this music has no highs" and "something cut this off". Critically it must run on lossless at **any** rate and depth, including 44.1 kHz, since that is the laundering container the current analysis skips. Expect honest `unknown` on streaming-derived 48 kHz material — see above for why that is the correct answer rather than a shortfall. The `prov` codes it would report (`up44`, `lossy`) already exist in the schema and are unset, waiting on that measurement.
-
-Underneath all of it is one boundary: **provenance is not a property of the audio.** Sample rate, bit depth and spectral shape describe what a file *is*. "Was this ever compressed, by whom, when" is a question about its history, and a file that lost that history lost it permanently. Better signals narrow the possibilities; they do not recover the answer, and a verdict claiming otherwise would assert more than the evidence carries.
+**What none of them can do is tell you where a file has been.** Anything uploaded to YouTube
+comes back at 48 kHz — the video audio baseline — whatever went in. Download it and you have a
+genuine 48 kHz file; the container is not lying. What is gone is that it was ever 44.1, and the
+lossy encode on the way through already removed the frequencies that would have shown the seam.
+The same holds for lossy audio re-wrapped in FLAC: the copy is perfect, so there is nothing left
+to catch it by. Sample rate, bit depth and spectral shape describe what a file *is* — not what
+it has been through.
 
 ## How Mood Vectors Work
 
