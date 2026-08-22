@@ -874,7 +874,7 @@ A fully analyzed track carries:
 
 **Do not trust a total in this table over the file itself.** Counts are measured from the JSON write surface, not maintained by hand: analyse one track and count the named feature keys in the result, minus the catalog/identity/housekeeping ones (`trackId`, `analysisDuration`, `lastModified`, and the `fingerprint.v1` / identity fields). A hand-kept total has nothing checking it — an earlier figure of "55" survived here for months after the tonal/rhythm wave landed, and its replacement "70" went stale the same way when the two waves below it were added.
 
-Emission is registry-driven: any field listed in `mbxmoods-schema.json`'s `excluded` block beside the exe is not written and is stripped from existing catalogs by `--fixup` (`bpmHistogram` is cut this way today). Re-instating a cut Essentia field costs a full re-scan — the raw extractor JSON is deleted at parse, so there is no parse-only backfill.
+Emission is registry-driven: any field listed in `mbxmoods-schema.json`'s `excluded` block beside the exe is not written and is stripped from existing catalogs by `--fixup` (`bpmHistogram` and `trackId` are cut this way today — so a current scan emits neither). Re-instating a cut Essentia field costs a full re-scan — the raw extractor JSON is deleted at parse, so there is no parse-only backfill.
 
 The 40 extended descriptors are what MBXHub persists for richer downstream scoring — sub-genre profiling, loudness normalisation, fingerprint-free clustering.
 
@@ -991,7 +991,6 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
   "trackCount": 70000,
   "tracks": {
     "C:\\Music\\Artist\\Song.mp3": {
-      "trackId": 123,
       "artist": "Artist",
       "title": "Song",
       "album": "Album",
@@ -1069,21 +1068,19 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
       "audioStreamSha256": "3a0be88f7ea54faa66f9e092ac40e0820197377d59a1b2c8c2d3a4b5c6d7e8f9",
       "audioStreamSha256Source": "flac-frames",
-      "fingerprint": {
-        "v1": {
-          "fileSize": 8421376,
-          "pathTail": "Artist/Album/Song.flac",
-          "durationMs": 245123,
-          "sampleRate": 96000,
-          "channels": 2,
-          "bitDepth": 24,
-          "codec": "flac",
-          "codecRaw": "audio/flac",
-          "bitrate": 2745,
-          "encoder": "reference libFLAC 1.3.2 20170101",
-          "encoderRaw": "reference libFLAC 1.3.2 20170101",
-          "audioHead64kMd5": "ab12cd34ef56789012abcdef34567890"
-        }
+      "fingerprint.v1": {
+        "fileSize": 8421376,
+        "pathTail": "Artist/Album/Song.flac",
+        "durationMs": 245123,
+        "sampleRate": 96000,
+        "channels": 2,
+        "bitDepth": 24,
+        "codec": "flac",
+        "codecRaw": "audio/flac",
+        "bitrate": 2745,
+        "encoder": "reference libFLAC 1.3.2 20170101",
+        "encoderRaw": "reference libFLAC 1.3.2 20170101",
+        "audioHead64kMd5": "ab12cd34ef56789012abcdef34567890"
       },
       "truedat": {
         "hiresGenuine": "yes",
@@ -1105,21 +1102,19 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
 For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when the file has a Xing/Info+LAME header:
 
 ```json
-"fingerprint": {
-  "v1": {
-    "...": "...",
-    "codec": "mp3",
-    "encoder": "LAME3.100",
-    "mp3LameTag": {
-      "version": "LAME3.100",
-      "vbrMethodCode": 4,
-      "vbrMethod": "VBR Method 4 (Two Pass)",
-      "lowpassHz": 19500,
-      "encoderDelay": 576,
-      "encoderPadding": 1656,
-      "musicCrc": 12345,
-      "infoTagRevision": 0
-    }
+"fingerprint.v1": {
+  "...": "...",
+  "codec": "mp3",
+  "encoder": "LAME3.100",
+  "mp3LameTag": {
+    "version": "LAME3.100",
+    "vbrMethodCode": 4,
+    "vbrMethod": "VBR Method 4 (Two Pass)",
+    "lowpassHz": 19500,
+    "encoderDelay": 576,
+    "encoderPadding": 1656,
+    "musicCrc": 12345,
+    "infoTagRevision": 0
   }
 }
 ```
@@ -1138,7 +1133,7 @@ truedat only ever *reads* SMFM, never writes it, so a missing block means the fi
 
 - **`fileMd5`** — MD5 of the file bytes. Written **only** under `--file-md5`; nothing downstream consumes it.
 - **`audioStreamSha256`** — SHA-256 of the invariant audio region, and the identity MBXHub indexes on. It survives moves, renames and tag edits. `audioStreamSha256Source` names the anchor **only when it is not the default**: `flac-frames` for FLAC (whose metadata blocks sit *inside* TagLib's region, so an ordinary retag would otherwise drift the hash) or `whole-file` when invariant bounds were unavailable. Absent means the plain invariant region. Computed concurrently with Essentia in pure-managed code — per-track wall-clock is `max(analysis, slowest-hash)`, not the sum.
-- **`fingerprint.v1`** — cheap composite (file size, path tail, audio properties, 64 KB head MD5) that drives the quick cache tier. `bitDepth` and `encoder` are what let a file's claimed format be cross-checked against its content — a 320 kbps MP3 whose `encoder` reads `LAME3.100` and whose LAME tag lowpasses at 16 kHz is not what it claims. For MP3 the nested `mp3LameTag` block is populated when a Xing/Info+LAME header is present.
+- **`fingerprint.v1`** — one flat key whose name contains a dot; it is **not** a `fingerprint` object with a `v1` child. Cheap composite (file size, path tail, audio properties, 64 KB head MD5) that drives the quick cache tier. `bitDepth` and `encoder` are what let a file's claimed format be cross-checked against its content — a 320 kbps MP3 whose `encoder` reads `LAME3.100` and whose LAME tag lowpasses at 16 kHz is not what it claims. For MP3 the nested `mp3LameTag` block is populated when a Xing/Info+LAME header is present.
 
 ### Authenticity blocks
 
