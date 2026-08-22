@@ -1174,7 +1174,39 @@ Multi-signal weighted voting per question. Hi-res verdict combines four signals:
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
-**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). One known gap remains for Phase 5+: LAME-to-LAME re-encode chains verdict `"no"` because the second LAME encode rewrites the Xing tag — needs cascade-encode artifact detection. Consumers should treat verdicts as high-confidence-but-not-perfect; the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
+**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`** — Phase 5 calibration pass against the 23-file hand-labeled corpus (`docs/reviews/2026-05-18-phase4-corpus-validation.md`), incorporating the FFT-derived `hfSpectralStructure` signal. The corpus-1 retune closed the ffmpeg-upsampled-fake-hi-res gap (3/3 fakes now correctly suppressed or classified). Consumers should treat verdicts as high-confidence-but-not-perfect (see the gaps below); the method tag will bump to `truedat-v1-…-YYYY-MM-DD` on each subsequent calibration pass.
+
+### How well the verdicts work, and where they don't
+
+Two different questions, with very different evidence behind them.
+
+**Is it right?** The only accuracy evidence is corpus-1 — 23 hand-labeled files, 23/23 correct on the hi-res question, with the lossless-24-bit subset that actually exercises the vote at 8/8. That is a calibration set, not a validation set: it is small, it was chosen, and the thresholds were tuned against it. The speech verdict has no labeled corpus at all, which is why its tag still reads `-untuned`. Treat every verdict as high-confidence-but-not-proof.
+
+**Does it commit?** That can be measured on a real library. On a ~5,000-entry mixed library (mp3 + flac, snapshot mid-scan):
+
+| Axis | yes | no | unknown | n/a | no block |
+|------|-----|----|---------|-----|----------|
+| `hiresGenuine` | 21.3 % | 0.1 % | 0.1 % | 17.5 % | 60.9 % |
+| `lossyTranscodeLikely` | 1.5 % | 4.4 % | 5.0 % | 28.2 % | 60.9 % |
+| `speechLikely` | 0 % | 15.8 % | 23.3 % | — | 60.9 % |
+
+The shape is deliberate: the panel abstains rather than accuses. Note `hiresGenuine: "no"` at 0.1 % — truedat will confirm a hi-res claim far more readily than it will call one fake, because a false accusation costs the operator more than a shrug.
+
+#### The gaps
+
+**Platform normalization is the big one.** A verdict describes the file in front of it, not the file's history. Upload anything to YouTube and it comes back at 48 kHz, because that is the video audio baseline — a 44.1 kHz CD rip goes in and a real 48 kHz file comes out. Nothing about that file is a lie: the container says 48 kHz, the decode is 48 kHz, and it is a perfectly valid 48 kHz file. What has been erased is that it was ever anything else, and no amount of looking at the samples recovers the fact of the upload.
+
+What survives is not the original — it is *the distribution's own fingerprint*. The platform's encoder imposes its own lowpass, so the rolloff sits where that encoder put it rather than where the music ended, and the encode chain leaves its own artifacts. That is a real signal and it is worth chasing, but it identifies the pipeline, not the provenance, and it degrades as platforms change encoders. Partial evidence, never proof.
+
+**The transcode axis only speaks MP3.** It votes on the encoder string and the LAME tag, which exist only for MP3 — so on the same library, *every* AAC, Opus, Vorbis and WMA entry came back `n/a` or with no block at all. Those are precisely the formats platforms actually serve. The one question this section is about is the one the axis is currently blind to.
+
+**Rolloff was tried and dropped.** An earlier `spectralRolloff` signal was removed after corpus validation showed it firing on naturally low-HF material — quiet acoustic recordings look like a lowpass if you only measure where the energy stops. The signal is real; separating it from genuinely dark music is the unsolved part.
+
+**A lossless container proves nothing about its contents.** FLAC encoded from a lossy decode is bit-exact to what it was given. On that same library 170 of the 183 48 kHz files were FLAC — consistent with video-baseline material in a lossless wrapper, though 48 kHz FLAC is also entirely normal for video and DAW work, which is exactly why it is a hint and not a verdict.
+
+**LAME-to-LAME chains verdict `"no"`** — the second encode rewrites the Xing tag, hiding the first. Needs cascade-encode artifact detection.
+
+Underneath all of these is one boundary: **provenance is not a property of the audio.** Sample rate, bit depth and spectral shape describe what the file *is*. "Was this ever compressed, by whom, and when" is a question about its history, and a file that lost that history lost it permanently. Signal processing narrows the possibilities; it does not recover the answer, and a verdict that claimed otherwise would be asserting more than the evidence carries.
 
 ## How Mood Vectors Work
 
