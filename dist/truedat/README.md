@@ -868,11 +868,11 @@ A fully analyzed track carries:
 | Core         | 15        | Always present. 12 numeric, plus `key` and `mode` (strings) and `mfcc[]` (13 values).                        |
 | Extended     | 40        | Nullable, omit-when-missing. Loudness envelope, silence, spectral shape, Bark/ERB/Mel band statistics, rhythm/tonal. |
 | Tonal/rhythm | 16        | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
-| Harmonic texture | 14    | Nullable, Essentia-derived (2026-08-09). `hpcp12` / `thpcp12` chroma, `dynamicComplexity`, beat-interval summary, within-track frame stdevs, `mfccStdev`. |
-| Timbre arrays | 4        | Nullable, Essentia-derived. `spectralContrastCoeffs`, `spectralContrastValleys`, `beatsLoudnessBandRatio`, `gfcc`. |
+| Harmonic texture | 14    | Nullable, Essentia-derived (2026-08-09). `hpcp12[12]` / `thpcp12[12]` chroma, `dynamicComplexity`, beat-interval summary, within-track frame stdevs, `mfccStdev[13]`. |
+| Timbre arrays | 4        | Nullable, Essentia-derived. `spectralContrastCoeffs[6]`, `spectralContrastValleys[6]`, `beatsLoudnessBandRatio[6]`, `gfcc[13]`. |
 | Authenticity | 3 blocks  | `bitUsage`, `hfEnergyRatio` + method, `hfSpectralStructure`. Populated only where the codec and sample rate make them meaningful. |
 
-**Do not trust a total in this table over the file itself.** Counts are measured from the JSON write surface, not maintained by hand: analyse one track and count the named feature keys in the result, minus the catalog/identity/housekeeping ones (`trackId`, `analysisDuration`, `lastModified`, and the `fingerprint.v1` / identity fields). A hand-kept total has nothing checking it — an earlier figure of "55" survived here for months after the tonal/rhythm wave landed, and its replacement "70" went stale the same way when the two waves below it were added.
+**Do not trust a total in this table over the file itself.** Counts are measured from the JSON write surface, not maintained by hand: analyse one track and count the named feature keys in the result, minus the catalog/identity/housekeeping ones (`analysisDuration`, `lastModified`, and the `fingerprint.v1` / identity fields). A hand-kept total has nothing checking it — an earlier figure of "55" survived here for months after the tonal/rhythm wave landed, and its replacement "70" went stale the same way when the two waves below it were added.
 
 Emission is registry-driven: any field listed in `mbxmoods-schema.json`'s `excluded` block beside the exe is not written and is stripped from existing catalogs by `--fixup` (`bpmHistogram` and `trackId` are cut this way today — so a current scan emits neither). Re-instating a cut Essentia field costs a full re-scan — the raw extractor JSON is deleted at parse, so there is no parse-only backfill.
 
