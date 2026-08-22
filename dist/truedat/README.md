@@ -1192,21 +1192,47 @@ Two different questions, with very different evidence behind them.
 
 The shape is deliberate: the panel abstains rather than accuses. Note `hiresGenuine: "no"` at 0.1 % — truedat will confirm a hi-res claim far more readily than it will call one fake, because a false accusation costs the operator more than a shrug.
 
+#### What actually works: two independent claims
+
+A hi-res file makes two separable claims — "this was sampled at 96 kHz" and "this carries 24 bits of information" — and **upsampling can only fake the first**. Resampling 44.1→96 gives you the rate for free, but it cannot put information into low bits that never held any. That independence is why the bought-hi-res case is the strongest thing truedat does.
+
+Seven files in one test library, all sold as 24/96 FLAC, all caught:
+
+```
+sr=96000  bitDepth=24  lowestNonZeroBit=15  effectiveBits=13.3  hfEnergyRatio=1e-06
+```
+
+Signal starts at bit 15 — 16-bit content padded into a 24-bit container — about 13 bits carry real information, and there is essentially nothing above 22.05 kHz. Genuine files in the same library sit at `lowestNonZeroBit=7`. Verdict `"no"`, confidence 0.6. That is a CD upsold as hi-res, identified without a reference copy.
+
+**The converse does not hold, and this is the important caveat.** Absence of ultrasonic content is not evidence of fakery. In that same library 240 lossless above-CD-rate entries read `hfEnergyRatio = 0`, and 217 of them show genuine 24-bit occupancy — analog-sourced or gently mastered music with nothing above 22 kHz to begin with. Those are real hi-res files that happen to be quiet up top, and a detector keying on HF absence alone would have condemned every one of them. The seven fakes were caught by the **bit** signal instead; their HF reading (~1e-06) is not even the lowest in the library.
+
 #### The gaps
 
-**Platform normalization is the big one.** A verdict describes the file in front of it, not the file's history. Upload anything to YouTube and it comes back at 48 kHz, because that is the video audio baseline — a 44.1 kHz CD rip goes in and a real 48 kHz file comes out. Nothing about that file is a lie: the container says 48 kHz, the decode is 48 kHz, and it is a perfectly valid 48 kHz file. What has been erased is that it was ever anything else, and no amount of looking at the samples recovers the fact of the upload.
+**Platform normalization.** A verdict describes the file in front of it, not its history. Upload anything to YouTube and it returns at 48 kHz, because that is the video audio baseline — a 44.1 kHz CD rip goes in and a genuine 48 kHz file comes out. Nothing about it is a lie: the container says 48 kHz, the decode is 48 kHz, and downloaded it is a perfectly valid 48 kHz file. What has been erased is that it was ever anything else.
 
-What survives is not the original — it is *the distribution's own fingerprint*. The platform's encoder imposes its own lowpass, so the rolloff sits where that encoder put it rather than where the music ended, and the encode chain leaves its own artifacts. That is a real signal and it is worth chasing, but it identifies the pipeline, not the provenance, and it degrades as platforms change encoders. Partial evidence, never proof.
+What survives is not the original but *the distribution's own fingerprint* — the platform encoder imposes its own lowpass, so the rolloff sits where that encoder put it rather than where the music ended. Real signal, worth chasing, but it identifies the pipeline rather than the provenance and it moves whenever platforms change encoders.
 
-**The transcode axis only speaks MP3.** It votes on the encoder string and the LAME tag, which exist only for MP3 — so on the same library, *every* AAC, Opus, Vorbis and WMA entry came back `n/a` or with no block at all. Those are precisely the formats platforms actually serve. The one question this section is about is the one the axis is currently blind to.
+**Detecting 44.1→48 without a reference is weak, and the measurements say so.** Three compounding reasons:
 
-**Rolloff was tried and dropped.** An earlier `spectralRolloff` signal was removed after corpus validation showed it firing on naturally low-HF material — quiet acoustic recordings look like a lowpass if you only measure where the energy stops. The signal is real; separating it from genuinely dark music is the unsolved part.
+1. *The band is a sliver.* At 48 kHz everything above 22.05 kHz is just 22.05–24 kHz. At 96 kHz there is 22.05–48 kHz to work with.
+2. *Zero is already the norm there.* 192 of 222 measured 48 kHz entries read `hfEnergyRatio` **exactly 0**; at 96 kHz only 90 of 564 do. A signal that reads zero on 86 % of the population separates nothing.
+3. *A lossy step erases it first.* If the file passed through a streaming encoder, its lowpass already cut below 22.05 kHz — the 44.1 evidence was gone before the file reached you.
 
-**A lossless container proves nothing about its contents.** FLAC encoded from a lossy decode is bit-exact to what it was given. On that same library 170 of the 183 48 kHz files were FLAC — consistent with video-baseline material in a lossless wrapper, though 48 kHz FLAC is also entirely normal for video and DAW work, which is exactly why it is a hint and not a verdict.
+**The transcode axis only speaks MP3.** It votes on the encoder string and the LAME tag, which exist only for MP3. On that library every AAC, Opus, Vorbis and WMA entry returned `n/a` or no block at all — precisely the formats streaming platforms serve.
 
-**LAME-to-LAME chains verdict `"no"`** — the second encode rewrites the Xing tag, hiding the first. Needs cascade-encode artifact detection.
+**A lossless container proves nothing about its contents.** FLAC encoded from a lossy decode is bit-exact to what it was handed, and 44.1 kHz FLAC is where laundered audio lands — which is exactly where the HF analysis declines to run today, since there is no Nyquist headroom to measure.
 
-Underneath all of these is one boundary: **provenance is not a property of the audio.** Sample rate, bit depth and spectral shape describe what the file *is*. "Was this ever compressed, by whom, and when" is a question about its history, and a file that lost that history lost it permanently. Signal processing narrows the possibilities; it does not recover the answer, and a verdict that claimed otherwise would be asserting more than the evidence carries.
+**`spectralRolloff` was tried and dropped.** It fired on naturally low-HF material: a quiet acoustic recording looks like a lowpass if all you measure is where the energy stops. The signal is real; separating it from genuinely dark music is the unsolved part, and it is why `imagingSymmetry` is emitted but not voted — a good resampler leaves no mirror images to find.
+
+**LAME-to-LAME chains verdict `"no"`** — the second encode rewrites the Xing tag and hides the first.
+
+#### Now, and where it is heading
+
+**Now:** truedat answers *"is this hi-res claim honest?"* well, because that question has two independent physical signals behind it and faking both is hard. It answers *"has this been through a lossy encoder?"* only for MP3, and only where the encoder left a tag. It cannot answer *"was this once 44.1 kHz?"* at all.
+
+**The target** is one additional measurement rather than more voting: a spectral **ceiling and cliff** detector — where the spectrum ends, and how *sharply* it ends. Resampler and codec anti-alias filters are near-brickwall; naturally dark music rolls off gradually. Steepness is the discriminator that `spectralRolloff` lacked, and it is what makes the difference between "this music has no highs" and "something cut this off". Critically it must run on lossless at **any** rate and depth, including 44.1 kHz, since that is the laundering container the current analysis skips. Expect honest `unknown` on streaming-derived 48 kHz material — see above for why that is the correct answer rather than a shortfall. The `prov` codes it would report (`up44`, `lossy`) already exist in the schema and are unset, waiting on that measurement.
+
+Underneath all of it is one boundary: **provenance is not a property of the audio.** Sample rate, bit depth and spectral shape describe what a file *is*. "Was this ever compressed, by whom, when" is a question about its history, and a file that lost that history lost it permanently. Better signals narrow the possibilities; they do not recover the answer, and a verdict claiming otherwise would assert more than the evidence carries.
 
 ## How Mood Vectors Work
 
