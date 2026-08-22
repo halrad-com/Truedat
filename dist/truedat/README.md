@@ -867,12 +867,14 @@ A fully analyzed track carries:
 | ------------ | --------- | ----------------------------------------------------------------------------------------------------------- |
 | Core         | 15        | Always present. 12 numeric, plus `key` and `mode` (strings) and `mfcc[]` (13 values).                        |
 | Extended     | 40        | Nullable, omit-when-missing. Loudness envelope, silence, spectral shape, Bark/ERB/Mel band statistics, rhythm/tonal. |
-| Tonal/rhythm | 15        | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
+| Tonal/rhythm | 16        | Nullable, Essentia-derived. `keyVotes` (3 profiles), tempo-histogram peaks, chords, tuning, `averageLoudness`. |
+| Harmonic texture | 14    | Nullable, Essentia-derived (2026-08-09). `hpcp12` / `thpcp12` chroma, `dynamicComplexity`, beat-interval summary, within-track frame stdevs, `mfccStdev`. |
+| Timbre arrays | 4        | Nullable, Essentia-derived. `spectralContrastCoeffs`, `spectralContrastValleys`, `beatsLoudnessBandRatio`, `gfcc`. |
 | Authenticity | 3 blocks  | `bitUsage`, `hfEnergyRatio` + method, `hfSpectralStructure`. Populated only where the codec and sample rate make them meaningful. |
 
-That is **70 named feature fields**. Counting leaf *values* rather than fields — `mfcc[]` is 13 numbers, `chordsHistogram[]` is 24, each `keyVotes` profile carries its own strength — a complete entry holds **111 numbers**, of which **74 are scalar feature values** written as named keys.
+**Do not trust a total in this table over the file itself.** Counts are measured from the JSON write surface, not maintained by hand: analyse one track and count the named feature keys in the result, minus the catalog/identity/housekeeping ones (`trackId`, `analysisDuration`, `lastModified`, and the `fingerprint.v1` / identity fields). A hand-kept total has nothing checking it — an earlier figure of "55" survived here for months after the tonal/rhythm wave landed, and its replacement "70" went stale the same way when the two waves below it were added.
 
-These counts are measured from the JSON write surface, not maintained by hand: analyse one file and count the numeric leaves in the result, minus the nine that are catalog/identity/housekeeping (`trackCount`, `trackId`, `analysisDuration`, and the six `fingerprint.v1` audio properties). Prefer re-measuring to trusting this table — an earlier figure of "55" survived here for months after the tonal/rhythm wave was added, because a hand-maintained count has nothing to check it.
+Emission is registry-driven: any field listed in `mbxmoods-schema.json`'s `excluded` block beside the exe is not written and is stripped from existing catalogs by `--fixup` (`bpmHistogram` is cut this way today). Re-instating a cut Essentia field costs a full re-scan — the raw extractor JSON is deleted at parse, so there is no parse-only backfill.
 
 The 40 extended descriptors are what MBXHub persists for richer downstream scoring — sub-genre profiling, loudness normalisation, fingerprint-free clustering.
 
@@ -1023,6 +1025,30 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "erbCrest": 11.2, "erbFlatness": -8.7, "erbKurtosis": 5.8, "erbSkewness": 1.9, "erbSpread": 18.2,
       "melCrest": 10.6, "melFlatness": -8.4, "melKurtosis": 6.1, "melSkewness": 2.0, "melSpread": 19.5,
       "beatsLoudness": -14.1, "chordsStrength": 0.61, "hpcpCrest": 6.2, "hpcpEntropy": 2.87,
+      "keyVotes": {
+        "krumhansl": { "key": "C", "scale": "major", "strength": 0.71 },
+        "temperley": { "key": "C", "scale": "major", "strength": 0.68 },
+        "edma":      { "key": "C", "scale": "major", "strength": 0.74 }
+      },
+      "bpmFirstPeak": 128.0, "bpmFirstPeakWeight": 0.62, "bpmFirstPeakSpread": 0.91,
+      "bpmSecondPeak": 64.0, "bpmSecondPeakWeight": 0.21, "bpmSecondPeakSpread": 1.44,
+      "chordsKey": "C", "chordsScale": "major", "chordsNumberRate": 0.021,
+      "chordsHistogram": [12.4, 0.8, 3.1, "..."],
+      "tuningFrequency": 440.2, "tuningEqualTemperedDeviation": 0.12,
+      "tuningDiatonicStrength": 0.58, "tuningNontemperedEnergyRatio": 0.09,
+      "averageLoudness": 0.87,
+      "hpcp12": [1.0, 0.21, 0.44, "..."],
+      "thpcp12": [1.0, 0.33, 0.18, "..."],
+      "dynamicComplexity": 3.14,
+      "beatsIntervalMean": 0.469, "beatsIntervalStdev": 0.011,
+      "beatsIntervalMin": 0.44, "beatsIntervalMax": 0.51,
+      "spectralCentroidStdev": 812.4, "spectralEnergyStdev": 0.0022,
+      "dissonanceStdev": 0.041, "pitchSalienceStdev": 0.087, "hpcpEntropyStdev": 0.51,
+      "zeroCrossingRateStdev": 0.031, "mfccStdev": [41.2, 18.6, "..."],
+      "spectralContrastCoeffs": [-0.62, -0.71, "..."],
+      "spectralContrastValleys": [-8.1, -8.6, "..."],
+      "beatsLoudnessBandRatio": [0.41, 0.22, "..."],
+      "gfcc": [-92.1, 41.3, "..."],
       "bitUsage": {
         "lowestNonZeroBit": 8,
         "bottomBitActivity": 0.4123,
@@ -1042,6 +1068,7 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "analysisDuration": 4.2,
       "fileMd5": "d41d8cd98f00b204e9800998ecf8427e",
       "audioStreamSha256": "3a0be88f7ea54faa66f9e092ac40e0820197377d59a1b2c8c2d3a4b5c6d7e8f9",
+      "audioStreamSha256Source": "invariant",
       "fingerprint": {
         "v1": {
           "fileSize": 8421376,
@@ -1062,6 +1089,9 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
         "hiresGenuine": "yes",
         "hiresConfidence": 1.0,
         "lossyTranscodeLikely": "n/a",
+        "speechLikely": "no",
+        "speechConfidence": 0.91,
+        "speechMethod": "truedat-speech-v1.3-untuned-2026-08-13",
         "method": "truedat-v1-fft-corpus1-2026-05-18"
       },
       "smfmScores": [22, 41, 8, 130, 95, 12, 4, 7, 88, 33],
@@ -1094,39 +1124,21 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 }
 ```
 
-When the source file carries a Sony SMFM (12-TONE) block — embedded by Sony Music Center — truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant raw slot index), and `smfmBpm` (Sony's tempo estimate). These are nullable and omitted when absent. The per-slot *channel names* are deliberately **not** emitted: a 2026-06-27 live device test refuted the old slot→name mapping (the device's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so any interpreted mood label is derived downstream by MBXHub, not by truedat. These keys were renamed from `sensme*` on 2026-06-28 — `--migrate` converts existing libraries (with backup), and the reader still accepts the old keys for un-migrated files.
+### Sony SMFM (12-TONE)
 
-`--list-smfm [path]` is the full report: every catalog entry, one row each, in `mbxmoods-smfm.csv` with a `state` column. There are **three** states, not two — `data` (block present and scored), `no-data` (block present, every score zero) and `no-smfm` (no block at all). The middle one is the reason the report exists in this shape: a file Sony analysed but scored nothing is not an untagged file, and collapsing it into either neighbour hands you a work list that is partly wrong whichever way it falls. Re-running the tagger is the fix for `no-smfm` and is precisely what has already been tried for `no-data`. The raw score vector is a column because `smfmChannel` is the argmax slot rather than a mood channel, so anything downstream needs the vector and not the index.
+When the source file carries a Sony SMFM block (embedded by Sony Music Center) truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant slot index) and `smfmBpm`. Slot *names* never appear: a 2026-06-27 device test refuted the slot→name mapping (Sony's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so `smfmChannelName` is kept as a back-compat property, held permanently null, and omitted from the JSON. Any mood label is derived downstream by MBXHub. Renamed from `sensme*` on 2026-06-28 — the reader still accepts the old keys and `--migrate` converts them.
 
-`--list-missing-smfm [path]` is the narrower, older report — it lists the `no-smfm` entries only (truedat's internal `HasSmfm` counts an all-zero block as present) with overall coverage, to `mbxmoods-smfm-missing.csv`. Because truedat only *reads* SMFM and never writes it, a missing block means the file has not been through Sony's tagger — a rescan cannot close that gap, which is why that report is a standalone mode rather than an entry in the `--stats` **Recommended** block.
+truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, made durable by `--no-smfm`. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
 
-A scan prints `+smfm` for a track that **newly** gains SMFM, and an `SMFM added: N` line in the summary. That is a change notice, not an inventory — it says nothing about the tracks that already had it, and it is gone when the console scrolls. `--list-smfm` is the durable answer to "which files carry it".
+### Identity fields
 
-`--list-formats [path]` answers a different question from every other report here: not how complete the catalog is, but **what the library is made of**. It buckets entries by `fingerprint.v1.codec`, prints the share each format holds and whether it is lossy or lossless, then rolls each format up by folder — so "I still have WMA somewhere, where?" has a direct answer instead of a spreadsheet exercise. The full listing goes to `mbxmoods-formats.csv`, with `bitrate` / `sampleRate` / `bitDepth` as columns; "and by bitrate?" is a pivot table away rather than another mode.
+- **`fileMd5`** — MD5 of the file bytes. Written **only** under `--file-md5`; nothing downstream consumes it.
+- **`audioStreamSha256`** — SHA-256 of the invariant audio region, and the identity MBXHub indexes on. `audioStreamSha256Source` records the anchor: `invariant`, or `flac-frames` for FLAC, where the metadata blocks sit *inside* TagLib's region and would otherwise drift the hash on an ordinary retag.
+- **`fingerprint.v1`** — cheap composite (file size, path tail, audio properties, 64 KB head MD5) that drives the quick cache tier. `bitDepth` and `encoder` are what let a file's claimed format be cross-checked against its content — a 320 kbps MP3 whose `encoder` reads `LAME3.100` and whose LAME tag lowpasses at 16 kHz is not what it claims. For MP3 the nested `mp3LameTag` block is populated when a Xing/Info+LAME header is present.
 
-Two buckets deliberately refuse to guess. `wma` covers **both** WMA and WMA Lossless, and `m4a` covers both AAC and ALAC, because the codec label comes from TagLib's MIME type and TagLib cannot cheaply tell those pairs apart — the catalog simply does not carry the distinction, and printing a confident "lossy" over a folder of WMA Lossless would be the report asserting something it has no evidence for. Resolving it needs ffprobe on the actual bytes, which is what `--convert-dir <folder> --wma-lossless-only` does on the machine holding the audio. Likewise, entries written before `fingerprint.v1` existed carry no codec at all and get their own `(not recorded)` row with the backfill command, rather than a codec inferred from the file extension — a guess sitting in the same column as a measurement makes the whole column untrustworthy, and the extension is precisely what a mislabelled file lies about.
+### Authenticity blocks
 
-`--strip-smfm [path]` is the removal side, and it exists because removal used to be a one-way door in the wrong direction. SMFM is *read* from the file's Sony tag and never computed, and the refresh path returns early when the tag is absent — so `--refresh-smfm` can backfill but structurally cannot **clear**. Strip the block out of the file itself (which `smfm-tools` does, deliberately preserving the audio frames so `audioStreamSha256` is unchanged and truedat still recognises the track) and the catalog takes a cache hit and carries the stale scores indefinitely, while `--list-smfm` keeps reporting the entry as tagged. `--strip-smfm` removes the fields from every entry — both key generations, since the reader still falls back to the legacy `sensme*` names — leaving every track and every other field in place. It backs up first, rewrites atomically, and **regenerates the `.mbxs` sidecar**, which is the step that makes it a mode rather than a hand edit: the hub boots sidecar-first, so editing the JSON alone changes nothing at runtime.
-
-It prints what it is about to cost before it acts — specifically how many entries carry *scored* 12-TONE data, since those drop to the essentia-only mood head (the weaker one for valence). That number is reported as a count rather than a percentage because the same command has wildly different blast radius per library: a couple of percent of one, nearly all of another. `--dry-run` reports and writes nothing.
-
-Pair it with `--no-smfm` if the removal is meant to stay. On its own a strip is undone by ordinary work — SMFM comes from the file's tag, so the next cache **miss** on any file still carrying the Sony block puts the data straight back. `--no-smfm` sits beside `--no-bitusage` / `--no-hf-analysis` and closes every read route, the `--refresh-smfm` backfill included; it refuses to run alongside `--refresh-smfm`, because the two contradict and a silent no-op is worse than a refusal.
-
-The SMFM format itself is documented in [`smfm-tools/`](smfm-tools/) — an unofficial wire-format spec, a confidence-tiered state of knowledge (including the claims device testing refuted), an SMFM-vs-Essentia comparison, and standalone Python tooling for extracting SMFM data outside truedat.
-
-Raw features are stored so MBXHub can compute valence/arousal at runtime with tunable weights — no re-scan needed to adjust the formulas. The 40 extended fields are persisted for future downstream scoring (sub-genre profiling, loudness normalisation, clustering). Every extended field is nullable; legacy entries produced before the extended set was added simply omit those keys rather than storing zeros. The `analysisDuration` field records how long Essentia took to analyze each track (in seconds).
-
-`fileMd5` (MD5 of the file bytes; maintained only with `--file-md5` — nothing downstream consumes it), `fingerprint.v1` (cheap composite — TagLib parse + 64 KB invariant-region MD5; fields include `fileSize`, `pathTail`, `durationMs`, `sampleRate`, `channels`, `bitDepth`, `codec`, `bitrate`, `encoder`, `audioHead64kMd5`, plus the nested `mp3LameTag` block for MP3s), and `audioStreamSha256` (streaming SHA-256 over the audio invariant region — content-stable across tag edits and file moves) are all computed concurrently with the Essentia feature extraction in pure-managed code. No subprocesses, no path-escape exposure, no codepage drama. Wall-clock per track is roughly `max(analysis, slowest-hash)` rather than the sum, with Essentia dominating. `audioStreamSha256` is the primary content thumbprint — it survives file moves, renames, and tag edits, and works identically on NTFS, exFAT, and any path Windows can open.
-
-The `bitDepth` and `encoder` sub-fields enable cross-checking a file's claimed format against its actual content — a 320 kbps MP3 whose `encoder` is `Lavc58.x` (ffmpeg transcoder) is almost certainly transcoded from a lossy source; a 24/96 FLAC whose `bitDepth=24` but whose `bitUsage.lowestNonZeroBit` lands at 16 is upsampled CD audio. The `truedat.*` verdict block (see below) consumes these fields plus the `bitUsage` / `hfEnergyRatio` / `hfSpectralStructure` signals to produce a per-track classification.
-
-For MP3 specifically, the `mp3LameTag` block inside `fingerprint.v1` is populated when the file carries a Xing/Info+LAME header. Fields include `version` (e.g. `LAME3.100`), `vbrMethod` (CBR / ABR / VBR method N), `lowpassHz` (LAME's chosen low-pass cutoff — the **single strongest transcode-from-low-bitrate tell**: a "320 kbps" MP3 with `lowpassHz: 16000` was almost certainly transcoded from 128 kbps source), `encoderDelay` / `encoderPadding`, `musicCrc`, `infoTagRevision`. Parsed pure-managed from the first ~8 KB of the file; no subprocess. Files re-encoded by ffmpeg (`Lavc...`) typically have no LAME tag at all — its absence on a non-Xing MP3 is itself a soft signal.
-
-For lossless containers claiming ≥24-bit depth, the `bitUsage` block carries a sub-second ffmpeg-piped PCM walk over 30 s mid-track that builds a trailing-zeros histogram of the s32le samples. Fields: `lowestNonZeroBit` (where signal actually starts in the 32-bit representation — true 24-bit lands at ~7–8 after ffmpeg's alignment, while 16-bit content padded to 24-bit lands at ~16), `bottomBitActivity` (fraction of non-zero samples at the resolution boundary), `effectiveBits` (continuous signal for confidence scoring, clipped to [0, 32] — the s32le sample-space ceiling), `samplesAnalyzed`, `method` (currently `ffmpeg-s32le-30s-mid-native`; the trailing `-native` records that the walk runs at the source's native sample rate rather than a forced 44.1k — earlier values without the suffix were biased by resample interpolation noise). The applicability gate runs as a ~5 ms TagLib peek **before** the ffmpeg decode so lossy / sub-24-bit files are skipped without spending 30 s of decode on data that would be meaningless. Populated only during fresh analysis or via `--verify --backfill --backfill-level features|all`. Null on ffmpeg-absent installs.
-
-The orthogonal `hfEnergyRatio` signal is the fraction of audio energy above 22.05 kHz, measured at the source's native sample rate via a hand-rolled radix-2 FFT walk over 4096-sample Hann-windowed frames (50 % overlap). Only populated when `sourceSampleRate > 44100` (CD-rate files have no Nyquist headroom above 22 kHz, so the test isn't applicable). Catches an evasion that `bitUsage` can't: an upsampler that adds dither to 16/44.1 → 24/96 produces plausible-looking LSB activity, but it can't fabricate audio energy above the original Nyquist. Bin-sharp values run small (genuine 24/96 hi-res lands at ~1e-5; upsampled-from-44.1 content lands at literal 0 after Lanczos suppression). The `hfEnergyMethod` companion field carries the algorithm identifier (currently `managed-fft-radix2-30s-mid-native`).
-
-The same FFT pass also emits `hfSpectralStructure: { flatness, peakToMean, imagingSymmetry, method }` — Wiener-entropy flatness over the HF band, peak-to-mean ratio of HF bins, and Pearson correlation of HF bins against their mirror partners in the source band. The Phase 5 signal catches ffmpeg-upsampled fake hi-res that the bit-level signals (`bitUsage`) miss entirely: upsampled content has very low flatness (energy in a few narrow imaging spikes against an otherwise-empty HF band) and high peak-to-mean (often 80–180), while genuine HF content lands either broadband (orchestral, flatness ~0.5) or peaky-but-uncorrelated-with-mid-band (synthesised cymbals, flatness ~0.01 but with one dominant harmonic). Together, `bitUsage`, `hfEnergyRatio`, and `hfSpectralStructure` are the three independent signals the verdict block weights to answer "is this 24/96 claim genuine?".
+`bitUsage` (lossless containers claiming ≥24-bit), `hfEnergyRatio` + `hfEnergyMethod`, and `hfSpectralStructure` (both when the source rate exceeds 44.1 kHz) are the measured inputs to the verdict below — bottom-bit occupancy, energy above 22.05 kHz, and the shape of that HF band. Each is omitted where the codec or sample rate makes it meaningless, and all three need ffmpeg. Backfill with `--verify --backfill --backfill-level features`.
 
 ### Authenticity verdict (`truedat.*` block)
 
@@ -1140,18 +1152,20 @@ Each track in `mbxmoods.json` carries a nested `truedat` block with two authenti
   "lossyTranscodeConfidence": 0.92,
   "speechLikely":            "yes" | "no" | "unknown" | "n/a",
   "speechConfidence":        0.78,
-  "speechMethod":            "truedat-speech-v1-untuned-2026-07-22",
+  "speechMethod":            "truedat-speech-v1.3-untuned-2026-08-13",
+  "prov":                    "up44",           // optional: pad16 | tc | up44 | lossy, joined with +
+  "content":                 "speech",         // optional: speech | silence | silence?
   "method":                  "truedat-v1-fft-corpus1-2026-05-18"
 }
 ```
 
 Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
 
-The block is **omitted entirely** when none of the three verdicts reached a decided `"yes"`/`"no"` — i.e. `hiresGenuine`, `lossyTranscodeLikely`, and `speechLikely` are all `"unknown"` or `"n/a"` (legacy entries without `fingerprint.v1`, weird-codec files, or entries lacking enough signal). Run `--verify --backfill` to populate the authenticity fields and pick up a real verdict on the next pass; `speechLikely` has no backfill path — it's computed from features already present, so it fills in for the whole catalog automatically the next time each entry is saved (any scan, cache hit or miss).
+The block is **omitted** when no verdict decided `"yes"`/`"no"` **and** no `prov`/`content` code is set (legacy entries without `fingerprint.v1`, weird-codec files, entries lacking signal). The `prov`/`content` half matters: a mostly-silent track decides no yes/no axis, so an axes-only rule would suppress its own flag. Run `--verify --backfill` to populate the authenticity inputs; `speechLikely` needs no backfill — it is computed from features already present, so it fills in the next time each entry is saved.
 
 Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped after corpus validation showed it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — corpus-1 tuning showed this discipline avoided false flips on peaky-but-genuine cymbal content.
 
-`speechLikely` classifies talk content (podcasts, audiobooks, spoken-word — all analyzed by default like anything else now, or any music-library track that's actually speech) vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight`, and tonal `keyVotes` strength. `"yes"` additionally requires the zero-crossing signal to fire on its own — a sine-tone or ambient bed can share talk's shape on the other signals but sits low on zcr, and without this gate it would wrongly reach `"yes"`; tone/ambient content demotes to `"unknown"` instead. A second gate requires `danceability < 0.50`: sparse, live and free-form *instrumental* music craters on every other signal exactly like speech does, and danceability is the one that separates them (genuine speech measures 0.00; real-music false positives ran 0.66–1.10). `"yes"` is a candidate for an exclusion rule, never a `--migrate` prune — `--migrate` never removes entries. Review the `"yes"` set with `--list-speech`, then write a rule via a decisions delta + `--apply-exclusions` if warranted. `speechMethod` carries its own tag (`truedat-speech-v1.2-untuned-2026-07-22`), independent of the authenticity `method` tag, since the two verdict families tune on separate schedules.
+`speechLikely` classifies talk content vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight` and `keyVotes` strength. `"yes"` additionally requires two gates: the zero-crossing signal must fire on its own (a tone or ambient bed shares talk's shape on the other signals but sits low on zcr), and `danceability < 0.50` (sparse, live and free-form *instrumental* music craters on every other signal exactly like speech; genuine speech measures 0.00, real-music false positives ran 0.66–1.10). Either gate demotes to `"unknown"`, never `"no"`. Review the `"yes"` set with `--list-speech`. `speechMethod` carries its own tag, independent of the authenticity `method` — the two verdict families tune on separate schedules.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
