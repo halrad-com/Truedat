@@ -8310,11 +8310,7 @@ namespace Truedat
                 if (trackData.Remove("chromaprintDuration")) legacy = true;
                 if (legacy) legacyStripped++;
                 // SMFM key rename: sensme* -> smfm* (rename, not removal — the data is kept).
-                bool tr = false;
-                if (RenameJsonKey(trackData, "sensmeScores",      "smfmScores"))      tr = true;
-                if (RenameJsonKey(trackData, "sensmeChannel",     "smfmChannel"))     tr = true;
-                if (RenameJsonKey(trackData, "sensmeChannelName", "smfmChannelName")) tr = true;
-                if (tr) renamed++;
+                if (MigrateSmfmKeys(trackData)) renamed++;
             }
 
             Console.WriteLine($"Tracks: {total}");
@@ -8407,6 +8403,32 @@ namespace Truedat
             return victims;
         }
 
+        /// <summary>The <c>sensme*</c> -> <c>smfm*</c> rename, as ONE table that
+        /// <c>--migrate</c> and the self-test both drive. It used to be four open-coded
+        /// RenameJsonKey calls with only three keys listed: <c>sensmeBpm</c> was renamed by
+        /// nothing, so a migrated catalog kept a dead key and — having no read fallback either —
+        /// silently lost the Sony GBPM. A test against RenameJsonKey itself could never have
+        /// caught that, because the helper was never the broken part; the LIST was. So the list
+        /// is now the thing a test can hold, and it is checked against
+        /// <see cref="SmfmJsonKeys"/> so a future key cannot be added to one and missed by the
+        /// other.</summary>
+        internal static readonly (string Legacy, string Current)[] SmfmKeyRenames = new[]
+        {
+            ("sensmeScores",      "smfmScores"),
+            ("sensmeChannel",     "smfmChannel"),
+            ("sensmeChannelName", "smfmChannelName"),
+            ("sensmeBpm",         "smfmBpm"),
+        };
+
+        /// <summary>Apply every legacy SMFM key rename to one entry. True when it changed.</summary>
+        internal static bool MigrateSmfmKeys(System.Text.Json.Nodes.JsonObject trackData)
+        {
+            bool changed = false;
+            foreach (var r in SmfmKeyRenames)
+                if (RenameJsonKey(trackData, r.Legacy, r.Current)) changed = true;
+            return changed;
+        }
+
         // -- SMFM strip (--strip-smfm) ----------------------------------------
 
         /// <summary>Every JSON key an SMFM block can occupy, BOTH name generations.
@@ -8414,8 +8436,9 @@ namespace Truedat
         /// legacy <c>sensme*</c> keys for un-migrated libraries, so a strip that removed
         /// only the <c>smfm*</c> keys would leave entries that still read as having
         /// 12-TONE data — the exact "removed it and it is still there" failure this mode
-        /// exists to end. <c>sensmeBpm</c> has no read fallback but is listed anyway:
-        /// leaving it behind would leave visible SMFM residue in the catalog.</summary>
+        /// exists to end. All four keys now have a read fallback and all four are renamed by
+        /// <c>--migrate</c> — <c>sensmeBpm</c> was the odd one out on both counts until
+        /// 2026-08-22, which silently cost un-migrated catalogs the Sony GBPM.</summary>
         internal static readonly string[] SmfmJsonKeys = new[]
         {
             "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
@@ -13929,8 +13952,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // Every key the reader can resolve SMFM from must be in the strip list.
                 foreach (var k in new[] { "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
-                                          "sensmeScores", "sensmeChannel", "sensmeChannelName" })
+                                          "sensmeScores", "sensmeChannel", "sensmeChannelName", "sensmeBpm" })
                     Assert(SmfmJsonKeys.Contains(k), $"strip-smfm: SmfmJsonKeys covers the reader key {k}");
+            }
+
+            // --- sensme* -> smfm*: the rename table, the migrate path, the read fallback ---
+            // sensmeBpm was renamed by nothing and read by nothing until 2026-08-22, so an
+            // un-migrated catalog lost the Sony GBPM and --migrate left a dead key while
+            // printing "renames SMFM keys". These drive the real table and the real reader:
+            // asserting RenameJsonKey works would pass with the key still missing.
+            {
+                var legacyEntry = JsonNode.Parse(
+                    @"{""artist"":""A"",""sensmeScores"":[1,2,3],""sensmeChannel"":2"
+                    + @",""sensmeChannelName"":""x"",""sensmeBpm"":123.5}")!.AsObject();
+                Assert(MigrateSmfmKeys(legacyEntry), "migrate: a legacy SMFM entry reports as changed");
+                foreach (var r in SmfmKeyRenames)
+                {
+                    Assert(!legacyEntry.ContainsKey(r.Legacy), $"migrate: {r.Legacy} is gone after the rename");
+                    Assert(legacyEntry.ContainsKey(r.Current), $"migrate: {r.Current} is present after the rename");
+                }
+                Assert(!MigrateSmfmKeys(legacyEntry), "migrate: the rename is idempotent");
+                // Independent of the table: the loop above iterates SmfmKeyRenames, so a row
+                // deleted from it deletes its own assertions with it. This one does not, and is
+                // what actually fails when a legacy key stops being renamed.
+                Assert(!legacyEntry.Any(kv => kv.Key.StartsWith("sensme", StringComparison.Ordinal)),
+                    "migrate: NO sensme* key survives a migrate (independent of the rename table)");
+
+                // The drift guard that would have caught the original bug: every legacy key the
+                // stripper knows about must be renameable, or --migrate leaves it behind forever.
+                foreach (var k in SmfmJsonKeys.Where(k => k.StartsWith("sensme", StringComparison.Ordinal)))
+                    Assert(SmfmKeyRenames.Any(r => r.Legacy == k),
+                        $"migrate: SmfmKeyRenames covers the legacy key {k}");
+
+                // The read fallback is the other half: before a catalog is migrated the legacy
+                // key is the ONLY place the value lives, so a reader without the fallback loses
+                // it whether or not --migrate ever runs.
+                using var legacyDoc = JsonDocument.Parse(@"{""sensmeScores"":[5,0,0],""sensmeBpm"":123.5}");
+                var legacyFeat = ParseTrackFeaturesFromJson(legacyDoc.RootElement);
+                Assert(legacyFeat.SmfmBpm.HasValue && Math.Abs(legacyFeat.SmfmBpm.Value - 123.5) < 1e-9,
+                    $"migrate: the reader falls back to sensmeBpm (got {legacyFeat.SmfmBpm?.ToString() ?? "null"})");
+
+                // ...and the current key still wins, so a half-migrated entry cannot be dragged
+                // back to a stale legacy value.
+                using var bothDoc = JsonDocument.Parse(@"{""smfmBpm"":90.0,""sensmeBpm"":123.5}");
+                Assert(ParseTrackFeaturesFromJson(bothDoc.RootElement).SmfmBpm == 90.0,
+                    "migrate: smfmBpm wins over a leftover sensmeBpm");
             }
 
             // --- --prune-entry: targeted removal by path ---
@@ -19303,7 +19369,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 SmfmChannel     = GetNullableInt(track, "smfmChannel") ?? GetNullableInt(track, "sensmeChannel"),
                 SmfmChannelName = GetStr(track, "smfmChannelName") is var scn && scn.Length > 0 ? scn
                                   : (GetStr(track, "sensmeChannelName") is var scnOld && scnOld.Length > 0 ? scnOld : null),
-                SmfmBpm           = GetNullableDbl(track, "smfmBpm"),
+                SmfmBpm         = GetNullableDbl(track, "smfmBpm") ?? GetNullableDbl(track, "sensmeBpm"),
             };
         }
 
