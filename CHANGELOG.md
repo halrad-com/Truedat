@@ -8,6 +8,34 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.0-EV1.2] — 2026-08-23
+
+Covers EV1.1 as well, which shipped without a section of its own.
+
+### Fixed
+
+- **Better support for multiple libraries.** A bare `truedat` now finds the active library
+  whatever its folder is called. A positional path still overrides.
+
+### Changed
+
+- **Catalog writes stream.** The DOM-mutating verbs (`--fixup`, `--remap`, `--migrate`,
+  `--merge-moods`, `--strip-smfm`, `--prune-*`) built the whole catalog as one string
+  before writing it, which on a large library is a multi-gigabyte allocation and the same
+  2 GB ceiling EV1 fixed on the read side. Measured on a 265 MB catalog: 81% of the time,
+  54% of the allocation, output byte-identical.
+- **`--fixup` checks the filesystem once per entry instead of twice.** Local disks will not
+  notice; a large library over SMB halves its metadata round-trips.
+
+### Documentation
+
+- The output-format reference now covers three schema waves it had never mentioned, states
+  that `fingerprint.v1` is one flat key rather than a nested object, and drops the
+  hand-kept feature total in favour of measuring the file.
+- The authenticity section says what each check catches and what it is blind to, including
+  the cases nothing can answer — a file that has been through a streaming platform comes
+  back genuinely re-encoded, and its history is not recoverable from the audio.
+
 ## [0.5.5.0-EV1] — 2026-08-21
 
 Opens the 0.5.5.0 line. No source changes since `v0.5.4.9-RC7` — same code, new version
