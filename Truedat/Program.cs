@@ -2773,7 +2773,7 @@ namespace Truedat
             {
                 // --restore OVERWRITES the destination catalog. Never let it pick that
                 // destination out of the current directory (see IsBareCwdCatalog).
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--restore", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -2823,7 +2823,7 @@ namespace Truedat
             {
                 // --compact / --prettify rewrite the catalog IN PLACE (backup archived first),
                 // so the target must be named, never inherited from the cwd.
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal(compactMode ? "--compact" : "--prettify",
                         Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
@@ -3102,7 +3102,7 @@ namespace Truedat
                 // Rewrites the catalog, so it takes the same anchor rule as --compact /
                 // --prune-excluded: refuse to act on whatever mbxmoods.json happens to
                 // be in the directory the operator is standing in.
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--strip-smfm", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -3125,7 +3125,7 @@ namespace Truedat
             // mirror. Mutates (backup first); --dry-run reports and writes nothing.
             if (pruneEntryPaths.Count > 0)
             {
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--prune-entry", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -3151,7 +3151,7 @@ namespace Truedat
             if (pruneExcludedMode)
             {
                 // --prune-excluded REMOVES entries and rewrites the catalog. Same rule.
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverCatalogBesideExe()))
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--prune-excluded", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
                     Environment.ExitCode = 1;
@@ -4633,7 +4633,10 @@ namespace Truedat
             if (!File.Exists(xmlPath))
             {
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
-                Console.WriteLine("Probed: exe-dir parent, exe-dir, current working directory.");
+                Console.WriteLine("Probed: exe-dir and its parent (bare and \\Library), each ancestor up to "
+                    + LibrarySearchMaxAncestors + " levels, any folder holding " + LibraryMarkerName
+                    + " within " + LibraryScanMaxDepth + " of those, AppData children, %APPDATA%\\MusicBee, then the working directory.");
+                Console.WriteLine("Run --paths to see exactly what resolved.");
                 var xmlHint = PathCodepageHint(xmlPath, File.Exists);
                 if (xmlHint != null) Console.WriteLine(xmlHint);
                 // Front page here is deliberate (changed from the full listing 2026-07-29,
@@ -9435,11 +9438,22 @@ namespace Truedat
         internal static string? DiscoverCatalogBesideExe()
             => ProbeCatalogBesideExe(AppContext.BaseDirectory);
 
+        /// <summary>The anchor test for the modes that REWRITE the catalog. Same ladder as
+        /// <see cref="DiscoverCatalogBesideExe"/> minus the marker scan, because those two
+        /// questions are different: "which catalog did they mean" may reasonably search, while
+        /// "did they anchor this at all" must not — a search that turns up a plausible-looking
+        /// file is precisely the failure <see cref="IsBareCwdCatalog"/> exists to stop (the
+        /// 2026-08-13 fixture clobber). Without this split the marker rung silently re-opens it:
+        /// a truedat installed anywhere above an unrelated MusicBee instance would let a bare
+        /// --restore overwrite that instance's live catalog.</summary>
+        internal static string? DiscoverAnchorCatalog()
+            => ProbeCatalogBesideExe(AppContext.BaseDirectory, includeMarkerScan: false);
+
         /// <summary>The probe itself, with the exe directory passed in so the self-test can point it
         /// at a real temp layout instead of wherever the test binary happens to live.</summary>
-        internal static string? ProbeCatalogBesideExe(string? exeDirRaw)
+        internal static string? ProbeCatalogBesideExe(string? exeDirRaw, bool includeMarkerScan = true)
         {
-            foreach (var dir in LibrarySearchDirs(exeDirRaw))
+            foreach (var dir in LibrarySearchDirs(exeDirRaw, includeMarkerScan))
             {
                 var cand = Path.Combine(dir, MoodsFileName);
                 if (File.Exists(cand)) return cand;
@@ -9472,7 +9486,11 @@ namespace Truedat
         /// library is two levels up and across at &lt;root&gt;\Library. Same layout, read in the
         /// other direction — if MusicBee's layout ever changes, both must change together.
         /// </summary>
-        internal static IEnumerable<string> LibrarySearchDirs(string? exeDirRaw)
+        /// <param name="includeMarkerScan">False omits the <see cref="NamedLibraryDirs"/> rung.
+        /// The destructive verbs pass false: their anchor test asks "did the operator point us at
+        /// something", and a library the SCAN turned up several folders away is not that. See
+        /// <see cref="DiscoverAnchorCatalog"/>.</param>
+        internal static IEnumerable<string> LibrarySearchDirs(string? exeDirRaw, bool includeMarkerScan = true)
         {
             string exeDir = (exeDirRaw ?? string.Empty)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -9516,7 +9534,8 @@ namespace Truedat
             // which is additionally drive-letter-STRIPPED, so rejoining it against the current
             // drive yields X:\MusicBee\Library\ — a path that does not exist. Local evidence
             // beats a recorded path; that is why no ini is parsed here.
-            foreach (var dir in NamedLibraryDirs(levels)) yield return dir;
+            if (includeMarkerScan)
+                foreach (var dir in NamedLibraryDirs(levels)) yield return dir;
 
             // Last: the instance's AppData children (<root>\AppData\MBXHub, \truedat, …). The
             // rule the operator settled on is "if it is under the MusicBee instance, it gets
@@ -9579,6 +9598,16 @@ namespace Truedat
         /// root can legitimately sit inside a music tree.</summary>
         internal const int LibraryScanMaxDepth = 2;
 
+        /// <summary>Ceiling on directories EXAMINED per scan. Depth alone does not bound the
+        /// work: the ancestor walk routinely reaches a volume root, and depth 2 under
+        /// <c>X:\</c> enumerates every top-level folder AND each one's children — on a music
+        /// volume that is thousands of probes, over a link that may be a slow share, on the
+        /// MISS path (a metadata mirror has no library XML, so discovery falls through the whole
+        /// ladder every time). The old ladder cost ~15 existence checks; this keeps the new rung
+        /// in the same order of magnitude. A library sitting past the cap is not found — the
+        /// positional path is the answer there, as it always was.</summary>
+        internal const int LibraryScanMaxDirs = 400;
+
         /// <summary>
         /// Library folders found by marker rather than by name, best candidate first.
         ///
@@ -9594,27 +9623,75 @@ namespace Truedat
         /// always does) never reaches this code. This rung only has to answer the bare-command
         /// case well.
         /// </summary>
+        /// <summary>Memo for <see cref="NamedLibraryDirs"/>, keyed on the level list. The ladder is
+        /// re-enumerated on every resolve and a single command can resolve twice (--paths asks for
+        /// both the catalog and the library XML), so without this the filesystem walk is paid
+        /// several times per run for an answer that cannot change mid-process.</summary>
+        static readonly Dictionary<string, List<string>> _namedLibraryCache =
+            new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
         internal static IEnumerable<string> NamedLibraryDirs(IReadOnlyList<string> levels)
         {
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var found = new List<(string Dir, long Stamp)>();
+            var key = string.Join("|", levels);
+            lock (_namedLibraryCache)
+                if (_namedLibraryCache.TryGetValue(key, out var hit)) return hit;
 
-            foreach (var level in levels)
-                ScanForLibraries(level, LibraryScanMaxDepth, seen, found);
-
-            // Freshest .mbl first; no-.mbl (Stamp 0) last; name as the deterministic tiebreak.
-            found.Sort((a, b) =>
-            {
-                int byStamp = b.Stamp.CompareTo(a.Stamp);
-                return byStamp != 0 ? byStamp : StringComparer.OrdinalIgnoreCase.Compare(a.Dir, b.Dir);
-            });
-
-            foreach (var f in found) yield return f.Dir;
+            var result = ScanNamedLibraryDirs(levels);
+            lock (_namedLibraryCache) _namedLibraryCache[key] = result;
+            return result;
         }
 
-        static void ScanForLibraries(string dir, int depth, HashSet<string> seen, List<(string, long)> found)
+        internal static void ResetNamedLibraryCacheForTest()
         {
-            if (depth <= 0) return;
+            lock (_namedLibraryCache) _namedLibraryCache.Clear();
+        }
+
+        static List<string> ScanNamedLibraryDirs(IReadOnlyList<string> levels)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int budget = LibraryScanMaxDirs;
+
+            // NEAREST LEVEL WINS, and the walk stops at the first level that answers.
+            //
+            // Ranking freshest-.mbl across ALL levels at once reaches SIBLING INSTANCES:
+            // LibrarySearchMaxAncestors (4) is sized for the DEEP tool location
+            // (<root>\AppData\MBXHub\truedat needs four levels to reach <root>), but it applies
+            // unconditionally, so from a SHALLOW one (C:\test\MB3\Library\truedat) it overshoots
+            // the instance root by two and lands on C:\test and C:\. That overshoot was harmless
+            // while every rung probed an exact NAME — C:\test\Library\mbxmoods.json simply does
+            // not exist. This rung SEARCHES under each level, so the same benign overshoot became
+            // "find every library on the drive", and a live sibling instance with a fresher .mbl
+            // won: measured from C:\test\MB7\Library\truedat, five libraries across four
+            // instances, and MB3's catalog was adopted.
+            //
+            // Stopping at the nearest level that yields anything keeps the instance's own
+            // libraries competing with each other (etlap's Library + Remote + nxtone all sit under
+            // one <root>, so freshest-.mbl still picks the live one) while never letting a
+            // neighbour's instance enter the comparison at all. It also means the volume root is
+            // not reached in any layout where a library exists nearer.
+            foreach (var level in levels)
+            {
+                var found = new List<(string Dir, long Stamp)>();
+                ScanForLibraries(level, LibraryScanMaxDepth, seen, found, ref budget);
+                if (found.Count == 0) continue;
+
+                // Freshest .mbl first; no-.mbl (Stamp 0) last; name as the deterministic tiebreak.
+                found.Sort((a, b) =>
+                {
+                    int byStamp = b.Stamp.CompareTo(a.Stamp);
+                    return byStamp != 0 ? byStamp : StringComparer.OrdinalIgnoreCase.Compare(a.Dir, b.Dir);
+                });
+
+                var ordered = new List<string>(found.Count);
+                foreach (var f in found) ordered.Add(f.Dir);
+                return ordered;
+            }
+            return new List<string>();
+        }
+
+        static void ScanForLibraries(string dir, int depth, HashSet<string> seen, List<(string, long)> found, ref int budget)
+        {
+            if (depth <= 0 || budget <= 0) return;
 
             List<string> children;
             try
@@ -9633,6 +9710,7 @@ namespace Truedat
                 // heavily by construction (grandparent at depth 2 already covers parent and
                 // exe-dir), so without this the same subtree is walked once per level.
                 if (!seen.Add(full)) continue;
+                if (--budget <= 0) return;   // examined-directory ceiling; see LibraryScanMaxDirs
 
                 bool isLibrary;
                 try { isLibrary = File.Exists(Path.Combine(full, LibraryMarkerName)); }
@@ -9651,7 +9729,7 @@ namespace Truedat
                     continue; // a library folder holds Artwork/Playlists/…, never another library
                 }
 
-                ScanForLibraries(child, depth - 1, seen, found);
+                ScanForLibraries(child, depth - 1, seen, found, ref budget);
             }
         }
 
@@ -16629,6 +16707,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var probeRoot = Path.Combine(Path.GetTempPath(), "truedat-probe-" + Guid.NewGuid().ToString("N"));
                 try
                 {
+                    ResetNamedLibraryCacheForTest();
                     var lib = Path.Combine(probeRoot, "Library");
                     var toolDir = Path.Combine(lib, "truedat");
                     Directory.CreateDirectory(toolDir);
@@ -16748,9 +16827,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // the same reason as the block above: the bug is about which directories get looked
             // at, so a stubbed filesystem would reproduce the wrong thing.
             {
-                var root = Path.Combine(Path.GetTempPath(), "truedat-namedlib-" + Guid.NewGuid().ToString("N"));
+                // Nested deliberately: toolDir is <root>\Library\truedat, and the ancestor walk
+                // climbs LibrarySearchMaxAncestors levels. Directly under %TEMP% that walk REACHES
+                // %TEMP%, so the marker scan would enumerate every sibling temp dir — including
+                // leftovers from earlier runs of this very test, whose Remote\ holds a marker and a
+                // catalog. One undeleted root (the cleanup below swallows its exception) would then
+                // decide the assertions. Burying the layout keeps the test inside its own sandbox.
+                var tempBase = Path.Combine(Path.GetTempPath(), "truedat-namedlib-" + Guid.NewGuid().ToString("N"));
+                var root = Path.Combine(tempBase, "a", "b", "c");
                 try
                 {
+                    ResetNamedLibraryCacheForTest();
                     // The lived layout: tools under <root>\Library (a first-run stub, no .mbl),
                     // the real library at <root>\Remote with the XML beside it.
                     var stub = Path.Combine(root, "Library");
@@ -16768,10 +16855,42 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                     var ladder = new List<string>(LibrarySearchDirs(toolDir));
                     Assert(ladder.Contains(remote), "namedlib: the marker rung puts <root>\\Remote on the ladder");
+                    // The destructive verbs ask a DIFFERENT question -- "did the operator anchor
+                    // this?" -- and a library the scan turned up is not an anchor. Without the
+                    // split, a truedat installed above an unrelated MusicBee instance lets a bare
+                    // --restore overwrite that instance's live catalog, which is exactly the
+                    // clobber IsBareCwdCatalog was added to stop.
+                    Assert(ProbeCatalogBesideExe(toolDir, includeMarkerScan: false) == null,
+                        "namedlib: the ANCHOR probe ignores the marker scan (destructive verbs stay refused)");
+                    Assert(!new List<string>(LibrarySearchDirs(toolDir, includeMarkerScan: false)).Contains(remote),
+                        "namedlib: the anchor ladder omits the marker rung entirely");
+                    Assert(IsBareCwdCatalog(null, null, ProbeCatalogBesideExe(toolDir, includeMarkerScan: false)),
+                        "namedlib: a marker-only library still reads as bare-cwd for the mutating verbs");
+
+                    // A SIBLING INSTANCE must never be adopted, however fresh it is. The ancestor
+                    // budget overshoots a shallow instance root, so <base> here stands in for the
+                    // C:\test that holds several MusicBee instances side by side; instance 2 gets
+                    // the freshest .mbl on the machine precisely so global ranking would pick it.
+                    var sibling = Path.Combine(tempBase, "a", "b", "OtherInstance", "Library");
+                    Directory.CreateDirectory(sibling);
+                    File.WriteAllText(Path.Combine(sibling, LibraryMarkerName), "<Path>ignored</Path>");
+                    var sibDb = Path.Combine(sibling, LibraryDbName);
+                    File.WriteAllText(sibDb, "db");
+                    var sibCatalog = Path.Combine(sibling, MoodsFileName);
+                    File.WriteAllText(sibCatalog, "{}");
+                    File.SetLastWriteTimeUtc(sibDb, DateTime.UtcNow.AddDays(1));
+                    ResetNamedLibraryCacheForTest();
+                    Assert(ProbeCatalogBesideExe(toolDir) != sibCatalog,
+                        "namedlib: a sibling instance is never adopted even with the freshest .mbl");
+                    Assert(ProbeCatalogBesideExe(toolDir) == remoteCatalog,
+                        "namedlib: the instance's OWN library still wins against a fresher sibling");
+                    Directory.Delete(Path.Combine(tempBase, "a", "b", "OtherInstance"), true);
+                    ResetNamedLibraryCacheForTest();
 
                     // The marker is what identifies it — not the name, and not the <Path> inside,
                     // which is stale on every mirrored instance (X: and P: both record D:\…).
                     File.Delete(Path.Combine(remote, LibraryMarkerName));
+                    ResetNamedLibraryCacheForTest();
                     Assert(!new List<string>(LibrarySearchDirs(toolDir)).Contains(remote),
                         "namedlib: without the marker file the folder is not treated as a library");
                     File.WriteAllText(Path.Combine(remote, LibraryMarkerName), "<Path>ignored</Path>");
@@ -16789,18 +16908,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // XML positionally and never gets here.)
                     var nxtone = Path.Combine(root, "nxtone");
                     Directory.CreateDirectory(nxtone);
+                    ResetNamedLibraryCacheForTest();
                     File.WriteAllText(Path.Combine(nxtone, LibraryMarkerName), "<Path>ignored</Path>");
                     var nxDb = Path.Combine(nxtone, LibraryDbName);
                     File.WriteAllText(nxDb, "db");
                     File.WriteAllText(Path.Combine(nxtone, MoodsFileName), "{}");
 
-                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc));
-                    File.SetLastWriteTimeUtc(nxDb, new DateTime(2026, 8, 23, 0, 0, 0, DateTimeKind.Utc));
+                    // Relative to now, never absolute: a hardcoded future date outranks every
+                    // real library on the machine forever, which is how a leftover root could
+                    // red-line this suite permanently.
+                    var t0 = DateTime.UtcNow;
+                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), t0.AddDays(-3));
+                    File.SetLastWriteTimeUtc(nxDb, t0.AddDays(-1));
+                    ResetNamedLibraryCacheForTest();
                     Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(nxtone, MoodsFileName),
                         "namedlib: with two libraries the freshest MusicBeeLibrary.mbl wins");
 
                     // …and it really is the mtime deciding, not the name order — flip it back.
-                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), new DateTime(2026, 8, 24, 0, 0, 0, DateTimeKind.Utc));
+                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), t0);
+                    ResetNamedLibraryCacheForTest();
                     Assert(ProbeCatalogBesideExe(toolDir) == remoteCatalog,
                         "namedlib: freshening the other library's .mbl flips the choice");
 
@@ -16821,7 +16947,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 finally
                 {
-                    try { Directory.Delete(root, true); } catch { }
+                    ResetNamedLibraryCacheForTest();
+                    try { Directory.Delete(tempBase, true); } catch { }
                 }
             }
 

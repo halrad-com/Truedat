@@ -464,9 +464,12 @@ names the folder after the library, so every name-based rung above misses a rena
 (etlap, 2026-08-21..23: the live library was `<root>\Remote`, its 106 MB XML sat in plain sight two
 rungs from the exe, and discovery reported it missing — read by the operator as "MusicBee is not
 writing the XML"). So `NamedLibraryDirs` stops guessing the name and looks for the **marker**:
-`MusicBeeLibrarySettings.ini`, which MusicBee drops in every library folder. Scan is depth-bounded
-(`LibraryScanMaxDepth`, 2) under each ancestor level — still known locations, never an unbounded
-recursive scan, because a MusicBee root can sit inside someone's music tree.
+`MusicBeeLibrarySettings.ini`, which MusicBee drops in every library folder. Scan is bounded twice over: depth
+(`LibraryScanMaxDepth`, 2) under each ancestor level, and total directories examined
+(`LibraryScanMaxDirs`, 400). Depth alone is NOT enough — the ancestor walk reaches a volume
+root, and depth 2 under `X:\` enumerates every top-level folder and each one's children, which
+on a music volume is thousands of probes on the MISS path. The result is memoized per process;
+a library past the cap is not found, and the positional path is the answer there.
 
 **Use the marker's EXISTENCE, never the path it records.** `MusicBeeLibrarySettings.ini` carries a
 fully drive-qualified `<Path>`, and `AppData\MusicBee3Settings.ini` carries `ENV_LibPath` — and
