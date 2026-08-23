@@ -2779,7 +2779,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                string? destCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var restoreRefusal);
+                string? destCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var restoreRefusal,
+                    includeMarkerScan: false);   // must match the anchor ladder guarded on above
                 if (restoreRefusal != null)
                 {
                     Console.Error.WriteLine(restoreRefusal);
@@ -2830,7 +2831,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                string? srcCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var reformatRefusal);
+                string? srcCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var reformatRefusal,
+                    includeMarkerScan: false);   // must match the anchor ladder guarded on above
                 if (reformatRefusal != null)
                 {
                     Console.Error.WriteLine(reformatRefusal);
@@ -3108,7 +3110,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                string? stripPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var stripRefusal);
+                string? stripPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var stripRefusal,
+                    includeMarkerScan: false);   // must match the anchor ladder guarded on above
                 if (stripRefusal != null)
                 {
                     Console.Error.WriteLine(stripRefusal);
@@ -3131,7 +3134,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                string? peCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var peRefusal);
+                string? peCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var peRefusal,
+                    includeMarkerScan: false);   // must match the anchor ladder guarded on above
                 if (peRefusal != null)
                 {
                     Console.Error.WriteLine(peRefusal);
@@ -3157,7 +3161,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                string? prunePath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var pruneRefusal);
+                string? prunePath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var pruneRefusal,
+                    includeMarkerScan: false);   // must match the anchor ladder guarded on above
                 if (pruneRefusal != null)
                 {
                     Console.Error.WriteLine(pruneRefusal);
@@ -9742,7 +9747,19 @@ namespace Truedat
              + $"  and {verb} rewrites it. Pass the path (or --moods <path>), or run from the library folder"
              + Environment.NewLine + "  with its iTunes XML as the positional argument.";
 
-        static string? ResolveMoodsCatalog(string? explicitPath, string? libraryXmlPath, out string? refusal)
+        /// <param name="includeMarkerScan">Must match whatever ladder the CALLER used for its
+        /// anchor test. The mutating verbs guard with <see cref="DiscoverAnchorCatalog"/> (marker
+        /// rung omitted) and must therefore resolve the same way: when the two ladders disagree,
+        /// the verb checks one file and overwrites a different one. Reachable whenever a catalog
+        /// exists at BOTH the marker rung and a later one — exe at &lt;root&gt;\Library\truedat,
+        /// catalog at &lt;root&gt;\AppData\MBXHub, library at &lt;root&gt;\Remote: the guard passes
+        /// on the AppData catalog and --restore overwrites Remote's. Found in review of the
+        /// cross-instance fix, 2026-08-23.</param>
+        /// <param name="exeDirForTest">Overrides the exe directory, so the self-test can drive a
+        /// real temp layout instead of wherever the test binary lives — same reason
+        /// <see cref="ProbeCatalogBesideExe"/> takes one. Null means the running exe.</param>
+        internal static string? ResolveMoodsCatalog(string? explicitPath, string? libraryXmlPath, out string? refusal,
+            bool includeMarkerScan = true, string? exeDirForTest = null)
         {
             refusal = null;
 
@@ -9777,7 +9794,7 @@ namespace Truedat
 
             // Nothing named at all: look beside the installed exe before assuming the cwd, so the
             // drop-in layout works for these modes exactly as it already does for a bare scan.
-            var discovered = DiscoverCatalogBesideExe();
+            var discovered = ProbeCatalogBesideExe(exeDirForTest ?? AppContext.BaseDirectory, includeMarkerScan);
             if (!string.IsNullOrEmpty(discovered)) return discovered;
 
             return Path.Combine(Environment.CurrentDirectory, MoodsFileName);
@@ -16866,6 +16883,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "namedlib: the anchor ladder omits the marker rung entirely");
                     Assert(IsBareCwdCatalog(null, null, ProbeCatalogBesideExe(toolDir, includeMarkerScan: false)),
                         "namedlib: a marker-only library still reads as bare-cwd for the mutating verbs");
+
+                    // THE CHECKED PATH AND THE WRITTEN PATH MUST BE THE SAME FILE.
+                    // The mutating verbs guard with the anchor ladder (no marker rung) and then
+                    // resolve the destination — so if resolution used the WIDE ladder they would
+                    // approve themselves against one catalog and overwrite another. Needs a
+                    // catalog at BOTH the marker rung and a later rung to diverge, which is this
+                    // layout: exe at <root>\Library\truedat, catalog at <root>\AppData\MBXHub
+                    // (what the guard sees), library catalog at <root>\Remote (what --restore
+                    // would have hit). Found reviewing the cross-instance fix, 2026-08-23.
+                    var appDataHub = Path.Combine(root, "AppData", "MBXHub");
+                    Directory.CreateDirectory(appDataHub);
+                    var appDataCatalog = Path.Combine(appDataHub, MoodsFileName);
+                    File.WriteAllText(appDataCatalog, "{}");
+                    ResetNamedLibraryCacheForTest();
+
+                    // Precondition: the two ladders really do land on different files here —
+                    // otherwise this test would pass without exercising anything.
+                    Assert(ProbeCatalogBesideExe(toolDir, includeMarkerScan: true) == remoteCatalog,
+                        "namedlib: (precondition) the WIDE ladder finds the marker library's catalog");
+                    Assert(ProbeCatalogBesideExe(toolDir, includeMarkerScan: false) == appDataCatalog,
+                        "namedlib: (precondition) the ANCHOR ladder finds the AppData catalog instead");
+
+                    var guardSaw = ProbeCatalogBesideExe(toolDir, includeMarkerScan: false);
+                    var wouldWrite = ResolveMoodsCatalog(null, null, out var anchorRefusal,
+                        includeMarkerScan: false, exeDirForTest: toolDir);
+                    Assert(anchorRefusal == null, "namedlib: the anchored resolve does not refuse");
+                    Assert(wouldWrite == guardSaw,
+                        "namedlib: a mutating verb writes the SAME catalog its anchor check approved");
+                    Assert(wouldWrite != remoteCatalog,
+                        "namedlib: a mutating verb does not reach the marker-scanned library's catalog");
+
+                    File.Delete(appDataCatalog);
+                    Directory.Delete(Path.Combine(root, "AppData"), true);
+                    ResetNamedLibraryCacheForTest();
 
                     // A SIBLING INSTANCE must never be adopted, however fresh it is. The ancestor
                     // budget overshoots a shallow instance root, so <base> here stands in for the
