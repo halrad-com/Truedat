@@ -1218,13 +1218,11 @@ Based on Russell's circumplex model of emotion. Each track gets a 2D coordinate 
                     Low Arousal
 ```
 
-**Valence** = weighted combination of 8 features:
-mode (0.25), dissonance (0.15), spectral centroid (0.15), spectral flatness (0.10), pitch salience (0.10), danceability (0.10), MFCC2 (0.10), chord changes (0.05)
+**Truedat does not compute these coordinates.** It writes features; MBXHub turns them into valence and arousal at runtime, which is why retuning the mapping never requires a rescan.
 
-**Arousal** = weighted combination of 7 features:
-BPM (0.20), onset rate (0.15), spectral RMS (0.15), loudness (0.15), spectral flux (0.15), zero-crossing rate (0.10), danceability (0.10)
+That mapping is documented, feature by feature and weight by weight, at **[The Audio Features](https://mbxhub.com/12sfaq.htm)** on mbxhub.com — which is also where to look for what has since replaced it. AutoQ's estimates now come from a trained model rather than the weighted-sum formula, and the formula survives as the fallback path when the model is off or a track lacks the features it needs.
 
-All weights are configurable in MBXHub's `autoQ.estimation` settings.
+This README deliberately no longer restates those weights. It carried its own copy for a while and the copy drifted — differing from the live values in every weight and in which features feed which axis.
 
 ## Visualization
 
@@ -1248,11 +1246,13 @@ This is a standard XML format originally from iTunes/Apple Music that many music
 
 [Features - MBXHub](https://mbxhub.com/features.html#autoq)
 
+[The Audio Features - MBXHub](https://mbxhub.com/12sfaq.htm) - what AutoQ does with every feature Truedat writes
+
 [Download - MBXHub](https://mbxhub.com/download.html)
 
 Truedat generates the mood data that MBXHub's AutoQ engine consumes. The workflow:
 
-1. **Truedat** scans your library using the iTunes XML export and produces `mbxmoods.json`
+1. **Truedat** scans your library (iTunes XML export, or a folder / file list) and produces `mbxmoods.json`
 2. **MBXHub** loads the file at startup and recomputes valence/arousal using its current weight settings
 3. **AutoQ** uses mood vectors for mood-aware shuffle, reactions, and influence scoring
 
