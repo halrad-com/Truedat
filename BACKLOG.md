@@ -244,3 +244,16 @@ CPU-bound or IO-bound. Motivated by a 2026-07-14 storage benchmark: analysis tim
 
 Interpretation: CPU ≈ 100% with low disk read ⇒ CPU-bound (scale out via `--chunk`); low CPU
 with high disk ⇒ IO-bound. Observability only, hence low.
+
+## openSMILE — parked, arm's length (2026-08-22)
+
+Not adoptable: audEERING Research License, non-commercial only, and it encumbers
+**features extracted with it**, not just the binary — so "train on eGeMAPS, ship only the
+model" is explicitly prohibited. Free distribution is not an exemption, and the Essentia
+subprocess pattern does not help (that works because AGPL restricts linking; this
+restricts use in a product). eGeMAPS remains the strongest off-the-shelf answer to
+valence, which is why this needs writing down rather than re-deciding.
+
+Permitted: pre-product evaluation only. Do not vendor it, do not let its output reach a
+shipped artefact. Revisit only after the anchor/annotation work, and if it wins there,
+via a commercial licence — not a workaround.
