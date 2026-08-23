@@ -451,13 +451,38 @@ bare scan; `ResolveMoodsCatalog` finds `mbxmoods.json` for every catalog mode. B
 **`LibrarySearchDirs`** — one shared ladder, so they cannot discover a library from different
 places — then fall back to the cwd. Order: exe-dir's parent, exe-dir, each of those two's
 `Library\` subfolder, then successive ancestors (bounded at `LibrarySearchMaxAncestors`) bare and
-`\Library`, then each ancestor's `AppData\*` children, and last `%APPDATA%\MusicBee`. Parent before
+`\Library`, then **libraries found by marker** (below), then each ancestor's `AppData\*` children,
+and last `%APPDATA%\MusicBee`. Parent before
 exe-dir is load-bearing and pinned: a catalog inside the tool folder is the accident, the library's
 is the one meant. `<root>\Library` beats `AppData\*` (it is the canonical home and
 `ResolveReviewDir`'s anchor), and `%APPDATA%\MusicBee` is last because a tool inside a *portable*
 instance must resolve to that instance, never to the user's default one — that ordering is pinned
-by a test on ladder position, not just membership. Known locations, never a recursive scan: a
-MusicBee root can sit inside someone's music tree.
+by a test on ladder position, not just membership.
+
+**Libraries are not all called `Library` — that is only the DEFAULT library's name.** MusicBee
+names the folder after the library, so every name-based rung above misses a renamed or rebuilt one
+(etlap, 2026-08-21..23: the live library was `<root>\Remote`, its 106 MB XML sat in plain sight two
+rungs from the exe, and discovery reported it missing — read by the operator as "MusicBee is not
+writing the XML"). So `NamedLibraryDirs` stops guessing the name and looks for the **marker**:
+`MusicBeeLibrarySettings.ini`, which MusicBee drops in every library folder. Scan is depth-bounded
+(`LibraryScanMaxDepth`, 2) under each ancestor level — still known locations, never an unbounded
+recursive scan, because a MusicBee root can sit inside someone's music tree.
+
+**Use the marker's EXISTENCE, never the path it records.** `MusicBeeLibrarySettings.ini` carries a
+fully drive-qualified `<Path>`, and `AppData\MusicBee3Settings.ini` carries `ENV_LibPath` — and
+*both are stale on any mirrored or moved instance*. Measured: `X:\Library` and `P:\Library` both
+mirror `D:\MusicBee` and both record `D:\MusicBee\Library\`; `ENV_LibPath` is additionally
+drive-letter-STRIPPED, so rejoining it against the current drive yields `X:\MusicBee\Library\`,
+which does not exist. Local evidence beats a recorded path — that is why **no ini is parsed here**,
+and re-adding an ini read would reintroduce exactly this bug.
+
+Multiple libraries rank by **freshest `MusicBeeLibrary.mbl`** (live truth; a settings flush lags
+mid-session), ties broken by name so two runs can never silently disagree. Folders with no `.mbl`
+(a first-run stub) sort last. There is deliberately **no selection flag and no prompt**: the
+positional XML path already wins outright, so a caller that knows which library it means — MBXHub
+always does, and passes it — never reaches this rung. It only has to answer the bare-command case.
+Per-library catalogs need no extra machinery: `ResolveMoodsCatalog` puts `mbxmoods.json` beside the
+library that produced it, so a local library and a NAS one get separate catalogs for free.
 
 **The authoritative answer lives in the plugin, not here.** MusicBee tells it the data folder via
 `Setting_GetPersistentStoragePath()`; truedat is a standalone CLI and can only infer. So this

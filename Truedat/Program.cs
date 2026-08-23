@@ -9502,6 +9502,22 @@ namespace Truedat
                 yield return Path.Combine(levels[i], LibrarySubdir);
             }
 
+            // Libraries that are not called "Library". Every rung above names the folder, and
+            // MusicBee names it after the LIBRARY — "Library" is only the default's name. A
+            // corruption-recovery rebuild called "Remote" (etlap, 2026-08-21..23) sat two rungs
+            // from the exe with its 106 MB XML in plain sight and discovery reported it missing,
+            // which the operator reasonably read as "MusicBee is not writing the XML".
+            //
+            // So stop guessing the name and look for the MARKER instead: a MusicBee library
+            // folder always contains MusicBeeLibrarySettings.ini. Deliberately the marker's
+            // EXISTENCE and not the <Path> it records — that value is fully drive-qualified but
+            // stale on any mirrored or moved instance (X: and P: both mirror D:\MusicBee and both
+            // record "D:\MusicBee\Library\"). Same trap in MusicBee3Settings.ini's ENV_LibPath,
+            // which is additionally drive-letter-STRIPPED, so rejoining it against the current
+            // drive yields X:\MusicBee\Library\ — a path that does not exist. Local evidence
+            // beats a recorded path; that is why no ini is parsed here.
+            foreach (var dir in NamedLibraryDirs(levels)) yield return dir;
+
             // Last: the instance's AppData children (<root>\AppData\MBXHub, \truedat, …). The
             // rule the operator settled on is "if it is under the MusicBee instance, it gets
             // found", and people do keep the catalog beside whichever tool wrote it.
@@ -9545,6 +9561,97 @@ namespace Truedat
                 var mbData = Path.Combine(roaming!, "MusicBee");
                 yield return Path.Combine(mbData, LibrarySubdir);
                 yield return mbData;
+            }
+        }
+
+        /// <summary>The file MusicBee drops in every library folder. Its presence is what marks a
+        /// folder as a library — see the note at the call site for why the path it records is not
+        /// used.</summary>
+        internal const string LibraryMarkerName = "MusicBeeLibrarySettings.ini";
+
+        /// <summary>The live library database. Absent on a first-run stub (etlap's Library/ held
+        /// only a 4-byte pfidx), which is exactly why its mtime ranks candidates.</summary>
+        internal const string LibraryDbName = "MusicBeeLibrary.mbl";
+
+        /// <summary>How deep below each ancestor level we look for a library folder. Two reaches
+        /// &lt;root&gt;\Remote and &lt;root&gt;\Libraries\Foo. Bounded for the same reason the
+        /// ancestor walk is: an unbounded scan eventually finds SOMEONE's library, and a MusicBee
+        /// root can legitimately sit inside a music tree.</summary>
+        internal const int LibraryScanMaxDepth = 2;
+
+        /// <summary>
+        /// Library folders found by marker rather than by name, best candidate first.
+        ///
+        /// Ranking is freshest <see cref="LibraryDbName"/> first — live truth, and the one signal
+        /// that survives mirroring, drive remapping and a stale settings flush alike. Folders with
+        /// no .mbl sort last (a first-run stub is a library folder, but never the active one).
+        /// Ties break on name so two runs on one layout can never disagree; determinism matters
+        /// more than the choice, because a silent flip between libraries is indistinguishable from
+        /// a correct pick.
+        ///
+        /// No selection UI and no override flag: the positional XML path already wins outright in
+        /// <see cref="ResolveITunesXml"/>, so a caller that knows which library it means (MBXHub
+        /// always does) never reaches this code. This rung only has to answer the bare-command
+        /// case well.
+        /// </summary>
+        internal static IEnumerable<string> NamedLibraryDirs(IReadOnlyList<string> levels)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var found = new List<(string Dir, long Stamp)>();
+
+            foreach (var level in levels)
+                ScanForLibraries(level, LibraryScanMaxDepth, seen, found);
+
+            // Freshest .mbl first; no-.mbl (Stamp 0) last; name as the deterministic tiebreak.
+            found.Sort((a, b) =>
+            {
+                int byStamp = b.Stamp.CompareTo(a.Stamp);
+                return byStamp != 0 ? byStamp : StringComparer.OrdinalIgnoreCase.Compare(a.Dir, b.Dir);
+            });
+
+            foreach (var f in found) yield return f.Dir;
+        }
+
+        static void ScanForLibraries(string dir, int depth, HashSet<string> seen, List<(string, long)> found)
+        {
+            if (depth <= 0) return;
+
+            List<string> children;
+            try
+            {
+                if (!Directory.Exists(dir)) return;
+                children = new List<string>(Directory.EnumerateDirectories(dir));
+            }
+            catch { return; /* unreadable branch is not a reason to fail discovery */ }
+
+            foreach (var child in children)
+            {
+                string full;
+                try { full = Path.GetFullPath(child); } catch { continue; }
+
+                // Guards the recursion as well as the marker check. The ancestor levels overlap
+                // heavily by construction (grandparent at depth 2 already covers parent and
+                // exe-dir), so without this the same subtree is walked once per level.
+                if (!seen.Add(full)) continue;
+
+                bool isLibrary;
+                try { isLibrary = File.Exists(Path.Combine(full, LibraryMarkerName)); }
+                catch { isLibrary = false; }
+
+                if (isLibrary)
+                {
+                    long stamp = 0;
+                    try
+                    {
+                        var db = new FileInfo(Path.Combine(full, LibraryDbName));
+                        if (db.Exists) stamp = db.LastWriteTimeUtc.Ticks;
+                    }
+                    catch { /* unreadable .mbl just ranks last */ }
+                    found.Add((full, stamp));
+                    continue; // a library folder holds Artwork/Playlists/…, never another library
+                }
+
+                ScanForLibraries(child, depth - 1, seen, found);
             }
         }
 
@@ -16633,6 +16740,88 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally
                 {
                     try { Directory.Delete(probeRoot, true); } catch { }
+                }
+            }
+
+            // --- libraries that are not called "Library" (etlap, 2026-08-21..23) -----------
+            // Every name-based rung misses a library MusicBee named after itself. Real dirs for
+            // the same reason as the block above: the bug is about which directories get looked
+            // at, so a stubbed filesystem would reproduce the wrong thing.
+            {
+                var root = Path.Combine(Path.GetTempPath(), "truedat-namedlib-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    // The lived layout: tools under <root>\Library (a first-run stub, no .mbl),
+                    // the real library at <root>\Remote with the XML beside it.
+                    var stub = Path.Combine(root, "Library");
+                    var toolDir = Path.Combine(stub, "truedat");
+                    var remote = Path.Combine(root, "Remote");
+                    Directory.CreateDirectory(toolDir);
+                    Directory.CreateDirectory(remote);
+                    File.WriteAllText(Path.Combine(remote, LibraryMarkerName), "<Path>ignored</Path>");
+                    File.WriteAllText(Path.Combine(remote, LibraryDbName), "db");
+                    var remoteCatalog = Path.Combine(remote, MoodsFileName);
+                    File.WriteAllText(remoteCatalog, "{}");
+
+                    Assert(ProbeCatalogBesideExe(toolDir) == remoteCatalog,
+                        "namedlib: a library called Remote is found from <root>\\Library\\truedat");
+
+                    var ladder = new List<string>(LibrarySearchDirs(toolDir));
+                    Assert(ladder.Contains(remote), "namedlib: the marker rung puts <root>\\Remote on the ladder");
+
+                    // The marker is what identifies it — not the name, and not the <Path> inside,
+                    // which is stale on every mirrored instance (X: and P: both record D:\…).
+                    File.Delete(Path.Combine(remote, LibraryMarkerName));
+                    Assert(!new List<string>(LibrarySearchDirs(toolDir)).Contains(remote),
+                        "namedlib: without the marker file the folder is not treated as a library");
+                    File.WriteAllText(Path.Combine(remote, LibraryMarkerName), "<Path>ignored</Path>");
+
+                    // Named libraries rank behind the exact rungs: a catalog in the canonical
+                    // <root>\Library still wins, so no existing layout changes behaviour.
+                    var stubCatalog = Path.Combine(stub, MoodsFileName);
+                    File.WriteAllText(stubCatalog, "{}");
+                    Assert(ProbeCatalogBesideExe(toolDir) == stubCatalog,
+                        "namedlib: the canonical <root>\\Library still beats a marker-found library");
+                    File.Delete(stubCatalog);
+
+                    // Two real libraries -> freshest .mbl wins. This is the multi-library answer:
+                    // no prompt, no flag, just live truth. (A caller that knows better passes the
+                    // XML positionally and never gets here.)
+                    var nxtone = Path.Combine(root, "nxtone");
+                    Directory.CreateDirectory(nxtone);
+                    File.WriteAllText(Path.Combine(nxtone, LibraryMarkerName), "<Path>ignored</Path>");
+                    var nxDb = Path.Combine(nxtone, LibraryDbName);
+                    File.WriteAllText(nxDb, "db");
+                    File.WriteAllText(Path.Combine(nxtone, MoodsFileName), "{}");
+
+                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc));
+                    File.SetLastWriteTimeUtc(nxDb, new DateTime(2026, 8, 23, 0, 0, 0, DateTimeKind.Utc));
+                    Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(nxtone, MoodsFileName),
+                        "namedlib: with two libraries the freshest MusicBeeLibrary.mbl wins");
+
+                    // …and it really is the mtime deciding, not the name order — flip it back.
+                    File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), new DateTime(2026, 8, 24, 0, 0, 0, DateTimeKind.Utc));
+                    Assert(ProbeCatalogBesideExe(toolDir) == remoteCatalog,
+                        "namedlib: freshening the other library's .mbl flips the choice");
+
+                    // A library folder with no .mbl is a first-run stub: real, but never active.
+                    File.Delete(Path.Combine(remote, LibraryDbName));
+                    File.Delete(nxDb);
+                    var ordered = new List<string>(NamedLibraryDirs(new List<string> { toolDir, stub, root }));
+                    Assert(ordered.Contains(remote) && ordered.Contains(nxtone),
+                        "namedlib: stubs without a .mbl are still recognised as library folders");
+
+                    // Bounded depth: deeper than LibraryScanMaxDepth is not searched, so a
+                    // MusicBee root sitting inside a music tree cannot drag in a stranger's library.
+                    var buried = Path.Combine(root, "x", "y", "Deep"); // depth 3 = exactly one past the limit
+                    Directory.CreateDirectory(buried);
+                    File.WriteAllText(Path.Combine(buried, LibraryMarkerName), "<Path>ignored</Path>");
+                    Assert(!new List<string>(NamedLibraryDirs(new List<string> { root })).Contains(buried),
+                        "namedlib: the marker scan is depth-bounded");
+                }
+                finally
+                {
+                    try { Directory.Delete(root, true); } catch { }
                 }
             }
 
