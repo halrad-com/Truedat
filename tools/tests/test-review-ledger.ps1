@@ -20,8 +20,18 @@
 
 [CmdletBinding()]
 param(
-    [string] $TruedatExe = "$PSScriptRoot\..\..\dist\truedat\truedat.exe"
+    [string] $TruedatExe
 )
+
+# Resolved in the body, not as a param default: $PSScriptRoot is not reliably bound when
+# the default expression is evaluated, which made the no-argument invocation fail on
+# Test-Path with an InvalidArgument rather than a readable message. A rig you cannot run
+# without remembering a flag is a rig nobody runs.
+if (-not $TruedatExe) {
+    # tools\tests\this.ps1 -> tools\tests -> tools -> repo root
+    $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+    $TruedatExe = Join-Path $repoRoot 'dist\truedat\truedat.exe'
+}
 
 $ErrorActionPreference = 'Stop'
 $script:failures = 0
