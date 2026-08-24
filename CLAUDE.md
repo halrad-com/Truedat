@@ -443,6 +443,19 @@ local tidy-up:
   (the volume is unreachable *and* the operator asserted it), not on a classification.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
+- **`ruleId` in `mbxmoods-review.json` is a KEY, and its format is a contract.** 64-bit
+  FNV-1a over `ExclusionRule.Identity()`, rendered as **16 lowercase hex chars**. The hub
+  pins it, persists it, and keys an irreversible action (undo-an-exclusion) on it, and it has
+  deliberately declined to re-normalize on its side — a second normalization is how two
+  components come to disagree about the same key, and the one gating an unrecoverable action
+  is the worst place for that. So: **lowercase-hex-only is load-bearing, and changing the
+  width or the encoding is a breaking change that needs a heads-up to restfulbee, not a
+  silent bump.** There is deliberately no mapping between id widths — a consumer holding an
+  old one re-reads, never translates. The id is derived, never stored, so
+  `mbxmoods-exclude.json` is untouched by any of this; that is the property that made
+  widening from 32 to 64 bits cost a rebuild instead of a migration, and it is worth keeping.
+  Note and sha stay out of `Identity()` so annotating a rule does not renumber it; changing
+  kind, action or target does, because that is a different rule.
 
 ## Which catalog a bare command means
 
