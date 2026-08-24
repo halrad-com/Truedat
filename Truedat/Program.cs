@@ -682,6 +682,9 @@ namespace Truedat
             Console.WriteLine("  --apply-exclusions <path>  Merge a decisions delta into the exclusion file (backs up");
             Console.WriteLine("                      first, reports changes). Also accepts a .m3u/.m3u8 playlist —");
             Console.WriteLine("                      entries become permanent file/exclude rules");
+            Console.WriteLine("  --list-review [path] Read-only: NAME what is in the review ledger — every file the");
+            Console.WriteLine("                      catalog does not hold, and why. Grouped so the set that needs");
+            Console.WriteLine("                      you comes first");
             Console.WriteLine("  --list-speech [path] Read-only: list entries whose verdict is speechLikely=yes ->");
             Console.WriteLine("                      mbxmoods-speech.csv (candidates for an exclusion rule via a decisions");
             Console.WriteLine("                      delta + --apply-exclusions; audio files untouched)");
@@ -814,7 +817,7 @@ namespace Truedat
         static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
-            "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "prune-entry", "verify-coverage", "backfill", "backfill-level",
+            "list-review", "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "prune-entry", "verify-coverage", "backfill", "backfill-level",
             "retry-errors", "migrate", "analyze", "audit", "audit-verdicts", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
@@ -2188,6 +2191,7 @@ namespace Truedat
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
+            bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
             bool listSpeechMode = false;   // --list-speech: read-only list of speechLikely=="yes" entries (candidates for an exclusion rule; JSON-only, no --preview/XML needed)
             bool stripSmfmMode = false;     // --strip-smfm: remove the Sony 12-TONE fields from every catalog entry (JSON only, no XML; --dry-run reports)
             var pruneEntryPaths = new List<string>();  // --prune-entry <path>: repeatable; remove exactly these catalog entries by path
@@ -2335,6 +2339,7 @@ namespace Truedat
                 // --json-output, which predates it and stays the canonical name.
                 else if (canonical == "json") jsonOutput = true;
                 else if (canonical == "stats-detail" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sdt) && sdt >= 0) { statsDetailThreshold = sdt; i++; }
+                else if (canonical == "list-review") listReviewMode = true;
                 else if (canonical == "list-speech") listSpeechMode = true;
                 else if (canonical == "strip-smfm") stripSmfmMode = true;
                 else if (canonical == "prune-entry" && i + 1 < args.Length) pruneEntryPaths.Add(args[++i]);
@@ -2987,6 +2992,19 @@ namespace Truedat
             // Podcast entries are --stats' separate line). Path resolution mirrors --stats.
             // Writes mbxmoods-speech.csv next to the moods file; console gets a count +
             // first-N preview. Writes no changes to the moods file itself.
+            if (listReviewMode)
+            {
+                string? lrPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var lrRefusal);
+                if (lrRefusal != null)
+                {
+                    Console.Error.WriteLine(lrRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = RunListReview(lrPath!);
+                return;
+            }
+
             if (listSpeechMode)
             {
                 string? speechPath = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var speechRefusal);
@@ -11606,6 +11624,111 @@ namespace Truedat
             return Path.Combine(moodsDir, "mbxmoods-duplicates.manifest.json");
         }
 
+        /// <summary>
+        /// <c>--list-review</c>: NAME what is in the review ledger.
+        ///
+        /// This exists because a count you cannot see is not a diagnosis. <c>--stats</c>
+        /// reported "70 entries lack the latest features" for weeks without ever being able
+        /// to say WHICH — so the operator's knowledge of which files were hopeless lived in
+        /// their head, and every run re-litigated it from scratch.
+        ///
+        /// Read-only. Groups by state so the actionable set is first: `review` is what a
+        /// human still has to look at, `auto` and `ignore` are already decided and are
+        /// shown for audit, not as work.
+        /// </summary>
+        internal static int RunListReview(string moodsPath)
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var ledgerPath = ResolveReviewLedgerPath(dir);
+            Console.WriteLine("=== Review ===");
+            Console.WriteLine($"Ledger: {ledgerPath}");
+
+            var ledger = ReviewLedger.Load(ledgerPath, out var lerr);
+            if (lerr != null)
+            {
+                Console.Error.WriteLine($"Error: the review ledger is unreadable: {lerr}");
+                Console.Error.WriteLine("Refusing rather than reporting an empty review — an unreadable ledger is");
+                Console.Error.WriteLine("not the same as nothing to review, and the difference is your decisions.");
+                return 1;
+            }
+            if (ledger.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Nothing recorded. Every file the catalog was asked about is in it.");
+                return 0;
+            }
+
+            foreach (var state in new[] { ReviewState.Review, ReviewState.Auto, ReviewState.Ignore })
+            {
+                var rows = ledger.Records.Where(r => r.State == state)
+                                         .OrderBy(r => ReviewLedger.DispositionName(r.Disposition), StringComparer.Ordinal)
+                                         .ThenBy(r => r.Path, StringComparer.OrdinalIgnoreCase)
+                                         .ToList();
+                if (rows.Count == 0) continue;
+                Console.WriteLine();
+                Console.WriteLine($"--- {ReviewLedger.StateName(state)} ({rows.Count:N0}) ---"
+                                  + (state == ReviewState.Review ? "   these need you" : ""));
+                foreach (var r in rows)
+                {
+                    Console.WriteLine($"  [{ReviewLedger.DispositionName(r.Disposition)}] {r.Path}");
+                    if (!string.IsNullOrEmpty(r.Reason)) Console.WriteLine($"      {r.Reason}");
+                    if (!string.IsNullOrEmpty(r.StateReason)) Console.WriteLine($"      auto: {r.StateReason}");
+                    if (!string.IsNullOrEmpty(r.RuleId)) Console.WriteLine($"      rule: {r.RuleId}");
+                    foreach (var c in r.Components)
+                        Console.WriteLine($"      {c.Name}: {c.Message}");
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"  {ledger.Count:N0} recorded, {ledger.NeedsReviewCount:N0} need review");
+            // Deliberately no "run X to fix these". Most cannot be fixed by any truedat
+            // command, and recommending one that cannot clear the count is the cascade this
+            // whole ledger replaced.
+            return 0;
+        }
+
+        /// <summary>Where the review ledger lives. The hub globs <c>*.json</c> in the review
+        /// dir and takes the review id from the filename stem, so putting it there is what
+        /// makes it renderable at all — the same anchor <see cref="ResolveManifestDest"/>
+        /// uses, deliberately not a second resolver. Falls back to beside the catalog when
+        /// no instance is found, so a bare truedat on a box with no MBXHub still keeps its
+        /// ledger.</summary>
+        internal static string ResolveReviewLedgerPath(string moodsDir)
+        {
+            var rd = ResolveReviewDir(moodsDir);
+            return Path.Combine(rd ?? moodsDir, ReviewLedger.FileName);
+        }
+
+        /// <summary>
+        /// Write the ledger ONCE, atomically. Never incrementally: the hub globs this
+        /// directory and reads each manifest, and a reader that hits a file mid-write drops
+        /// that manifest from its list entirely — observed hub-side, fixed there, and a
+        /// live ledger would reopen it far wider. A stale count is wrong by a little; a
+        /// vanished manifest is wrong by everything.
+        ///
+        /// Failure to write a diagnostic must never fail the run that produced it.
+        /// </summary>
+        internal static bool SaveReviewLedger(ReviewLedger ledger, string path, out string? error)
+        {
+            error = null;
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir!);
+                var tmp = path + ".tmp";
+                var json = ledger.ToJson(VersionInfo.Display, DateTime.UtcNow).ToJsonString(
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(tmp, json);
+                AtomicReplace(tmp, path);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
         /// <summary>Resolve (and create) the MBXHub review directory for the instance that
         /// OWNS the library being scanned, not "some running MusicBee": MusicBee's layout
         /// puts the moods file in &lt;root&gt;\Library\, so &lt;root&gt; is the parent of the
@@ -17567,6 +17690,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(berr != null, "ledger: a corrupt file REPORTS rather than reading as empty");
                 }
                 finally { try { File.Delete(tmpBad); } catch { } }
+
+                // The atomic write: staged then swapped, leaving no .tmp sibling behind for
+                // the hub's directory glob to trip over.
+                var saveDir = Path.Combine(Path.GetTempPath(), "truedat-ledgersave-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(saveDir);
+                    var savePath = Path.Combine(saveDir, ReviewLedger.FileName);
+                    Assert(SaveReviewLedger(led4, savePath, out var serr) && serr == null,
+                        "ledger-save: writes without error");
+                    Assert(File.Exists(savePath), "ledger-save: the target file exists after the swap");
+                    Assert(!File.Exists(savePath + ".tmp"),
+                        "ledger-save: no .tmp sibling survives — the hub globs this directory");
+                    var back = ReviewLedger.Load(savePath, out _);
+                    Assert(back.Find(@"D:\m\s2.flac")?.State == ReviewState.Ignore,
+                        "ledger-save: a saved ledger reloads with operator state intact");
+                    // Overwriting an existing ledger must also be atomic, not truncate-then-write.
+                    Assert(SaveReviewLedger(led5, savePath, out _),
+                        "ledger-save: overwrites an existing ledger");
+                    Assert(ReviewLedger.Load(savePath, out _).Count == led5.Count,
+                        "ledger-save: the overwrite is complete, not appended");
+                }
+                finally { try { Directory.Delete(saveDir, true); } catch { } }
             }
 
             // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
