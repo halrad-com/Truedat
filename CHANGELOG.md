@@ -8,6 +8,32 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.0-EV1.3] — 2026-08-24
+
+### Added
+
+- **`mbxmoods-review.json`** — one file listing everything the catalog does not hold and
+  why. Each record carries the verbatim tool message, when it was first seen, and a state:
+  `review` (needs you), `ignore` (you decided), `auto` (truedat decided, and it says on what
+  evidence). A record stops the file being attempted in every mode. `--list-review` names
+  them. It supersedes the errors and skipped CSVs, which still ship this release.
+- **`--audit-verdicts`** — the per-signal verdict trace, now opt-in. It was recomputed for
+  every entry on every save and buried the rest of `--audit` under ~137k lines.
+- **`playlist` exclusion rule kind.** Membership is re-read each run, so editing the
+  playlist in MusicBee changes the next scan.
+- **Per-root latency profile** at the `--fixup` root check, and throughput per phase in the
+  run report — so a bandwidth-bound phase and a latency-bound one stop looking identical.
+
+### Changed
+
+- **`--fixup` checks files on disk in parallel**, sized from the measured latency of each
+  root. Measured on a 72k library over a share: 13 minutes to under a minute; local disk
+  stays serial, where concurrency would only add contention.
+- **`--stats` reports instead of prescribing.** It no longer recommends a command that
+  cannot clear the count it just printed.
+- **Excluded entries name the rule that caught them**, so an exclusion can be traced back
+  and undone.
+
 ## [0.5.5.0-EV1.2] — 2026-08-23
 
 Covers EV1.1 as well, which shipped without a section of its own.

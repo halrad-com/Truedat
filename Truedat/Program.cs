@@ -4927,6 +4927,31 @@ namespace Truedat
                 _ledgerScopeNote = " (this chunk)";
             }
 
+            // Review ledger for this run: loaded once, written once at the end. Loading
+            // rather than starting empty is the point — the operator's states and the
+            // original firstSeen live in that file and a scan must not discard them.
+            //
+            // Initialised HERE, before the pre-scan filters, and that ordering is
+            // load-bearing. It used to sit further down beside the error list, which meant
+            // every PRE-scan skip (video, remote URL, exclusion rule) hit a null ledger and
+            // was silently dropped while mid-scan skips (short file, DSD) recorded fine.
+            // Measured on a 72k library: the run appended 226 rows to the skipped CSV and
+            // wrote only 79 records — the missing 147 were exactly the video files. Caught
+            // by diffing the ledger against the CSV it is meant to replace, which is the
+            // whole reason that diff runs before anything is cut.
+            _retryErrorsRun = retryErrors;
+            var runLedgerPath = ResolveReviewLedgerPath(outputDir);
+            _runLedger = ReviewLedger.Load(runLedgerPath, out var runLedgerErr);
+            if (runLedgerErr != null)
+            {
+                // Refuse rather than silently start from empty: an unreadable ledger is not
+                // the same as an empty one, and the difference is every decision in it.
+                Console.Error.WriteLine($"Error: the review ledger at {runLedgerPath} is unreadable: {runLedgerErr}");
+                Console.Error.WriteLine("Refusing to scan — continuing would overwrite it and discard your review states.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
             tracks = FilterRemoteUrls(tracks, skippedPath);
             tracks = FilterExclusions(tracks, skippedPath);
             tracks = FilterVideoFiles(tracks, skippedPath);
@@ -5054,22 +5079,6 @@ namespace Truedat
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
             int smfmAdded = 0;         // tracks that gained SMFM data this scan (file newly carries 12-TONE)
-
-            // Review ledger for this run: loaded once, written once at the end. Loading
-            // rather than starting empty is the point — the operator's states and the
-            // original firstSeen live in that file and a scan must not discard them.
-            _retryErrorsRun = retryErrors;
-            var runLedgerPath = ResolveReviewLedgerPath(outputDir);
-            _runLedger = ReviewLedger.Load(runLedgerPath, out var runLedgerErr);
-            if (runLedgerErr != null)
-            {
-                // Refuse rather than silently start from empty: an unreadable ledger is not
-                // the same as an empty one, and the difference is every decision in it.
-                Console.Error.WriteLine($"Error: the review ledger at {runLedgerPath} is unreadable: {runLedgerErr}");
-                Console.Error.WriteLine("Refusing to scan — continuing would overwrite it and discard your review states.");
-                Environment.ExitCode = 1;
-                return;
-            }
 
             Dictionary<string, string> existingErrors;
             if (retryErrors)
@@ -19125,7 +19134,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             string reason, string? ruleId, string runMode)
         {
             var led = _runLedger;
-            if (led == null || string.IsNullOrEmpty(filePath)) return;
+            if (string.IsNullOrEmpty(filePath)) return;
+            if (led == null) { Interlocked.Increment(ref _reviewRecordsDropped); return; }
             try
             {
                 var rec = new ReviewRecord
@@ -19187,13 +19197,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static ReviewLedger? _runLedger;
         static readonly object _runLedgerLock = new object();
 
+        /// <summary>
+        /// Records that were dropped because the ledger was not initialised yet.
+        ///
+        /// This counter exists because the SILENCE was the bug. Recording no-ops on a null
+        /// ledger, so a call site that runs before init loses its records and nothing says
+        /// so — which is exactly what happened to the pre-scan filters: 147 video skips
+        /// vanished while short-file and DSD skips recorded fine, and only a diff against
+        /// the CSV revealed it. A wrong count is recoverable; a silently partial ledger is
+        /// not, because the skip rule built on it then quietly stops covering a whole class.
+        /// Non-zero at flush time is a bug in truedat, and it says so.
+        /// </summary>
+        static int _reviewRecordsDropped;
+
         /// <summary>Record a failure into the run ledger. Deliberately additive and
         /// exception-swallowing: a diagnostic must never be the thing that fails a run.</summary>
         static void RecordReviewFailure(string filePath, string reason, double sizeMb,
             double durationSecs, string failedComponents, string runMode)
         {
             var led = _runLedger;
-            if (led == null || string.IsNullOrEmpty(filePath)) return;
+            if (string.IsNullOrEmpty(filePath)) return;
+            if (led == null) { Interlocked.Increment(ref _reviewRecordsDropped); return; }
             try
             {
                 var rec = new ReviewRecord
@@ -19256,6 +19280,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var led = _runLedger;
             if (led == null) return;
             _runLedger = null;
+
+            // A non-zero drop count is a truedat bug, not an operator problem, and it is
+            // reported as one. Staying quiet here is what let 147 video skips go missing.
+            int dropped = Interlocked.Exchange(ref _reviewRecordsDropped, 0);
+            if (dropped > 0)
+            {
+                Console.Error.WriteLine($"WARNING: {dropped:N0} review record(s) were produced before the ledger");
+                Console.Error.WriteLine("  was initialised and have been LOST. The ledger is incomplete for this run,");
+                Console.Error.WriteLine("  so the skip rule does not cover them. This is a truedat bug — please report it.");
+            }
+
             if (led.Count == 0) return;
             if (SaveReviewLedger(led, ledgerPath, out var err))
             {
