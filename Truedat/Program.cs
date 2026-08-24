@@ -6804,6 +6804,7 @@ namespace Truedat
             // disk, and NOTHING in the previous output said why. Advisory for now — the
             // sweep below is still serial; parallelizing it is a separate decision, and
             // this measurement is what should size it when that happens.
+            int sweepConcurrency = 1;
             foreach (var pr in probedRoots)
             {
                 if (!pr.Reachable) continue;
@@ -6812,12 +6813,17 @@ namespace Truedat
                     var samples = SampleStatLatencyMs(rootPaths[pr.Root], RootLatencySamples);
                     if (samples.Length == 0) continue;
                     double p50 = MedianMs(samples);
+                    int rootConcurrency = SweepConcurrencyFor(p50);
+                    // The sweep is ONE pass over a mixed path list, so it gets one width:
+                    // the slowest root's. A fast root dragged to 8 loses microseconds it
+                    // never had to give; a slow root held to 1 costs the whole run.
+                    if (rootConcurrency > sweepConcurrency) sweepConcurrency = rootConcurrency;
                     var access = ClassifyRootAccess(pr.Root, IsNetworkDrivePath(pr.Root));
                     var kind = access == RootAccess.Unc ? "remote (UNC)"
                              : access == RootAccess.MappedNetwork ? "remote (mapped)"
                              : "local";
                     Console.WriteLine($"  {pr.Root}   {kind}   "
-                                      + RootLatencyVerdict(p50, SweepConcurrencyFor(p50))
+                                      + RootLatencyVerdict(p50, rootConcurrency)
                                       + $"   [{samples.Length} probes]");
                 }
                 catch { /* a profile is never worth failing a run over */ }
@@ -6871,27 +6877,53 @@ namespace Truedat
             // kept copy of a deleted duplicate) instead of keeping a dead entry via a stale
             // XML filename match.
             var survivingByHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            Console.WriteLine($"Checking {totalEntries:N0} files on disk...");
+            Console.WriteLine($"Checking {totalEntries:N0} files on disk"
+                              + (sweepConcurrency > 1 ? $" ({sweepConcurrency} at a time)" : "") + "...");
+
+            // Ordered snapshot. The PROBE runs concurrently (it is ~0 bytes and all wait, so
+            // throughput is concurrency/latency and the link cannot saturate); the FOLD below
+            // is serial and in catalog order, because survivingByHash is first-wins and which
+            // duplicate copy wins must not depend on thread scheduling.
+            var sweepEntries = tracks.Where(kv => kv.Value != null).ToList();
+            var sweepPaths = new string[sweepEntries.Count];
+            for (int i = 0; i < sweepEntries.Count; i++)
+                sweepPaths[i] = PathHelper.NormalizeSeparators(sweepEntries[i].Key);
+            var sweepFound = new bool[sweepEntries.Count];
+
             int swept = 0;
             var tick = Stopwatch.StartNew();
-            foreach (var kv in tracks)
-            {
-                if (kv.Value == null) continue;
-                var probePath = PathHelper.NormalizeSeparators(kv.Key);
-                swept++;
-                // Heartbeat on TIME, not on a count: the whole point is the case where each call
-                // is slow, and a per-N-entries tick goes quiet for exactly as long as the problem
-                // is bad. Two seconds is often enough to see it moving, rare enough not to spam a
-                // local run that finishes in one.
-                if (tick.Elapsed.TotalSeconds >= 2)
+            var tickLock = new object();
+            Parallel.For(0, sweepPaths.Length,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, sweepConcurrency) },
+                i =>
                 {
-                    Console.WriteLine($"  {swept:N0} / {totalEntries:N0} checked   ({PhaseReport.Rate(swept, phase.Elapsed)})");
-                    tick.Restart();
-                }
-                if (!File.Exists(probePath)) continue;
-                existsOnDisk.Add(probePath);
-                var sha = kv.Value.AsObject()["audioStreamSha256"]?.GetValue<string>();
-                if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!)) survivingByHash[sha!] = kv.Key;
+                    sweepFound[i] = File.Exists(sweepPaths[i]);
+                    int done = Interlocked.Increment(ref swept);
+                    // Heartbeat on TIME, not on a count: the whole point is the case where each
+                    // call is slow, and a per-N-entries tick goes quiet for exactly as long as
+                    // the problem is bad. Double-checked under a lock so concurrent workers
+                    // cannot interleave a line or reset the timer out from under each other.
+                    if (tick.Elapsed.TotalSeconds >= 2)
+                    {
+                        lock (tickLock)
+                        {
+                            if (tick.Elapsed.TotalSeconds >= 2)
+                            {
+                                Console.WriteLine($"  {done:N0} / {totalEntries:N0} checked"
+                                                  + $"   ({PhaseReport.Rate(done, phase.Elapsed)})");
+                                tick.Restart();
+                            }
+                        }
+                    }
+                });
+
+            for (int i = 0; i < sweepEntries.Count; i++)
+            {
+                if (!sweepFound[i]) continue;
+                existsOnDisk.Add(sweepPaths[i]);
+                var sha = sweepEntries[i].Value!.AsObject()["audioStreamSha256"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(sha) && !survivingByHash.ContainsKey(sha!))
+                    survivingByHash[sha!] = sweepEntries[i].Key;
             }
             // The rate is the diagnosis. Tens of thousands per second is a local disk; a few
             // hundred is a network share, and on a 156k-entry library that is the whole run.
