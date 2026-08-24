@@ -6695,18 +6695,42 @@ namespace Truedat
         /// </summary>
         sealed class PhaseReport
         {
-            readonly List<KeyValuePair<string, TimeSpan>> _phases = new List<KeyValuePair<string, TimeSpan>>();
+            readonly List<PhaseRow> _phases = new List<PhaseRow>();
             readonly List<KeyValuePair<string, string>> _notes = new List<KeyValuePair<string, string>>();
             readonly Stopwatch _total = Stopwatch.StartNew();
 
             /// <summary>Record the phase that just finished, restart the clock for the next one,
-            /// and hand back the elapsed time formatted for the line being printed.</summary>
-            public string Mark(string name, Stopwatch phase)
+            /// and hand back the elapsed time formatted for the line being printed.
+            ///
+            /// <paramref name="bytes"/> is the payload the phase actually moved, 0 when it moved
+            /// none. It is what separates the two regimes a slow run can be in: a phase that
+            /// moves bytes is bounded by BANDWIDTH and gets faster only by reading less, while a
+            /// phase that moves ~none is bounded by LATENCY and gets faster by overlapping waits.
+            /// Duration alone cannot tell those apart, which is why a 13-minute existence sweep
+            /// and a 13-minute audio read looked identical in this report.</summary>
+            public string Mark(string name, Stopwatch phase, long bytes = 0)
             {
                 var elapsed = phase.Elapsed;
-                _phases.Add(new KeyValuePair<string, TimeSpan>(name, elapsed));
+                _phases.Add(new PhaseRow { Name = name, Elapsed = elapsed, Bytes = bytes });
                 phase.Restart();
                 return Format(elapsed);
+            }
+
+            /// <summary>Mark a phase, taking its payload size from a file that may not exist.
+            /// A missing file degrades to "no bytes recorded", never throws.</summary>
+            public string MarkFile(string name, Stopwatch phase, string path)
+            {
+                long bytes = 0;
+                try { var fi = new FileInfo(path); if (fi.Exists) bytes = fi.Length; }
+                catch { }
+                return Mark(name, phase, bytes);
+            }
+
+            struct PhaseRow
+            {
+                public string Name;
+                public TimeSpan Elapsed;
+                public long Bytes;
             }
 
             /// <summary>Record a non-time fact about the run (sizes, counts, ratios).</summary>
@@ -6740,6 +6764,18 @@ namespace Truedat
             public static string Rate(int items, TimeSpan t) =>
                 t.TotalSeconds < 0.001 ? "—" : $"{items / t.TotalSeconds:N0}/s";
 
+            /// <summary>Bytes per second for a phase, or "" when it moved none — an empty
+            /// column is the honest answer for a metadata phase, and it is exactly the
+            /// signal that says "this one is not bandwidth". Guarded against a zero
+            /// interval so a fast phase prints nothing rather than infinity.</summary>
+            internal static string Throughput(long bytes, TimeSpan t)
+            {
+                if (bytes <= 0 || t.TotalSeconds < 0.001) return "";
+                double bps = bytes / t.TotalSeconds;
+                return bps >= 1L << 20 ? $"{bps / (1L << 20):F0} MB/s"
+                                       : $"{bps / 1024.0:F0} KB/s";
+            }
+
             public void Report()
             {
                 Console.WriteLine();
@@ -6748,7 +6784,11 @@ namespace Truedat
                     Console.WriteLine($"  {n.Key,-24}{n.Value}");
                 if (_notes.Count > 0 && _phases.Count > 0) Console.WriteLine();
                 foreach (var p in _phases)
-                    Console.WriteLine($"  {p.Key,-24}{Format(p.Value),10}");
+                {
+                    var tp = Throughput(p.Bytes, p.Elapsed);
+                    Console.WriteLine($"  {p.Name,-24}{Format(p.Elapsed),10}"
+                                      + (tp.Length > 0 ? $"   {tp,10}" : ""));
+                }
                 Console.WriteLine($"  {"total",-24}{Format(_total.Elapsed),10}");
             }
         }
@@ -6776,11 +6816,11 @@ namespace Truedat
             var tracks = root["tracks"]?.AsObject();
             if (tracks == null || tracks.Count == 0) { Console.WriteLine("No tracks in moods file."); return; }
             int totalEntries = tracks.Count;  // captured before the loop drains `tracks`
-            Console.WriteLine($"Moods entries: {tracks.Count:N0}   ({timing.Mark("load catalog", phase)})");
+            Console.WriteLine($"Moods entries: {tracks.Count:N0}   ({timing.MarkFile("load catalog", phase, moodsPath)})");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             var library = ITunesParser.Parse(xmlPath, out _);
-            Console.WriteLine($"Library tracks: {library.Count:N0}   ({timing.Mark("parse library XML", phase)})");
+            Console.WriteLine($"Library tracks: {library.Count:N0}   ({timing.MarkFile("parse library XML", phase, xmlPath)})");
 
             // --- Library reachability guard (before any orphan decision) ---
             // A fixup decides "this file is gone" from the filesystem, and both
@@ -7126,12 +7166,12 @@ namespace Truedat
                 // per entry, and the summary should not make an operator guess which.
                 phase.Restart();
                 var bakPath = BackupCatalogCompressed(moodsPath);
-                Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}   ({timing.Mark("compress backup", phase)})");
+                Console.WriteLine(); Console.WriteLine($"Backup: {bakPath}   ({timing.MarkFile("compress backup", phase, bakPath)})");
                 root["tracks"] = newTracks; root["trackCount"] = newTracks.Count; StampCatalogHeader(root, DateTime.UtcNow.ToString("o"));
                 var tmpPath = moodsPath + ".tmp";
                 WriteCatalogDom(root, tmpPath);
                 AtomicReplace(tmpPath, moodsPath);
-                Console.WriteLine($"Updated: {moodsPath}   ({timing.Mark("write catalog", phase)})");
+                Console.WriteLine($"Updated: {moodsPath}   ({timing.MarkFile("write catalog", phase, moodsPath)})");
                 RegenerateSidecar(moodsPath);
                 timing.Mark("regenerate sidecar", phase);
                 timing.NoteFileSize("catalog out", moodsPath, $", {newTracks.Count:N0} entries");
@@ -17398,6 +17438,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "audit-verdicts: --audit-verdicts emits it");
                 Assert(!ShouldTraceVerdicts(false, true),
                     "audit-verdicts: without --audit there is no tee to write it to");
+
+                // Throughput separates the two regimes a slow phase can be in. A phase
+                // that moved no bytes reports NO rate — an empty column is the signal
+                // that says "not bandwidth", and inventing a 0 MB/s would read as a
+                // stalled transfer rather than a metadata phase.
+                Assert(PhaseReport.Throughput(0, TimeSpan.FromSeconds(789)) == "",
+                    "throughput: a phase that moved no bytes reports no rate (the sweep)");
+                Assert(PhaseReport.Throughput(100L << 20, TimeSpan.FromSeconds(1)) == "100 MB/s",
+                    "throughput: 100 MB in 1s");
+                Assert(PhaseReport.Throughput(50L << 20, TimeSpan.FromSeconds(2)) == "25 MB/s",
+                    "throughput: 50 MB in 2s");
+                Assert(PhaseReport.Throughput(1L << 30, TimeSpan.Zero) == "",
+                    "throughput: a zero interval prints nothing, not infinity");
+                Assert(PhaseReport.Throughput(512 * 1024, TimeSpan.FromSeconds(1)) == "512 KB/s",
+                    "throughput: sub-MB rates keep KB units");
             }
 
             // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
