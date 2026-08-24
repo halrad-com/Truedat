@@ -19221,11 +19221,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// The one skip rule, for every mode: a review record stops the attempt, and its
         /// reason is what gets printed. Returns null when the file should be attempted.
         ///
-        /// Under <c>--retry-errors</c> this returns null for everything EXCEPT
-        /// <see cref="ReviewState.Auto"/> — auto is truedat's own conclusion that the file
-        /// cannot succeed, recorded with its evidence, so an ordinary retry is not enough to
-        /// override it. Otherwise a retry would keep re-driving files the tool has already
-        /// proven hopeless, which is the loop the ledger exists to end.
+        /// <c>--retry-errors</c> re-attempts <see cref="ReviewState.Review"/> records ONLY.
+        /// The other two states are decisions and both hold: <see cref="ReviewState.Ignore"/>
+        /// is the operator saying leave it alone, and <see cref="ReviewState.Auto"/> is
+        /// truedat's own conclusion recorded with its evidence. A blanket retry must not
+        /// quietly resurrect either — that would make the operator's decision depend on which
+        /// flag they last typed, and would keep re-driving files already proven hopeless,
+        /// which is the loop this ledger exists to end.
+        ///
+        /// Caught by the end-to-end rig, not by the unit asserts: they pin the decision, and
+        /// this was a hole in which decision got consulted.
         /// </summary>
         internal static string? ReviewSkipReason(string path)
         {
@@ -19234,7 +19239,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             ReviewRecord? rec;
             lock (_runLedgerLock) rec = led.Find(path);
             if (rec == null) return null;
-            if (_retryErrorsRun && rec.State != ReviewState.Auto) return null;
+            if (_retryErrorsRun && rec.State == ReviewState.Review) return null;
+            if (rec.State == ReviewState.Ignore)
+                return $"ignored — {(rec.Reason.Length > 0 ? rec.Reason : "operator decision")}";
             if (rec.State == ReviewState.Auto)
                 return $"auto — {rec.StateReason ?? rec.Reason}";
             return rec.Reason.Length > 0 ? rec.Reason : "in review";
