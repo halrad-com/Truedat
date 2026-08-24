@@ -6045,6 +6045,9 @@ namespace Truedat
             EmitStagingSummary();
             }
             PrintScanTallies();
+            if (_shaReadRetries > 0)
+                Console.WriteLine($"  Contention: {_shaReadRetries:N0} sha read(s) recovered by retry"
+                                  + "   (tracks that would otherwise have lost their catalog entry)");
             FlushRunLedger(runLedgerPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
             if (finalSaveSw != null)
@@ -12642,10 +12645,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 : Task.Run(() =>
             {
                 var swSha = Stopwatch.StartNew();
-                var r = ComputeAudioStreamSha256FromFile(readPath, fileSize, out _);
+                // Resilient HERE specifically: this is the one call site where the file is
+                // being read by several workers at once, so it is the only place a
+                // transient sharing conflict is likely — and the only place where losing
+                // the sha costs the track its whole catalog entry via the health gate.
+                var r = ComputeAudioStreamSha256Resilient(readPath, fileSize, out var shaErr, out _, out var shaRetries);
                 swSha.Stop();
+                if (shaRetries > 0)
+                {
+                    // Surfaced, not silent: a recovered conflict is the signal that the
+                    // fan-out is contending with itself, and it is the difference between
+                    // "this file is fine" and "this file nearly lost its entry".
+                    Interlocked.Add(ref _shaReadRetries, shaRetries);
+                    if (r.hash == null)
+                        Console.Error.WriteLine($"  sha: gave up after {shaRetries} retries on a locked file: {Path.GetFileName(readPath)} ({shaErr})");
+                }
                 if (_audit)
-                    Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} file=\"{auditName}\"");
+                    Console.Error.WriteLine($"[AUDIT] audioStreamSha256Ms={swSha.ElapsedMilliseconds} retries={shaRetries} file=\"{auditName}\"");
                 return r;
             });
             var tagsTask = extractTags
@@ -17174,6 +17190,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- unknown-option suggestion helper --------------------------------
             {
+                // The retry gate. Keyed on a LOCK, not on failure generally: a blanket
+                // retry would burn four extra opens on every genuinely unreadable file,
+                // which is the mistake the staged-copy ladder explicitly avoided.
+                Assert(LooksLikeSharingViolation("The process cannot access the file because it is being used by another process."),
+                    "sha-retry: the win32 sharing-violation message is recognised");
+                Assert(LooksLikeSharingViolation("Sharing violation on path X"),
+                    "sha-retry: the alternate sharing-violation wording is recognised");
+                Assert(!LooksLikeSharingViolation("Access to the path 'X' is denied."),
+                    "sha-retry: access-denied is NOT retried — it will never succeed");
+                Assert(!LooksLikeSharingViolation("Could not find file 'X'."),
+                    "sha-retry: a missing file is NOT retried");
+                Assert(!LooksLikeSharingViolation(null) && !LooksLikeSharingViolation(""),
+                    "sha-retry: no error message means nothing to retry");
+
                 // Every settable key must say what it does untouched. --config enumerated
                 // keys and nothing else for a while, so "every flag uses its built-in
                 // default" named a state the screen then declined to show. A key added
@@ -22248,6 +22278,69 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// </summary>
         static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error)
             => ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out _);
+
+        /// <summary>
+        /// Retries a transient sharing violation before letting a track lose its entry.
+        ///
+        /// The worker fan-out reads one file from several readers at once — essentia and
+        /// ffmpeg as subprocesses, sha / fingerprint / SMFM in-process — and a momentary
+        /// conflict on any of them returns null. The health gate then fails the whole
+        /// track and NO catalog entry is written, so a few hundred milliseconds of
+        /// contention costs a real track permanently and reports it as
+        /// `analysis incomplete: sha`, which reads like a corrupt file.
+        ///
+        /// Observed on the replay fixtures: intermittent, and only on first-touch reads —
+        /// once the OS had the file cached it stopped, which is exactly the signature of
+        /// a timing window rather than a bad file.
+        ///
+        /// Gated on win32 32/33 ONLY, same as the staged-copy ladder (`ede1407`): a
+        /// blanket retry would burn the ladder on access-denied for every genuinely
+        /// unreadable file. This is the managed half of that generalisation; the
+        /// subprocess readers need re-invoking a process rather than re-opening a handle
+        /// and are deliberately not covered here.
+        /// </summary>
+        internal const int SharedReadRetries = 4;
+        internal const int SharedReadRetryMs = 150;
+
+        /// <summary>Sha reads recovered by a retry this run. Reported at the end of a scan
+        /// because a non-zero count means tracks were within one timing window of losing
+        /// their catalog entries — invisible otherwise, since a recovered read looks
+        /// exactly like a normal one.</summary>
+        static int _shaReadRetries;
+
+        static (string? hash, string source) ComputeAudioStreamSha256Resilient(
+            string filePath, long fileSize, out string? error, out string? legacySha, out int retriedTimes)
+        {
+            retriedTimes = 0;
+            for (int attempt = 0; ; attempt++)
+            {
+                var result = ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out legacySha);
+                if (result.hash != null) return result;
+                if (attempt >= SharedReadRetries || !LooksLikeSharingViolation(error)) return result;
+                retriedTimes++;
+                System.Threading.Thread.Sleep(SharedReadRetryMs);
+            }
+        }
+
+        /// <summary>
+        /// True when a swallowed read failure was another process holding the file, as
+        /// opposed to the file being unreadable.
+        ///
+        /// Message-matched, and that is a compromise worth naming: the readers catch
+        /// broadly and surface only ex.Message, so the HResult is gone by the time a
+        /// caller sees it. Restructuring every reader to preserve the exception is the
+        /// right fix and a bigger change than this one. The cost of a wrong match here is
+        /// bounded — at worst four extra opens on a file that was going to fail anyway —
+        /// so a false positive is cheap and a false negative just returns today's
+        /// behaviour.
+        /// </summary>
+        internal static bool LooksLikeSharingViolation(string? error)
+        {
+            if (string.IsNullOrEmpty(error)) return false;
+            return error!.IndexOf("being used by another process", StringComparison.OrdinalIgnoreCase) >= 0
+                || error.IndexOf("sharing violation", StringComparison.OrdinalIgnoreCase) >= 0
+                || error.IndexOf("used by another", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
 
         /// <summary>Overload that also returns the LEGACY-region sha for FLAC files
         /// (TagLib invariant region, which includes the metadata blocks — the value
