@@ -1817,6 +1817,14 @@ namespace Truedat
                         removed++;
                         if (skippedPath != null)
                             AppendSkipped(skippedPath, t.Location!, GetExtensionSafe(t.Location!), $"excluded (rule: {reason})");
+                        // AFTER AppendSkipped, deliberately: that helper records a `skipped`
+                        // disposition of its own, and this upsert must be the one that wins.
+                        // Excluded is its OWN disposition, not a skip wearing a reason string
+                        // — a rule is operator policy, a structural skip is a fact about the
+                        // file, and only one of them is undoable. RuleId stays null until
+                        // rules carry identity; the reason text is renderable but not
+                        // actionable, which is the gap RBA named.
+                        RecordReviewSkip(t.Location!, ReviewDisposition.Excluded, reason, null, "scan");
                         if (_audit)
                             Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
                     }
@@ -17644,6 +17652,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var distinct = new HashSet<int>(SampleIndices(5, 20));
                 Assert(distinct.Count == 5, "sample-indices: no index is probed twice");
 
+                // Disposition precedence: an excluded file passes through AppendSkipped on
+                // its way out, which records a `skipped` disposition of its own. The
+                // exclusion upsert must land LAST or the operator's own rule shows up as a
+                // structural skip — and only one of those two is undoable.
+                {
+                    var dl = new ReviewLedger();
+                    var tX = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+                    dl.Upsert(new ReviewRecord { Path = @"D:\m\x.mp3", Disposition = ReviewDisposition.Skipped, Reason = "excluded (rule: r)" }, tX, false);
+                    dl.Upsert(new ReviewRecord { Path = @"D:\m\x.mp3", Disposition = ReviewDisposition.Excluded, Reason = "genre=Podcast" }, tX, false);
+                    Assert(dl.Find(@"D:\m\x.mp3")!.Disposition == ReviewDisposition.Excluded,
+                        "ledger: the later upsert wins, so an excluded file is not filed as a plain skip");
+                }
+
                 // Verdict tracing needs BOTH flags. --audit alone must stay quiet: the
                 // trace is recomputed per entry per save, and a log that buries the
                 // diagnosis under 137k lines of vote arithmetic is not a diagnostic.
@@ -19004,8 +19025,41 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// retry + append-with-header pattern. Thread-safe via a dedicated static
         /// lock so worker pools across modes can call this concurrently.
         /// </summary>
+        /// <summary>Record a non-failure reason a file is not in the catalog — a policy or
+        /// structural skip, or an operator rule. Same ledger as failures, because the
+        /// question the operator asks is one question ("why isn't this track in my
+        /// catalog"), and three artefacts answering it separately is how they came to
+        /// disagree.</summary>
+        static void RecordReviewSkip(string filePath, ReviewDisposition disposition,
+            string reason, string? ruleId, string runMode)
+        {
+            var led = _runLedger;
+            if (led == null || string.IsNullOrEmpty(filePath)) return;
+            try
+            {
+                var rec = new ReviewRecord
+                {
+                    Path = filePath,
+                    Disposition = disposition,
+                    Reason = reason ?? "",
+                    RuleId = ruleId,
+                    LastRunMode = runMode,
+                    // A skip is not an attempt, so it never reaches the failed-too-often
+                    // trigger and never needs a human: the reason is already definitive.
+                    State = ReviewState.Auto,
+                    StateReason = reason ?? "",
+                };
+                lock (_runLedgerLock) led.Upsert(rec, DateTime.UtcNow, isRetry: false);
+            }
+            catch { }
+        }
+
         static void AppendSkipped(string skippedPath, string filePath, string ext, string reason)
         {
+            // Ledger first, and unconditionally: the CSV is skipped entirely when no path
+            // was configured, and a record that depends on an output file being wired is
+            // exactly the kind of partial truth that made the old three artefacts disagree.
+            RecordReviewSkip(filePath, ReviewDisposition.Skipped, reason, null, "scan");
             if (string.IsNullOrEmpty(skippedPath)) return;
             lock (_skippedCsvLock)
             {
