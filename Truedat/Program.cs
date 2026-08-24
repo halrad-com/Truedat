@@ -4203,6 +4203,24 @@ namespace Truedat
                 var flDsdSkipped = 0;
                 var flSmfmAdded = 0;
                 var flErrors = new ConcurrentBag<string>();
+
+                // Review ledger for the per-file modes. The old error-list skip existed only
+                // on the XML scan path, which is exactly why backfill re-attempted two
+                // permanently-corrupt MP3s on every single run. Every path that can fail a
+                // file records it, or the ledger is a partial truth and the skip is a lie.
+                var flLedgerDir = !string.IsNullOrEmpty(analyzeFileMoods)
+                    ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods!)) ?? ".")
+                    : Directory.GetCurrentDirectory();
+                var flLedgerPath = ResolveReviewLedgerPath(flLedgerDir);
+                _retryErrorsRun = retryErrors;
+                _runLedger = ReviewLedger.Load(flLedgerPath, out var flLedgerErr);
+                if (flLedgerErr != null)
+                {
+                    Console.Error.WriteLine($"Error: the review ledger at {flLedgerPath} is unreadable: {flLedgerErr}");
+                    Console.Error.WriteLine("Refusing — continuing would overwrite it and discard your review states.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
 
                 // Accumulate for moods file (optional)
@@ -4474,6 +4492,7 @@ namespace Truedat
                         {
                             Interlocked.Increment(ref flFailed);
                             flErrors.Add($"{filePath}: {flResults.EssentiaError}");
+                            RecordReviewFailure(filePath, flResults.EssentiaError ?? "", 0, 0, "essentia", "file-list");
                             Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {flResults.EssentiaError}");
                             return;
                         }
@@ -4501,6 +4520,7 @@ namespace Truedat
                                 var comps = string.Join(";", healthFailed);
                                 Interlocked.Increment(ref flFailed);
                                 flErrors.Add($"{filePath}: analysis incomplete: {comps}");
+                                RecordReviewFailure(filePath, $"analysis incomplete: {comps}", 0, 0, comps, "file-list");
                                 Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: analysis incomplete: {comps}");
                                 return;
                             }
@@ -4556,6 +4576,7 @@ namespace Truedat
                     {
                         Interlocked.Increment(ref flFailed);
                         flErrors.Add($"{filePath}: {ex.Message}");
+                        RecordReviewFailure(filePath, ex.Message, 0, 0, "exception", "file-list");
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
                     }
                     finally { flStagedSrc?.Dispose(); KeepAwakePump(workMode: true); }
@@ -4629,6 +4650,7 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
+                FlushRunLedger(flLedgerPath);
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                     ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold);
                 // Exit 3 (not 1) when the source went away: the caller — the autoscan plugin —
