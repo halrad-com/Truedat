@@ -17701,7 +17701,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "{\"kind\":\"folder\",\"pattern\":\"\\\\Samples\\\\**\",\"action\":\"exclude\"}]}", out _);
                     Assert(rset.IsExcluded(@"D:\m\a.mp3", "Podcast", out _, out var idA) && idA != null,
                         "rule-id: an excluded file names the rule that caught it");
-                    Assert(idA!.Length == 8, "rule-id: 8 hex chars, short enough to read and quote");
+                    // 64 bits, not 32: the hub PERSISTS this (an undo pin is a stored
+                    // reference to a rule) and a collision means undoing the WRONG rule in
+                    // the one artefact that cannot be regenerated.
+                    Assert(idA!.Length == 16, "rule-id: 16 hex chars — 64 bits, because it is persisted and acted on");
+                    Assert(System.Text.RegularExpressions.Regex.IsMatch(idA, "^[0-9a-f]{16}$"),
+                        "rule-id: lowercase hex only, so it round-trips through JSON and a URL unchanged");
                     Assert(rset.IsExcluded(@"D:\m\b.mp3", "Podcast", out _, out var idB) && idB == idA,
                         "rule-id: the same rule yields the same id for every file it catches");
                     Assert(rset.IsExcluded(@"D:\m\Samples\c.mp3", null, out _, out var idC) && idC != idA,

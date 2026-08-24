@@ -95,21 +95,31 @@ namespace Truedat
         /// </summary>
         public string Id => ShortId(Identity());
 
-        /// <summary>FNV-1a over the identity, rendered as 8 hex chars. Same family as
-        /// PathComparer's hash: deterministic across processes and machines, which is what
-        /// makes the id in a ledger written on one box meaningful on another.</summary>
+        /// <summary>
+        /// FNV-1a over the identity, rendered as 16 hex chars. Same family as PathComparer's
+        /// hash: deterministic across processes and machines, which is what makes an id
+        /// written into a ledger on one box meaningful on another.
+        ///
+        /// 64 bits, not 32, because this stopped being a display key. MBXHub will PERSIST a
+        /// ruleId — an undo pin is a stored reference to a rule — and the failure mode of a
+        /// collision is undoing the WRONG rule, in the one artefact in this system that
+        /// cannot be regenerated. At 32 bits that sat around 1e-4 for a large rule set:
+        /// small, but the wrong kind of small for an irreversible action on operator
+        /// judgement. Widened while nothing had persisted one yet; the id is derived, so the
+        /// change cost a rebuild and would have cost a migration a feature later.
+        /// </summary>
         internal static string ShortId(string identity)
         {
             unchecked
             {
-                const uint offset = 2166136261, prime = 16777619;
-                uint h = offset;
+                const ulong offset = 14695981039346656037UL, prime = 1099511628211UL;
+                ulong h = offset;
                 for (int i = 0; i < identity.Length; i++)
                 {
                     h ^= identity[i];
                     h *= prime;
                 }
-                return h.ToString("x8");
+                return h.ToString("x16");
             }
         }
     }
