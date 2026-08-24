@@ -17455,6 +17455,120 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "throughput: sub-MB rates keep KB units");
             }
 
+            // --- Review ledger --------------------------------------------------------
+            {
+                var t0 = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+                var t1 = new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc);
+                ReviewRecord Rec(string p, string reason, double? mb = null) => new ReviewRecord
+                {
+                    Path = p,
+                    Disposition = ReviewDisposition.Failed,
+                    Reason = reason,
+                    SizeMb = mb,
+                };
+
+                // Existence is sufficient to stop an attempt — in every mode, not just scan.
+                var led = new ReviewLedger();
+                led.Upsert(Rec(@"D:\m\a.flac", "essentia exit 1", 4.0), t0, isRetry: false);
+                Assert(led.ShouldSkip(@"D:\m\a.flac"), "ledger: a record stops the file being attempted");
+                Assert(led.ShouldSkip(@"d:/m/A.FLAC"), "ledger: skip lookup folds case and slash direction");
+                Assert(!led.ShouldSkip(@"D:\m\other.flac"), "ledger: an unrecorded file is still attempted");
+
+                // THE fix. The old ledger was deleted wholesale by the command the advisor
+                // recommended, so failure history never survived a retry.
+                Assert(led.SetState(@"D:\m\a.flac", ReviewState.Ignore), "ledger: operator can set a state");
+                led.Upsert(Rec(@"D:\m\a.flac", "essentia exit 1", 4.0), t1, isRetry: true);
+                var kept = led.Find(@"D:\m\a.flac")!;
+                Assert(kept.State == ReviewState.Ignore,
+                    "ledger: a rescan does NOT overwrite the operator's state");
+                Assert(kept.FirstSeenUtc == t0, "ledger: firstSeen survives — a rescan does not rewrite history");
+                Assert(kept.LastSeenUtc == t1, "ledger: lastSeen advances");
+                Assert(kept.Attempts == 2, "ledger: an explicit retry advances attempts");
+
+                // Only a retry advances the counter: a first failure stops automatic
+                // re-attempts, so an ordinary scan seeing the file again is not an attempt.
+                led.Upsert(Rec(@"D:\m\a.flac", "essentia exit 1", 4.0), t1, isRetry: false);
+                Assert(led.Find(@"D:\m\a.flac")!.Attempts == 2,
+                    "ledger: a non-retry pass does not inflate the attempt count");
+
+                // auto is truedat's own conclusion, and must always say WHY.
+                var led2 = new ReviewLedger();
+                led2.Upsert(Rec(@"D:\m\silent.flac", "File looks like a completely silent file... Aborting..."), t0, false);
+                var sil = led2.Find(@"D:\m\silent.flac")!;
+                Assert(sil.State == ReviewState.Auto, "ledger: an extractor silence verdict concludes auto");
+                Assert(!string.IsNullOrEmpty(sil.StateReason),
+                    "ledger: an auto conclusion always names its trigger — an unauditable one is a guess");
+
+                var led3 = new ReviewLedger();
+                led3.Upsert(Rec(@"D:\m\tiny.mp3", "taglib refused", 0.001), t0, false);
+                Assert(led3.Find(@"D:\m\tiny.mp3")!.State == ReviewState.Auto,
+                    "ledger: a file too small to hold audio concludes auto");
+
+                // Speech must NEVER auto-skip. It is untuned and fires on sparse
+                // instrumental, live and ambient music; auto-skipping would silently stop
+                // analyzing real music with nothing surfacing that it happened.
+                Assert(ReviewLedgerRules.AutoConclusion("speechLikely=yes", 8_000_000, 1) == null,
+                    "ledger: speech is NOT an auto trigger — untuned, and it fires on real music");
+                Assert(ReviewLedgerRules.AutoConclusion("essentia exit 1", 8_000_000, 1) == null,
+                    "ledger: an ordinary failure stays in review for a human");
+                Assert(ReviewLedgerRules.AutoConclusion("essentia exit 1", 8_000_000, 3) != null,
+                    "ledger: failing past the retry guard concludes auto");
+
+                // An operator decision outranks an automatic one.
+                var led4 = new ReviewLedger();
+                led4.Upsert(Rec(@"D:\m\s2.flac", "silent file"), t0, false);
+                led4.SetState(@"D:\m\s2.flac", ReviewState.Review);
+                led4.Upsert(Rec(@"D:\m\s2.flac", "silent file"), t1, false);
+                Assert(led4.Find(@"D:\m\s2.flac")!.State == ReviewState.Auto,
+                    "ledger: auto re-concludes on a record the operator left in review");
+                led4.SetState(@"D:\m\s2.flac", ReviewState.Ignore);
+                led4.Upsert(Rec(@"D:\m\s2.flac", "silent file"), t1, false);
+                Assert(led4.Find(@"D:\m\s2.flac")!.State == ReviewState.Ignore,
+                    "ledger: auto does NOT overwrite an operator decision");
+
+                // Only 'review' is pending work; ignore and auto were both decided.
+                Assert(led4.NeedsReviewCount == 0, "ledger: an ignored record is not pending review");
+                var led5 = new ReviewLedger();
+                led5.Upsert(Rec(@"D:\m\r.flac", "essentia exit 1", 4.0), t0, false);
+                Assert(led5.NeedsReviewCount == 1, "ledger: a fresh failure is pending review");
+
+                // Envelope: kind is DECLARED, never sniffed from the shape.
+                var env = led5.ToJson("test", t1);
+                Assert(env["kind"]?.GetValue<string>() == "review",
+                    "ledger: the envelope declares kind (a shape-sniff fails silently)");
+                Assert(env["counts"]?["needsReview"]?.GetValue<int>() == 1,
+                    "ledger: the envelope carries the needs-review count");
+
+                // Round trip must preserve the operator's decision — it is the whole point
+                // of the file surviving a run.
+                var tmpLedger = Path.Combine(Path.GetTempPath(), "truedat-ledger-" + Guid.NewGuid().ToString("N") + ".json");
+                try
+                {
+                    File.WriteAllText(tmpLedger, led4.ToJson("test", t1).ToJsonString());
+                    var reloaded = ReviewLedger.Load(tmpLedger, out var lerr);
+                    Assert(lerr == null, "ledger: a well-formed file loads without error");
+                    Assert(reloaded.Find(@"D:\m\s2.flac")?.State == ReviewState.Ignore,
+                        "ledger: the operator's state survives a save/load round trip");
+                    Assert(reloaded.Find(@"D:\m\s2.flac")?.FirstSeenUtc == t0,
+                        "ledger: firstSeen survives the round trip");
+                }
+                finally { try { File.Delete(tmpLedger); } catch { } }
+
+                // A missing ledger is an empty one, not an error. A CORRUPT one reports,
+                // so a caller can refuse instead of silently starting from empty and
+                // discarding every operator state in the file.
+                var absent = ReviewLedger.Load(Path.Combine(Path.GetTempPath(), "truedat-no-such-" + Guid.NewGuid().ToString("N") + ".json"), out var aerr);
+                Assert(aerr == null && absent.Count == 0, "ledger: a missing file is an empty ledger, not an error");
+                var tmpBad = Path.Combine(Path.GetTempPath(), "truedat-badledger-" + Guid.NewGuid().ToString("N") + ".json");
+                try
+                {
+                    File.WriteAllText(tmpBad, "{ this is not json");
+                    ReviewLedger.Load(tmpBad, out var berr);
+                    Assert(berr != null, "ledger: a corrupt file REPORTS rather than reading as empty");
+                }
+                finally { try { File.Delete(tmpBad); } catch { } }
+            }
+
             // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
             // The bpmHistogram cut (2026-08-10, registry-driven). OverrideForTest is the mutation
             // seam: the writer gate must DROP a listed field and EMIT an unlisted one.
