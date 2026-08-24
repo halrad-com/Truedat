@@ -1947,6 +1947,23 @@ namespace Truedat
             sourcePath = null; entryCount = 0; urlSkipped = 0; error = null;
             if (_noExclusions) return baseSet;
 
+            // Bind any `playlist` RULE the exclusion file declares, before anything else.
+            // A parsed-but-unbound playlist rule matches NOTHING, so shipping the kind
+            // without this would mean a rule the operator wrote silently covering zero
+            // files — the precise failure the whole exclusion design exists to prevent.
+            // Fail-closed: the error propagates to the caller, which already refuses the
+            // run on it, rather than scanning as though the rule were not there.
+            var bindProblems = baseSet.BindPlaylists(baseDir, p =>
+            {
+                var r = PlaylistReader.Read(p);
+                return r.Error != null ? null : r.Paths;
+            });
+            if (bindProblems.Count > 0)
+            {
+                error = string.Join("; ", bindProblems);
+                return baseSet;
+            }
+
             var path = _excludePlaylistPath;
             if (path != null && !File.Exists(path))
             {
@@ -17696,6 +17713,47 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                     Assert(!rset.IsExcluded(@"D:\m\keep.mp3", "Rock", out _, out var idNone) && idNone == null,
                         "rule-id: a file no rule catches has no rule id");
+                }
+
+                // playlist rule kind: a MusicBee autoplaylist IS a durable rule (a query that
+                // re-evaluates), which is why membership is re-read per run rather than
+                // frozen. A static export converted by --apply-exclusions is the other thing.
+                {
+                    var pjson = "{\"rules\":[{\"kind\":\"playlist\",\"playlist\":\"junk.m3u8\",\"action\":\"exclude\"}]}";
+                    var pset = ExclusionSet.FromJson(pjson, out var perr);
+                    Assert(perr == null && pset.Rules.Count == 1, "playlist-rule: parses");
+                    Assert(pset.Rules[0].Kind == ExclusionKind.Playlist, "playlist-rule: parsed as its own kind");
+                    Assert(pset.Rules[0].Describe() == "playlist=junk.m3u8", "playlist-rule: describes itself by playlist");
+
+                    // UNBOUND matches nothing — and that is why the caller must refuse when
+                    // binding fails. A rule that silently covers zero files is the operator
+                    // believing exclusions are in force while everything gets analyzed.
+                    Assert(!pset.IsExcluded(@"D:\m\a.mp3", null, out _, out _),
+                        "playlist-rule: UNBOUND matches nothing (caller must refuse, not proceed)");
+
+                    var bound = ExclusionSet.FromJson(pjson, out _);
+                    var probs = bound.BindPlaylists(@"D:\lib", _ => new[] { @"D:\m\a.mp3", @"D:/m/B.MP3" });
+                    Assert(probs.Count == 0, "playlist-rule: binding a readable playlist reports no problems");
+                    Assert(bound.IsExcluded(@"D:\m\a.mp3", null, out _, out var pid) && pid != null,
+                        "playlist-rule: a bound rule excludes a member, and names itself");
+                    Assert(bound.IsExcluded(@"d:/m/b.mp3", null, out _, out _),
+                        "playlist-rule: membership folds case and slash direction");
+                    Assert(!bound.IsExcluded(@"D:\m\other.mp3", null, out _, out _),
+                        "playlist-rule: a non-member is not excluded");
+
+                    var failed = ExclusionSet.FromJson(pjson, out _);
+                    var fprobs = failed.BindPlaylists(@"D:\lib", _ => null);
+                    Assert(fprobs.Count == 1, "playlist-rule: an unreadable playlist is REPORTED, not swallowed");
+
+                    // include and exclude are peers across every kind, playlist included.
+                    var incl = ExclusionSet.FromJson(
+                        "{\"rules\":[{\"kind\":\"folder\",\"pattern\":\"\\\\m\\\\**\",\"action\":\"exclude\"}," +
+                        "{\"kind\":\"playlist\",\"playlist\":\"keep.m3u8\",\"action\":\"include\"}]}", out _);
+                    incl.BindPlaylists(@"D:\lib", _ => new[] { @"D:\m\keep.mp3" });
+                    Assert(incl.IsExcluded(@"D:\m\drop.mp3", null, out _, out _),
+                        "playlist-rule: the folder exclude still applies");
+                    Assert(!incl.IsExcluded(@"D:\m\keep.mp3", null, out _, out _),
+                        "playlist-rule: a playlist INCLUDE wins over a folder exclude — include/exclude are peers");
                 }
 
                 // Verdict tracing needs BOTH flags. --audit alone must stay quiet: the

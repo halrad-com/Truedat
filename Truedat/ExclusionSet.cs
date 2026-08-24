@@ -5,7 +5,7 @@ using System.Threading;
 
 namespace Truedat
 {
-    internal enum ExclusionKind { Folder, Genre, File }
+    internal enum ExclusionKind { Folder, Genre, File, Playlist }
 
     internal enum ExclusionAction { Exclude, Include }
 
@@ -38,6 +38,21 @@ namespace Truedat
 
         /// <summary>Pre-normalized match target, computed once at parse time.</summary>
         internal string Norm = "";
+
+        /// <summary>
+        /// For <see cref="ExclusionKind.Playlist"/>: the normalized paths the playlist
+        /// currently lists. NULL until <see cref="ExclusionSet.BindPlaylists"/> resolves it,
+        /// and an unbound rule matches NOTHING — deliberately, and it must be diagnosed
+        /// loudly, because a rule that silently matches nothing is the exact failure this
+        /// whole design exists to prevent: the operator believes exclusions are in force
+        /// while the scan analyzes everything.
+        ///
+        /// This is what makes a playlist rule a RULE rather than a snapshot: membership is
+        /// re-read every run, so editing the playlist in MusicBee changes the next scan. A
+        /// static export converted by --apply-exclusions is the other thing — a materialised
+        /// set of `file` rules, frozen at the moment it was applied.
+        /// </summary>
+        internal HashSet<string>? Members;
         /// <summary>True for a folder rule whose pattern is a root-independent fragment.</summary>
         internal bool IsFragment;
 
@@ -48,6 +63,7 @@ namespace Truedat
             {
                 case ExclusionKind.Folder: return "folder=" + Value;
                 case ExclusionKind.Genre: return "genre=" + Value;
+                case ExclusionKind.Playlist: return "playlist=" + Value;
                 default: return "file=" + Value;
             }
         }
@@ -220,7 +236,8 @@ namespace Truedat
             if (string.Equals(kindText, "folder", StringComparison.OrdinalIgnoreCase)) kind = ExclusionKind.Folder;
             else if (string.Equals(kindText, "genre", StringComparison.OrdinalIgnoreCase)) kind = ExclusionKind.Genre;
             else if (string.Equals(kindText, "file", StringComparison.OrdinalIgnoreCase)) kind = ExclusionKind.File;
-            else { why = $"rule[{index}]: unknown kind '{kindText}' (expected folder|genre|file)"; return null; }
+            else if (string.Equals(kindText, "playlist", StringComparison.OrdinalIgnoreCase)) kind = ExclusionKind.Playlist;
+            else { why = $"rule[{index}]: unknown kind '{kindText}' (expected folder|genre|file|playlist)"; return null; }
 
             ExclusionAction action;
             if (string.Equals(actionText, "exclude", StringComparison.OrdinalIgnoreCase)) action = ExclusionAction.Exclude;
@@ -269,6 +286,16 @@ namespace Truedat
                     if (value.Length == 0) { why = $"rule[{index}]: genre rule needs a non-empty value"; return null; }
                     rule.Value = value;
                     rule.Norm = value.ToUpperInvariant();
+                    return rule;
+                }
+                case ExclusionKind.Playlist:
+                {
+                    var pl = (Str(obj, "playlist") ?? "").Trim();
+                    if (pl.Length == 0) { why = $"rule[{index}]: playlist rule needs a playlist path"; return null; }
+                    rule.Value = pl;
+                    // The playlist's own path is the identity — the rule is "whatever this
+                    // playlist lists", not "these files". Membership is resolved per run.
+                    rule.Norm = NormalizePath(pl);
                     return rule;
                 }
                 default:
@@ -350,6 +377,51 @@ namespace Truedat
             return false;
         }
 
+        /// <summary>
+        /// Resolve every <see cref="ExclusionKind.Playlist"/> rule's membership by reading
+        /// the playlist. Separate from parsing on purpose: parsing stays pure (strings in,
+        /// verdict out, self-testable without a filesystem) and the IO lives where a caller
+        /// can see it and handle failure.
+        ///
+        /// Returns the problems it hit. A caller that gets a non-empty list MUST refuse the
+        /// run rather than continue: an unbound playlist rule matches nothing, and analyzing
+        /// everything while the operator believes their rules are in force is the exact
+        /// silent failure this design removes. Same posture the file-level exclusion reader
+        /// already takes for a present-but-unusable playlist.
+        ///
+        /// Relative playlist paths resolve against <paramref name="baseDir"/>, matching how
+        /// the conventional exclude-playlist is discovered.
+        /// </summary>
+        public IReadOnlyList<string> BindPlaylists(string baseDir, Func<string, IReadOnlyList<string>?> readPlaylist)
+        {
+            var problems = new List<string>();
+            foreach (var rule in _rules)
+            {
+                if (rule.Kind != ExclusionKind.Playlist) continue;
+                var path = rule.Value;
+                try
+                {
+                    if (!System.IO.Path.IsPathRooted(path) && !string.IsNullOrEmpty(baseDir))
+                        path = System.IO.Path.Combine(baseDir, path);
+                    var entries = readPlaylist(path);
+                    if (entries == null)
+                    {
+                        problems.Add($"playlist rule '{rule.Value}': could not read {path}");
+                        continue;
+                    }
+                    var set = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var e in entries)
+                        if (!string.IsNullOrEmpty(e)) set.Add(NormalizePath(e));
+                    rule.Members = set;
+                }
+                catch (Exception ex)
+                {
+                    problems.Add($"playlist rule '{rule.Value}': {ex.Message}");
+                }
+            }
+            return problems;
+        }
+
         static bool Matches(ExclusionRule rule, string normPath, string? normGenre)
         {
             switch (rule.Kind)
@@ -360,6 +432,11 @@ namespace Truedat
                         : normPath.StartsWith(rule.Norm, StringComparison.Ordinal);
                 case ExclusionKind.Genre:
                     return normGenre != null && normGenre.Length > 0 && normGenre == rule.Norm;
+                case ExclusionKind.Playlist:
+                    // Unbound matches nothing. See ExclusionRule.Members — the caller is
+                    // required to bind and to refuse the run when binding failed, rather
+                    // than let a rule quietly cover zero files.
+                    return rule.Members != null && rule.Members.Contains(normPath);
                 default:
                     return normPath == rule.Norm;
             }
