@@ -244,3 +244,56 @@ CPU-bound or IO-bound. Motivated by a 2026-07-14 storage benchmark: analysis tim
 
 Interpretation: CPU ≈ 100% with low disk read ⇒ CPU-bound (scale out via `--chunk`); low CPU
 with high disk ⇒ IO-bound. Observability only, hence low.
+
+## Diagnostics: name the subject, measure the cost
+
+Motivated by a measured case: a `--fixup` over a wireless link spent **13m 9s of a
+13m 46s run** in the existence sweep — 72,144 `File.Exists` calls at ~10.9 ms each — and
+nothing in the output said so. The same catalog sweeps in ~10s on local disk. Meanwhile the
+run log was 11 MB, essentially all of it per-track `--audit` verdict tracing.
+
+Shipped: per-root latency profile at the fixup root check (`SampleStatLatencyMs`,
+`MedianMs`, `SweepConcurrencyFor`). Everything below is not.
+
+### Parallel metadata sweep, sized from measured latency
+
+The sweep is serial while the rest of the scan runs at parallelism 6. Metadata calls carry
+~0 bytes, so throughput is `concurrency / latency` and the link cannot saturate — the
+opposite regime to reading audio, where one sequential stream beats N parallel ones and
+staging already does the right thing. Predicted 13m 9s -> ~1m 39s at concurrency 8.
+
+Take the concurrency from the measured p50, not a constant: the correct value differs by
+an order of magnitude between local disk and a wireless share. Cap it — SMB credits and a
+modest NAS CPU flatten the curve early, and the same share is usually streaming audio to
+the player while this runs.
+
+### Per-operation instrumentation
+
+Every operation that can fail or be slow records its **subject** (which file), its
+**duration**, and its **outcome**. Failure attribution then falls out for free rather than
+being a separate feature: a failure is an operation whose cost ended in an error.
+
+### Demote per-track verdict tracing
+
+`--audit` currently emits the full per-signal vote trace for every track including the
+overwhelming majority that decide `no`. It buries everything else. Give it its own switch.
+
+### Storage profile with a stored baseline
+
+Report per root: ops/sec (latency regime) and bytes/sec (bandwidth regime). The ratio says
+which side of the sequential-vs-parallel line a phase sits on, without the operator needing
+to know the transport. A fixed-sample benchmark writes a baseline; later runs diff against
+it, so comparing two environments is a measurement rather than two anecdotes.
+
+### Advisor must not recommend commands that cannot clear the count
+
+`--stats` cascades: it recommends `--retry-errors`, which **deletes the error ledger**, so
+the same entries reclassify as merely stale and are then recommended for `--refresh`, which
+cannot help them either. The ledger has to survive the retry, and a count that no command
+can act on should be reported as a fact, not as pending work.
+
+### One review file for everything the catalog does not hold
+
+Failures, policy skips and exclusions in one file with reasons, replacing the separate
+errors/skipped CSVs. Nothing is retried implicitly; retry is explicit and updates records
+rather than erasing them.

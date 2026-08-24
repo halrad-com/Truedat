@@ -6496,6 +6496,134 @@ namespace Truedat
             return (true, $"{total:N0} entries on unreachable root(s): {names}");
         }
 
+        // -- Root latency profile ---------------------------------------------
+        //
+        // Measured 2026-08-23 on one catalog (~72k entries) across three paths to the
+        // SAME files, fixup's existence sweep:
+        //
+        //   local D:                  ~10s      ~7,200/s    0.14 ms/call
+        //   gigabit  -> a NAS        1m  0s    ~1,200/s    0.83 ms/call
+        //   802.11n  -> same NAS    13m  9s        91/s   10.90 ms/call
+        //
+        // The two remote rows are a controlled experiment — same server, same files,
+        // only the link changed — so the 13x is the WIRE, not the NAS and not SMB. The
+        // sweep moves ZERO bytes, so none of it is bandwidth: it is 10.9 ms of round-trip
+        // paid 72,144 times in series, on a link that sat ~0% utilized for 13 minutes.
+        //
+        // We deliberately do NOT identify the transport. The SMB dialect would need
+        // Get-SmbConnection, which is WMI and DENIED unelevated (verified) — and it only
+        // ever was a proxy for "what does a call cost", which is measurable directly and
+        // stays true across protocol, firmware and NAS age. Report what comes through,
+        // not what kind of wire carries it.
+
+        /// <summary>How a library root is reached. Reported BESIDE the measured latency,
+        /// never instead of it: remote and slow are separate facts (a gigabit share is
+        /// remote and fast; an ailing local disk is neither). Nothing branches on this —
+        /// it is context for a human reading the line.</summary>
+        internal enum RootAccess { Local, Unc, MappedNetwork }
+
+        /// <summary>Pure classifier, split from <see cref="IsNetworkDrivePath"/> so the
+        /// decision is testable without a mapped drive.</summary>
+        internal static RootAccess ClassifyRootAccess(string root, bool isMappedNetwork)
+        {
+            if (!string.IsNullOrEmpty(root) && root.StartsWith(@"\\", StringComparison.Ordinal))
+                return RootAccess.Unc;
+            return isMappedNetwork ? RootAccess.MappedNetwork : RootAccess.Local;
+        }
+
+        /// <summary>Median of the samples, in ms. Median not mean: one 400 ms outlier on a
+        /// contended link should not decide the concurrency for 72,000 calls.</summary>
+        internal static double MedianMs(IReadOnlyList<double> samples)
+        {
+            if (samples == null || samples.Count == 0) return 0.0;
+            var s = samples.ToArray();
+            Array.Sort(s);
+            int mid = s.Length / 2;
+            return (s.Length % 2 == 1) ? s[mid] : (s[mid - 1] + s[mid]) / 2.0;
+        }
+
+        /// <summary>
+        /// Concurrency for a metadata sweep over this root, derived from its MEASURED
+        /// per-call latency rather than a constant.
+        ///
+        /// Metadata calls carry ~0 bytes, so throughput is purely <c>concurrency /
+        /// latency</c> and the link can never saturate — the only ceiling is the server.
+        /// That is the opposite regime to reading audio, where one sequential stream beats
+        /// N parallel ones (1x9 &gt; 9x1) because they divide one pipe and defeat read-ahead.
+        /// truedat already gets THAT half right by staging each track once.
+        ///
+        /// Capped at <see cref="SweepConcurrencyMax"/> deliberately. The arithmetic keeps
+        /// climbing past it, but SMB credits and a modest NAS CPU flatten the curve, and
+        /// the same share is usually streaming audio to MusicBee while this runs — a
+        /// stuttering player is a worse failure than a slow fixup. 8 already takes the
+        /// 802.11n case from 13m 9s to ~1m 39s, which is 87% of the distance to the
+        /// theoretical floor.
+        ///
+        /// A local root returns 1: at 0.14 ms there is no wait to hide, and concurrency
+        /// there buys contention instead of overlap.
+        /// </summary>
+        internal static int SweepConcurrencyFor(double p50Ms)
+        {
+            if (p50Ms < LocalLatencyMaxMs) return 1;
+            if (p50Ms < ModerateLatencyMaxMs) return 4;
+            return SweepConcurrencyMax;
+        }
+
+        internal const double LocalLatencyMaxMs = 0.3;
+        internal const double ModerateLatencyMaxMs = 2.0;
+        internal const int SweepConcurrencyMax = 8;
+
+        /// <summary>The one-line verdict for a root: which resource bounds it, and what
+        /// that implies. Pure, so the wording is pinned by the self-test.</summary>
+        internal static string RootLatencyVerdict(double p50Ms, int concurrency)
+            => concurrency <= 1
+                ? $"stat p50 {p50Ms:0.00}ms  -> fast, serial"
+                : $"stat p50 {p50Ms:0.00}ms  -> latency-bound, sweep concurrency {concurrency}";
+
+        /// <summary>
+        /// Time <paramref name="maxSamples"/> metadata calls against real catalog paths
+        /// under a root. Returns per-call ms.
+        ///
+        /// Samples are drawn EVENLY ACROSS the supplied list, not from the head: catalog
+        /// order is roughly directory order, so the first N paths are one folder whose
+        /// attributes the server has just cached — which would flatter the number badly.
+        /// For the same reason it stats FILES, not the root directory.
+        ///
+        /// A path that no longer exists is still a valid sample — the round trip was paid
+        /// either way — so failures are timed and kept, not discarded.
+        /// </summary>
+        internal static double[] SampleStatLatencyMs(IReadOnlyList<string> paths, int maxSamples)
+        {
+            if (paths == null || paths.Count == 0 || maxSamples <= 0) return new double[0];
+            var idx = SampleIndices(paths.Count, maxSamples);
+            var result = new double[idx.Length];
+            var sw = new Stopwatch();
+            for (int i = 0; i < idx.Length; i++)
+            {
+                sw.Restart();
+                try { _ = File.GetAttributes(paths[idx[i]]); }
+                catch { /* a miss costs a round trip too — keep the timing */ }
+                sw.Stop();
+                result[i] = sw.Elapsed.TotalMilliseconds;
+            }
+            return result;
+        }
+
+        /// <summary>Evenly-spaced sample positions across <paramref name="count"/> items.
+        /// Pure, and split out because the SPREAD is the load-bearing property: catalog
+        /// order is roughly directory order, so sampling the head measures one folder the
+        /// server has already cached and reports a latency the run will never see.</summary>
+        internal static int[] SampleIndices(int count, int maxSamples)
+        {
+            if (count <= 0 || maxSamples <= 0) return new int[0];
+            int take = Math.Min(maxSamples, count);
+            var idx = new int[take];
+            for (int i = 0; i < take; i++) idx[i] = (int)((long)i * count / take);
+            return idx;
+        }
+
+        internal const int RootLatencySamples = 20;
+
         /// <summary>Backstop for the case a per-volume probe can't catch: a flaky link
         /// (root answers, yet many individual files read as gone) or an unintended bulk
         /// delete. Refuse when a run would orphan more than <see cref="MassOrphanFraction"/>
@@ -6654,10 +6782,14 @@ namespace Truedat
             // reconcile is only trustworthy against a complete view of the library —
             // writing nothing and churning no backup. Re-run with the library mounted.
             var rootCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var rootPaths = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var key in tracks.Select(kv => kv.Key))
             {
                 var r = ReachabilityRoot(key);
-                if (r.Length > 0) rootCounts[r] = rootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+                if (r.Length == 0) continue;
+                rootCounts[r] = rootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+                if (!rootPaths.TryGetValue(r, out var lst)) rootPaths[r] = lst = new List<string>();
+                lst.Add(key);
             }
             var probedRoots = rootCounts
                 .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _)))
@@ -6665,6 +6797,31 @@ namespace Truedat
             var (refuseReach, downSummary) = EvaluateReachability(probedRoots);
             Console.WriteLine($"Library roots: {probedRoots.Count} probed, {probedRoots.Count(p => p.Reachable)} reachable"
                               + $"   ({timing.Mark("probe library roots", phase)})");
+
+            // Per-root latency profile. ~20 timed metadata calls per reachable root
+            // (~200 ms on 802.11n, unmeasurable locally) buys the one number that explains
+            // an entire run: this catalog's sweep is 13m 9s over WiFi and ~10s on local
+            // disk, and NOTHING in the previous output said why. Advisory for now — the
+            // sweep below is still serial; parallelizing it is a separate decision, and
+            // this measurement is what should size it when that happens.
+            foreach (var pr in probedRoots)
+            {
+                if (!pr.Reachable) continue;
+                try
+                {
+                    var samples = SampleStatLatencyMs(rootPaths[pr.Root], RootLatencySamples);
+                    if (samples.Length == 0) continue;
+                    double p50 = MedianMs(samples);
+                    var access = ClassifyRootAccess(pr.Root, IsNetworkDrivePath(pr.Root));
+                    var kind = access == RootAccess.Unc ? "remote (UNC)"
+                             : access == RootAccess.MappedNetwork ? "remote (mapped)"
+                             : "local";
+                    Console.WriteLine($"  {pr.Root}   {kind}   "
+                                      + RootLatencyVerdict(p50, SweepConcurrencyFor(p50))
+                                      + $"   [{samples.Length} probes]");
+                }
+                catch { /* a profile is never worth failing a run over */ }
+            }
             if (refuseReach && !_forceClean)
             {
                 Console.WriteLine();
@@ -17136,6 +17293,53 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ClassifyWaveMissing(@"D:\m\stale.flac",   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: in work list, not errored/skipped -> Stale (the only --refresh bucket)");
                 Assert(ClassifyWaveMissing("",                   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: empty key -> Stale (legacy fall-through)");
                 Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac" }) == WaveMissingBucket.Errored, "wave-bucket: errored beats skipped");
+            }
+
+            // --- Root latency profile ------------------------------------------------
+            // Pinned against the REAL 2026-08-23 measurements (same catalog, same files,
+            // three paths): local 0.14 ms, gigabit 0.83 ms, 802.11n 10.90 ms.
+            {
+                Assert(ClassifyRootAccess(@"\\server\share", false) == RootAccess.Unc,
+                    "root-access: a UNC root is remote even when no drive is mapped");
+                Assert(ClassifyRootAccess(@"Z:\", true) == RootAccess.MappedNetwork,
+                    "root-access: a mapped network drive is remote");
+                Assert(ClassifyRootAccess(@"D:\", false) == RootAccess.Local,
+                    "root-access: a plain drive root is local");
+
+                Assert(MedianMs(new double[0]) == 0.0, "median: no samples -> 0");
+                Assert(MedianMs(new[] { 5.0 }) == 5.0, "median: single sample");
+                Assert(MedianMs(new[] { 1.0, 2.0, 3.0, 4.0 }) == 2.5, "median: even count averages the middle pair");
+                Assert(MedianMs(new[] { 3.0, 1.0, 2.0 }) == 2.0, "median: unsorted input is sorted first");
+                // The whole reason it is a median: one contended-link outlier must not
+                // drag the verdict. Mean here would be 81.6ms -> concurrency 8 on LOCAL disk.
+                Assert(MedianMs(new[] { 0.14, 0.14, 0.14, 0.15, 408.0 }) == 0.14,
+                    "median: a single 408ms outlier does not move the p50 off local");
+
+                Assert(SweepConcurrencyFor(0.14) == 1,
+                    "sweep-concurrency: local disk (0.14ms measured) stays serial — no wait to hide");
+                Assert(SweepConcurrencyFor(0.83) == 4,
+                    "sweep-concurrency: gigabit (0.83ms measured) overlaps 4");
+                Assert(SweepConcurrencyFor(10.90) == 8,
+                    "sweep-concurrency: 802.11n (10.90ms measured) caps at 8, not the arithmetic optimum");
+                Assert(SweepConcurrencyFor(4000.0) == SweepConcurrencyMax,
+                    "sweep-concurrency: a pathologically slow root is still capped (NAS also serves playback)");
+
+                Assert(RootLatencyVerdict(0.14, 1) == "stat p50 0.14ms  -> fast, serial",
+                    "root-verdict: serial wording for a fast root");
+                Assert(RootLatencyVerdict(10.90, 8) == "stat p50 10.90ms  -> latency-bound, sweep concurrency 8",
+                    "root-verdict: latency-bound wording names the concurrency");
+
+                // Spread, not head. Sampling the first 20 of 72,144 measures one cached
+                // directory and reports a latency the run will never see.
+                var spread = SampleIndices(72144, 20);
+                Assert(spread.Length == 20, "sample-indices: takes the requested count");
+                Assert(spread[0] == 0, "sample-indices: starts at the head");
+                Assert(spread[19] >= 68000, "sample-indices: reaches the TAIL of the catalog, not just the head");
+                Assert(SampleIndices(5, 20).Length == 5, "sample-indices: fewer items than samples -> one each");
+                Assert(SampleIndices(0, 20).Length == 0, "sample-indices: empty catalog -> no probes");
+                Assert(SampleIndices(100, 0).Length == 0, "sample-indices: zero samples -> no probes");
+                var distinct = new HashSet<int>(SampleIndices(5, 20));
+                Assert(distinct.Count == 5, "sample-indices: no index is probed twice");
             }
 
             // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
