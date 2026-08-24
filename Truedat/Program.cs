@@ -589,6 +589,9 @@ namespace Truedat
             Console.WriteLine($"  -p, --parallel      Parallel threads (default: {Math.Max(1, Environment.ProcessorCount - 2)} = cores-2, leaves 2 for foreground;");
             Console.WriteLine($"                      '-p max' uses all {Environment.ProcessorCount}, '-p N' sets exactly N)");
             Console.WriteLine("  --audit             Write all console output to truedat.log (for debugging)");
+            Console.WriteLine("  --audit-verdicts    --audit plus the per-signal verdict vote trace. Verbose:");
+            Console.WriteLine("                      recomputed for every entry on every save (~137k lines on a");
+            Console.WriteLine("                      72k catalog), so it is off unless you are tuning thresholds");
             Console.WriteLine("  --preview [path]    Write the scan work plan + review candidates to preview.json");
             Console.WriteLine("                      (MBXHub review folder by default; falls back to mbxmoods-preview.json");
             Console.WriteLine("                      beside the moods file when no MBXHub instance is found). Analyzes");
@@ -812,7 +815,7 @@ namespace Truedat
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
             "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "prune-entry", "verify-coverage", "backfill", "backfill-level",
-            "retry-errors", "migrate", "analyze", "audit", "check-filenames",
+            "retry-errors", "migrate", "analyze", "audit", "audit-verdicts", "check-filenames",
             "duplicates", "losers-m3u", "manifest", "html", "p", "parallel",
             "synthesize", "catalog", "synth-output", "count", "album-ratio",
             "synth-moods", "seed", "dry-run", "seed-moods", "seed-catalog",
@@ -1134,6 +1137,18 @@ namespace Truedat
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
         static bool _audit;
+
+        /// <summary>--audit-verdicts: also emit the per-signal verdict vote trace.
+        /// OFF even under --audit, because the trace is recomputed for EVERY catalog entry
+        /// on EVERY periodic save — measured at 17,116 blocks (~137,000 lines) in an 11 MB
+        /// log whose run spent 95% of its time in one operation the log said nothing about.
+        /// Diagnostic detail that buries the diagnosis is not diagnostic.</summary>
+        static bool _auditVerdicts;
+
+        /// <summary>Pure gate, so the relationship is pinned: verdict tracing requires
+        /// --audit (the trace has nowhere to go without the tee) AND its own opt-in.</summary>
+        internal static bool ShouldTraceVerdicts(bool audit, bool auditVerdicts)
+            => audit && auditVerdicts;
         // The active --audit tee (stdout -> console + truedat.log), when one is installed.
         // Lets ComputeTruedatVerdict route its per-entry signal traces to the log FILE
         // only (TeeWriter.FileOnly) — at per-entry-per-save volume they'd flood the
@@ -2368,6 +2383,7 @@ namespace Truedat
                 else if (canonical == "keep-backups" && i + 1 < args.Length && int.TryParse(args[i + 1], out var kb) && kb >= 0) { _keepBackups = kb; i++; }
                 else if (canonical == "analyze") analyzeMode = true;
                 else if (canonical == "audit") auditLog = true;
+                else if (canonical == "audit-verdicts") { auditLog = true; _auditVerdicts = true; }
                 else if (canonical == "check-filenames") checkFilenames = true;
                 else if (canonical == "duplicates") duplicatesMode = true;
                 else if (canonical == "losers-m3u")
@@ -17372,6 +17388,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(SampleIndices(100, 0).Length == 0, "sample-indices: zero samples -> no probes");
                 var distinct = new HashSet<int>(SampleIndices(5, 20));
                 Assert(distinct.Count == 5, "sample-indices: no index is probed twice");
+
+                // Verdict tracing needs BOTH flags. --audit alone must stay quiet: the
+                // trace is recomputed per entry per save, and a log that buries the
+                // diagnosis under 137k lines of vote arithmetic is not a diagnostic.
+                Assert(!ShouldTraceVerdicts(true, false),
+                    "audit-verdicts: --audit alone does NOT emit the per-entry vote trace");
+                Assert(ShouldTraceVerdicts(true, true),
+                    "audit-verdicts: --audit-verdicts emits it");
+                Assert(!ShouldTraceVerdicts(false, true),
+                    "audit-verdicts: without --audit there is no tee to write it to");
             }
 
             // --- FieldPolicy: an excluded field is omitted by the writer + stripped by --fixup ---
@@ -18987,7 +19013,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // unreadable lines; worse, they went to stderr which the tee didn't capture,
             // so the detail never reached truedat.log either. Null when !_audit — the
             // ?. calls skip argument evaluation, keeping the common path zero-cost.
-            var trace = _audit ? new StringBuilder() : null;
+            var trace = ShouldTraceVerdicts(_audit, _auditVerdicts) ? new StringBuilder() : null;
             trace?.AppendLine($"TRUEDAT verdict: {(string.IsNullOrEmpty(trackPath) ? "(unknown)" : trackPath)}");
 
             // Local prov-code appender: joins with '+', confident codes before any
