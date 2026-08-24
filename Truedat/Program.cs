@@ -11232,12 +11232,18 @@ namespace Truedat
                 //   stale   (in the work list, no error)  -> --refresh-features (the ONLY
                 //                                            bucket a rescan fixes)
                 int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveSkipped = 0, waveStale = 0;
+                int waveRecorded = 0;
+                var waveLedger = ReviewLedger.Load(ResolveReviewLedgerPath(dir), out _);
                 foreach (var e in entries)
                 {
                     if (e?.Features == null) continue;
                     if (!(e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
                           && (e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))) continue;
                     var key = e.Features.FilePath ?? "";
+                    // A file the review ledger already explains is not "stale". This is the
+                    // fall-through that produced the nag: anything not positively identified
+                    // was declared re-analyzable and recommended for --refresh forever.
+                    if (waveLedger.ShouldSkip(key)) { waveRecorded++; continue; }
                     switch (ClassifyWaveMissing(key, errs, libraryKeys, scanWorkList, skipped))
                     {
                         case WaveMissingBucket.Errored:  waveErrored++;  break;
@@ -11248,6 +11254,8 @@ namespace Truedat
                     }
                 }
                 waveBreakdown = new List<string>();
+                if (waveRecorded > 0)
+                    waveBreakdown.Add($"{waveRecorded,6:N0}  already reviewed        ->  truedat --list-review   (recorded, not pending)");
                 // --retry-errors only surfaces when there ARE errored entries — it re-attempts
                 // known-bad files, so it's a one-off, not a step to run on every scan.
                 if (waveErrored > 0)
@@ -11265,8 +11273,31 @@ namespace Truedat
             }
             if (s.ExcludedByRule > 0)
                 rec.Add($"{s.ExcludedByRule:N0} entries an exclusion rule covers    ->  truedat --prune-excluded --dry-run  (then without --dry-run to retire them)");
-            if (s.MissingFingerprint > 0)
-                rec.Add($"{s.MissingFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
+
+            // The review ledger is REPORTED, never prescribed. Most of what it holds cannot
+            // be fixed by any truedat command — a silent file stays silent, a corrupt MPEG
+            // header stays corrupt — and naming a command that cannot clear a count is the
+            // cascade this ledger replaced: --retry-errors deleted the error list, the same
+            // entries then read as merely stale, and --refresh was recommended for files
+            // that could never improve. State the fact; point at the surface that can SHOW
+            // it. That is the whole advisor rule.
+            var statsLedger = ReviewLedger.Load(ResolveReviewLedgerPath(
+                Path.GetDirectoryName(Path.GetFullPath(path)) ?? "."), out _);
+            if (statsLedger.Count > 0)
+                rec.Add($"{statsLedger.Count:N0} files not analyzed"
+                        + (statsLedger.NeedsReviewCount > 0 ? $", {statsLedger.NeedsReviewCount:N0} need review" : "")
+                        + $"   ->  truedat --list-review");
+
+            // Backfill can only fill what TagLib can read, and an entry lacking
+            // fingerprint.v1 AND audioStreamSha256 is one TagLib refused — the command
+            // would throw on the same exception that created the gap. Recommend it only
+            // for entries no review record explains.
+            int unexplainedFingerprint = s.MissingFingerprint;
+            if (statsLedger.Count > 0)
+                unexplainedFingerprint = entries.Count(e => e != null && e.FingerprintV1 == null
+                                                            && !statsLedger.ShouldSkip(e.Features?.FilePath ?? ""));
+            if (unexplainedFingerprint > 0)
+                rec.Add($"{unexplainedFingerprint:N0} entries lack fingerprint.v1          ->  truedat --verify --backfill --backfill-level identity");
             if (!_fileMd5Enabled && s.FileMd5 > 0)
                 rec.Add($"{s.FileMd5:N0} stray fileMd5 values                ->  truedat --migrate  (needs the library's iTunes XML; run from the library dir, not a metadata mirror)");
 
