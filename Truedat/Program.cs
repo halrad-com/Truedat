@@ -1810,7 +1810,7 @@ namespace Truedat
                 // IsExcluded runs for EVERY track, in or out of this shard's bucket — it is what
                 // increments per-rule MatchCount, and those counts must stay library-wide.
                 // Only the ledger row and the count below are shard-scoped.
-                if (_exclusions.IsExcluded(t.Location!, t.Genre, out var reason))
+                if (_exclusions.IsExcluded(t.Location!, t.Genre, out var reason, out var exclRuleId))
                 {
                     if (_ledgerScope(t.Location))
                     {
@@ -1824,7 +1824,7 @@ namespace Truedat
                         // file, and only one of them is undoable. RuleId stays null until
                         // rules carry identity; the reason text is renderable but not
                         // actionable, which is the gap RBA named.
-                        RecordReviewSkip(t.Location!, ReviewDisposition.Excluded, reason, null, "scan");
+                        RecordReviewSkip(t.Location!, ReviewDisposition.Excluded, reason, exclRuleId, "scan");
                         if (_audit)
                             Console.WriteLine($"  [skipped excluded: {reason}] {t.Artist} - {t.Name} :: {t.Location}");
                     }
@@ -17663,6 +17663,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     dl.Upsert(new ReviewRecord { Path = @"D:\m\x.mp3", Disposition = ReviewDisposition.Excluded, Reason = "genre=Podcast" }, tX, false);
                     Assert(dl.Find(@"D:\m\x.mp3")!.Disposition == ReviewDisposition.Excluded,
                         "ledger: the later upsert wins, so an excluded file is not filed as a plain skip");
+                }
+
+                // Rule ids. DERIVED from the rule, never stored: mbxmoods-exclude.json is
+                // the one artefact that cannot be regenerated, so an id that required a
+                // format change would mean a migration and a window where two truedat
+                // versions disagree about the same file.
+                {
+                    var rset = ExclusionSet.FromJson(
+                        "{\"rules\":[{\"kind\":\"genre\",\"value\":\"Podcast\",\"action\":\"exclude\"}," +
+                        "{\"kind\":\"folder\",\"pattern\":\"\\\\Samples\\\\**\",\"action\":\"exclude\"}]}", out _);
+                    Assert(rset.IsExcluded(@"D:\m\a.mp3", "Podcast", out _, out var idA) && idA != null,
+                        "rule-id: an excluded file names the rule that caught it");
+                    Assert(idA!.Length == 8, "rule-id: 8 hex chars, short enough to read and quote");
+                    Assert(rset.IsExcluded(@"D:\m\b.mp3", "Podcast", out _, out var idB) && idB == idA,
+                        "rule-id: the same rule yields the same id for every file it catches");
+                    Assert(rset.IsExcluded(@"D:\m\Samples\c.mp3", null, out _, out var idC) && idC != idA,
+                        "rule-id: a different rule yields a different id");
+
+                    // Stability across a reparse is the whole point — an id that changed
+                    // when the file was reloaded could not be used to undo anything.
+                    var rset2 = ExclusionSet.FromJson(
+                        "{\"rules\":[{\"kind\":\"genre\",\"value\":\"Podcast\",\"action\":\"exclude\"}]}", out _);
+                    Assert(rset2.IsExcluded(@"D:\m\z.mp3", "Podcast", out _, out var idReparse) && idReparse == idA,
+                        "rule-id: stable across a reparse, and independent of the other rules present");
+
+                    // Note is metadata, so annotating a rule must not renumber it.
+                    var rset3 = ExclusionSet.FromJson(
+                        "{\"rules\":[{\"kind\":\"genre\",\"value\":\"Podcast\",\"action\":\"exclude\",\"note\":\"added later\"}]}", out _);
+                    Assert(rset3.IsExcluded(@"D:\m\z.mp3", "Podcast", out _, out var idNoted) && idNoted == idA,
+                        "rule-id: adding a note does not renumber the rule");
+
+                    Assert(!rset.IsExcluded(@"D:\m\keep.mp3", "Rock", out _, out var idNone) && idNone == null,
+                        "rule-id: a file no rule catches has no rule id");
                 }
 
                 // Verdict tracing needs BOTH flags. --audit alone must stay quiet: the

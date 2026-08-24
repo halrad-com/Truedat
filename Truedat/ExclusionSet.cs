@@ -60,6 +60,42 @@ namespace Truedat
         /// carry edits.
         /// </summary>
         public string Identity() => (int)Kind + "|" + (int)Action + "|" + Norm;
+
+        /// <summary>
+        /// Short, stable, operator-facing id for this rule — what an excluded row names so
+        /// the operator can trace an exclusion back to its cause and undo it. Without one,
+        /// a review surface is a list of files that vanished.
+        ///
+        /// DERIVED from <see cref="Identity"/>, deliberately not stored. mbxmoods-exclude.json
+        /// is the one artefact in the system that cannot be regenerated — it is pure operator
+        /// judgement — so adding a field to it would mean a format change, a migration, and a
+        /// window where rules written by two truedat versions disagree. A derived id needs
+        /// none of that: nothing is written, nothing migrates, and an id computed by an older
+        /// build matches one computed by a newer build for the same rule.
+        ///
+        /// It changes when the rule's kind, action or target changes — which is correct, since
+        /// that IS a different rule. Note and sha are metadata and deliberately excluded, so
+        /// annotating a rule does not renumber it.
+        /// </summary>
+        public string Id => ShortId(Identity());
+
+        /// <summary>FNV-1a over the identity, rendered as 8 hex chars. Same family as
+        /// PathComparer's hash: deterministic across processes and machines, which is what
+        /// makes the id in a ledger written on one box meaningful on another.</summary>
+        internal static string ShortId(string identity)
+        {
+            unchecked
+            {
+                const uint offset = 2166136261, prime = 16777619;
+                uint h = offset;
+                for (int i = 0; i < identity.Length; i++)
+                {
+                    h ^= identity[i];
+                    h *= prime;
+                }
+                return h.ToString("x8");
+            }
+        }
     }
 
     /// <summary>
@@ -264,8 +300,16 @@ namespace Truedat
         /// still apply.
         /// </summary>
         public bool IsExcluded(string path, string? genre, out string reason)
+            => IsExcluded(path, genre, out reason, out _);
+
+        /// <summary>As <see cref="IsExcluded(string,string?,out string)"/>, but also hands back
+        /// the id of the rule that caught it. The reason text is renderable; the id is
+        /// ACTIONABLE — it is what lets an operator find the rule again and undo it, and an
+        /// exclusion that cannot be traced back to its cause is unreviewable.</summary>
+        public bool IsExcluded(string path, string? genre, out string reason, out string? ruleId)
         {
             reason = "";
+            ruleId = null;
             if (_rules.Length == 0 || string.IsNullOrEmpty(path)) return false;
 
             var normPath = NormalizePath(path);
@@ -282,6 +326,7 @@ namespace Truedat
             }
             if (included || firstExclude == null) return false;
             reason = firstExclude.Describe();
+            ruleId = firstExclude.Id;
             return true;
         }
 
