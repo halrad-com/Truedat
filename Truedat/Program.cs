@@ -4999,6 +4999,22 @@ namespace Truedat
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
             int smfmAdded = 0;         // tracks that gained SMFM data this scan (file newly carries 12-TONE)
 
+            // Review ledger for this run: loaded once, written once at the end. Loading
+            // rather than starting empty is the point — the operator's states and the
+            // original firstSeen live in that file and a scan must not discard them.
+            _retryErrorsRun = retryErrors;
+            var runLedgerPath = ResolveReviewLedgerPath(outputDir);
+            _runLedger = ReviewLedger.Load(runLedgerPath, out var runLedgerErr);
+            if (runLedgerErr != null)
+            {
+                // Refuse rather than silently start from empty: an unreadable ledger is not
+                // the same as an empty one, and the difference is every decision in it.
+                Console.Error.WriteLine($"Error: the review ledger at {runLedgerPath} is unreadable: {runLedgerErr}");
+                Console.Error.WriteLine("Refusing to scan — continuing would overwrite it and discard your review states.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
             Dictionary<string, string> existingErrors;
             if (retryErrors)
             {
@@ -5932,6 +5948,7 @@ namespace Truedat
             EmitStagingSummary();
             }
             PrintScanTallies();
+            FlushRunLedger(runLedgerPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
@@ -18943,9 +18960,69 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
         }
 
+        /// <summary>The run's in-memory review ledger, loaded at scan start and written ONCE
+        /// at the end. In-memory because the failure path runs on the worker fan-out — the
+        /// ledger must not be touched per-failure from N threads, and it must not be
+        /// live-updating on disk regardless (the hub globs that directory).</summary>
+        static ReviewLedger? _runLedger;
+        static readonly object _runLedgerLock = new object();
+
+        /// <summary>Record a failure into the run ledger. Deliberately additive and
+        /// exception-swallowing: a diagnostic must never be the thing that fails a run.</summary>
+        static void RecordReviewFailure(string filePath, string reason, double sizeMb,
+            double durationSecs, string failedComponents, string runMode)
+        {
+            var led = _runLedger;
+            if (led == null || string.IsNullOrEmpty(filePath)) return;
+            try
+            {
+                var rec = new ReviewRecord
+                {
+                    Path = filePath,
+                    Disposition = ReviewDisposition.Failed,
+                    Reason = reason ?? "",
+                    SizeMb = sizeMb > 0 ? sizeMb : (double?)null,
+                    DurationSec = durationSecs > 0 ? durationSecs : (double?)null,
+                    LastRunMode = runMode,
+                };
+                foreach (var c in (failedComponents ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+                    rec.Components.Add(new ReviewComponent { Name = c.Trim(), Message = reason ?? "" });
+                lock (_runLedgerLock) led.Upsert(rec, DateTime.UtcNow, isRetry: _retryErrorsRun);
+            }
+            catch { }
+        }
+
+        /// <summary>True when this run was launched with --retry-errors, i.e. the operator
+        /// explicitly asked for another attempt. Only that advances a record's attempt
+        /// count — an ordinary scan does not re-attempt a recorded file at all.</summary>
+        static bool _retryErrorsRun;
+
+        /// <summary>Write the run's ledger, once, at the end. Reports what it holds so the
+        /// count is visible without a second command, but recommends NOTHING: most of what
+        /// is in there cannot be fixed by any truedat command, and naming one that cannot
+        /// clear the count is the cascade this ledger exists to end.</summary>
+        static void FlushRunLedger(string ledgerPath)
+        {
+            var led = _runLedger;
+            if (led == null) return;
+            _runLedger = null;
+            if (led.Count == 0) return;
+            if (SaveReviewLedger(led, ledgerPath, out var err))
+            {
+                Console.WriteLine($"  Review:     {led.Count:N0} files not analyzed"
+                                  + (led.NeedsReviewCount > 0 ? $", {led.NeedsReviewCount:N0} need review" : "")
+                                  + "   (truedat --list-review)");
+            }
+            else
+            {
+                Console.Error.WriteLine($"WARNING: could not write the review ledger: {err}");
+            }
+        }
+
         static void AppendError(string errorsPath, string filePath, string artist, string title,
             string error, double sizeMb, double durationSecs, string failedComponents, object lockObj)
         {
+            RecordReviewFailure(filePath, error, sizeMb, durationSecs, failedComponents, "scan");
             lock (lockObj)
             {
                 for (int attempt = 0; attempt < 5; attempt++)
