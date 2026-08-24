@@ -199,6 +199,63 @@ namespace Truedat
             r.StateReason = why;
         }
 
+        /// <summary>
+        /// Fold another shard's ledger into this one. Union by path.
+        ///
+        /// `--chunk` partitions deterministically by <c>ChunkOwns</c>, so the same path should
+        /// appear in exactly one shard and most of this never fires. It is defined anyway
+        /// because "should" is not "does": a path that moved between shard runs, or overlapping
+        /// M/N arguments, produces a genuine conflict, and a merge that resolved those
+        /// arbitrarily would silently drop an operator decision.
+        ///
+        /// Conflict rules, each chosen so the merge cannot LOSE information:
+        ///   firstSeen  — earliest wins. A merge must not rewrite history any more than a
+        ///                rescan may.
+        ///   lastSeen   — latest wins.
+        ///   attempts   — MAX, not sum. The shards describe the same file, not two attempts
+        ///                at it; summing would inflate it toward the auto trigger.
+        ///   state      — a DECISION beats undecided, and an OPERATOR decision beats
+        ///                truedat's: Ignore > Auto > Review. Anything else lets a shard that
+        ///                merely has not looked at a file overwrite a shard where the
+        ///                operator already ruled on it.
+        ///   the rest   — from whichever record was observed most recently.
+        /// </summary>
+        internal void MergeFrom(ReviewLedger other)
+        {
+            if (other == null) return;
+            foreach (var incoming in other._byPath.Values)
+            {
+                if (!_byPath.TryGetValue(incoming.Path, out var mine))
+                {
+                    _byPath[incoming.Path] = incoming;
+                    continue;
+                }
+
+                var newer = incoming.LastSeenUtc > mine.LastSeenUtc ? incoming : mine;
+                var older = ReferenceEquals(newer, incoming) ? mine : incoming;
+
+                var merged = newer;
+                merged.FirstSeenUtc = (older.FirstSeenUtc != DateTime.MinValue
+                                       && (merged.FirstSeenUtc == DateTime.MinValue
+                                           || older.FirstSeenUtc < merged.FirstSeenUtc))
+                                      ? older.FirstSeenUtc : merged.FirstSeenUtc;
+                merged.Attempts = Math.Max(mine.Attempts, incoming.Attempts);
+                merged.State = StrongerState(mine.State, incoming.State);
+                if (merged.State == ReviewState.Auto && string.IsNullOrEmpty(merged.StateReason))
+                    merged.StateReason = mine.StateReason ?? incoming.StateReason;
+                _byPath[incoming.Path] = merged;
+            }
+        }
+
+        /// <summary>Ignore &gt; Auto &gt; Review. An operator decision outranks truedat's, and
+        /// any decision outranks not having looked.</summary>
+        internal static ReviewState StrongerState(ReviewState a, ReviewState b)
+        {
+            if (a == ReviewState.Ignore || b == ReviewState.Ignore) return ReviewState.Ignore;
+            if (a == ReviewState.Auto || b == ReviewState.Auto) return ReviewState.Auto;
+            return ReviewState.Review;
+        }
+
         /// <summary>Set an operator state. Returns false when the path has no record.</summary>
         internal bool SetState(string path, ReviewState state)
         {

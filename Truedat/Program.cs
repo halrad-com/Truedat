@@ -4941,6 +4941,16 @@ namespace Truedat
             // whole reason that diff runs before anything is cut.
             _retryErrorsRun = retryErrors;
             var runLedgerPath = ResolveReviewLedgerPath(outputDir);
+            if (chunkHostSuffix != null)
+            {
+                // Same chunk-suffix convention as the catalog, errors.csv and skipped.csv.
+                // Without it every shard wrote the SAME mbxmoods-review.json holding only its
+                // own ChunkOwns slice — and worse than last-writer-wins, each shard LOADED
+                // that file at start, inherited a foreign shard's records, and wrote them back
+                // mixed with its own, so an operator state from another slice could be
+                // overwritten. Shards keep separate ledgers and `--merge-moods` folds them.
+                runLedgerPath = InsertFilenameSuffix(runLedgerPath, chunkHostSuffix);
+            }
             _runLedger = ReviewLedger.Load(runLedgerPath, out var runLedgerErr);
             if (runLedgerErr != null)
             {
@@ -8558,9 +8568,75 @@ namespace Truedat
             Console.WriteLine($"Written: {outputPath}");
             timing.NoteFileSize("catalog out", outputPath);
             timing.NoteFileSize("sidecar", Path.ChangeExtension(outputPath, ".mbxs"));
+
+            MergeShardLedgers(sources, outputPath, timing, phase);
+
             timing.Report();
             Console.WriteLine();
             return 0;
+        }
+
+        /// <summary>
+        /// Fold each shard's review ledger into one beside the merged catalog.
+        ///
+        /// A chunked scan leaves N ledgers, each holding only its own <c>ChunkOwns</c> slice,
+        /// and a slice is not an answer to "what is not in my catalog" — the operator asked
+        /// for one file and N partial ones is the fragmentation the ledger replaced. So the
+        /// verb that already reconciles shard catalogs reconciles their ledgers too.
+        ///
+        /// Deliberately best-effort: a merge that produced a catalog must not fail because a
+        /// diagnostic could not be combined, and a shard with no ledger (nothing to report) is
+        /// normal rather than missing. An UNREADABLE one is different and is named — silently
+        /// dropping a shard's records would leave a merged ledger that looks complete and is
+        /// not, which is exactly the failure mode this whole artefact exists to remove.
+        /// </summary>
+        static void MergeShardLedgers(List<string> sources, string outputPath,
+            PhaseReport timing, Stopwatch phase)
+        {
+            try
+            {
+                var merged = new ReviewLedger();
+                int found = 0;
+                var unreadable = new List<string>();
+                foreach (var source in sources)
+                {
+                    var dir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
+                    // A shard's ledger sits beside its catalog carrying the same suffix, so it
+                    // is derived from the catalog's own name rather than guessed.
+                    var stem = Path.GetFileNameWithoutExtension(source);
+                    var suffix = stem.StartsWith("mbxmoods", StringComparison.OrdinalIgnoreCase)
+                        ? stem.Substring("mbxmoods".Length) : "";
+                    var candidate = Path.Combine(dir, "mbxmoods-review" + suffix + ".json");
+                    if (!File.Exists(candidate)) continue;
+                    var shard = ReviewLedger.Load(candidate, out var shardErr);
+                    if (shardErr != null) { unreadable.Add($"{Path.GetFileName(candidate)}: {shardErr}"); continue; }
+                    merged.MergeFrom(shard);
+                    found++;
+                }
+
+                foreach (var u in unreadable)
+                    Console.Error.WriteLine($"WARNING: shard ledger unreadable, its records are NOT in the merge — {u}");
+
+                if (found == 0) return;
+
+                phase.Restart();
+                var outDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+                var mergedPath = Path.Combine(outDir, ReviewLedger.FileName);
+                if (SaveReviewLedger(merged, mergedPath, out var saveErr))
+                {
+                    timing.Mark("merge review ledgers", phase);
+                    Console.WriteLine($"Review:     {merged.Count:N0} records merged from {found} shard ledger(s)"
+                                      + (merged.NeedsReviewCount > 0 ? $", {merged.NeedsReviewCount:N0} need review" : ""));
+                }
+                else
+                {
+                    Console.Error.WriteLine($"WARNING: could not write the merged review ledger: {saveErr}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"WARNING: review ledgers were not merged: {ex.Message}");
+            }
         }
 
         /// <summary>Renames a JSON object key in place, preserving the value (clone-detach to avoid
@@ -17689,6 +17765,59 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     dl.Upsert(new ReviewRecord { Path = @"D:\m\x.mp3", Disposition = ReviewDisposition.Excluded, Reason = "genre=Podcast" }, tX, false);
                     Assert(dl.Find(@"D:\m\x.mp3")!.Disposition == ReviewDisposition.Excluded,
                         "ledger: the later upsert wins, so an excluded file is not filed as a plain skip");
+                }
+
+                // Shard merge. --chunk partitions by ChunkOwns so most of this never fires,
+                // but "should not collide" is not "cannot", and a merge that resolved a
+                // conflict arbitrarily would silently drop an operator decision.
+                {
+                    var tEarly = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var tLate = new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc);
+                    ReviewRecord R(string p, DateTime first, DateTime last, ReviewState st, int att, string reason = "boom")
+                        => new ReviewRecord { Path = p, Disposition = ReviewDisposition.Failed, Reason = reason,
+                                              FirstSeenUtc = first, LastSeenUtc = last, State = st, Attempts = att };
+
+                    // Disjoint shards: plain union, which is the only case that normally happens.
+                    var s1 = new ReviewLedger(); var s2 = new ReviewLedger();
+                    s1.Upsert(R(@"D:\m\a.flac", tEarly, tEarly, ReviewState.Review, 1), tEarly, false);
+                    s2.Upsert(R(@"D:\m\b.flac", tEarly, tEarly, ReviewState.Review, 1), tEarly, false);
+                    var m = new ReviewLedger(); m.MergeFrom(s1); m.MergeFrom(s2);
+                    Assert(m.Count == 2, "shard-merge: disjoint shards union");
+
+                    // An operator decision in ONE shard must survive a merge with a shard that
+                    // merely has not looked at the file. Losing this is the whole risk.
+                    var d1 = new ReviewLedger(); var d2 = new ReviewLedger();
+                    d1.Upsert(R(@"D:\m\c.flac", tEarly, tEarly, ReviewState.Review, 1), tEarly, false);
+                    d1.SetState(@"D:\m\c.flac", ReviewState.Ignore);
+                    d2.Upsert(R(@"D:\m\c.flac", tLate, tLate, ReviewState.Review, 1), tLate, false);
+                    var dm = new ReviewLedger(); dm.MergeFrom(d1); dm.MergeFrom(d2);
+                    Assert(dm.Find(@"D:\m\c.flac")!.State == ReviewState.Ignore,
+                        "shard-merge: an operator decision survives a merge with a shard that never looked");
+                    // ...and in the other merge order, or the result depends on argv ordering.
+                    var dm2 = new ReviewLedger(); dm2.MergeFrom(d2); dm2.MergeFrom(d1);
+                    Assert(dm2.Find(@"D:\m\c.flac")!.State == ReviewState.Ignore,
+                        "shard-merge: order-independent — the decision wins either way round");
+
+                    Assert(ReviewLedger.StrongerState(ReviewState.Ignore, ReviewState.Auto) == ReviewState.Ignore,
+                        "shard-merge: the OPERATOR's decision outranks truedat's");
+                    Assert(ReviewLedger.StrongerState(ReviewState.Auto, ReviewState.Review) == ReviewState.Auto,
+                        "shard-merge: any decision outranks not having looked");
+
+                    // History is not rewritten by a merge any more than by a rescan.
+                    var shardH1 = new ReviewLedger(); var shardH2 = new ReviewLedger();
+                    shardH1.Upsert(R(@"D:\m\d.flac", tEarly, tEarly, ReviewState.Review, 1), tEarly, false);
+                    // Reached through real retries, not by setting the field: Upsert forces
+                    // Attempts=1 on insert (a new record IS one attempt), so a fixture that
+                    // just assigns 3 is testing nothing.
+                    shardH2.Upsert(R(@"D:\m\d.flac", tLate, tLate, ReviewState.Review, 1), tLate, false);
+                    shardH2.Upsert(R(@"D:\m\d.flac", tLate, tLate, ReviewState.Review, 1), tLate, isRetry: true);
+                    shardH2.Upsert(R(@"D:\m\d.flac", tLate, tLate, ReviewState.Review, 1), tLate, isRetry: true);
+                    var shardHm = new ReviewLedger(); shardHm.MergeFrom(shardH1); shardHm.MergeFrom(shardH2);
+                    var shardHr = shardHm.Find(@"D:\m\d.flac")!;
+                    Assert(shardHr.FirstSeenUtc == tEarly, "shard-merge: earliest firstSeen wins");
+                    Assert(shardHr.LastSeenUtc == tLate, "shard-merge: latest lastSeen wins");
+                    Assert(shardHr.Attempts == 3,
+                        "shard-merge: attempts is MAX not sum — two shards describe one file, not two attempts");
                 }
 
                 // Rule ids. DERIVED from the rule, never stored: mbxmoods-exclude.json is
