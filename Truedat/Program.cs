@@ -4295,6 +4295,15 @@ namespace Truedat
                         return;
                     }
 
+                    // Review record = do not attempt. Same rule, same helper, every mode.
+                    var flReviewSkip = ReviewSkipReason(filePath);
+                    if (flReviewSkip != null)
+                    {
+                        Console.Error.WriteLine($"[skipped review] {Path.GetFileName(filePath)} ({flReviewSkip})");
+                        Interlocked.Increment(ref flDsdSkipped);
+                        return;
+                    }
+
                     SourceHandle? flStagedSrc = null;
                     try
                     {
@@ -5291,6 +5300,19 @@ namespace Truedat
                             Interlocked.Increment(ref dsdSkipped);
                             EtaDrainNewPool();
                             trackClass = "skip·dsd";
+                            return;
+                        }
+
+                        // A review record is sufficient to stop the attempt. Nothing is
+                        // retried implicitly: --retry-errors is the operator saying so out
+                        // loud, and without it a recorded file is not re-attempted at all.
+                        var reviewRec = ReviewSkipReason(t.Location);
+                        if (reviewRec != null)
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {reviewRec})");
+                            Interlocked.Increment(ref skipped);
+                            EtaDrainNewPool();
+                            trackClass = "skip·error";
                             return;
                         }
 
@@ -19018,6 +19040,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// explicitly asked for another attempt. Only that advances a record's attempt
         /// count — an ordinary scan does not re-attempt a recorded file at all.</summary>
         static bool _retryErrorsRun;
+
+        /// <summary>
+        /// The one skip rule, for every mode: a review record stops the attempt, and its
+        /// reason is what gets printed. Returns null when the file should be attempted.
+        ///
+        /// Under <c>--retry-errors</c> this returns null for everything EXCEPT
+        /// <see cref="ReviewState.Auto"/> — auto is truedat's own conclusion that the file
+        /// cannot succeed, recorded with its evidence, so an ordinary retry is not enough to
+        /// override it. Otherwise a retry would keep re-driving files the tool has already
+        /// proven hopeless, which is the loop the ledger exists to end.
+        /// </summary>
+        internal static string? ReviewSkipReason(string path)
+        {
+            var led = _runLedger;
+            if (led == null) return null;
+            ReviewRecord? rec;
+            lock (_runLedgerLock) rec = led.Find(path);
+            if (rec == null) return null;
+            if (_retryErrorsRun && rec.State != ReviewState.Auto) return null;
+            if (rec.State == ReviewState.Auto)
+                return $"auto — {rec.StateReason ?? rec.Reason}";
+            return rec.Reason.Length > 0 ? rec.Reason : "in review";
+        }
 
         /// <summary>Write the run's ledger, once, at the end. Reports what it holds so the
         /// count is visible without a second command, but recommends NOTHING: most of what
