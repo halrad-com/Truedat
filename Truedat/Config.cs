@@ -44,6 +44,21 @@ namespace Truedat
             public int Min;
             public int Max;
             public string Help = "";
+
+            /// <summary>
+            /// What this key does when nothing sets it, as the operator would see it.
+            ///
+            /// The listing enumerated every settable key without ever saying what its default
+            /// WAS, so "no settings in force - every flag uses its built-in default" named a
+            /// state it then declined to show. A settings screen that cannot answer "what is
+            /// it now, and is that the default" is a list of spellings.
+            ///
+            /// Text, not a typed value, because two of these are not constants: `parallel` is
+            /// derived from the core count at runtime and `stage-dir` from %TEMP%. Rendering
+            /// them as prose keeps one column honest for all of them rather than showing a
+            /// fake literal for the two that vary per machine.
+            /// </summary>
+            public string Default = "";
         }
 
         /// <summary>Every settable key. Ranges mirror what the argument parser accepts, so a
@@ -51,28 +66,28 @@ namespace Truedat
         /// token (see BuildArgs).</summary>
         internal static readonly Setting[] Settings = new[]
         {
-            new Setting { Key = "no-stage",        Kind = Kind.Bool, Help = "read sources directly, never stage a local copy" },
-            new Setting { Key = "no-quick-cache",  Kind = Kind.Bool, Help = "disable the head-64k quick cache tier" },
-            new Setting { Key = "no-bitusage",     Kind = Kind.Bool, Help = "skip the bitUsage signal (one ffmpeg pass per track)" },
-            new Setting { Key = "no-hf-analysis",  Kind = Kind.Bool, Help = "skip the HF signals (one ffmpeg pass per track)" },
-            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Help = "never read Sony SMFM tags" },
-            new Setting { Key = "file-md5",        Kind = Kind.Bool, Help = "compute and store the whole-file MD5" },
-            new Setting { Key = "enableshortfiles",Kind = Kind.Bool, Help = "analyze files under the short-file threshold" },
-            new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Help = "do not hold the machine awake during a scan" },
-            new Setting { Key = "refresh-features",Kind = Kind.Bool, Help = "re-analyze entries missing a later feature wave" },
-            new Setting { Key = "refresh-smfm",    Kind = Kind.Bool, Help = "re-read SMFM tags on cache hits" },
-            new Setting { Key = "audit",           Kind = Kind.Bool, Help = "verbose per-track diagnostics to stderr" },
-            new Setting { Key = "parallel",        Kind = Kind.Int,  Min = 1, Max = 1024,    Help = "worker count" },
-            new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Help = "percent CPU cap for subprocesses" },
-            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Help = "catalog backups to retain (0 = keep all)" },
-            new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Help = "duration that tags a track as long" },
-            new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Help = "skip tracks longer than this (seconds)" },
-            new Setting { Key = "stage-dir",       Kind = Kind.Text, Help = "where staged copies are written" },
+            new Setting { Key = "no-stage",        Kind = Kind.Bool, Default = "false", Help = "read sources directly, never stage a local copy" },
+            new Setting { Key = "no-quick-cache",  Kind = Kind.Bool, Default = "false", Help = "disable the head-64k quick cache tier" },
+            new Setting { Key = "no-bitusage",     Kind = Kind.Bool, Default = "false", Help = "skip the bitUsage signal (one ffmpeg pass per track)" },
+            new Setting { Key = "no-hf-analysis",  Kind = Kind.Bool, Default = "false", Help = "skip the HF signals (one ffmpeg pass per track)" },
+            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Default = "false", Help = "never read Sony SMFM tags" },
+            new Setting { Key = "file-md5",        Kind = Kind.Bool, Default = "false", Help = "compute and store the whole-file MD5" },
+            new Setting { Key = "enableshortfiles",Kind = Kind.Bool, Default = "false", Help = "analyze files under the short-file threshold" },
+            new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Default = "false", Help = "do not hold the machine awake during a scan" },
+            new Setting { Key = "refresh-features",Kind = Kind.Bool, Default = "false", Help = "re-analyze entries missing a later feature wave" },
+            new Setting { Key = "refresh-smfm",    Kind = Kind.Bool, Default = "false", Help = "re-read SMFM tags on cache hits" },
+            new Setting { Key = "audit",           Kind = Kind.Bool, Default = "false", Help = "verbose per-track diagnostics to stderr" },
+            new Setting { Key = "parallel",        Kind = Kind.Int,  Min = 1, Max = 1024,    Default = "cores-2", Help = "worker count" },
+            new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Default = "no limit", Help = "percent CPU cap for subprocesses" },
+            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Default = "5", Help = "catalog backups to retain (0 = keep all)" },
+            new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Default = "30", Help = "duration that tags a track as long" },
+            new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Default = "48000", Help = "skip tracks longer than this (seconds)" },
+            new Setting { Key = "stage-dir",       Kind = Kind.Text, Default = "%TEMP%\\.truedat-stage", Help = "where staged copies are written" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes
             // nothing a hand-run --fixup would not, with the same guards and the same refusals.
-            new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Help = "reconcile the catalog against disk after a full scan" },
+            new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Default = "false", Help = "reconcile the catalog against disk after a full scan" },
         };
 
         private static readonly Dictionary<string, Setting> ByKey =

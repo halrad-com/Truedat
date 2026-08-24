@@ -931,15 +931,24 @@ namespace Truedat
                 Console.WriteLine("  In force:");
                 foreach (var s in TruedatConfig.Settings)
                     if (cfg.Values.TryGetValue(s.Key, out var v))
-                        Console.WriteLine($"    {s.Key,-18} {v}");
+                        Console.WriteLine($"    {s.Key,-18} {v,-22} (default {s.Default})");
             }
             Console.WriteLine();
+            // Every key, with what it is NOW and what it would be untouched. The listing used
+            // to enumerate keys and nothing else, so "every flag uses its built-in default"
+            // named a state it then declined to show — you could read the whole screen and
+            // still not know what any of it does when left alone.
             Console.WriteLine("  Settable (a typed flag always wins over these):");
+            Console.WriteLine($"    {"key",-18} {"accepts",-14} {"value",-22} {"default",-22} what it does");
             foreach (var s in TruedatConfig.Settings)
             {
                 string type = s.Kind == TruedatConfig.Kind.Bool ? "true|false"
                     : s.Kind == TruedatConfig.Kind.Int ? $"{s.Min}..{s.Max}" : "<text>";
-                Console.WriteLine($"    {s.Key,-18} {type,-14} {s.Help}");
+                // Marked rather than merely shown: on a screen where most rows are defaults,
+                // the one the operator changed is the only one they are looking for.
+                bool set = cfg.Values.TryGetValue(s.Key, out var val);
+                string shown = set ? val + "  <-- set" : "[default]";
+                Console.WriteLine($"    {s.Key,-18} {type,-14} {shown,-22} {s.Default,-22} {s.Help}");
             }
             Console.WriteLine();
             Console.WriteLine("  truedat --config <key> <value>   set it");
@@ -17165,6 +17174,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- unknown-option suggestion helper --------------------------------
             {
+                // Every settable key must say what it does untouched. --config enumerated
+                // keys and nothing else for a while, so "every flag uses its built-in
+                // default" named a state the screen then declined to show. A key added
+                // without a Default silently reintroduces that blank column, and nobody
+                // reviewing the new key would notice — so it fails here instead.
+                foreach (var cs in TruedatConfig.Settings)
+                    Assert(!string.IsNullOrWhiteSpace(cs.Default),
+                        $"config: '{cs.Key}' declares its built-in default");
+
                 Assert(SuggestFlag("refresh-featuers") == "refresh-features",
                     "SuggestFlag corrects a transposition typo");
                 Assert(SuggestFlag("duplicate") == "duplicates",
