@@ -17356,17 +17356,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 // The retry gate. Keyed on a LOCK, not on failure generally: a blanket
                 // retry would burn four extra opens on every genuinely unreadable file,
-                // which is the mistake the staged-copy ladder explicitly avoided.
-                Assert(LooksLikeSharingViolation("The process cannot access the file because it is being used by another process."),
-                    "sha-retry: the win32 sharing-violation message is recognised");
-                Assert(LooksLikeSharingViolation("Sharing violation on path X"),
-                    "sha-retry: the alternate sharing-violation wording is recognised");
-                Assert(!LooksLikeSharingViolation("Access to the path 'X' is denied."),
+                // which is the mistake the staged-copy ladder explicitly avoided. The gate
+                // is IsSharingViolation — the win32-code predicate this file already had
+                // and already tests; a real locked handle proves the code survives the
+                // reader now instead of being stringified into ex.Message on the way out.
+                {
+                    var probe = Path.Combine(Path.GetTempPath(), "truedat-lockprobe-" + Guid.NewGuid().ToString("N") + ".tmp");
+                    File.WriteAllBytes(probe, new byte[] { 1, 2, 3, 4 });
+                    Exception? locked = null;
+                    using (var hold = new FileStream(probe, FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        try { using var second = new FileStream(probe, FileMode.Open, FileAccess.Read, FileShare.Read); }
+                        catch (Exception ex) { locked = ex; }
+                    }
+                    try { File.Delete(probe); } catch { }
+                    Assert(locked != null, "sha-retry: an exclusively-held file does refuse a second open");
+                    Assert(IsSharingViolation(locked!),
+                        "sha-retry: a REAL locked handle is classified by win32 code, not message text");
+                }
+                Assert(!IsSharingViolation(new UnauthorizedAccessException("Access to the path 'X' is denied.")),
                     "sha-retry: access-denied is NOT retried — it will never succeed");
-                Assert(!LooksLikeSharingViolation("Could not find file 'X'."),
+                Assert(!IsSharingViolation(new FileNotFoundException("Could not find file 'X'.")),
                     "sha-retry: a missing file is NOT retried");
-                Assert(!LooksLikeSharingViolation(null) && !LooksLikeSharingViolation(""),
-                    "sha-retry: no error message means nothing to retry");
 
                 // The counters record FILES and keep the two outcomes apart. The original
                 // summed retry ATTEMPTS into one counter and incremented it on both paths,
@@ -22534,33 +22545,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             retriedTimes = 0;
             for (int attempt = 0; ; attempt++)
             {
-                var result = ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out legacySha);
+                var result = ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out legacySha, out var failure);
                 if (result.hash != null) return result;
-                if (attempt >= SharedReadRetries || !LooksLikeSharingViolation(error)) return result;
+                if (attempt >= SharedReadRetries || failure == null || !IsSharingViolation(failure)) return result;
                 retriedTimes++;
                 System.Threading.Thread.Sleep(SharedReadRetryMs);
             }
         }
 
-        /// <summary>
-        /// True when a swallowed read failure was another process holding the file, as
-        /// opposed to the file being unreadable.
-        ///
-        /// Message-matched, and that is a compromise worth naming: the readers catch
-        /// broadly and surface only ex.Message, so the HResult is gone by the time a
-        /// caller sees it. Restructuring every reader to preserve the exception is the
-        /// right fix and a bigger change than this one. The cost of a wrong match here is
-        /// bounded — at worst four extra opens on a file that was going to fail anyway —
-        /// so a false positive is cheap and a false negative just returns today's
-        /// behaviour.
-        /// </summary>
-        internal static bool LooksLikeSharingViolation(string? error)
-        {
-            if (string.IsNullOrEmpty(error)) return false;
-            return error!.IndexOf("being used by another process", StringComparison.OrdinalIgnoreCase) >= 0
-                || error.IndexOf("sharing violation", StringComparison.OrdinalIgnoreCase) >= 0
-                || error.IndexOf("used by another", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
 
         /// <summary>Overload that also returns the LEGACY-region sha for FLAC files
         /// (TagLib invariant region, which includes the metadata blocks — the value
@@ -22568,9 +22560,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// hashes without re-analysis during the flac-frames transition; null for
         /// non-FLAC or when the legacy region is unavailable.</summary>
         static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error, out string? legacySha)
+            => ComputeAudioStreamSha256FromFile(filePath, fileSize, out error, out legacySha, out _);
+
+        /// <summary>Overload that hands back the exception. Failures arrive from three
+        /// places here — the FLAC read, the invariant-region read, and this method's own
+        /// catch — so all three have to surface it or the retry path sees a null and
+        /// classifies a lock as unreadable.</summary>
+        static (string? hash, string source) ComputeAudioStreamSha256FromFile(string filePath, long fileSize, out string? error, out string? legacySha, out Exception? failure)
         {
             error = null;
             legacySha = null;
+            failure = null;
             try
             {
                 // FLAC: frame-anchored region (see GetFlacAudioStart). The legacy
@@ -22587,7 +22587,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     }
                     catch { }
                     var (_, shaA, shaB) = ComputeMd5AndTwoShas(filePath, fileSize, false,
-                        flacStart, fileSize, legStart, legEnd, out error);
+                        flacStart, fileSize, legStart, legEnd, out error, out failure);
                     legacySha = shaB;
                     return (shaA, shaA != null ? "flac-frames" : "");
                 }
@@ -22605,12 +22605,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     invEnd = fileSize;
                     source = "whole-file";
                 }
-                var hash = ComputeAudioStreamSha256(filePath, invStart, invEnd, out error);
+                var hash = ComputeAudioStreamSha256(filePath, invStart, invEnd, out error, out failure);
                 return (hash, source);
             }
             catch (Exception ex)
             {
                 error = ex.Message;
+                failure = ex;
                 return (null, "");
             }
         }
@@ -22744,7 +22745,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static (string? md5, string? shaA, string? shaB) ComputeMd5AndTwoShas(
             string filePath, long fileSize, bool wantMd5,
             long aStart, long aEnd, long bStart, long bEnd, out string? error)
+            => ComputeMd5AndTwoShas(filePath, fileSize, wantMd5, aStart, aEnd, bStart, bEnd, out error, out _);
+
+        /// <summary>Overload that hands back the exception — see the matching
+        /// <see cref="ComputeAudioStreamSha256(string, long, long, out string?, out Exception?)"/>
+        /// overload for why the retry path needs the win32 code and not the message.</summary>
+        static (string? md5, string? shaA, string? shaB) ComputeMd5AndTwoShas(
+            string filePath, long fileSize, bool wantMd5,
+            long aStart, long aEnd, long bStart, long bEnd, out string? error, out Exception? failure)
         {
+            failure = null;
             error = null;
             try
             {
@@ -22795,6 +22805,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             catch (Exception ex)
             {
                 error = ex.Message;
+                failure = ex;
                 return (null, null, null);
             }
         }
@@ -22804,8 +22815,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Disk-bound; SHA-NI makes CPU cost negligible on modern hardware (SHA256Cng — the default SHA256.Create() on net48 is managed-only).
         /// </summary>
         static string? ComputeAudioStreamSha256(string filePath, long invariantStart, long invariantEnd, out string? error)
+            => ComputeAudioStreamSha256(filePath, invariantStart, invariantEnd, out error, out _);
+
+        /// <summary>Overload that hands back the exception itself, not just its text. The
+        /// retry path classifies failures by win32 code via <see cref="IsSharingViolation"/>,
+        /// and `ex.Message` cannot carry a code — stringifying at the catch is precisely what
+        /// forced `ec41bf4` to duplicate that predicate as locale-bound message matching.</summary>
+        static string? ComputeAudioStreamSha256(string filePath, long invariantStart, long invariantEnd, out string? error, out Exception? failure)
         {
             error = null;
+            failure = null;
             try
             {
                 long length = invariantEnd - invariantStart;
@@ -22837,6 +22856,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             catch (Exception ex)
             {
                 error = ex.Message;
+                failure = ex;
                 return null;
             }
         }
