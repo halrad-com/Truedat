@@ -254,7 +254,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = "truedat-v1-fft-corpus1-2026-05-18";  // Phase 5 — FFT-derived Signal F + bin-sharp hfEnergyRatio retune against corpus1 (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8)
+        public string Method = "truedat-v1-fft-rategate-2026-08-28";  // Phase 5 corpus1 thresholds UNCHANGED (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8) + the 2026-08-28 rate gate: hiresGenuine requires sampleRate > 44100, since a 24/44.1 file makes no hi-res claim and the panel has no bandwidth evidence at CD rate. Tag bumped because the same file can now answer differently than it did under corpus1 — that is an algorithm generation change, not a retune
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
         public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";
@@ -6045,9 +6045,12 @@ namespace Truedat
             EmitStagingSummary();
             }
             PrintScanTallies();
-            if (_shaReadRetries > 0)
-                Console.WriteLine($"  Contention: {_shaReadRetries:N0} sha read(s) recovered by retry"
+            if (_shaReadsRecovered > 0)
+                Console.WriteLine($"  Contention: {_shaReadsRecovered:N0} file(s) recovered by retry"
                                   + "   (tracks that would otherwise have lost their catalog entry)");
+            if (_shaReadsGaveUp > 0)
+                Console.WriteLine($"  Contention: {_shaReadsGaveUp:N0} file(s) still locked after retries"
+                                  + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
             FlushRunLedger(runLedgerPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
             if (finalSaveSw != null)
@@ -11537,18 +11540,49 @@ namespace Truedat
             return best;
         }
 
-        /// <summary>A copy that CLAIMS hi-res (>44.1 kHz or >=24-bit) but has zero
-        /// ultrasonic energy is an upsample. Standalone this can false-positive on a
-        /// genuine narrow-band 24/48, but inside a duplicate group — where a lower-rate
-        /// twin of the same audio exists — it is provably fake, so the keeper uses it to
-        /// avoid preferring an upsampled YouTube/re-encode copy over a real original.</summary>
+        /// <summary>A copy that CLAIMS hi-res (>44.1 kHz) but has zero ultrasonic energy is
+        /// an upsample. Standalone this can false-positive on a genuine narrow-band 24/48,
+        /// but inside a duplicate group — where a lower-rate twin of the same audio exists —
+        /// it is provably fake, so the keeper uses it to avoid preferring an upsampled
+        /// YouTube/re-encode copy over a real original.
+        ///
+        /// The claim is RATE, not depth (2026-08-28, matching the hi-res verdict gate): a
+        /// 24/44.1 file is CD rate with bit headroom, not hi-res. The old test also accepted
+        /// `BitDepth >= 24`. Traced every path that can set HfEnergyRatio: the three scan
+        /// fan-outs and the `--verify --backfill` features tier all obtain it from
+        /// ComputeHfAnalysis, which returns null at &lt;= 44100, so for any value truedat
+        /// COMPUTES the rate arm already carried every case that could return true and the
+        /// depth arm was dead. It is NOT dead for a value truedat merely READS — the JSON
+        /// parse and the cache-reuse copy carry hfEnergyRatio forward ungated — so an entry
+        /// storing a sub-44.1 sampleRate alongside an hfEnergyRatio (hand-edited catalog, or
+        /// the BACKLOG ceiling/cliff work once it measures at 44.1) flips from "upsampled"
+        /// to not. That flip is the correction, not a side effect: a file that never claimed
+        /// hi-res cannot be FAKE hi-res, whatever its spectrum looks like. Note the rate arm
+        /// still catches a 16/96 upsample, which is what dropping the depth arm risked.</summary>
         internal static bool IsFakeHires(TrackEntry? e)
         {
             var fp = e?.FingerprintV1;
             var f = e?.Features;
             if (fp == null || f == null) return false;
-            bool claimsHires = fp.SampleRate > 44100 || fp.BitDepth >= 24;
+            bool claimsHires = fp.SampleRate > 44100;
             return claimsHires && f.HfEnergyRatio.HasValue && f.HfEnergyRatio.Value < 1e-6;
+        }
+
+        /// <summary>True when bit-usage evidence says a 24-bit container is carrying 16-bit
+        /// content — the same pad16 signature the verdict votes on, at the same threshold
+        /// (lowestNonZeroBit >= 14). Unlike <see cref="IsFakeHires"/> this is a DEPTH claim,
+        /// so it holds at any sample rate, which is exactly why the keeper needs it: a padded
+        /// 24/44.1 copy otherwise outranks its genuine 16/44.1 twin on claimed BitDepth alone.
+        ///
+        /// Absent bit-usage -> false. The measurement only exists for lossless >=24-bit files
+        /// with ffmpeg present, and a missing measurement must never demote a copy: that would
+        /// rank on which files happened to get analysed rather than on what they contain.
+        /// Single-signal on purpose — lowestNonZeroBit IS the padding measurement, and the
+        /// keeper only reorders copies of the same audio, it never removes anything.</summary>
+        internal static bool IsPaddedDepth(TrackEntry? e)
+        {
+            var bu = e?.Features?.BitUsage;
+            return bu != null && bu.LowestNonZeroBit >= 14;
         }
 
         /// <summary>Positive when pa outranks pb as keeper.</summary>
@@ -11565,6 +11599,11 @@ namespace Truedat
             // Genuine beats fake hi-res: an upsampled copy (claims hi-res, no ultrasonic)
             // must not win on its inflated bitDepth/sampleRate over the real original.
             c = (IsFakeHires(ea) ? 0 : 1).CompareTo(IsFakeHires(eb) ? 0 : 1);
+            if (c != 0) return c;
+            // Genuine depth beats padded depth, and it must be tested BEFORE BitDepth or the
+            // padding wins on the very number it faked: a 24/44.1 container holding 16-bit
+            // content would outrank the real 16/44.1 rip it was made from.
+            c = (IsPaddedDepth(ea) ? 0 : 1).CompareTo(IsPaddedDepth(eb) ? 0 : 1);
             if (c != 0) return c;
             c = (a?.BitDepth ?? 0).CompareTo(b?.BitDepth ?? 0);
             if (c != 0) return c;
@@ -12058,6 +12097,7 @@ namespace Truedat
                 Col("fileSize", "bytes", "num");
                 Col("smfm", "smfm", "text");
                 Col("fakeHires", "hi-res", "text");
+                Col("paddedDepth", "depth", "text");
                 w.WriteEndArray();
             }
 
@@ -12117,6 +12157,7 @@ namespace Truedat
                         jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
                         jw.WriteString("smfm", e?.Features?.HasSmfm == true ? "smfm" : "");
                         jw.WriteString("fakeHires", IsFakeHires(e) ? "upsampled" : "");
+                        jw.WriteString("paddedDepth", IsPaddedDepth(e) ? "padded" : "");
                         jw.WriteEndObject();
                     }
                 }
@@ -12187,6 +12228,7 @@ namespace Truedat
                     if (fp?.DurationMs > 0) jw.WriteNumber("durationMs", fp!.DurationMs);
                     jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
                     jw.WriteBoolean("fakeHires", IsFakeHires(e));
+                    jw.WriteBoolean("paddedDepth", IsPaddedDepth(e));
                     if (string.Equals(p, g.Keeper, StringComparison.OrdinalIgnoreCase)) jw.WriteBoolean("keeper", true);
                     jw.WriteEndObject();
                 }
@@ -12240,6 +12282,7 @@ namespace Truedat
                             jw.WriteNumber("fileSize", fp?.FileSize ?? 0);
                             jw.WriteBoolean("smfm", e?.Features?.HasSmfm == true);
                             jw.WriteBoolean("fakeHires", IsFakeHires(e));
+                            jw.WriteBoolean("paddedDepth", IsPaddedDepth(e));
                             jw.WriteEndObject();
                         }
                         jw.WriteEndArray();
@@ -12394,6 +12437,17 @@ function albumKey(g){
   return pairKey(g);
 }
 let CLUSTERS={};
+// The bit-depth cell carries both depth defects, because both are lies about THIS number:
+// paddedDepth = a 24-bit container holding 16-bit content; fakeHires = claims hi-res with no
+// ultrasonic energy. Padding is named first when both fire — it is the more specific claim
+// about depth, and it is the one that decided the keeper.
+function depthCell(m){
+  const bad=m.paddedDepth||m.fakeHires;
+  const label=m.paddedDepth?' padded':(m.fakeHires?' fake':'');
+  const tip=m.paddedDepth?'padded: 24-bit container carrying 16-bit content'
+       :(m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':'');
+  return `<td class='num ${bad?'fake':''}' title='${tip}'>${m.bitDepth||''}${label}</td>`;
+}
 function memberRow(g,m){
   const k=m.path===keeperOf(g);
   return `<tr class='${k?'keep':''}'>`
@@ -12401,7 +12455,7 @@ function memberRow(g,m){
     +`<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='open containing folder'>${esc(m.path)}</a></td>`
     +`<td>${esc(m.title)}</td><td>${esc(m.artist)}</td><td>${esc(m.album)}</td>`
     +`<td>${esc(m.codec)}</td>`
-    +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td>`
+    +`<td class='num'>${m.bitrate||''}</td><td class='num'>${m.sampleRate||''}</td>`+depthCell(m)
     +`<td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td>`
     +`<td class='smfm'>${m.smfm?'smfm':''}</td></tr>`;
 }
@@ -12416,7 +12470,8 @@ function tableFor(groups){
 function pairSide(m){
   if(!m) return `<td class='muted' colspan='7'>&mdash;</td>`;
   return `<td class='path'><button class='play' data-u='${esc(folderUrl(m.path))}' title='play'>&#9654;</button> <a class='flink' href='${esc(folderUrl(folderOf(m.path)))}' title='${esc(m.path)}'>${esc(fileOf(m.path))}</a></td>`
-    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td><td class='num ${m.fakeHires?'fake':''}' title='${m.fakeHires?'upsampled: claims hi-res but no ultrasonic energy':''}'>${m.bitDepth||''}${m.fakeHires?' fake':''}</td><td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
+    +`<td>${esc(m.codec)}</td><td class='num'>${m.bitrate||''}</td>`+depthCell(m)
+    +`<td class='num'>${bytes(m.fileSize)}</td><td class='num'>${dur(m.durationMs)}</td><td class='smfm'>${m.smfm?'smfm':''}</td>`;
 }
 function pairTable(groups,kA,kB,disp){
   const sub=`<th>file</th><th>codec</th><th class='num'>kbps</th><th class='num'>bit</th><th class='num'>size</th><th class='num'>len</th><th>smfm</th>`;
@@ -12655,8 +12710,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     // Surfaced, not silent: a recovered conflict is the signal that the
                     // fan-out is contending with itself, and it is the difference between
-                    // "this file is fine" and "this file nearly lost its entry".
-                    Interlocked.Add(ref _shaReadRetries, shaRetries);
+                    // "this file is fine" and "this file nearly lost its entry". A give-up
+                    // is the opposite outcome and is counted separately — it did NOT nearly
+                    // lose its entry, it lost it.
+                    RecordShaRetryOutcome(r.hash != null);
                     if (r.hash == null)
                         Console.Error.WriteLine($"  sha: gave up after {shaRetries} retries on a locked file: {Path.GetFileName(readPath)} ({shaErr})");
                 }
@@ -14332,6 +14389,58 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Assert(PickKeeper(new[] { "C:\\m\\a.mp3", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: lossless beats lossy");
             Assert(PickKeeper(new[] { "C:\\m\\a.flac", "C:\\m\\hi.flac" }, kpLookup) == "C:\\m\\hi.flac", "keeper: higher bitDepth wins among lossless");
             Assert(PickKeeper(new[] { "C:\\m\\deep\\sub\\a.flac", "C:\\m\\a.flac" }, kpLookup) == "C:\\m\\a.flac", "keeper: equal quality -> shortest path wins");
+
+            // IsFakeHires: the hi-res CLAIM is sample rate, not bit depth (2026-08-28).
+            TrackEntry MakeFh(int bitDepth, int sampleRate, double? hfRatio) => new TrackEntry
+            {
+                Features = new TrackFeatures { HfEnergyRatio = hfRatio },
+                FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = bitDepth, SampleRate = sampleRate },
+            };
+            Assert(IsFakeHires(MakeFh(24, 96000, 0.0)),
+                "fakeHires: 24/96 with no ultrasonic energy is an upsample");
+            // The depth arm was dropped; the rate arm must still carry a 16-bit upsample,
+            // which is the regression that removing it could have caused.
+            Assert(IsFakeHires(MakeFh(16, 96000, 0.0)),
+                "fakeHires: 16/96 with no ultrasonic energy is still caught by the rate arm");
+            // 24/44.1 is CD rate with bit headroom — no hi-res claim, so "fake hi-res" is the
+            // wrong label whatever the spectrum says. Only reachable with a self-inconsistent
+            // entry (hfEnergyRatio present below 44.1 kHz), which no scan path produces today
+            // but a hand-edited catalog can, and the BACKLOG cliff work will.
+            Assert(!IsFakeHires(MakeFh(24, 44100, 0.0)),
+                "fakeHires: 24/44.1 makes no hi-res claim -> never flagged upsampled");
+            Assert(!IsFakeHires(MakeFh(24, 96000, 1e-4)),
+                "fakeHires: 24/96 with real ultrasonic energy is genuine");
+            Assert(!IsFakeHires(MakeFh(24, 96000, null)),
+                "fakeHires: no hfEnergyRatio measured -> abstain, not an accusation");
+
+            // Padded depth must lose to genuine depth, and must be tested before BitDepth.
+            TrackEntry MakePad(int bitDepth, int sampleRate, int? lowestNonZeroBit) => new TrackEntry
+            {
+                Features = new TrackFeatures
+                {
+                    BitUsage = lowestNonZeroBit is int lnz
+                        ? new BitUsageSummary { LowestNonZeroBit = lnz, EffectiveBits = 24 - lnz }
+                        : null,
+                },
+                FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = bitDepth, SampleRate = sampleRate },
+            };
+            var padMap = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["C:\\p\\real16.flac"]  = MakePad(16, 44100, null),   // ordinary CD rip, no bit-usage
+                ["C:\\p\\padded24.flac"] = MakePad(24, 44100, 16),    // 24-bit container, 16-bit content
+                ["C:\\p\\real24.flac"]   = MakePad(24, 96000, 8),     // genuine 24-bit
+                ["C:\\p\\padded24b.flac"] = MakePad(24, 96000, 16),   // padded, but higher rate
+                ["C:\\p\\plain24.flac"]  = MakePad(24, 44100, null),  // 24-bit, never measured
+            };
+            Func<string, TrackEntry?> padLookup = p => padMap.TryGetValue(p, out var v) ? v : null;
+            Assert(PickKeeper(new[] { "C:\\p\\padded24.flac", "C:\\p\\real16.flac" }, padLookup) == "C:\\p\\real16.flac",
+                "keeper: genuine 16-bit beats a 24-bit container holding 16-bit content");
+            Assert(PickKeeper(new[] { "C:\\p\\real16.flac", "C:\\p\\real24.flac" }, padLookup) == "C:\\p\\real24.flac",
+                "keeper: genuine 24-bit still beats 16-bit (padding check does not fire)");
+            Assert(PickKeeper(new[] { "C:\\p\\padded24.flac", "C:\\p\\padded24b.flac" }, padLookup) == "C:\\p\\padded24b.flac",
+                "keeper: both padded -> normal ordering resumes, higher sampleRate wins");
+            Assert(PickKeeper(new[] { "C:\\p\\real16.flac", "C:\\p\\plain24.flac" }, padLookup) == "C:\\p\\plain24.flac",
+                "keeper: unmeasured 24-bit is not demoted — absent evidence never ranks a copy down");
 
             Console.WriteLine();
             Console.WriteLine("Duplicate grouping self-test");
@@ -16794,16 +16903,71 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "content/prov: ordinary music emits neither code");
 
                 // pad16: lossless 24-bit container whose bit-usage says 16-bit padded.
+                // SampleRate 96000 is load-bearing since the rate gate landed — at CD rate
+                // this same entry resolves to "n/a" (asserted two blocks down).
                 var pad = ComputeTruedatVerdict("p1", new TrackEntry
                 {
                     Features = new TrackFeatures
                     {
                         BitUsage = new BitUsageSummary { LowestNonZeroBit = 16, EffectiveBits = 12 },
                     },
-                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24 },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24, SampleRate = 96000 },
                 });
                 Assert(pad.HiresGenuine == "no" && pad.Prov == "pad16",
                     "prov: 16-bit-padded 24-bit FLAC -> hiresGenuine no + prov pad16");
+
+                // Rate gate: a 24/44.1 file makes no hi-res claim. Before the gate this
+                // exact entry scored lnz +0.40 and effectiveBits +0.20 over maxWeight 0.60
+                // = +1.0 and emitted hiresGenuine "yes" — a confident affirmative from two
+                // bit-depth measures, on a file the HF analysis can't even reach.
+                var cdRate = ComputeTruedatVerdict("cd1", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        BitUsage = new BitUsageSummary { LowestNonZeroBit = 8, EffectiveBits = 21 },
+                    },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24, SampleRate = 44100 },
+                });
+                Assert(cdRate.HiresGenuine == "n/a" && cdRate.HiresConfidence == null,
+                    "hires: 24/44.1 makes no hi-res claim -> n/a, never a confident yes");
+
+                // ...and 48 kHz still DOES claim, so the gate is > 44100 and not >= 48000.
+                var rate48 = ComputeTruedatVerdict("r48", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        BitUsage = new BitUsageSummary { LowestNonZeroBit = 8, EffectiveBits = 21 },
+                    },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24, SampleRate = 48000 },
+                });
+                Assert(rate48.HiresGenuine == "yes",
+                    "hires: 24/48 still claims hi-res and resolves normally");
+
+                // pad16 SURVIVES the closed gate: padding is a bit-depth fact at any rate.
+                // Both bit-usage signals vote fake -> confident code, no panel to consult.
+                var padCd = ComputeTruedatVerdict("p2", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        BitUsage = new BitUsageSummary { LowestNonZeroBit = 16, EffectiveBits = 12 },
+                    },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24, SampleRate = 44100 },
+                });
+                Assert(padCd.HiresGenuine == "n/a" && padCd.Prov == "pad16",
+                    "prov: 24/44.1 padding still reports pad16 with hiresGenuine n/a");
+
+                // lnz fires fake but effectiveBits abstains (16 is inside the 14..18 band)
+                // -> low-confidence pad16?, mirroring the "panel only reached unknown" rule.
+                var padCdWeak = ComputeTruedatVerdict("p3", new TrackEntry
+                {
+                    Features = new TrackFeatures
+                    {
+                        BitUsage = new BitUsageSummary { LowestNonZeroBit = 16, EffectiveBits = 16 },
+                    },
+                    FingerprintV1 = new FingerprintV1 { Codec = "flac", BitDepth = 24, SampleRate = 44100 },
+                });
+                Assert(padCdWeak.Prov == "pad16?",
+                    "prov: 24/44.1 padding with effectiveBits abstaining -> pad16?");
 
                 // tc: lossy container re-encoded from lossy (Lavc encoder, no LAME tag).
                 var tc = ComputeTruedatVerdict("t1", new TrackEntry
@@ -17203,6 +17367,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "sha-retry: a missing file is NOT retried");
                 Assert(!LooksLikeSharingViolation(null) && !LooksLikeSharingViolation(""),
                     "sha-retry: no error message means nothing to retry");
+
+                // The counters record FILES and keep the two outcomes apart. The original
+                // summed retry ATTEMPTS into one counter and incremented it on both paths,
+                // so the end-of-scan "recovered by retry" line counted give-ups — tracks
+                // that lost their catalog entry — as rescues.
+                {
+                    int rec0 = _shaReadsRecovered, gave0 = _shaReadsGaveUp;
+                    RecordShaRetryOutcome(true);
+                    RecordShaRetryOutcome(true);
+                    RecordShaRetryOutcome(false);
+                    Assert(_shaReadsRecovered - rec0 == 2,
+                        "sha-retry: two recovered files count 2, not the attempts they took");
+                    Assert(_shaReadsGaveUp - gave0 == 1,
+                        "sha-retry: a give-up counts separately and never as a recovery");
+                    _shaReadsRecovered = rec0; _shaReadsGaveUp = gave0;
+                }
 
                 // Every settable key must say what it does untouched. --config enumerated
                 // keys and nothing else for a while, so "every flag uses its built-in
@@ -19898,6 +20078,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 double score = 0, maxWeight = 0;
                 bool lnzVotedFake = false;   // bitUsage said "16-bit padded into 24" — the pad16 signature
+                bool ebVotedFake = false;    // effectiveBits agreed the file behaves like 16-bit
 
                 // Signal: bitUsage.lowestNonZeroBit. After ffmpeg's int24->int32 shift,
                 // real 24-bit content lands at ~7-8; 16-bit padded to 24 lands at ~16.
@@ -19933,6 +20114,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     double eb = f.BitUsage.EffectiveBits;
                     int vote = eb >= 18 ? 1 : eb <= 14 ? -1 : 0;
                     if (vote != 0) { score += vote * 0.20; maxWeight += 0.20; }
+                    if (vote == -1) ebVotedFake = true;
                     trace?.AppendLine($"  TRUEDAT hires effectiveBits={eb:F2} vote={vote:+#;-#;0} weight=0.20");
                 }
 
@@ -19962,17 +20144,40 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     trace?.AppendLine($"  TRUEDAT hires hfSpectralStructure: flatness={fl:F4} peakToMean={pm:F2} imagingSymmetry={sy:F4} vote={vote:+#;-#;0} weight=0.35");
                 }
 
-                (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
-                trace?.AppendLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
-
-                // prov:"pad16" — the bit-usage verdict already knows WHY it voted fake.
-                // Emit the code when the lnz signal fired fake and the verdict agreed
-                // ("no"); if the lnz fired fake but the panel only reached "unknown", emit
-                // the low-confidence "pad16?" so the evidence is still greppable.
-                if (lnzVotedFake)
+                // Sample rate is HALF THE CLAIM, and 44.1 kHz is CD rate — a 24/44.1 file
+                // makes no hi-res assertion to adjudicate. Resolving one anyway was a false
+                // affirmative: ComputeHfAnalysis bails at <= 44100 (the notApplicable return
+                // in that helper), so the panel saw only lowestNonZeroBit + effectiveBits —
+                // two BIT-DEPTH measures carrying nothing about bandwidth — scored +1.0 and
+                // certified the file as genuine hi-res on evidence that never looked at the
+                // spectrum. Below the rate threshold hiresGenuine stays "n/a": the enum has
+                // an abstain for exactly this, and a limitation that abstains is a limitation
+                // while the same limitation asserting is a bug.
+                if (fp.SampleRate > 44100)
                 {
-                    if (v.HiresGenuine == "no") AppendProv("pad16");
-                    else if (v.HiresGenuine == "unknown") AppendProv("pad16?");
+                    (v.HiresGenuine, v.HiresConfidence) = ResolveVerdict(score, maxWeight, minMaxWeight: 0.40);
+                    trace?.AppendLine($"  TRUEDAT hires SCORE={score:F2} maxWeight={maxWeight:F2} -> verdict={v.HiresGenuine}");
+
+                    // prov:"pad16" — the bit-usage verdict already knows WHY it voted fake.
+                    // Emit the code when the lnz signal fired fake and the verdict agreed
+                    // ("no"); if the lnz fired fake but the panel only reached "unknown", emit
+                    // the low-confidence "pad16?" so the evidence is still greppable.
+                    if (lnzVotedFake)
+                    {
+                        if (v.HiresGenuine == "no") AppendProv("pad16");
+                        else if (v.HiresGenuine == "unknown") AppendProv("pad16?");
+                    }
+                }
+                else
+                {
+                    // pad16 SURVIVES the closed gate. "16-bit content padded into a 24-bit
+                    // container" is a bit-depth fact, true at any sample rate, and the two
+                    // signals that establish it (lowestNonZeroBit, effectiveBits) are exactly
+                    // the ones that still run down here — the HF pair is what 44.1 loses.
+                    // Confidence comes from those two agreeing with each other, since there
+                    // is no panel verdict left to corroborate against.
+                    if (lnzVotedFake) AppendProv(ebVotedFake ? "pad16" : "pad16?");
+                    trace?.AppendLine($"  TRUEDAT hires sampleRate={fp.SampleRate} <= 44100 -> no hi-res claim, verdict n/a (pad16 still reports)");
                 }
             }
 
@@ -22302,11 +22507,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         internal const int SharedReadRetries = 4;
         internal const int SharedReadRetryMs = 150;
 
-        /// <summary>Sha reads recovered by a retry this run. Reported at the end of a scan
-        /// because a non-zero count means tracks were within one timing window of losing
-        /// their catalog entries — invisible otherwise, since a recovered read looks
-        /// exactly like a normal one.</summary>
-        static int _shaReadRetries;
+        /// <summary>FILES whose sha read came back only because of a retry, and files that
+        /// stayed locked through every retry. Two counters, because they are opposite
+        /// outcomes: a recovery kept the catalog entry, a give-up lost it. Counting FILES
+        /// and not attempts is equally deliberate — one file recovering on its third try is
+        /// one rescued track, not three.
+        ///
+        /// The original single counter summed attempts and incremented on both paths, so the
+        /// end-of-scan line reported give-ups as recoveries: the diagnostic added to stop
+        /// contention being silent was itself reporting the opposite of what happened.</summary>
+        static int _shaReadsRecovered;
+        static int _shaReadsGaveUp;
+
+        /// <summary>Records one retried sha read. Separated from the worker so the
+        /// recovered-vs-gave-up decision is testable without a locked file; the worker has
+        /// nothing else to say about it.</summary>
+        internal static void RecordShaRetryOutcome(bool recovered)
+        {
+            if (recovered) Interlocked.Increment(ref _shaReadsRecovered);
+            else Interlocked.Increment(ref _shaReadsGaveUp);
+        }
 
         static (string? hash, string source) ComputeAudioStreamSha256Resilient(
             string filePath, long fileSize, out string? error, out string? legacySha, out int retriedTimes)

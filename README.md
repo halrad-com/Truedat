@@ -220,9 +220,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --duplicates [path]     Read-only duplicate-audio report over mbxmoods.json: exact groups
                           (byte-identical audioStreamSha256) plus probable cross-encode
                           candidates (quantized feature match), each with a recommended
-                          keeper (lossless > bitDepth > sampleRate > bitrate > SMFM-tagged >
-                          size > shortest path). Writes mbxmoods-duplicates.csv + .json;
-                          per member: codec/bitrate/sampleRate/bitDepth/album + an smfm flag.
+                          keeper (lossless > genuine-over-faked depth/rate > bitDepth >
+                          sampleRate > bitrate > SMFM-tagged > size > shortest path — so a
+                          padded or upsampled copy cannot win on the number it inflated).
+                          Writes mbxmoods-duplicates.csv + .json;
+                          per member: codec/bitrate/sampleRate/bitDepth/album, an smfm flag,
+                          and fakeHires/paddedDepth marking a copy whose depth or rate claim
+                          the audio does not support.
   --losers-m3u [path]     With --duplicates: write non-keeper members to an .m3u8 playlist
                           for review/removal inside MusicBee. Path must end in .m3u or .m3u8;
                           default is mbxmoods-duplicate-losers.m3u8 next to the moods file.
@@ -1089,7 +1093,7 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
         "speechLikely": "no",
         "speechConfidence": 0.91,
         "speechMethod": "truedat-speech-v1.3-untuned-2026-08-13",
-        "method": "truedat-v1-fft-corpus1-2026-05-18"
+        "method": "truedat-v1-fft-rategate-2026-08-28"
       },
       "smfmScores": [22, 41, 8, 130, 95, 12, 4, 7, 88, 33],
       "smfmChannel": 3,
@@ -1160,21 +1164,21 @@ Each track in `mbxmoods.json` carries a nested `truedat` block with two authenti
   "speechMethod":            "truedat-speech-v1.3-untuned-2026-08-13",
   "prov":                    "up44",           // optional: pad16 | tc | up44 | lossy, joined with +
   "content":                 "speech",         // optional: speech | silence | silence?
-  "method":                  "truedat-v1-fft-corpus1-2026-05-18"
+  "method":                  "truedat-v1-fft-rategate-2026-08-28"
 }
 ```
 
-Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
+Four-string enum, **not** a bool — collapsing `"unknown"` into yes/no is exactly what produces false positives and negatives in the wild. `"unknown"` and `"n/a"` are first-class outcomes. `"n/a"` means the test wasn't applicable to this file (hi-res check on a 16-bit FLAC or on any file at 44.1 kHz, transcode check on a FLAC, etc.); `"unknown"` means it was applicable but the signals are weak or disagreeing.
 
 The block is **omitted** when no verdict decided `"yes"`/`"no"` **and** no `prov`/`content` code is set (legacy entries without `fingerprint.v1`, weird-codec files, entries lacking signal). The `prov`/`content` half matters: a mostly-silent track decides no yes/no axis, so an axes-only rule would suppress its own flag. Run `--verify --backfill` to populate the authenticity inputs; `speechLikely` needs no backfill — it is computed from features already present, so it fills in the next time each entry is saved.
 
-Multi-signal weighted voting per question. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped: it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — that discipline is what keeps it from flipping peaky-but-genuine cymbal content.
+Multi-signal weighted voting per question. The hi-res verdict requires a claim on both axes — lossless at 24-bit **and** above 44.1 kHz; at CD rate the high-frequency checks cannot run, so `hiresGenuine` is `"n/a"` rather than an answer from bit-depth evidence alone. Padding still reports `prov: pad16` at any rate. Hi-res verdict combines four signals: `bitUsage.lowestNonZeroBit` (0.40), `hfEnergyRatio` (0.40), `bitUsage.effectiveBits` (0.20), and `hfSpectralStructure` (Phase 5 — Signal F, 0.35) — total available weight 1.35 when all signals vote. Transcode verdict (MP3 only) combines encoder string, MP3 LAME tag lowpass, and LAME tag presence with weights 0.30 / 0.35 / 0.20. (An earlier `spectralRolloff` signal was dropped: it produced false positives on naturally low-HF material.) ±0.7 **normalized**-score threshold (score / maxWeight) means signals must collectively cross 70% agreement for a yes/no verdict; one strong signal alone abstains as `"unknown"`. Signal F intentionally abstains in the middle band (`0.005 ≤ flatness ≤ 0.5` or `peakToMean ≤ 50`), reinforcing existing yes/no calls without driving them on its own — that discipline is what keeps it from flipping peaky-but-genuine cymbal content.
 
 `speechLikely` classifies talk content vs. music, voting over `danceability`, `chordsStrength`, `silenceRate30dB`, `zeroCrossingRate`, `bpmFirstPeakWeight` and `keyVotes` strength. `"yes"` additionally requires two gates: the zero-crossing signal must fire on its own (a tone or ambient bed shares talk's shape on the other signals but sits low on zcr), and `danceability < 0.50` (sparse, live and free-form *instrumental* music craters on every other signal exactly like speech; genuine speech measures 0.00, real-music false positives ran 0.66–1.10). Either gate demotes to `"unknown"`, never `"no"`. Review the `"yes"` set with `--list-speech`. `speechMethod` carries its own tag, independent of the authenticity `method` — the two verdict families tune on separate schedules.
 
 Computed inline at write time, not persisted in cache. Threshold changes ship without a rescan; the method tags bump when thresholds change so consumers can detect algorithm drift. Per-signal vote+weight trace available via `--audit` for debugging.
 
-**Current method tag: `truedat-v1-fft-corpus1-2026-05-18`.** The tag identifies the threshold generation, so a consumer can tell which algorithm produced a stored verdict; it bumps to `truedat-v1-…-YYYY-MM-DD` whenever the thresholds are retuned. Treat verdicts as high-confidence but not proof — see what each check misses, below.
+**Current method tag: `truedat-v1-fft-rategate-2026-08-28`.** The tag identifies the threshold generation, so a consumer can tell which algorithm produced a stored verdict; it bumps to `truedat-v1-…-YYYY-MM-DD` whenever the thresholds are retuned or an applicability gate changes — anything that can make the same file answer differently. Treat verdicts as high-confidence but not proof — see what each check misses, below.
 
 ### What each check catches, and what it misses
 
@@ -1191,16 +1195,21 @@ single one decides, and when they disagree the verdict is `"unknown"`.
 | `encoder` string | What wrote the file | ffmpeg re-encodes, which carry no LAME tag | A second LAME pass, which rewrites the tag and hides the first |
 
 Applicability is gated, not guessed: bit checks run only on lossless files claiming 24-bit,
-high-frequency checks only above 44.1 kHz, and the transcode checks only on MP3. Outside those,
-the answer is `"n/a"` rather than a verdict from a measurement that means nothing there.
+high-frequency checks only above 44.1 kHz, the hi-res verdict only where both hold, and the
+transcode checks only on MP3. Outside those, the answer is `"n/a"` rather than a verdict from a
+measurement that means nothing there.
 
 **What none of them can do is tell you where a file has been.** Anything uploaded to YouTube
 comes back at 48 kHz — the video audio baseline — whatever went in. Download it and you have a
 genuine 48 kHz file; the container is not lying. What is gone is that it was ever 44.1, and the
 lossy encode on the way through already removed the frequencies that would have shown the seam.
-The same holds for lossy audio re-wrapped in FLAC: the copy is perfect, so there is nothing left
-to catch it by. Sample rate, bit depth and spectral shape describe what a file *is* — not what
-it has been through.
+Lossy audio re-wrapped in FLAC is a different case: the copy is perfect, so no *container or
+tag* evidence survives — no LAME tag, no encoder string, honest 16/44.1 properties, real bit
+usage. What survives is in the audio, since the encoder's lowpass was baked in before the
+decode. **truedat does not look for it today** — the transcode checks are MP3/AAC-gated, so a
+FLAC is `"n/a"` whatever it was made from. Finding it means measuring the *shape* of the ceiling
+rather than its height, because a genuinely dark master also ends low; that is the cliff
+detector in `BACKLOG.md`. Until it exists this class is uncovered, not cleared.
 
 ## How Mood Vectors Work
 

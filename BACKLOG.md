@@ -27,6 +27,20 @@ Open work only. Shipped items live in `CHANGELOG.md`.
    refuses today). Honest `unknown` expected on streaming-derived 48k material. The `prov`
    code plumbing shipped in v0.5.4.8-RC1 and is waiting for these codes. Needs operator go.
 
+   **Two more discriminators, both content-independent** (2026-08-28) — ceiling position
+   alone condemns dark masters:
+   - **What lies above the ceiling.** Real recordings carry a noise floor to Nyquist
+     (dither, ADC, hiss); decoded lossy audio has a dead band. A quiet ambient master still
+     has its floor — the difference a rolloff reading cannot see.
+   - **Whether the ceiling holds still.** A master's HF extent tracks the music; an imposed
+     lowpass sits at one frequency every frame. Needs per-frame edge statistics, not the
+     per-bin mean the current loop accumulates — plan the loop for it up front.
+
+   Motivation: a forum report of ambient CD rips flagged as lossy transcodes by
+   rolloff-based tooling — the false positive this must not reproduce. The 2026-08-28 rate
+   gate made the 44.1 hole explicit, so this is the only thing that will ever cover a
+   16/44.1 or 24/44.1 lossless file.
+
 3. **v3 `.mbxs` fixture for restfulbee** (chore, small). Generate a small synthetic v3
    sidecar (178 B records) + matching mini-catalog so the hub-side v3 reader lands against a
    known-good file. Their lane after that: sidecar-only boot.
@@ -157,7 +171,7 @@ are designed to differ between a lossless file and its lossy copy.
 
 ## Authenticity — remaining detection gaps
 
-Phases 1–5 shipped; current method tag `truedat-v1-fft-corpus1-2026-05-18`, scorecard 23/23
+Phases 1–5 shipped; current method tag `truedat-v1-fft-rategate-2026-08-28`, scorecard 23/23
 hi-res and 21/23 transcode on corpus-1. What is left, roughly by value/cost:
 
 1. **Encoder string whitelist/blacklist** (helps LP rips, EAC, dBpoweramp).

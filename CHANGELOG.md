@@ -34,6 +34,27 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - **Excluded entries name the rule that caught them**, so an exclusion can be traced back
   and undone.
 
+### Fixed
+
+- **A 44.1 kHz file is no longer certified as genuine hi-res.** `hiresGenuine` now requires
+  `sampleRate > 44100` as well as 24-bit lossless — at CD rate the high-frequency checks
+  cannot run, so the verdict was answering `"yes"` from bit-depth evidence alone. It reads
+  `"n/a"` there now; `prov: pad16` still reports at any rate. Verdicts recompute on every
+  save, so catalogs correct themselves on the next scan — no rescan, no backfill. Method
+  tag: `truedat-v1-fft-rategate-2026-08-28`.
+- **The duplicate report's `fakeHires` flag applies the same rule.** A 24/44.1 copy is no
+  longer labelled `upsampled`; a 16/96 upsample is still caught. Affects
+  `mbxmoods-duplicates.json`, the review manifest, the interactive page and keeper ranking.
+- **The contention line no longer counts give-ups as rescues.** It summed retry attempts
+  into one counter and incremented on both paths, so files that stayed locked and lost
+  their catalog entry were reported as `recovered by retry`. Recoveries and give-ups are
+  now counted per file, on separate lines.
+- **A padded copy no longer wins the duplicate it faked.** The keeper ranked on claimed bit
+  depth, so a 24-bit container holding 16-bit content outranked the genuine 16-bit rip
+  beside it. Bit-usage evidence now demotes it first; copies with no bit-usage measured are
+  never demoted. A new `paddedDepth` field carries the reason into the same three outputs,
+  so the demotion is visible — the non-keepers are what `--losers-m3u` hands you to act on.
+
 ## [0.5.5.0-EV1.2] — 2026-08-23
 
 Covers EV1.1 as well, which shipped without a section of its own.
