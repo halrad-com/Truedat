@@ -3540,7 +3540,12 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (!File.Exists(analyzeFilePath))
+                // One stat for existence, size and mtime. --analyze-file handles a single
+                // file per invocation, so this is three round trips saved per RUN, not per
+                // track — consistency with the other scan paths rather than throughput.
+                FileInfo? afStat = null;
+                try { afStat = new FileInfo(analyzeFilePath!); } catch { }
+                if (afStat == null || !afStat.Exists)
                 {
                     // Missing is a structural skip, not an analysis failure — the same call the
                     // M6 fix made for --file-list, which the very same plugin workflow invokes.
@@ -3653,9 +3658,9 @@ namespace Truedat
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
 
-                var afFileSize = new FileInfo(analyzeFilePath!).Length;
+                var afFileSize = afStat.Length;                 // from the existence stat above
                 DateTime afCurrentLastMod = DateTime.MinValue;
-                try { afCurrentLastMod = File.GetLastWriteTimeUtc(analyzeFilePath!); } catch { }
+                try { afCurrentLastMod = afStat.LastWriteTimeUtc; } catch { }
 
                 // Pre-load moods for cache check (only meaningful when --moods is set).
                 ConcurrentDictionary<string, TrackEntry>? afMoodsTracks = null;
@@ -4001,7 +4006,11 @@ namespace Truedat
                     CancellationToken = CancellationToken.None
                 }, filePath =>
                 {
-                    if (!File.Exists(filePath))
+                    // One stat for existence AND size (see the scan paths) — two syscalls
+                    // over SMB otherwise, and --hash-only exists to run fast.
+                    FileInfo? hoStat = null;
+                    try { hoStat = new FileInfo(filePath); } catch { }
+                    if (hoStat == null || !hoStat.Exists)
                     {
                         Interlocked.Increment(ref hoFailed);
                         hoErrors.Add($"{filePath}\tfile not found");
@@ -4011,7 +4020,7 @@ namespace Truedat
 
                     try
                     {
-                        var fi = new FileInfo(filePath);
+                        var fi = hoStat;
                         var fpV1 = ComputeFingerprintV1(filePath, fi.Length, out var fpErr);
                         if (fpV1 == null)
                         {
@@ -4303,7 +4312,16 @@ namespace Truedat
                 Action<string> processFile = filePath =>
                 {
                     if (Volatile.Read(ref flSourceLost) != 0) return;
-                    if (!File.Exists(filePath))
+                    // ONE metadata round trip for all three facts this path needs — exists,
+                    // mtime, size — where it previously made three separate syscalls spread
+                    // across eighty lines. Free on local NTFS out of the OS metadata cache,
+                    // three network round trips per file over SMB. This is the autoscan /
+                    // playlist path, so it is exactly where a "scan just these few tracks"
+                    // run pays it. try because the FileInfo ctor throws on invalid path
+                    // characters where File.Exists swallowed to false.
+                    FileInfo? flStat = null;
+                    try { flStat = new FileInfo(filePath); } catch { }
+                    if (flStat == null || !flStat.Exists)
                     {
                         // Volume gone, or file gone? This is the autoscan path — the plugin pipes
                         // new paths here continuously — so a NAS blip would otherwise ledger a
@@ -4383,10 +4401,11 @@ namespace Truedat
                         // worker block analyzes. (FIX 5 — pairs with the source-handle
                         // snapshot for the staging happy path; this is the non-staged
                         // fallback / cache-hit path.)
+                        // Both from the single stat taken at entry — no second/third round trip.
                         DateTime currentLastMod = DateTime.MinValue;
-                        try { currentLastMod = File.GetLastWriteTimeUtc(filePath); } catch { }
+                        try { currentLastMod = flStat.LastWriteTimeUtc; } catch { }
                         long flFileSize = 0;
-                        try { flFileSize = new FileInfo(filePath).Length; } catch { }
+                        try { flFileSize = flStat.Length; } catch { }
 
                         // Lazy staging — opened on first tier-2/3/4 body read or at cache miss.
                         // Tier-1 (path-mtime equality) doesn't open it.
@@ -8023,7 +8042,12 @@ namespace Truedat
                 // thousands of meaningless MISSING rows behind it.
                 if (Volatile.Read(ref sourceLost) != 0) { loopState.Stop(); return; }
 
-                if (!File.Exists(path))
+                // One stat for existence and size. Verify then reads the entire file to
+                // recompute the SHA, so this saves far less here than on a cache hit —
+                // it is consistency with the scan paths, not a speedup worth claiming.
+                FileInfo? vStat = null;
+                try { vStat = new FileInfo(path); } catch { }
+                if (vStat == null || !vStat.Exists)
                 {
                     // "Gone" is ambiguous: deleted, or the volume just dropped (NAS/WiFi/ethernet
                     // down, external drive unplugged or spun out). Re-probe this file's ROOT —
@@ -8043,7 +8067,7 @@ namespace Truedat
                 {
                     try
                     {
-                        var fileSize = new FileInfo(path).Length;
+                        var fileSize = vStat.Length;   // from the existence stat above
                         var (recomputed, recomputedSource) = ComputeAudioStreamSha256FromFile(path, fileSize, out var err, out var legacySha);
                         if (string.IsNullOrEmpty(recomputed))
                         {
