@@ -89,7 +89,7 @@ namespace Truedat
 
             if (result.Paths.Count == 0)
                 result.Error = result.UrlSkipped > 0
-                    ? $"playlist {playlistPath} contains only stream URLs — no file entries to exclude"
+                    ? $"playlist {playlistPath} contains only stream URLs — no file entries"
                     : $"playlist {playlistPath} contains no usable entries";
             return result;
         }

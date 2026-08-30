@@ -724,8 +724,12 @@ namespace Truedat
             Console.WriteLine("  --analyze           Run analysis mode (Essentia -> mbxmoods.json) — the default");
             Console.WriteLine("  --analyze-file <f>  Analyze a single audio file with Essentia (no iTunes XML needed)");
             Console.WriteLine("  --file-list <path>  Analyze files listed in a text file (one path per line, UTF-8, # comments)");
+            Console.WriteLine("                      A .m3u/.m3u8 is read as a PLAYLIST: relative entries resolve against the");
+            Console.WriteLine("                      playlist's folder and stream URLs are skipped. Maintain the playlist in");
+            Console.WriteLine("                      MusicBee for an incremental 'scan just these' run.");
             Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
             Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
+            Console.WriteLine("                      NOTE: results are recorded ONLY if --moods is also given.");
             Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
             Console.WriteLine("  --paths [--json]    Report every path this run would use (catalog, sidecar, exclusions,");
             Console.WriteLine("                      playlist, logs, ledgers, staging), each present or absent, and which");
@@ -4202,10 +4206,25 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
-                    filePaths = File.ReadAllLines(fileListPath!, Encoding.UTF8)
-                        .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
-                        .Select(line => line.Trim())
-                        .ToList();
+                    // A .m3u/.m3u8 is READ AS A PLAYLIST, not as a line-per-path text file.
+                    // The plain reader would *appear* to work — an extended M3U's #EXTM3U /
+                    // #EXTINF directives are exactly the '#' comments it already drops — which
+                    // is the trap: it would silently resolve relative entries against the CWD
+                    // instead of the playlist's own directory (the m3u convention), and pass
+                    // stream URLs through as if they were file paths. Route it through the
+                    // one reader that already gets both right, the same one --exclude-playlist
+                    // and --apply-exclusions use, so a playlist means the same thing to every
+                    // surface that accepts one.
+                    filePaths = ReadFileListPaths(fileListPath!, out var flListErr, out var flUrlSkipped);
+                    if (flListErr != null)
+                    {
+                        Console.Error.WriteLine($"Error: {flListErr}");
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    if (PlaylistReader.IsPlaylistPath(fileListPath))
+                        Console.Error.WriteLine($"  Read {filePaths.Count} path(s) from playlist {fileListPath}"
+                            + (flUrlSkipped > 0 ? $" ({flUrlSkipped} stream URL(s) skipped)" : ""));
                 }
 
                 if (filePaths.Count == 0)
@@ -4663,6 +4682,22 @@ namespace Truedat
                 {
                     SaveResults(analyzeFileMoods!, flMoodsTracks);
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
+                }
+                else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
+                {
+                    // Without --moods this mode analyzes and DISCARDS. That is legitimate for a
+                    // one-off inspection run, but it is indistinguishable on the console from a
+                    // successful incremental scan — the per-file lines look identical — so an
+                    // operator driving this from a launcher's argument box (MBXHub's
+                    // Truedat.Args) gets a green run, an untouched catalog, and no way to tell.
+                    // Say it out loud: no silent failures, the same rule the scan-health gate
+                    // and the exclusion loader already follow.
+                    Console.Error.WriteLine();
+                    // "Nothing was written" would be FALSE — the review ledger and the skipped
+                    // CSV are still written. Name the artefact that was not written, which is
+                    // the same correction already applied to the exclusion-merge failure text.
+                    Console.Error.WriteLine($"WARNING: no --moods given — {flProcessed} file(s) were analyzed but NO CATALOG was written.");
+                    Console.Error.WriteLine("         Add --moods <path-to-mbxmoods.json> to record the results in a catalog.");
                 }
                 KeepAwakeRelease();   // scan phase (incl. save) is over; nothing left to hold awake for
 
@@ -5383,7 +5418,24 @@ namespace Truedat
                         // analysis error. scanPath already carries the \\?\ fallback for
                         // over-MAX_PATH paths, so a miss here means the file is genuinely
                         // gone (not merely unreachable by normal Win32 IO).
-                        if (!File.Exists(scanPath))
+                        // ONE metadata round trip for both facts we need about this file:
+                        // does it exist, and when was it last written. FileInfo populates
+                        // both from a single GetFileAttributesEx on first property access,
+                        // where File.Exists + File.GetLastWriteTimeUtc are two separate
+                        // syscalls. On local NTFS that second call is free out of the OS
+                        // metadata cache — over SMB it is a full network round trip, paid
+                        // once per ALREADY-CACHED track, which is the dominant cost of an
+                        // incremental scan against a NAS and invisible on a local disk.
+                        // Snapshotting both from one instant is also the more correct
+                        // reading: the pair can no longer disagree about the same file.
+                        // The try is not decoration: File.Exists SWALLOWS a bad path to false,
+                        // where the FileInfo ctor THROWS on invalid path characters. Without
+                        // this, a pathological XML entry would stop reading as "[skipped
+                        // missing]" and start reading as an analysis failure — a behaviour
+                        // change smuggled in by what is meant to be a pure IO refactor.
+                        FileInfo? scanStat = null;
+                        try { scanStat = new FileInfo(scanPath); } catch { }
+                        if (scanStat == null || !scanStat.Exists)
                         {
                             // Deleted, or did the volume just go? Re-probe this file's ROOT before
                             // recording anything: a healthy root always answers, so an error here
@@ -5420,7 +5472,7 @@ namespace Truedat
                         {
                             try
                             {
-                                var currentLastMod = File.GetLastWriteTimeUtc(scanPath);
+                                var currentLastMod = scanStat.LastWriteTimeUtc;   // from the existence stat above — no second round trip
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(existing.LastModified))
                                 {
                                     // Re-extract when the canary says the entry is stale (pre-LRA /
@@ -15144,6 +15196,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         && !PlaylistReader.IsPlaylistPath("delta.json") && !PlaylistReader.IsPlaylistPath(null),
                         "playlist: extension detection m3u/m3u8 only");
 
+                    // --file-list routing: a playlist goes through PlaylistReader, a .txt does
+                    // not. Pinned on the ONE input where the two readers actually disagree — a
+                    // relative entry — because that is the difference the routing exists for.
+                    // Byte-identical content in both files, so only the extension can decide.
+                    var flLines = new[] { "#EXTM3U", "#EXTINF:1,X", @"D:\Music\a.mp3", @"relative\b.flac",
+                                          "https://example.com/s.mp3" };
+                    var flAsPlaylist = Path.Combine(plDir, "scan-these.m3u8");
+                    var flAsText = Path.Combine(plDir, "scan-these.txt");
+                    File.WriteAllLines(flAsPlaylist, flLines);
+                    File.WriteAllLines(flAsText, flLines);
+
+                    var plPaths = ReadFileListPaths(flAsPlaylist, out var plErr, out var plUrls);
+                    Assert(plErr == null, "file-list playlist: reads clean");
+                    Assert(plUrls == 1, $"file-list playlist: stream URL skipped and counted (got {plUrls})");
+                    Assert(plPaths.Count == 2, $"file-list playlist: 2 file entries, URL excluded (got {plPaths.Count})");
+                    Assert(plPaths.Count > 1 && plPaths[1].Equals(Path.Combine(plDir, @"relative\b.flac"),
+                            StringComparison.OrdinalIgnoreCase),
+                        "file-list playlist: relative entry resolves against the PLAYLIST folder, not the CWD");
+
+                    var txtPaths = ReadFileListPaths(flAsText, out var txtErr, out var txtUrls);
+                    Assert(txtErr == null && txtUrls == 0, "file-list text: plain reader reports no playlist metadata");
+                    Assert(txtPaths.Count == 3, $"file-list text: same bytes, 3 raw lines incl. the URL (got {txtPaths.Count})");
+                    Assert(txtPaths.Count > 1 && txtPaths[1] == @"relative\b.flac",
+                        "file-list text: relative entry stays verbatim — the exact divergence the .m3u8 route fixes");
+
+                    // A playlist that yields nothing is an ERROR, not an empty scan: the
+                    // launcher-driven case must not report a clean run over zero files.
+                    Assert(ReadFileListPaths(urlOnly, out var flUrlOnlyErr, out _) != null && flUrlOnlyErr != null,
+                        "file-list playlist: URL-only playlist surfaces the reader's error");
+
                     // Combine: include in the FILE set overrides exclude in the playlist set.
                     var fileSet = ExclusionSet.FromJson(
                         "{\"schemaVersion\":1,\"rules\":[{\"kind\":\"file\",\"action\":\"include\",\"path\":\"D:\\\\Music\\\\a.mp3\"}]}", out var fsErr);
@@ -23217,6 +23299,35 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static TimeSpan StopwatchTicksToTimeSpan(long stopwatchTicks)
         {
             return TimeSpan.FromSeconds((double)stopwatchTicks / Stopwatch.Frequency);
+        }
+
+        /// <summary>Read the path list for --file-list. A .m3u/.m3u8 is routed through
+        /// <see cref="PlaylistReader"/> — relative entries resolve against the PLAYLIST's
+        /// folder (the m3u convention) and stream URLs are skipped and counted; anything
+        /// else is the plain one-path-per-line UTF-8 text format.
+        ///
+        /// The distinction is the whole point and it is easy to miss: the plain reader
+        /// would APPEAR to handle a playlist, because an extended M3U's #EXTM3U/#EXTINF
+        /// directives are exactly the '#' comments it already drops. What it would get
+        /// wrong is silent — relative entries resolved against the CWD (so the launcher's
+        /// working directory decides which files you scan) and stream URLs treated as
+        /// file paths. Extracted from the scan loop so that routing decision can be
+        /// asserted directly instead of only through a full run.</summary>
+        internal static List<string> ReadFileListPaths(string path, out string? error, out int urlSkipped)
+        {
+            error = null;
+            urlSkipped = 0;
+            if (PlaylistReader.IsPlaylistPath(path))
+            {
+                var pl = PlaylistReader.Read(path);
+                urlSkipped = pl.UrlSkipped;
+                error = pl.Error;
+                return pl.Paths;
+            }
+            return File.ReadAllLines(path, Encoding.UTF8)
+                .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                .Select(line => line.Trim())
+                .ToList();
         }
 
         static DateTime TruncateToSeconds(DateTime dt)
