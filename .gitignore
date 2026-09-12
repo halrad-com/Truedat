@@ -22,6 +22,13 @@ data/
 # The tracked mbxmoods.json fixture is .json, so it is unaffected.
 mbxmoods-*.csv
 
+# Scan-output JSON has the same problem: mbxmoods-review.json published a local
+# path on 2026-09-12. The schema is documentation, not output, and stays tracked;
+# the mbxmoods.json fixture has no dash, so neither rule touches it.
+# .githooks/data-gate.sh backstops forced adds and already-tracked files.
+mbxmoods-*.json
+!mbxmoods-schema.json
+
 # Internal docs — never published
 _docs/
 docs/

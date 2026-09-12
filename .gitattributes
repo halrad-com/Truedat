@@ -1,0 +1,3 @@
+# Git hooks run under sh. A Windows checkout with autocrlf would give them CRLF line endings,
+# and a carriage return breaks every line of a shell script, so they are always LF.
+.githooks/* text eol=lf
