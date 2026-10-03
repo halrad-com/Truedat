@@ -8,7 +8,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
-## [0.5.5.3] — 2026-10-02
+## [0.5.5.2-EV1] — 2026-10-03
 
 ### Fixed
 
