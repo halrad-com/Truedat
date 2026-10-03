@@ -3859,7 +3859,7 @@ namespace Truedat
                         if (!healthPass)
                         {
                             var comps = string.Join(";", healthFailed);
-                            Console.Error.WriteLine($"FAILED: analysis incomplete: {comps}");
+                            Console.Error.WriteLine($"FAILED: analysis incomplete: {comps}{TagsFailDetail(healthFailed, afTags)}");
                             Environment.ExitCode = 1;
                             return;
                         }
@@ -3937,6 +3937,16 @@ namespace Truedat
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
+                    // --analyze-file never consults the ledger, but its success still makes a
+                    // review record for this file stale — clear it beside the catalog it wrote.
+                    var afMoodsDir = Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods!)) ?? ".";
+                    var afLedgerPath = ResolveReviewLedgerPath(afMoodsDir);
+                    var afLedger = ReviewLedger.Load(afLedgerPath, out var afLedgerErr);
+                    bool afHasRecord = afLedgerErr == null && afLedger.Find(analyzeFilePath!) != null;
+                    if (afHasRecord) _runLedger = afLedger;
+                    ClearReviewRecord(analyzeFilePath!);
+                    if (afHasRecord) FlushRunLedger(afLedgerPath);
+                    PruneErrorsCsv(Path.Combine(afMoodsDir, "mbxmoods-errors.csv"));
                     ReportCatalog(analyzeFileMoods!, afMoodsTracks.Values, statsDetailThreshold);
                 }
 
@@ -4448,6 +4458,7 @@ namespace Truedat
                                     var flMtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(flMtimeEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                     if (flMtimeSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flMtimeEntry;
+                                    ClearReviewRecord(filePath);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMtime);
                                     Console.Error.WriteLine($"[CACHED{flMtimeSmfmTag}] {Path.GetFileName(filePath)}");
@@ -4475,6 +4486,7 @@ namespace Truedat
                                         var flHeadSmfmTag = _refreshSmfm && ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flHeadSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flHeadEntry;
+                                        ClearReviewRecord(filePath);
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByHeadPath);
                                         Console.Error.WriteLine($"[CACHED·head{flHeadSmfmTag}] {Path.GetFileName(filePath)}");
@@ -4509,6 +4521,7 @@ namespace Truedat
                                         var flShaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
+                                        ClearReviewRecord(filePath);
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByShaPath);
                                         Console.Error.WriteLine($"[CACHED·sha{flShaPathSmfmTag}] {Path.GetFileName(filePath)}");
@@ -4544,6 +4557,7 @@ namespace Truedat
                                     var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
+                                    ClearReviewRecord(filePath);
                                     RemoveIfMoved(flMoodsTracks, xs.OldKey!);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByShaCross);
@@ -4599,10 +4613,11 @@ namespace Truedat
                             if (!healthPass)
                             {
                                 var comps = string.Join(";", healthFailed);
+                                var reason = $"analysis incomplete: {comps}" + TagsFailDetail(healthFailed, tags);
                                 Interlocked.Increment(ref flFailed);
-                                flErrors.Add($"{filePath}: analysis incomplete: {comps}");
-                                RecordReviewFailure(filePath, $"analysis incomplete: {comps}", 0, 0, comps, "file-list");
-                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: analysis incomplete: {comps}");
+                                flErrors.Add($"{filePath}: {reason}");
+                                RecordReviewFailure(filePath, reason, 0, 0, comps, "file-list");
+                                Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {reason}");
                                 return;
                             }
                         }
@@ -4647,6 +4662,7 @@ namespace Truedat
                         {
                             var flKey = Path.GetFullPath(filePath);
                             flMoodsTracks[flKey] = trackEntry;
+                            ClearReviewRecord(filePath);
                         }
 
                         Interlocked.Increment(ref flProcessed);
@@ -4748,6 +4764,8 @@ namespace Truedat
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
                 FlushRunLedger(flLedgerPath);
+                if (!string.IsNullOrEmpty(analyzeFileMoods))
+                    PruneErrorsCsv(Path.Combine(flLedgerDir, "mbxmoods-errors.csv"));
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                     ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold);
                 // Exit 3 (not 1) when the source went away: the caller — the autoscan plugin —
@@ -5534,6 +5552,7 @@ namespace Truedat
                                         var mtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(mtimeEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                         if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
+                                        ClearReviewRecord(t.Location);
                                         Interlocked.Increment(ref cachedCount);
                                         trackClass = "cached";
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached{backfillTag}{mtimeSmfmTag})");
@@ -5568,6 +5587,7 @@ namespace Truedat
                                                 var headSmfmTag = _refreshSmfm && ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = headEntry;
+                                                ClearReviewRecord(t.Location);
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByHeadPath);
                                                 trackClass = "cached·head";
@@ -5612,6 +5632,7 @@ namespace Truedat
                                                 var shaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
+                                                ClearReviewRecord(t.Location);
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByShaPath);
                                                 trackClass = "cached·sha";
@@ -5649,6 +5670,7 @@ namespace Truedat
                                                     var rekeySmfmTag = _refreshSmfm && ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                     if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                     allTracks[t.Location] = rekeyEntry;
+                                                    ClearReviewRecord(t.Location);
                                                     Interlocked.Increment(ref cachedCount);
                                                     Interlocked.Increment(ref flacRekeyed);
                                                     trackClass = "cached·rekey";
@@ -5705,6 +5727,7 @@ namespace Truedat
                                         var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
+                                        ClearReviewRecord(t.Location);
                                         RemoveIfMoved(allTracks, xs.OldKey!);
                                         Interlocked.Increment(ref cachedByShaCross);
                                         Interlocked.Increment(ref cachedCount);
@@ -5866,6 +5889,7 @@ namespace Truedat
                         if (lastMod == DateTime.MinValue)
                             try { lastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
 
+                        ClearReviewRecord(t.Location);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
@@ -6123,6 +6147,7 @@ namespace Truedat
                 Console.WriteLine($"  Contention: {_shaReadsGaveUp:N0} file(s) still locked after retries"
                                   + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
             FlushRunLedger(runLedgerPath);
+            PruneErrorsCsv(errorsPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
             if (finalSaveSw != null)
                 Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
@@ -19502,6 +19527,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return (failed.Count == 0, failed);
         }
 
+        /// <summary>The suffix that explains a <c>tags</c> gate failure — " — tags: &lt;what
+        /// TagLib threw or returned&gt;" — or "" when tags did not fail or no detail was
+        /// captured. Appended to the reason that reaches the review ledger and the console,
+        /// so a locked staged copy, a header claiming length unknown and a genuine parse
+        /// refusal stop reading identically as the bare word "tags".</summary>
+        internal static string TagsFailDetail(List<string> failed, FileTags? tags)
+        {
+            if (tags?.Detail == null || !failed.Contains("tags")) return "";
+            return " — tags: " + tags.Detail;
+        }
+
         /// <summary>Shared decode-coverage threshold. A track whose Essentia decoded length
         /// covers less than this fraction of its real duration is treated as under-decoded:
         /// the scan-health gate fails it, and the worker fan-out retries it via an ffmpeg
@@ -19715,6 +19751,61 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             catch { }
         }
 
+        /// <summary>A file was analyzed and its entry written: clear any review record for it.
+        /// Counted so <see cref="FlushRunLedger"/> writes the ledger even when clearing left
+        /// it empty — skipping that write is what would keep a stale record on disk.</summary>
+        static void ClearReviewRecord(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            _analyzedOkPaths.Add(filePath);
+            var led = _runLedger;
+            if (led == null) return;
+            bool removed;
+            lock (_runLedgerLock) removed = led.Remove(filePath);
+            if (removed) Interlocked.Increment(ref _reviewRecordsCleared);
+        }
+        static int _reviewRecordsCleared;
+        /// <summary>Every path analyzed and written this run — the set whose old error rows
+        /// are no longer current. Read once, at end of run, by <see cref="PruneErrorsCsv"/>.</summary>
+        static readonly ConcurrentBag<string> _analyzedOkPaths = new ConcurrentBag<string>();
+
+        /// <summary>Drop <c>mbxmoods-errors.csv</c> rows for files analyzed successfully this
+        /// run. The CSV is append-only and was only ever cleared wholesale by
+        /// <c>--retry-errors</c>, so a file that later scanned fine kept its error row forever —
+        /// read by the full scan's skip list and by <c>--stats</c> as a live failure. Runs after
+        /// the workers finish (no concurrent appends), keeps the header and any row it cannot
+        /// parse, and swaps atomically so a failure leaves the old file intact.</summary>
+        static void PruneErrorsCsv(string errorsPath)
+        {
+            if (_analyzedOkPaths.IsEmpty || !File.Exists(errorsPath)) return;
+            var ok = new HashSet<string>(_analyzedOkPaths, PathComparer.Instance);
+            var tmp = errorsPath + ".tmp";
+            try
+            {
+                var lines = File.ReadAllLines(errorsPath);
+                var kept = new List<string>(lines.Length);
+                int removed = 0;
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    if (i > 0 && !string.IsNullOrWhiteSpace(lines[i]))
+                    {
+                        var parts = ParseCsvLine(lines[i]);
+                        if (parts.Length >= 4 && ok.Contains(parts[3])) { removed++; continue; }
+                    }
+                    kept.Add(lines[i]);
+                }
+                if (removed == 0) return;
+                File.WriteAllLines(tmp, kept, new UTF8Encoding(false));
+                AtomicReplace(tmp, errorsPath);
+                Console.WriteLine($"  Errors:     {removed:N0} row(s) cleared from {Path.GetFileName(errorsPath)} — file is now in the catalog");
+            }
+            catch (Exception ex)
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                Console.Error.WriteLine($"WARNING: could not clear stale rows from {errorsPath}: {ex.Message}");
+            }
+        }
+
         /// <summary>True when this run was launched with --retry-errors, i.e. the operator
         /// explicitly asked for another attempt. Only that advances a record's attempt
         /// count — an ordinary scan does not re-attempt a recorded file at all.</summary>
@@ -19770,9 +19861,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine("  so the skip rule does not cover them. This is a truedat bug — please report it.");
             }
 
-            if (led.Count == 0) return;
+            int cleared = Interlocked.Exchange(ref _reviewRecordsCleared, 0);
+            if (led.Count == 0 && cleared == 0) return;
             if (SaveReviewLedger(led, ledgerPath, out var err))
             {
+                if (cleared > 0)
+                    Console.WriteLine($"  Review:     {cleared:N0} record(s) cleared — file is now in the catalog");
+                if (led.Count > 0)
                 Console.WriteLine($"  Review:     {led.Count:N0} files not analyzed"
                                   + (led.NeedsReviewCount > 0 ? $", {led.NeedsReviewCount:N0} need review" : "")
                                   + "   (truedat --list-review)");
@@ -22272,10 +22367,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             public string Album = "";
             public string Genre = "";
             public int DurationMs;
+            /// <summary>Why DurationMs is 0, when it is: what TagLib threw, or that it
+            /// parsed the file and still reported no duration. The health gate fails a
+            /// track on DurationMs==0 alone, and until this field existed the ledger could
+            /// only say the word "tags" — a locked file and a header claiming length
+            /// unknown were indistinguishable. Null when a duration was read.</summary>
+            public string? Detail;
         }
 
         /// <summary>Best-effort tag extraction. Defaults on failure — identity signals
-        /// still flow even if tags are unreadable.</summary>
+        /// still flow even if tags are unreadable — but the failure is RECORDED in
+        /// <see cref="FileTags.Detail"/>, never swallowed silently.</summary>
         static FileTags ExtractFileTags(string filePath)
         {
             var m = new FileTags();
@@ -22292,10 +22394,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     m.Album = tag.Album ?? "";
                     m.Genre = tag.FirstGenre ?? "";
                 }
-                if (tfile.Properties != null)
-                    m.DurationMs = (int)tfile.Properties.Duration.TotalMilliseconds;
+                var props = tfile.Properties;
+                if (props != null)
+                    m.DurationMs = (int)props.Duration.TotalMilliseconds;
+                if (m.DurationMs <= 0)
+                    m.Detail = props == null
+                        ? "TagLib parsed the file but returned no audio properties"
+                        : $"TagLib parsed the file but reported duration {props.Duration.TotalMilliseconds:0} ms ({props.Description})";
             }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                m.Detail = $"TagLib threw {ex.GetType().Name}: {ex.Message}";
+            }
             return m;
         }
 

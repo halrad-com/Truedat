@@ -256,6 +256,12 @@ namespace Truedat
             return ReviewState.Review;
         }
 
+        /// <summary>Drop a path's record. The ledger lists what the catalog does NOT hold, so
+        /// once an analysis succeeds and the entry is written, any record for that path is
+        /// stale and must go — otherwise a file that rescanned fine stays in the review list
+        /// forever. Returns false when the path had no record.</summary>
+        internal bool Remove(string path) => _byPath.Remove(path ?? "");
+
         /// <summary>Set an operator state. Returns false when the path has no record.</summary>
         internal bool SetState(string path, ReviewState state)
         {
