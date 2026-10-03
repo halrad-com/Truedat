@@ -155,6 +155,76 @@ try {
     Assert ($listed -notmatch '--retry-errors') '--list-review: does not recommend a retry it cannot honour'
     Assert ($listed -notmatch '--refresh') '--list-review: does not recommend a refresh that cannot help'
 
+    # ── --verify --backfill must consult AND feed the ledger ─────────────────
+    # 461b905 made a record stop the attempt in every SCAN mode, and the commit message,
+    # the changelog and a cross-repo note all said "every mode". Backfill was never wired —
+    # and backfill is the exact case cited as motivating it, because an entry with no
+    # fingerprint.v1 passes the re-extract canary, so the tier-1 cache pins it and backfill
+    # is the ONLY path that can fill it. A file TagLib refuses therefore failed identically
+    # on every pass, forever, re-reading the whole file each time.
+    #
+    # Its own library dir: this drives --verify over a hand-written catalog, and must not
+    # inherit or disturb the --file-list fixtures above.
+    $bfLib = Join-Path $work 'bf'
+    New-Item -ItemType Directory -Path $bfLib | Out-Null
+    $bfBad = Join-Path $bfLib 'garbage.flac'
+    [IO.File]::WriteAllBytes($bfBad, [byte[]](1..8))
+    $bfMoods = Join-Path $bfLib 'mbxmoods.json'
+    $bfLedger = Join-Path $bfLib 'mbxmoods-review.json'
+
+    # Forward slashes in the key on purpose: a backslash needs JSON escaping and getting
+    # that wrong writes a catalog truedat rejects as corrupt. PathComparer normalizes
+    # separators, so the entry still matches the file on disk.
+    $bfKey = ($bfBad -replace '\\', '/')
+    @"
+{
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generatedBy": "rig",
+  "trackCount": 1,
+  "tracks": {
+    "$bfKey": { "bpm": 120.0, "key": "C", "mode": "major", "loudness": -10.0 }
+  }
+}
+"@ | Set-Content -Path $bfMoods -Encoding UTF8
+
+    # Pass 1: the file is unreadable, so verify errors — and RECORDS it. Without the
+    # record there is nothing for pass 2 to consult: a file that only ever fails inside
+    # verify never reaches a scan's failure sites, so nothing else would ever create one.
+    $bf1 = Invoke-Truedat @("--verify", "--backfill", "--moods", $bfMoods)
+    Assert ($bf1 -match 'Errored:\s+1') 'backfill pass 1: the unreadable entry is reported as an error'
+    Assert (Test-Path $bfLedger) 'backfill pass 1: verify --backfill writes the review ledger'
+
+    if (Test-Path $bfLedger) {
+        $bj = Get-Content $bfLedger -Raw | ConvertFrom-Json
+        $bfRec = $bj.records | Where-Object { $_.path -eq $bfBad }
+        Assert ($null -ne $bfRec) 'backfill pass 1: the failing entry has a record'
+        if ($bfRec) {
+            Assert ($bfRec.lastRunMode -eq 'verify-backfill') 'backfill pass 1: the record names the mode that produced it'
+            Assert ($bfRec.disposition -eq 'failed') 'backfill pass 1: an unreadable file is a FAILURE, not a skip'
+            Assert ($bfRec.reason -and $bfRec.reason.Length -gt 0) 'backfill pass 1: the record carries the real reason'
+            Assert ($null -ne ($bfRec.components | Where-Object { $_.name -eq 'sha' })) 'backfill pass 1: the record names the component that failed'
+        }
+    }
+
+    # Pass 2: the record must stop the attempt BEFORE the read. Errored going to 0 is the
+    # load-bearing assertion — it is what proves the file was not re-read. Asserting only
+    # that "Review-skipped" appears would also pass if the gate sat after the sha read,
+    # which is where the first version of this fix put it.
+    $bf2 = Invoke-Truedat @("--verify", "--backfill", "--moods", $bfMoods)
+    Assert ($bf2 -match 'Review-skipped:\s+1') 'backfill pass 2: the record stops the attempt and is reported'
+    Assert ($bf2 -match 'Errored:\s+0') 'backfill pass 2: the file is NOT re-read — the loop is closed'
+
+    $bfCsv = Join-Path $bfLib 'mbxmoods-verify.csv'
+    if (Test-Path $bfCsv) {
+        $bfCsvText = Get-Content $bfCsv -Raw
+        Assert ($bfCsvText -match 'REVIEW_SKIPPED') 'backfill pass 2: the CSV says REVIEW_SKIPPED, never a bare OK'
+    }
+
+    # Read-only verify must still answer the integrity question. A record governs work done
+    # on the operator's behalf; it does not suppress "did these bytes change".
+    $bf3 = Invoke-Truedat @("--verify", "--moods", $bfMoods)
+    Assert ($bf3 -notmatch 'Review-skipped') 'read-only verify: does not consult the ledger — integrity is still checked'
+
     # ── A corrupt ledger must REFUSE, not silently start from empty ──────────
     Set-Content -Path $ledger -Value '{ this is not json' -Encoding UTF8
     $outBad = Invoke-Truedat @("--list-review", $moods)

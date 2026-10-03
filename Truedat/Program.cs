@@ -8060,7 +8060,31 @@ namespace Truedat
                 return 3;
             }
 
-            int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0, backfilled = 0;
+            int ok = 0, drift = 0, missing = 0, noHash = 0, errored = 0, backfilled = 0, reviewSkipped = 0;
+
+            // The review ledger, loaded ONLY under --backfill, because read-only verify
+            // attempts nothing a record could stop: it recomputes a sha to detect drift, which
+            // is the integrity question itself and must still be answered for a file in review.
+            // Backfill is the half that performs work, so it is the half a record governs.
+            string? verifyLedgerPath = null;
+            if (backfill)
+            {
+                verifyLedgerPath = ResolveReviewLedgerPath(
+                    Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".");
+                _runLedger = ReviewLedger.Load(verifyLedgerPath, out var vLedgerErr);
+                if (vLedgerErr != null)
+                {
+                    // Refuse rather than proceed blind: an unreadable ledger means backfill
+                    // cannot tell which entries it already knows are hopeless, so it would
+                    // re-attempt them AND record duplicates over a file it failed to parse.
+                    Console.WriteLine($"REFUSING: the review ledger could not be read: {vLedgerErr}");
+                    Console.WriteLine($"  {verifyLedgerPath}");
+                    Console.WriteLine("Fix or remove it, then re-run. Nothing was written.");
+                    KeepAwakeRelease();
+                    return 1;
+                }
+            }
+
             var details = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
             int done = 0;
@@ -8110,6 +8134,25 @@ namespace Truedat
                     status = "MISSING";
                     Interlocked.Increment(ref missing);
                 }
+                else if (backfill && ReviewSkipReason(path) is string preSkip)
+                {
+                    // Consulted BEFORE any read, and only under --backfill.
+                    //
+                    // This placement is the one that actually closes the loop I set out to fix.
+                    // The file that re-attempts forever is one TagLib refuses outright, and that
+                    // fails at the SHA read above — status ERROR, a full file read spent, before
+                    // the backfill gate inside ApplyBackfill is ever reached. Gating only the
+                    // backfill work would have left the re-read in place and looked fixed.
+                    //
+                    // Read-only --verify deliberately does NOT consult the ledger: it recomputes
+                    // a hash to answer "did the bytes change", which is the integrity question
+                    // itself and stays worth answering for a file in review. Backfill is the half
+                    // that performs work on the operator's behalf, so it is the half a decision
+                    // governs.
+                    status = "REVIEW_SKIPPED";
+                    detail = preSkip;
+                    Interlocked.Increment(ref reviewSkipped);
+                }
                 else
                 {
                     try
@@ -8121,6 +8164,16 @@ namespace Truedat
                             status = "ERROR";
                             detail = err ?? "hash compute failed";
                             Interlocked.Increment(ref errored);
+                            // Record it, under backfill only. Without this there is nothing for
+                            // the pre-read consult above to find: a file that only ever fails
+                            // HERE never reaches a scan's failure sites, so no record is ever
+                            // created and every backfill pass re-reads it in full. Recording is
+                            // what converts "fails identically forever" into "skipped, with a
+                            // reason, clearable". The retry ladder has already ruled out a
+                            // transient lock, and a vanished volume aborts the run before this.
+                            if (backfill)
+                                RecordReviewFailure(path, err ?? "hash compute failed",
+                                    fileSize / 1048576.0, 0, "sha", "verify-backfill");
                         }
                         else if (string.IsNullOrEmpty(entry.AudioStreamSha256))
                         {
@@ -8131,9 +8184,15 @@ namespace Truedat
                                 entry.AudioStreamSha256 = recomputed;
                                 entry.AudioStreamSha256Source = recomputedSource;
                                 filled.Add("audioStreamSha256");
-                                ApplyBackfill(path, fileSize, entry, level, filled);
+                                // The sha is already computed and proven from the bytes, so it
+                                // is kept even when the ledger stops the rest: it cost nothing
+                                // extra and it is not what the record is about.
+                                var skipA = ApplyBackfill(path, fileSize, entry, level, filled);
+                                if (skipA != null) Interlocked.Increment(ref reviewSkipped);
                                 status = "BACKFILLED";
-                                detail = string.Join("|", filled);
+                                detail = skipA != null
+                                    ? string.Join("|", filled) + $"|review-skipped: {skipA}"
+                                    : string.Join("|", filled);
                                 Interlocked.Increment(ref backfilled);
                             }
                             else
@@ -8161,12 +8220,22 @@ namespace Truedat
                                         entry.AudioStreamSha256Source = recomputedSource;
                                         filled.Add("audioStreamSha256-upgraded");
                                     }
-                                    ApplyBackfill(path, fileSize, entry, level, filled);
+                                    var skipB = ApplyBackfill(path, fileSize, entry, level, filled);
                                     if (filled.Count > 0)
                                     {
                                         status = "BACKFILLED";
                                         detail = string.Join("|", filled);
                                         Interlocked.Increment(ref backfilled);
+                                    }
+                                    else if (skipB != null)
+                                    {
+                                        // NOT "OK": the entry's gaps are still gaps. Reporting
+                                        // OK here would make a skipped entry indistinguishable
+                                        // from a complete one, which is how a ledger entry
+                                        // becomes invisible.
+                                        status = "REVIEW_SKIPPED";
+                                        detail = skipB;
+                                        Interlocked.Increment(ref reviewSkipped);
                                     }
                                     else
                                     {
@@ -8201,9 +8270,14 @@ namespace Truedat
                                     entry.AudioStreamSha256Source = recomputedSource;
                                     entry.FingerprintV1 = freshFp;
                                     filled.Add("audioStreamSha256-accepted-tag-drift");
-                                    ApplyBackfill(path, fileSize, entry, level, filled);
+                                    // Same as Tier A: the operator-accepted re-key stands, the
+                                    // ledger only stops the further attempts.
+                                    var skipC = ApplyBackfill(path, fileSize, entry, level, filled);
+                                    if (skipC != null) Interlocked.Increment(ref reviewSkipped);
                                     status = "BACKFILLED";
-                                    detail = string.Join("|", filled);
+                                    detail = skipC != null
+                                        ? string.Join("|", filled) + $"|review-skipped: {skipC}"
+                                        : string.Join("|", filled);
                                     Interlocked.Increment(ref backfilled);
                                 }
                                 else
@@ -8260,6 +8334,10 @@ namespace Truedat
                 Console.WriteLine(chunkTotal > 0
                     ? $"Re-run this shard (--chunk {chunkIndex}/{chunkTotal}) once the library is back."
                     : "Re-run once the library is back.");
+                // The ledger is dropped unwritten along with everything else. A fingerprint that
+                // "failed" because the share vanished is not a file to stop attempting, and
+                // recording it would turn one network blip into permanent skips.
+                _runLedger = null;
                 return 3;
             }
 
@@ -8280,6 +8358,10 @@ namespace Truedat
                     return 1;
                 }
             }
+            // After the catalog save, so a record is only persisted for a run whose result
+            // actually stands. Writes even at zero records, because clearing can empty the
+            // ledger and skipping that write is what keeps a stale record on disk.
+            if (verifyLedgerPath != null) FlushRunLedger(verifyLedgerPath);
             KeepAwakeRelease();   // walk + save are over; nothing left to hold awake for
 
             // Per-shard CSV: a completed shard must be durably done and must not be overwritten
@@ -8369,6 +8451,9 @@ namespace Truedat
             Console.WriteLine($"  OK:                {ok}");
             if (backfill)
                 Console.WriteLine($"  Backfilled:        {backfilled}");
+            if (backfill && reviewSkipped > 0)
+                Console.WriteLine($"  Review-skipped:    {reviewSkipped}"
+                                  + $"   (a record stopped the attempt — see {ReviewLedger.FileName})");
             Console.WriteLine($"  {(backfill ? "Reanalyze needed:" : "Drift:           ")}  {drift}");
             Console.WriteLine($"  Missing:           {missing}");
             if (!backfill)
@@ -8477,13 +8562,28 @@ namespace Truedat
         /// tiers run; All (default) does both. Caller must have already SHA-validated
         /// that audio bytes match before invoking — backfill MUST NOT touch entries
         /// whose audio drifted.</summary>
-        static void ApplyBackfill(string path, long fileSize, TrackEntry entry, BackfillLevel level, List<string> filled)
+        /// <summary>
+        /// Returns the reason this entry was NOT attempted, or null when backfill ran.
+        ///
+        /// The ledger check is INSIDE here, not at the three call sites, for the same reason
+        /// --no-smfm is guarded inside ApplySmfmInPlace: a call site added later cannot forget
+        /// it. 461b905 made a review record stop the attempt in every SCAN mode and I claimed
+        /// "every mode" — backfill was never wired, and backfill is the exact case I cited as
+        /// motivating it, because Tier B re-attempts a TagLib read on a file TagLib already
+        /// refused, every single run, forever.
+        /// </summary>
+        static string? ApplyBackfill(string path, long fileSize, TrackEntry entry, BackfillLevel level, List<string> filled)
         {
+            var skip = ReviewSkipReason(path);
+            if (skip != null) return skip;
+
             if (level != BackfillLevel.Features)
                 ApplyBackfillIdentity(path, fileSize, entry, filled);
 
             if (level != BackfillLevel.Identity)
                 ApplyBackfillFeatures(path, entry, filled);
+
+            return null;
         }
 
         /// <summary>Identity-tier backfill (Tier A fileMd5, Tier B whole fingerprint.v1,
@@ -8506,14 +8606,22 @@ namespace Truedat
             // Tier B — whole fingerprint.v1 missing (legacy entries)
             if (entry.FingerprintV1 == null)
             {
-                var fp = ComputeFingerprintV1(path, fileSize, path, out _);
+                var fp = ComputeFingerprintV1(path, fileSize, path, out var fpErr);
                 if (fp != null)
                 {
                     entry.FingerprintV1 = fp;
                     filled.Add("fingerprint.v1");
                     return;  // a fresh fingerprint already includes every IdentityField — Tier C is moot
                 }
-                // ComputeFingerprintV1 failed (rare — corrupt tags). Nothing more to backfill.
+                // The failure is RECORDED, not discarded. This read is the one that loops: an
+                // entry with no fingerprint.v1 passes the re-extract canary, so the tier-1 cache
+                // pins it and backfill is the only path that can fill it — and a file TagLib
+                // refuses fails here on every run, identically, forever. The error used to go to
+                // `out _`. A record is what makes the next run skip it (the retry ladder above
+                // has already ruled out a transient lock by the time we get here), and it is
+                // reviewable and clearable rather than silent.
+                RecordReviewFailure(path, fpErr ?? "fingerprint read failed", fileSize / 1048576.0,
+                    0, "fingerprint", "verify-backfill");
                 return;
             }
 
