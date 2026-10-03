@@ -12,6 +12,24 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Fixed
 
+- **`fingerprint.v1.pathTail` recorded the staging copy, not the track.** Any scan of a
+  library over a UNC path, a mapped network drive, or a non-ASCII local path wrote the temp
+  copy's name (`temp\.truedat-stage\<guid>.flac`) as the track's path witness — 1,367 of
+  72,477 entries in one catalog. `--migrate` re-derives the tail from each entry's own key:
+  catalog-only, no library XML, no file access, ~30 s on a 262 MB catalog. `--fixup` repairs
+  it too, after reconciliation.
+- **A locked fingerprint read gets retried instead of losing the track.** The sha and tags
+  reads retry a sharing violation; the fingerprint read, opened the same way in the same
+  fan-out, did not — so the same lock still cost the track its catalog entry. Same ladder,
+  same rules, and the end-of-scan report counts recovered and still-locked fingerprint reads
+  separately from the other two.
+- **`--verify --backfill` honours the review ledger.** A record stopped the attempt in every
+  scan mode but not in backfill, which is the one path that can fill a legacy entry's missing
+  `fingerprint.v1` — so a file TagLib refuses was re-read in full on every pass, forever. The
+  ledger is now consulted before any read, and a failure inside backfill is recorded so the
+  next pass skips it with a reason. Read-only `--verify` still checks every entry: a record
+  governs work, not the integrity question. Skipped entries report `REVIEW_SKIPPED`, never
+  `OK`.
 - **A locked tags read gets retried instead of losing the track.** The sha read already
   retried a sharing violation; the tags read did not, and an empty tags result fails the
   health gate and writes no catalog entry — reported as `analysis incomplete: tags`. Up to
