@@ -6146,6 +6146,12 @@ namespace Truedat
             if (_shaReadsGaveUp > 0)
                 Console.WriteLine($"  Contention: {_shaReadsGaveUp:N0} file(s) still locked after retries"
                                   + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
+            if (_tagReadsRecovered > 0)
+                Console.WriteLine($"  Contention: {_tagReadsRecovered:N0} file(s) recovered their TAGS by retry"
+                                  + "   (tracks that would otherwise have lost their catalog entry)");
+            if (_tagReadsGaveUp > 0)
+                Console.WriteLine($"  Contention: {_tagReadsGaveUp:N0} file(s) tags still locked after retries"
+                                  + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
             FlushRunLedger(runLedgerPath);
             PruneErrorsCsv(errorsPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
@@ -17526,6 +17532,65 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     _shaReadsRecovered = rec0; _shaReadsGaveUp = gave0;
                 }
 
+                // Tags carry the same ladder as sha. The staged-open gate proves the copy
+                // openable ONCE, which does not cover a holder arriving mid-fan-out, and a
+                // lost tags read fails the health gate and costs the whole catalog entry.
+                // TagLib opens the stream inside its own constructors, so the win32 code can
+                // arrive wrapped — these assertions fail if the ladder stops reaching it.
+                {
+                    var probe = Path.Combine(Path.GetTempPath(), "truedat-tagslock-" + Guid.NewGuid().ToString("N") + ".flac");
+                    File.WriteAllBytes(probe, new byte[] { 1, 2, 3, 4 });
+                    int rec0 = _tagReadsRecovered, gave0 = _tagReadsGaveUp;
+                    var swLock = Stopwatch.StartNew();
+                    FileTags held;
+                    using (var hold = new FileStream(probe, FileMode.Open, FileAccess.Read, FileShare.None))
+                        held = ExtractFileTags(probe);
+                    swLock.Stop();
+                    try { File.Delete(probe); } catch { }
+                    Assert(held.DurationMs == 0, "tags-retry: an exclusively-held file still yields no duration");
+                    Assert(held.Detail != null && held.Detail.Contains("stayed locked through " + SharedReadRetries + " retries"),
+                        "tags-retry: a give-up names the lock and the retry count, not the bare word 'tags'");
+                    Assert(_tagReadsGaveUp - gave0 == 1,
+                        "tags-retry: a locked file counts ONE give-up, not one per attempt");
+                    Assert(_tagReadsRecovered - rec0 == 0,
+                        "tags-retry: a give-up never counts as a recovery");
+                    Assert(swLock.ElapsedMilliseconds >= SharedReadRetries * SharedReadRetryMs,
+                        "tags-retry: the ladder waited between attempts (it ran, it did not fall straight through)");
+                    _tagReadsRecovered = rec0; _tagReadsGaveUp = gave0;
+                }
+
+                // The other half of the gate: a failure that can never succeed must cost
+                // nothing. A missing file is not a lock, so it returns on the first attempt.
+                {
+                    int rec0 = _tagReadsRecovered, gave0 = _tagReadsGaveUp;
+                    var swGone = Stopwatch.StartNew();
+                    var gone = ExtractFileTags(Path.Combine(Path.GetTempPath(),
+                        "truedat-absent-" + Guid.NewGuid().ToString("N") + ".flac"));
+                    swGone.Stop();
+                    Assert(gone.Detail != null && !gone.Detail.Contains("stayed locked"),
+                        "tags-retry: a missing file reports its own error, never a lock");
+                    Assert(swGone.ElapsedMilliseconds < SharedReadRetryMs,
+                        "tags-retry: a non-lock failure is NOT retried — no ladder delay");
+                    Assert(_tagReadsGaveUp - gave0 == 0 && _tagReadsRecovered - rec0 == 0,
+                        "tags-retry: an unretried failure touches neither counter");
+                    _tagReadsRecovered = rec0; _tagReadsGaveUp = gave0;
+                }
+
+                // The chain walk is the load-bearing half for a wrapping reader: the same
+                // win32 code one level down must still read as retryable, and a wrapper with
+                // no violation anywhere in it must not.
+                {
+                    var lockIo = new IOException("locked", unchecked((int)0x80070020));
+                    Assert(IsSharingViolationChain(new TagLib.CorruptFileException("wrapped")) == false,
+                        "tags-retry: a wrapper with no violation in the chain is not retried");
+                    Assert(IsSharingViolationChain(new InvalidOperationException("outer", lockIo)),
+                        "tags-retry: a violation one level down is still a lock");
+                    Assert(IsSharingViolationChain(lockIo),
+                        "tags-retry: a violation at the top is still a lock");
+                    Assert(!IsSharingViolationChain(null),
+                        "tags-retry: no exception is not a lock");
+                }
+
                 // Every settable key must say what it does untouched. --config enumerated
                 // keys and nothing else for a while, so "every flag uses its built-in
                 // default" named a state the screen then declined to show. A key added
@@ -22375,11 +22440,68 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             public string? Detail;
         }
 
-        /// <summary>Best-effort tag extraction. Defaults on failure — identity signals
-        /// still flow even if tags are unreadable — but the failure is RECORDED in
-        /// <see cref="FileTags.Detail"/>, never swallowed silently.</summary>
+        /// <summary>Best-effort tag extraction, retrying a sharing violation on the same
+        /// ladder as the sha read (<see cref="SharedReadRetries"/>). Defaults on failure —
+        /// identity signals still flow even if tags are unreadable — but the failure is
+        /// RECORDED in <see cref="FileTags.Detail"/>, never swallowed silently.
+        ///
+        /// <see cref="TryOpenStagedWithRetry"/> proves the staged copy openable ONCE before
+        /// the fan-out starts, which is why no reader needed its own ladder for the COPY
+        /// window. It cannot cover a holder that arrives DURING the fan-out — a scan-on-close
+        /// AV reaching the file while eight readers are on it — and it does not run at all on
+        /// a path that was never staged (local ASCII, or --no-stage). The sha read has carried
+        /// its own ladder for that window; tags is the other in-process reader, and the only
+        /// one whose empty result fails the health gate and costs the track its whole catalog
+        /// entry, so it carries the same one. The review row that prompted this read
+        /// `analysis incomplete: tags` — tags alone — while the fingerprint, a TagLib read of
+        /// the same path in the same fan-out, succeeded.
+        ///
+        /// Keyed on the LOCK, never on failure generally: a parse that SUCCEEDS and still
+        /// reports no duration is deterministic, and a missing or access-denied file will
+        /// never succeed — retrying those burns four opens per file to reach the same answer,
+        /// which is the mistake the staged ladder explicitly avoided.</summary>
         static FileTags ExtractFileTags(string filePath)
         {
+            int retried = 0;
+            for (int attempt = 0; ; attempt++)
+            {
+                var tags = ExtractFileTagsOnce(filePath, out var failure);
+                bool ok = tags.Detail == null;
+                bool locked = !ok && failure != null && IsSharingViolationChain(failure);
+                if (ok || !locked || attempt >= SharedReadRetries)
+                {
+                    if (retried > 0)
+                    {
+                        RecordTagsRetryOutcome(ok);
+                        if (locked)
+                            tags.Detail = $"stayed locked through {retried} retr{(retried == 1 ? "y" : "ies")}: {tags.Detail}";
+                    }
+                    return tags;
+                }
+                retried++;
+                System.Threading.Thread.Sleep(SharedReadRetryMs);
+            }
+        }
+
+        /// <summary>A sharing violation anywhere in the exception chain. TagLib is a WRAPPING
+        /// reader — it opens the stream inside its own format constructors, so the win32 code
+        /// can arrive as an InnerException rather than at the top. <see cref="IsSharingViolation"/>
+        /// alone would classify such a lock as permanent and skip the retry, making the ladder
+        /// silently inert; the sha path reads the stream itself and never needed this.
+        /// Depth-bounded so a self-referential chain cannot spin.</summary>
+        internal static bool IsSharingViolationChain(Exception? ex)
+        {
+            for (int depth = 0; ex != null && depth < 8; depth++, ex = ex.InnerException)
+                if (IsSharingViolation(ex)) return true;
+            return false;
+        }
+
+        /// <summary>One tag-read attempt. Hands back the exception so the caller's ladder can
+        /// classify a lock by win32 code; null when the read did not throw — including the
+        /// parsed-but-no-duration case, which is deterministic and must not be retried.</summary>
+        static FileTags ExtractFileTagsOnce(string filePath, out Exception? failure)
+        {
+            failure = null;
             var m = new FileTags();
             try
             {
@@ -22404,6 +22526,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             catch (Exception ex)
             {
+                failure = ex;
                 m.Detail = $"TagLib threw {ex.GetType().Name}: {ex.Message}";
             }
             return m;
@@ -22753,6 +22876,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (recovered) Interlocked.Increment(ref _shaReadsRecovered);
             else Interlocked.Increment(ref _shaReadsGaveUp);
+        }
+
+        /// <summary>FILES whose tag read came back only because of a retry, and files whose
+        /// tags stayed locked through every retry. Kept apart from the sha counters because
+        /// they are separate reads with separate outcomes — one file can recover its sha and
+        /// still lose its tags, and a single pair of counters would hide which read is
+        /// contended.</summary>
+        static int _tagReadsRecovered;
+        static int _tagReadsGaveUp;
+
+        /// <summary>Records one retried tag read. Same recovered-vs-gave-up split as
+        /// <see cref="RecordShaRetryOutcome"/>, and for the same reason: a recovery kept the
+        /// catalog entry, a give-up cost it.</summary>
+        internal static void RecordTagsRetryOutcome(bool recovered)
+        {
+            if (recovered) Interlocked.Increment(ref _tagReadsRecovered);
+            else Interlocked.Increment(ref _tagReadsGaveUp);
         }
 
         static (string? hash, string source) ComputeAudioStreamSha256Resilient(
