@@ -3739,7 +3739,7 @@ namespace Truedat
                             FingerprintV1? afQuickFp = null;
                             if (_quickCache && afEx.FingerprintV1 != null)
                             {
-                                afQuickFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, out _);
+                                afQuickFp = ComputeFingerprintV1(analyzeFilePath!, afFileSize, analyzeFilePath!, out _);
                                 if (afQuickFp != null && IsTagsOnlyChange(afQuickFp, afEx.FingerprintV1))
                                 {
                                     var freshTags = ExtractFileTags(analyzeFilePath!);
@@ -3767,7 +3767,7 @@ namespace Truedat
                                 if (afShaHit || afLegacyHit)
                                 {
                                     var refreshedMd5 = afHashes.md5;
-                                    var refreshedFp = afQuickFp ?? ComputeFingerprintV1(afStagedPath, afFileSize, out _);
+                                    var refreshedFp = afQuickFp ?? ComputeFingerprintV1(afStagedPath, afFileSize, analyzeFilePath!, out _);
                                     var freshTags = ExtractFileTags(afStagedPath);
                                     trackEntry = afLegacyHit
                                         ? RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
@@ -3798,7 +3798,7 @@ namespace Truedat
                             && HasCurrentFeatures(xs.Entry!.Features))
                         {
                             var refreshedMd5 = afXHashes.md5;
-                            var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, out _);
+                            var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, analyzeFilePath!, out _);
                             var freshTags = ExtractFileTags(afStagedPath);
                             trackEntry = afXLegacyHit
                                 ? RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
@@ -4031,7 +4031,7 @@ namespace Truedat
                     try
                     {
                         var fi = hoStat;
-                        var fpV1 = ComputeFingerprintV1(filePath, fi.Length, out var fpErr);
+                        var fpV1 = ComputeFingerprintV1(filePath, fi.Length, filePath, out var fpErr);
                         if (fpV1 == null)
                         {
                             Interlocked.Increment(ref hoFailed);
@@ -4475,7 +4475,7 @@ namespace Truedat
                                 FingerprintV1? flQuickFp = null;
                                 if (_quickCache && fEx.FingerprintV1 != null)
                                 {
-                                    flQuickFp = ComputeFingerprintV1(filePath, flFileSize, out _);
+                                    flQuickFp = ComputeFingerprintV1(filePath, flFileSize, filePath, out _);
                                     if (flQuickFp != null && IsTagsOnlyChange(flQuickFp, fEx.FingerprintV1))
                                     {
                                         var freshTags = ExtractFileTags(filePath);
@@ -4508,7 +4508,7 @@ namespace Truedat
                                     if (flShaHit || flLegacyHit)
                                     {
                                         var refreshedMd5 = flHashes.md5;
-                                        var refreshedFp = flQuickFp ?? ComputeFingerprintV1(flStagedPath, flFileSize, out _);
+                                        var refreshedFp = flQuickFp ?? ComputeFingerprintV1(flStagedPath, flFileSize, filePath, out _);
                                         var freshTags = ExtractFileTags(flStagedPath);
                                         var flShaPathEntry = flLegacyHit
                                             ? RebuildCacheEntryFromTags(
@@ -4544,7 +4544,7 @@ namespace Truedat
                                     && HasCurrentFeatures(xs.Entry!.Features))
                                 {
                                     var refreshedMd5 = flXHashes.md5;
-                                    var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, out _);
+                                    var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, filePath, out _);
                                     var freshTags = ExtractFileTags(flStagedPath);
                                     var flCrossShaEntry = flXLegacyHit
                                         ? RebuildCacheEntryFromTags(
@@ -5579,7 +5579,7 @@ namespace Truedat
                                             try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                                         if (msSourceSize > 0)
                                         {
-                                            msQuickFp = ComputeFingerprintV1(scanPath, msSourceSize, out _);
+                                            msQuickFp = ComputeFingerprintV1(scanPath, msSourceSize, t.Location, out _);
                                             if (msQuickFp != null && IsTagsOnlyChange(msQuickFp, existing.FingerprintV1))
                                             {
                                                 var headEntry = RebuildCacheEntry(existing, t, currentLastMod, null, msQuickFp);
@@ -5624,7 +5624,7 @@ namespace Truedat
                                                 // fileMd5 + fingerprint.v1 (both tag-affected),
                                                 // reuse everything else.
                                                 var refreshedMd5 = bodyHashes.md5;
-                                                var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
+                                                var refreshedFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, t.Location, out _);
                                                 var shaPathEntry = legacyHit
                                                     ? RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
                                                     : RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
@@ -5655,7 +5655,7 @@ namespace Truedat
                                                 && existing.FingerprintV1 != null
                                                 && !string.IsNullOrEmpty(recomputedSha))
                                             {
-                                                var rescueFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
+                                                var rescueFp = msQuickFp ?? ComputeFingerprintV1(msStagedPath, msSourceSize, t.Location, out _);
                                                 var storedFp = existing.FingerprintV1;
                                                 bool propsOk = rescueFp != null
                                                     && rescueFp.Codec == storedFp.Codec
@@ -5717,7 +5717,7 @@ namespace Truedat
                                         // Audio bytes match; fingerprint.v1 is tag-affected —
                                         // recompute it, reuse Essentia features.
                                         var refreshedMd5 = crossHashes.md5;
-                                        var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, out _);
+                                        var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, t.Location, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
                                         var crossShaEntry = crossLegacyHit
@@ -7353,6 +7353,15 @@ namespace Truedat
             Console.WriteLine($"Reconciled {reconciled:N0} entries"
                               + $"   ({timing.Mark("reconcile", phase)}, {reconcileRate})");
 
+            // pathTail repair — AFTER reconciliation, deliberately: a remapped entry must get
+            // the tail of the key it ended up under, not the one it arrived with. Keying the
+            // repair off the final dictionary is also the only placement that cannot disagree
+            // with the key actually written, which is the property the field lost in the first
+            // place. Costs no IO, so it runs even with the audio volume offline.
+            int retailed = 0;
+            foreach (var kv in newTracks)
+                if (kv.Value is JsonObject tailObj && RepairPathTail(tailObj, kv.Key)) retailed++;
+
             var moodPaths = new HashSet<string>(newTracks.Select(kv => kv.Key), PathComparer.Instance);
             int unanalyzed = library.Count(t => !moodPaths.Contains(t.Location));
 
@@ -7366,6 +7375,7 @@ namespace Truedat
             Console.WriteLine($"  Total out:   {newTracks.Count}");
             if (strippedEntries > 0) Console.WriteLine($"  Stripped:    {strippedEntries} (excluded field removed, e.g. bpmHistogram)");
             if (reflattened > 0) Console.WriteLine($"  Reflattened: {reflattened} (spectralFlatness re-derived from stored bands)");
+            if (retailed > 0) Console.WriteLine($"  Retailed:    {retailed} (fingerprint.v1.pathTail re-derived from the catalog key)");
 
             if (orphanedEntries.Count > 0 && orphanedEntries.Count <= 20)
             {
@@ -7398,7 +7408,7 @@ namespace Truedat
                 return;
             }
 
-            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0 || reflattened > 0)
+            if (remapped > 0 || orphaned > 0 || resolvedByHash > 0 || strippedEntries > 0 || reflattened > 0 || retailed > 0)
             {
                 // The write tail is timed separately from the reconcile because they fail and
                 // slow down for unrelated reasons: compressing ~900 MB is CPU, the swap and the
@@ -8171,7 +8181,7 @@ namespace Truedat
                                 // scan — neither compare can succeed because the stored hash
                                 // covered metadata bytes that no longer exist. Operator-accepted
                                 // re-key: audio props must still match the stored fingerprint.
-                                var freshFp = ComputeFingerprintV1(path, fileSize, out _);
+                                var freshFp = ComputeFingerprintV1(path, fileSize, path, out _);
                                 var storedFp = entry.FingerprintV1;
                                 bool propsOk = freshFp != null && storedFp != null
                                     && freshFp.Codec == storedFp.Codec
@@ -8490,7 +8500,7 @@ namespace Truedat
             // Tier B — whole fingerprint.v1 missing (legacy entries)
             if (entry.FingerprintV1 == null)
             {
-                var fp = ComputeFingerprintV1(path, fileSize, out _);
+                var fp = ComputeFingerprintV1(path, fileSize, path, out _);
                 if (fp != null)
                 {
                     entry.FingerprintV1 = fp;
@@ -8832,7 +8842,8 @@ namespace Truedat
         static void RunMigrate(string moodsPath)
         {
             Console.WriteLine("=== Migrate Mode ===");
-            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*)");
+            Console.WriteLine("Cleans up mbxmoods.json: strips legacy fields (valence/arousal, audioMd5, chromaprint), renames SMFM keys (sensme*->smfm*),");
+            Console.WriteLine("re-derives fingerprint.v1.pathTail from each entry's key. Catalog-only — no library XML, no file access.");
             if (!_fileMd5Enabled)
                 Console.WriteLine("Also strips fileMd5 (nothing consumes it; pass --file-md5 to keep it)");
             Console.WriteLine();
@@ -8853,11 +8864,17 @@ namespace Truedat
             timing.Mark("load catalog", phase);
             timing.Note("entries in", $"{tracks.Count:N0}");
 
-            int stripped = 0, renamed = 0, md5Stripped = 0, legacyStripped = 0, total = tracks.Count;
+            int stripped = 0, renamed = 0, md5Stripped = 0, legacyStripped = 0, retailed = 0, total = tracks.Count;
             foreach (var kv in tracks)
             {
                 var trackData = kv.Value?.AsObject();
                 if (trackData == null) continue;
+                // pathTail repair. Belongs HERE rather than only in --fixup: the tail is
+                // derivable from the entry's own key, so the mood file is sufficient — and
+                // --fixup needs the library XML and refuses when a library root is
+                // unreachable, which is exactly the metadata-mirror box you would repair a
+                // catalog from. No filesystem access, no re-analysis, no XML.
+                if (RepairPathTail(trackData, kv.Key)) retailed++;
                 bool va = false;
                 if (trackData.Remove("valence")) va = true;
                 if (trackData.Remove("arousal")) va = true;
@@ -8886,8 +8903,10 @@ namespace Truedat
                 Console.WriteLine($"Stripped fileMd5 from: {md5Stripped}");
             if (legacyStripped > 0)
                 Console.WriteLine($"Stripped audioMd5/chromaprint from: {legacyStripped}");
+            if (retailed > 0)
+                Console.WriteLine($"Re-derived fingerprint.v1.pathTail on: {retailed}");
 
-            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0)
+            if (stripped == 0 && renamed == 0 && md5Stripped == 0 && legacyStripped == 0 && retailed == 0)
             {
                 Console.WriteLine();
                 Console.WriteLine("Nothing to migrate.");
@@ -10481,15 +10500,23 @@ namespace Truedat
         internal sealed class SourceHandle : IDisposable
         {
             public string Path { get; }
+            /// <summary>The path the handle was opened FROM — the track's real location.
+            /// Equal to <see cref="Path"/> on a direct open, the original when a copy was
+            /// staged. Anything that NAMES the track (pathTail, a catalog key, a report row)
+            /// must read this; only byte reads may use <see cref="Path"/>. The handle is the
+            /// one place that knows both, which is why the distinction lives here rather
+            /// than being re-derived by each caller.</summary>
+            public string SourcePath { get; }
             public string Method { get; }    // "direct" | "hardlink" | "staged" | "staged-fallback"
             public long StageMs { get; }
             public long StageBytes { get; }
             public DateTime SourceLastWriteUtc { get; }
             private readonly string? _toDelete;
 
-            public SourceHandle(string path, string method, long stageMs, long stageBytes, string? toDelete, DateTime sourceLastWriteUtc)
+            public SourceHandle(string path, string sourcePath, string method, long stageMs, long stageBytes, string? toDelete, DateTime sourceLastWriteUtc)
             {
                 Path = path;
+                SourcePath = sourcePath;
                 Method = method;
                 StageMs = stageMs;
                 StageBytes = stageBytes;
@@ -10756,7 +10783,7 @@ namespace Truedat
             if (opts.NoStage)
             {
                 try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
-                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
+                return new SourceHandle(sourcePath, sourcePath, "direct", 0, 0, null, mtime);
             }
 
             // Pass-through #2: purely local ASCII path — nothing to gain.
@@ -10768,7 +10795,7 @@ namespace Truedat
             if (!shouldStage)
             {
                 try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
-                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
+                return new SourceHandle(sourcePath, sourcePath, "direct", 0, 0, null, mtime);
             }
 
             // Otherwise: stage. The staged filename is GUID-based so the staged
@@ -10824,7 +10851,7 @@ namespace Truedat
                 Interlocked.Add(ref _stageBytesTotal, bytes);
                 long f; do { f = Volatile.Read(ref _stageFirstStamp); if (f != 0 && copyStart >= f) break; } while (Interlocked.CompareExchange(ref _stageFirstStamp, copyStart, f) != f);
                 long l; do { l = Volatile.Read(ref _stageLastStamp); if (copyEnd <= l) break; } while (Interlocked.CompareExchange(ref _stageLastStamp, copyEnd, l) != l);
-                return new SourceHandle(dest, method, sw.ElapsedMilliseconds, bytes, dest, mtime);
+                return new SourceHandle(dest, sourcePath, method, sw.ElapsedMilliseconds, bytes, dest, mtime);
             }
             catch (Exception ex)
             {
@@ -10833,7 +10860,7 @@ namespace Truedat
                 try { if (dest.Length > 0) File.Delete(dest); } catch { }
                 try { mtime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
                 Interlocked.Increment(ref _stageFallbackCount);
-                return new SourceHandle(sourcePath, "direct", 0, 0, null, mtime);
+                return new SourceHandle(sourcePath, sourcePath, "direct", 0, 0, null, mtime);
             }
         }
 
@@ -12786,6 +12813,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             (string? md5, string? sha, string? leg, string src)? precomputedHashes = null)
         {
             string readPath = src.Path;
+            // The handle knows both; only byte reads may use readPath. Anything that NAMES
+            // the track reads SourcePath — a staged copy's temp name must never be recorded.
+            string identityPath = src.SourcePath;
             string auditName = Path.GetFileName(auditDisplayPath);
             var analyzeStart = Stopwatch.GetTimestamp();
 
@@ -12796,7 +12826,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var fingerprintTask = Task.Run(() =>
             {
                 var swFp = Stopwatch.StartNew();
-                var fp = ComputeFingerprintV1(readPath, fileSize, out var fpErr);
+                var fp = ComputeFingerprintV1(readPath, fileSize, identityPath, out var fpErr);
                 swFp.Stop();
                 if (_audit)
                     Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{auditName}\"");
@@ -18598,6 +18628,62 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(SafeDbl(realNode, "spectralFlatness") == 0.4062, "repair: real value survives untouched");
             }
 
+            // --- fingerprint.v1.pathTail: the tail NAMES the track -----------------------------
+            // The staged-copy bug (353919d .. 2026-10-02) wrote the temp copy's name here on
+            // every UNC / mapped-drive / non-ASCII scan. NOTHING caught it for ~4 months because
+            // every fingerprint test passes ONE path, so read-path and identity-path are the same
+            // string by construction and the only broken configuration was never built. These
+            // asserts build it: a tail that disagrees with its key, and a handle whose read path
+            // differs from its source path.
+            {
+                const string key = @"\\nas\music\Miles Davis\Kind of Blue\01 So What.flac";
+                var staged = JsonNode.Parse(
+                    "{\"fingerprint.v1\":{\"fileSize\":123,\"pathTail\":" +
+                    "\"temp\\\\.truedat-stage\\\\f055286b96124bc18bf0ba99b843e8b1.flac\"}}")!.AsObject();
+                Assert(RepairPathTail(staged, key), "pathTail: a staged temp tail is reported as repaired");
+                var fixedTail = staged["fingerprint.v1"]!.AsObject()["pathTail"]!.GetValue<string>();
+                // Exact value, not a negative "no longer contains truedat-stage" — a wrong-but-
+                // different tail would pass that and still be wrong.
+                Assert(fixedTail == @"miles davis\kind of blue\01 so what.flac",
+                    $"pathTail: re-derived from the catalog key (got \"{fixedTail}\")");
+                Assert(!RepairPathTail(staged, key), "pathTail: idempotent — a second pass changes nothing");
+
+                // Derived-not-asserted: the repair must not depend on recognizing the stage dir.
+                var unrelated = JsonNode.Parse("{\"fingerprint.v1\":{\"pathTail\":\"who\\\\knows\\\\x.flac\"}}")!.AsObject();
+                Assert(RepairPathTail(unrelated, key), "pathTail: ANY tail disagreeing with the key is corrected");
+
+                var already = JsonNode.Parse(
+                    "{\"fingerprint.v1\":{\"pathTail\":\"miles davis\\\\kind of blue\\\\01 so what.flac\"}}")!.AsObject();
+                Assert(!RepairPathTail(already, key), "pathTail: a correct tail is left alone");
+
+                var noBlock = JsonNode.Parse("{\"bpm\":120}")!.AsObject();
+                Assert(!RepairPathTail(noBlock, key), "pathTail: no fingerprint.v1 block -> no change, no block invented");
+                Assert(noBlock["fingerprint.v1"] == null, "pathTail: repair never creates the block");
+
+                // A non-string node must not throw mid-catalog — one bad entry cannot abort a
+                // 72k-entry repair pass.
+                var wrongType = JsonNode.Parse("{\"fingerprint.v1\":{\"pathTail\":42}}")!.AsObject();
+                Assert(RepairPathTail(wrongType, key), "pathTail: a non-string tail is replaced, not thrown on");
+
+                // A drive root is the degenerate key: ComputePathTail needs >= 2 segments, and
+                // @"C:\" yields one. (@"C:\single" yields TWO — "c:\single" — so it is NOT the
+                // too-few case; my first version of this assert got that wrong and the suite
+                // caught it, which is the point of pinning the exact boundary.)
+                var tooFew = JsonNode.Parse("{\"fingerprint.v1\":{\"pathTail\":\"a\\\\b\\\\c.flac\"}}")!.AsObject();
+                Assert(!RepairPathTail(tooFew, @"C:\"),
+                    "pathTail: a key with too few segments derives nothing, so nothing is written");
+                Assert(tooFew["fingerprint.v1"]!.AsObject()["pathTail"]!.GetValue<string>() == @"a\b\c.flac",
+                    "pathTail: an underivable key leaves the stored tail untouched");
+
+                // The plumbing the fan-out reads. A staged handle must report BOTH paths, and the
+                // ctor must not have them swapped — that swap is the whole bug, re-expressible.
+                var h = new SourceHandle(@"C:\Temp\.truedat-stage\abc.flac", key, "staged", 0, 0, null, DateTime.MinValue);
+                Assert(h.Path == @"C:\Temp\.truedat-stage\abc.flac", "SourceHandle: Path is the copy that gets read");
+                Assert(h.SourcePath == key, "SourceHandle: SourcePath is the track's real location");
+                Assert(ComputePathTail(h.SourcePath) == @"miles davis\kind of blue\01 so what.flac",
+                    "SourceHandle: the tail taken from SourcePath names the track, not the copy");
+            }
+
             // --- WriteCatalogDom: the DOM-mutating verbs' writer -------------------------------
             // Every catalog-rewriting verb (--fixup / --remap / --migrate / --merge-moods /
             // --strip-smfm / --prune-*) writes through this one helper. It replaced
@@ -19451,6 +19537,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 ? shortest.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : derived.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
             trackData["spectralFlatness"] = JsonNode.Parse(text);
+            return true;
+        }
+
+        /// <summary>
+        /// Re-derive <c>fingerprint.v1.pathTail</c> from the entry's catalog key. The tail NAMES
+        /// the track and the key IS the track's path, so the key is its ground truth and the
+        /// repair costs no file IO. That is why its primary surface is <c>--migrate</c> (catalog
+        /// only) rather than just <c>--fixup</c>, which needs the library XML and refuses outright
+        /// when a library root is unreachable — i.e. on the mirror box you would repair from.
+        /// Entries scanned over a UNC / mapped-drive / non-ASCII path between 353919d (2026-06-09)
+        /// and this fix recorded the STAGED TEMP COPY's name instead
+        /// (<c>temp\.truedat-stage\&lt;guid&gt;.flac</c>) — 1,367 of 72,052 in one live catalog.
+        /// Returns true when the stored tail differed and was replaced. Derived-not-asserted, so
+        /// it also silently corrects any other way a tail could drift from its key.
+        /// </summary>
+        internal static bool RepairPathTail(JsonObject trackData, string catalogKey)
+        {
+            if (!(trackData["fingerprint.v1"] is JsonObject fp)) return false;
+            var want = ComputePathTail(catalogKey);
+            if (want == null) return false;   // key has too few segments — nothing to derive from
+            // Read defensively: a non-string node must not throw mid-catalog. A missing or
+            // wrong-typed tail reads as null, which differs from `want` and so gets written.
+            string? have = null;
+            if (fp["pathTail"] is JsonValue hv) hv.TryGetValue<string>(out have);
+            if (string.Equals(have, want, StringComparison.Ordinal)) return false;
+            fp["pathTail"] = want;
             return true;
         }
 
@@ -22699,8 +22811,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
         }
 
-        static FingerprintV1? ComputeFingerprintV1(string filePath, long fileSize, out string? error)
+        /// <param name="readPath">The bytes to parse — the staged copy when one was made.</param>
+        /// <param name="identityPath">The path that NAMES the track, i.e. its real location.
+        /// Separate from <paramref name="readPath"/> on purpose and deliberately NOT optional:
+        /// one parameter served both for months, so every staged call site silently recorded
+        /// the temp copy's name as <c>pathTail</c> (1,367 entries in one live catalog). A
+        /// required parameter makes a caller state which path names the track, and makes
+        /// getting it wrong a compile error instead of a wrong value in the catalog.</param>
+        static FingerprintV1? ComputeFingerprintV1(string readPath, long fileSize, string identityPath, out string? error)
         {
+            var filePath = readPath;
             error = null;
             try
             {
@@ -22735,7 +22855,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     headSource = "flac-frames";
                 }
 
-                var tail = ComputePathTail(filePath);
+                // identityPath, never filePath: the tail NAMES the track, so a staged copy's
+                // temp name must never reach it (see the identityPath param doc).
+                var tail = ComputePathTail(identityPath);
                 if (tail == null)
                 {
                     error = "path has too few segments for pathTail";
