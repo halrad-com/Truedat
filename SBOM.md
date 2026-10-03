@@ -5,10 +5,11 @@
 | Field | Value |
 |-------|-------|
 | Name | Truedat (Music Mood Extractor & Fingerprinter) |
-| Version | 1.0.0 |
+| Version | 1.0.0 (assembly); release v0.5.5.2 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.2` |
 | License | MIT |
 | Framework | .NET Framework 4.8 |
 | Output | `truedat.exe` (single file, ILRepack merged) |
+| Code signing | `truedat.exe` is Authenticode-signed by **Halrad LLC** (SHA-256, RFC3161 timestamp from Sectigo) via `dist/sign.cmd`. The third-party binaries shipped beside it (Essentia, FFmpeg) are not signed by Halrad. |
 
 ## Components
 
@@ -26,6 +27,7 @@
 | Tool | Version | Purpose |
 |------|---------|---------|
 | ILRepack | 2.0.34.2 | Merge assemblies into single exe |
+| signtool | Windows SDK (via VS 2022 `VsDevCmd.bat`) | Authenticode-sign `truedat.exe` after build (`dist/sign.cmd`) |
 
 ### essentia_streaming_extractor_music.exe (Built from Source)
 
@@ -99,7 +101,8 @@ Source: [FFmpeg](https://ffmpeg.org/)
 |------|-------------|
 | `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5` (maintained only with `--file-md5`), `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). Legacy `audioMd5` / `chromaprint` keys from old scans are ignored on read and stripped by `--migrate`. |
 | `mbxmoods.<host>.json` | Output of `--chunk M/N` — hostname-suffixed shard. Each machine in a chunked scan writes its own shard; combine with `--merge-moods` for a unified file. |
-| `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. |
+| `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. A file's row is removed when a later scan puts it in the catalog. |
+| `mbxmoods-review.json` | Review ledger: every file the catalog does not hold (excluded / skipped / failed), with the reason. A `tags` failure names what TagLib threw or returned. A file's record is removed when a later scan puts it in the catalog. Listed by `--list-review`. |
 | `mbxmoods-verify.csv` | Output of `--verify` — per-entry integrity report (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Tab-separated. Excludes OK rows to keep size small. |
 | `truedat.log` | Console output log (when `--audit` is used) |
 
