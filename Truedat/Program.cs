@@ -6152,6 +6152,12 @@ namespace Truedat
             if (_tagReadsGaveUp > 0)
                 Console.WriteLine($"  Contention: {_tagReadsGaveUp:N0} file(s) tags still locked after retries"
                                   + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
+            if (_fpReadsRecovered > 0)
+                Console.WriteLine($"  Contention: {_fpReadsRecovered:N0} file(s) recovered their FINGERPRINT by retry"
+                                  + "   (tracks that would otherwise have lost their catalog entry)");
+            if (_fpReadsGaveUp > 0)
+                Console.WriteLine($"  Contention: {_fpReadsGaveUp:N0} file(s) fingerprint still locked after retries"
+                                  + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
             FlushRunLedger(runLedgerPath);
             PruneErrorsCsv(errorsPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
@@ -17589,6 +17595,50 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     _tagReadsRecovered = rec0; _tagReadsGaveUp = gave0;
                 }
 
+                // Fingerprint is the THIRD reader in that same window and had no ladder at all,
+                // so a lock that no longer cost a track its tags could still cost it its
+                // fingerprint — same health gate, same lost entry. Same assertions, because it
+                // is the same failure.
+                {
+                    var probe = Path.Combine(Path.GetTempPath(), "truedat-fplock-" + Guid.NewGuid().ToString("N") + ".flac");
+                    File.WriteAllBytes(probe, new byte[] { 1, 2, 3, 4 });
+                    int rec0 = _fpReadsRecovered, gave0 = _fpReadsGaveUp;
+                    var swFp = Stopwatch.StartNew();
+                    FingerprintV1? heldFp;
+                    string? heldErr;
+                    using (var hold = new FileStream(probe, FileMode.Open, FileAccess.Read, FileShare.None))
+                        heldFp = ComputeFingerprintV1(probe, 4, probe, out heldErr);
+                    swFp.Stop();
+                    try { File.Delete(probe); } catch { }
+                    Assert(heldFp == null, "fp-retry: an exclusively-held file still yields no fingerprint");
+                    Assert(heldErr != null && heldErr.Contains("stayed locked through " + SharedReadRetries + " retries"),
+                        $"fp-retry: a give-up names the lock and the retry count (got \"{heldErr}\")");
+                    Assert(_fpReadsGaveUp - gave0 == 1,
+                        "fp-retry: a locked file counts ONE give-up, not one per attempt");
+                    Assert(_fpReadsRecovered - rec0 == 0,
+                        "fp-retry: a give-up never counts as a recovery");
+                    Assert(swFp.ElapsedMilliseconds >= SharedReadRetries * SharedReadRetryMs,
+                        "fp-retry: the ladder waited between attempts (it ran, it did not fall straight through)");
+                    _fpReadsRecovered = rec0; _fpReadsGaveUp = gave0;
+                }
+
+                // And the fingerprint's non-lock half: a missing file must cost nothing.
+                {
+                    int rec0 = _fpReadsRecovered, gave0 = _fpReadsGaveUp;
+                    var swFpGone = Stopwatch.StartNew();
+                    var gonePath = Path.Combine(Path.GetTempPath(), "truedat-absent-" + Guid.NewGuid().ToString("N") + ".flac");
+                    var goneFp = ComputeFingerprintV1(gonePath, 4, gonePath, out var goneErr);
+                    swFpGone.Stop();
+                    Assert(goneFp == null, "fp-retry: a missing file yields no fingerprint");
+                    Assert(goneErr != null && !goneErr.Contains("stayed locked"),
+                        "fp-retry: a missing file reports its own error, never a lock");
+                    Assert(swFpGone.ElapsedMilliseconds < SharedReadRetryMs,
+                        "fp-retry: a non-lock failure is NOT retried — no ladder delay");
+                    Assert(_fpReadsGaveUp - gave0 == 0 && _fpReadsRecovered - rec0 == 0,
+                        "fp-retry: an unretried failure touches neither counter");
+                    _fpReadsRecovered = rec0; _fpReadsGaveUp = gave0;
+                }
+
                 // The other half of the gate: a failure that can never succeed must cost
                 // nothing. A missing file is not a lock, so it returns on the first attempt.
                 {
@@ -22818,10 +22868,52 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// the temp copy's name as <c>pathTail</c> (1,367 entries in one live catalog). A
         /// required parameter makes a caller state which path names the track, and makes
         /// getting it wrong a compile error instead of a wrong value in the catalog.</param>
+        /// <summary>
+        /// Retrying wrapper. The fan-out runs Essentia, the sha read, the tags read and this
+        /// over the SAME file at once, so a holder arriving during that window is exactly when
+        /// a transient sharing violation happens — and an empty fingerprint fails the scan
+        /// health gate, which costs the track its whole catalog entry. The sha read got a
+        /// ladder first; tags got one in a262e2d; this was the third reader in the same window
+        /// with no ladder at all, so the same lock that no longer costs a track its tags could
+        /// still cost it its fingerprint.
+        ///
+        /// Retries ONLY a sharing violation, and walks the exception chain to find it: TagLib
+        /// opens the stream inside its own format constructors, so the win32 code arrives as an
+        /// InnerException and a top-level-only test would leave the ladder inert. A missing
+        /// file, an access denial, or a parse that completes and reports no properties are all
+        /// deterministic — retrying those just burns the ladder on every genuinely broken file.
+        /// </summary>
         static FingerprintV1? ComputeFingerprintV1(string readPath, long fileSize, string identityPath, out string? error)
+        {
+            int retried = 0;
+            for (int attempt = 0; ; attempt++)
+            {
+                var fp = ComputeFingerprintV1Once(readPath, fileSize, identityPath, out error, out var failure);
+                bool locked = fp == null && IsSharingViolationChain(failure);
+                if (fp != null || !locked || attempt >= SharedReadRetries)
+                {
+                    if (retried > 0)
+                    {
+                        RecordFingerprintRetryOutcome(fp != null);
+                        if (locked)
+                            error = $"stayed locked through {retried} retr{(retried == 1 ? "y" : "ies")}: {error}";
+                    }
+                    return fp;
+                }
+                retried++;
+                System.Threading.Thread.Sleep(SharedReadRetryMs);
+            }
+        }
+
+        /// <summary>One fingerprint attempt. Hands the exception back so the caller's ladder can
+        /// classify a lock by win32 code; <paramref name="failure"/> is null when nothing threw,
+        /// including the parsed-but-no-properties case, which must not be retried.</summary>
+        static FingerprintV1? ComputeFingerprintV1Once(string readPath, long fileSize, string identityPath,
+            out string? error, out Exception? failure)
         {
             var filePath = readPath;
             error = null;
+            failure = null;
             try
             {
                 using var tfile = TagLib.File.Create(filePath);
@@ -22914,6 +23006,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             catch (Exception ex)
             {
+                failure = ex;
                 error = ex.Message;
                 return null;
             }
@@ -23007,6 +23100,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// contended.</summary>
         static int _tagReadsRecovered;
         static int _tagReadsGaveUp;
+
+        /// <summary>FILES whose fingerprint read came back only because of a retry, and files
+        /// whose fingerprint stayed locked through every retry. Third pair rather than reuse:
+        /// the fan-out runs three in-process readers over the same file, each can lose
+        /// independently, and the health gate fails a track on ANY of them — so a single pair
+        /// would say "contention" without saying which read is losing.</summary>
+        static int _fpReadsRecovered;
+        static int _fpReadsGaveUp;
+
+        /// <summary>Records one retried fingerprint read. Same recovered-vs-gave-up split as
+        /// <see cref="RecordShaRetryOutcome"/> / <see cref="RecordTagsRetryOutcome"/>: a
+        /// recovery kept the catalog entry, a give-up cost it.</summary>
+        internal static void RecordFingerprintRetryOutcome(bool recovered)
+        {
+            if (recovered) Interlocked.Increment(ref _fpReadsRecovered);
+            else Interlocked.Increment(ref _fpReadsGaveUp);
+        }
 
         /// <summary>Records one retried tag read. Same recovered-vs-gave-up split as
         /// <see cref="RecordShaRetryOutcome"/>, and for the same reason: a recovery kept the
