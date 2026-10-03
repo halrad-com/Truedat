@@ -8,6 +8,18 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3] — 2026-10-02
+
+### Fixed
+
+- **A locked tags read gets retried instead of losing the track.** The sha read already
+  retried a sharing violation; the tags read did not, and an empty tags result fails the
+  health gate and writes no catalog entry — reported as `analysis incomplete: tags`. Up to
+  four retries, 150 ms apart, on a lock only; a parse that reports no duration, a missing
+  file and an access-denied file are not retried. A give-up now says it stayed locked and
+  for how many retries, and the end-of-scan report counts recovered and still-locked tags
+  reads separately from sha's.
+
 ## [0.5.5.0-EV2] — 2026-08-29
 
 ### Added
