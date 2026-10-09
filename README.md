@@ -24,12 +24,12 @@ Optional. Enables multi-channel downmixing, the `Unsupported codec` decode retry
 
 | File | SHA-256 |
 |------|---------|
-| `ffmpeg.exe` | `9c6b03ec0c5b5efc6c471ec81d3bdc99b50d88c0cdefbfe0cb6e1b55e28cd331` |
-| `ffprobe.exe` | `307a1f169d1e3c0c099aa3eb384a5de53b1a489ccb9b9a4c2d3082b8bf1d2188` |
-| `ffplay.exe` | `8c268f0046fe9f1c31e55bd37d038907823221c92f90986b653d60d5a8ba14c3` |
+| `ffmpeg.exe` | `59c8a17f012f148bdce12b93f8cba2d37f281a3e0e856d505608ca5eaa4520ed` |
+| `ffprobe.exe` | `2fac541ccf404a600c62c9f7be14600dd98ae5679defb31f5ed2fe71e3a388a8` |
+| `ffplay.exe` | `21f5d5880eddfc5dab0f0dedb1d21a0c3ce1dba62ae8776d227739a3521d25f6` |
 
-- **Version**: `2026-08-20-git-7d77562d2a-full_build-www.gyan.dev`
-- **Compiler**: gcc 16.1.0 (Rev2, MSYS2)
+- **Version**: `2026-10-08-git-ec420ba161-full_build-www.gyan.dev`
+- **Compiler**: gcc 16.2.0 (Rev4, MSYS2)
 - **License**: GPL-3.0+ (`--enable-gpl --enable-version3`)
-- **Download**: https://www.gyan.dev/ffmpeg/builds/ — "git master full" build (`ffmpeg-<date>-git-<hash>-full_build.7z`)
+- **Download**: [GyanD release 2026-10-08-git-ec420ba161](https://github.com/GyanD/codexffmpeg/releases/tag/2026-10-08-git-ec420ba161) — "git master full" build (`ffmpeg-2026-10-08-git-ec420ba161-full_build.7z`)
 - **Note**: Truedat uses `ffmpeg.exe` (downmix / retry / authenticity / `--transcode`) and `ffprobe.exe` (`--transcode` source-property matching). `ffplay.exe` ships with the FFmpeg distribution and is unused.
