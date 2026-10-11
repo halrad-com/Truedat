@@ -8,6 +8,23 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.6.0-DV1] — 2026-10-11
+
+### Added
+
+- **A SQLite store (preview, v2 S1).** `--store-import` loads a catalog and the ledgers beside it
+  into a store keyed by identity — a UUID per file entity, content-hash facets that name their
+  algorithm, one location per copy on a machine, a run row per attempt — idempotently, in
+  batches, with a mirror catalog resolving to the same entities. `--store-export` writes a
+  catalog and `.mbxs` back out through the unchanged writer, plus `key-moves.json` whenever a
+  content hash was superseded. `--store-roundtrip` proves per-entry byte equality of store
+  against catalog; on a 72,477-track catalog it reports EQUAL. `--store-info` reports bytes per
+  track, the projection to 156k tracks, analysis speed, coverage by wave and shared content.
+  `--stats --store` and `--duplicates --store` answer from the store. Uses Windows' built-in
+  SQLite (`winsqlite3.dll`, 3.40+, checked at open with a plain refusal when missing); nothing is
+  installed or shipped. `mbxmoods.json` stays what MBXHub reads; every existing mode is unchanged;
+  the store path is always explicit.
+
 ## [0.5.5.2-EV1] — 2026-10-03
 
 ### Fixed

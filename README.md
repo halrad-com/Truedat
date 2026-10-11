@@ -78,6 +78,42 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 - **Suspects** — Audio files under 50 KB that may be corrupt or truncated.
 - **Long paths** — Paths at or over the Windows 260-char MAX_PATH. The scan handles these automatically (`\\?\` long-path fallback through a staged copy), but other tools may not — consider shortening.
 
+### Store (preview, v2 S1) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`
+
+A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
+entity, content-hash facets that name their algorithm, one location row per copy on a machine),
+with provenance for every run. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
+is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
+exactly as before. The store path is always explicit (`--store <file.db>`); it is never guessed.**
+
+```cmd
+REM Load a catalog and the ledgers beside it (errors, skipped, review, verify) into a store; idempotent
+truedat.exe --store-import "X:\Library\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM A mirror of the same library: same entities, extra locations
+truedat.exe --store-import "P:\Library\mbxmoods.json" --store "D:\truedat\truedat.db" --library-root "D:\Music" --root-role mirror
+
+REM Prove the store holds the catalog: per-entry byte equality through the catalog writer
+truedat.exe --store-roundtrip "X:\Library\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM Write a catalog (+ .mbxs) back out; key-moves.json beside it lists any superseded content hash
+truedat.exe --store-export "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM Measurements: bytes per track, projection to 156k tracks, analysis speed, coverage by wave, shared content
+truedat.exe --store-info --store "D:\truedat\truedat.db"
+
+REM The read-only verbs answer from the store instead of the JSON
+truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
+truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\truedat\truedat.db"
+```
+
+Flags: `--store <db>`, `--store-import`, `--library-root <path>` (else inferred per volume and
+reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
+the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
+store has several roots), `--store-roundtrip <catalog>`, `--store-info`. Measured on a 72,477-track
+catalog: import 25 s, export 7 s, round-trip EQUAL, store 5,090 bytes per track.
+
 ## Quick Start
 
 ```cmd
