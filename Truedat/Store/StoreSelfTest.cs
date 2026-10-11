@@ -34,6 +34,53 @@ namespace Truedat.Store
             Block(assert, "Export", () => TestExport(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
             Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
+            Console.WriteLine("Store self-test (C8: --store-info measurements)");
+            Block(assert, "StoreInfo", () => TestStoreInfo(assert));
+        }
+
+        // ---------------------------------------------------------------- store info
+        static void TestStoreInfo(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "info-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                entries[@"D:\Music\Tool\a.flac"].AnalysisDurationSecs = 30;      // 300 s track -> RTF 10
+                entries[@"D:\Music\Tool\b.mp3"].AnalysisDurationSecs = 9;        // 180 s -> 20
+                entries[@"D:\Music\old\legacy.flac"].AnalysisDurationSecs = 50;  // 250 s -> 5
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                WriteLedgers(dir, @"D:\Music");
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                // one key move: legacy.flac re-keyed
+                var changed = FixtureEntries(@"D:\Music");
+                changed[@"D:\Music\Tool\a.flac"].AnalysisDurationSecs = 30;      // the re-import rewrites every row; keep the RTF samples
+                changed[@"D:\Music\Tool\b.mp3"].AnalysisDurationSecs = 9;
+                changed[@"D:\Music\old\legacy.flac"].AnalysisDurationSecs = 50;
+                changed[@"D:\Music\old\legacy.flac"].AudioStreamSha256 = "2222222222222222222222222222222222222222222222222222222222222222";
+                changed[@"D:\Music\old\legacy.flac"].AudioStreamSha256Source = "flac-frames";
+                WriteCatalog(catalog, changed);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+
+                var info = StoreInfoCommand.Collect(store);
+                assert(info.SchemaVersion == 1 && info.SqliteVersion.StartsWith("3.") && info.MachineId.Length == 36, $"schema/sqlite/machine reported ({info.SchemaVersion}, {info.SqliteVersion})");
+                assert(info.Roots.Count == 1 && info.Roots[0].Path == @"D:\Music" && info.Roots[0].Role == "primary", "roots listed");
+                assert(info.Tracks == 6 && info.Counts["track_feature"] == 6 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4, $"counts: 6 tracks, 7 entities, runs {info.Counts["run"]}");
+                assert(info.FileBytes > 100_000 && info.PageSize == 4096 && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
+                assert(info.BytesPerTrack == (double)info.FileBytes / 6 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track and the 156k projection derive from the file size");
+                assert(info.RtfSamples == 3 && info.MedianRtf.HasValue && Math.Abs(info.MedianRtf.Value - 10.0) < 1e-9, $"median RTF over the 3 rows with both durations = 10 (got {info.MedianRtf}, n={info.RtfSamples})");
+                assert(info.FailedComponents.TryGetValue("sha", out var fsha) && fsha == 1 && info.FailedComponents.TryGetValue("fingerprint", out var ffp) && ffp == 1, "failed components split on ';' and counted per component");
+                assert(info.Coverage["loudnessMomentary"] == 1 && info.Coverage["dynamicComplexity"] == 1 && info.Coverage["fingerprint.v1"] == 6 && info.Coverage["smfmScores"] == 1,
+                    $"coverage by wave: extended {info.Coverage["loudnessMomentary"]}, capture-once {info.Coverage["dynamicComplexity"]}, fingerprint {info.Coverage["fingerprint.v1"]}, smfm {info.Coverage["smfmScores"]} (only the fully populated entry has the waves)");
+                assert(info.ContentKeysShared == 1 && info.LocationsOnSharedKeys == 2, $"one content key shared by 2 locations (d1/d2) ({info.ContentKeysShared}/{info.LocationsOnSharedKeys})");
+                assert(info.SupersededHashes == 1 && info.NoShaFeatures == 1, $"1 superseded hash (the re-keyed FLAC), 1 no-sha feature row ({info.SupersededHashes}/{info.NoShaFeatures})");
+
+                int rc = StoreInfoCommand.Run(store, false);
+                assert(rc == 0 && File.Exists(Path.Combine(dir, StoreInfoCommand.ResultFileName)), "Run writes store-info.json beside the store and exits 0");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- store as the verbs' dictionary

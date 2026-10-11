@@ -841,7 +841,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
-            "store-export", "export-root", "store-roundtrip",
+            "store-export", "export-root", "store-roundtrip", "store-info",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -2246,6 +2246,7 @@ namespace Truedat
             string? storeExportPath = null;      // --store-export <out.json>: the store -> catalog, through the unchanged writer
             string? storeExportRoot = null;      // --export-root <path>: which root to export when the store has several
             string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
+            bool storeInfoMode = false;           // --store-info: measurements (bytes/track, RTF, coverage, dupes, key moves)
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2399,6 +2400,7 @@ namespace Truedat
                 else if (canonical == "store-export" && i + 1 < args.Length) storeExportPath = args[++i];
                 else if (canonical == "export-root" && i + 1 < args.Length) storeExportRoot = args[++i];
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
+                else if (canonical == "store-info") storeInfoMode = true;
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
                 // --json-output, which predates it and stays the canonical name.
@@ -3038,6 +3040,11 @@ namespace Truedat
             if (storeRoundtripCatalog != null)
             {
                 Environment.ExitCode = global::Truedat.Store.ExportCommand.RunRoundtrip(storePath, storeRoundtripCatalog, storeExportRoot, auditLog);
+                return;
+            }
+            if (storeInfoMode)
+            {
+                Environment.ExitCode = global::Truedat.Store.StoreInfoCommand.Run(storePath, auditLog);
                 return;
             }
 
