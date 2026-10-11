@@ -5,8 +5,10 @@ using System.Text;
 
 namespace Truedat.Store
 {
-    /// <summary>SST canonical-path rules, verbatim (spec §3): root stripped, NFC, '/' separators,
-    /// case-folded for matching, original case kept for display. The same rules diffycat needs.</summary>
+    /// <summary>Canonical-path rules for a location (schema v1 track_location.canonical_path): root stripped,
+    /// NFC, '/' separators, case-folded for matching, original case kept for display. The same rules diffycat
+    /// needs. A canonical path is a MATCHING rung (hash first, path second), never identity: the media's
+    /// identity is file_entity.id and locations stack under it.</summary>
     internal static class CanonicalPath
     {
         /// <summary>Splits <paramref name="fullPath"/> under <paramref name="root"/>. <paramref name="relPath"/>

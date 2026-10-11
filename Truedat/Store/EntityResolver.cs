@@ -35,8 +35,8 @@ namespace Truedat.Store
         }
     }
 
-    /// <summary>SST matching tiers as S1 needs them: exact content-hash facet → exact (root, canonical
-    /// path) → create. Idempotent on content hash (SST OQ2): the same hash never mints twice. A path
+    /// <summary>Matching tiers as S1 needs them: exact content-hash facet → exact (root, canonical
+    /// path) → create. Idempotent on content hash: the same hash never mints twice. A path
     /// match with a new hash records the new hash as primary and demotes the old one, never deleting
     /// it. Conflict detection (same hash, different audio props) is the import's job — it has the
     /// feature rows to compare.</summary>

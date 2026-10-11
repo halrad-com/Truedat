@@ -1,7 +1,22 @@
--- truedat v2 store — schema v1. THE CONTRACT: reviewed cross-repo (restfulbee), changed only by a new
--- versioned script. Forward-only; an exe refuses a store newer than itself. SST v2 vocabulary
--- (MBXU/SST.md) with the gaps the 2026-10-04 plan found closed (G2 location key, G3 analysis keyed
--- separately from the entity, G4 work tables, G5 value/segment/artifact edges, G8 machine identity).
+-- truedat v2 store — schema v1. THE CONTRACT: reviewed cross-repo (restfulbee), proven by the byte-equal
+-- round-trip against a real 72,477-track catalog, changed only by a new versioned script. Forward-only;
+-- an exe refuses a store newer than itself. The design stands on its own (ruling 2026-10-11: the earlier
+-- SST reference design is retired and is not the thing to reconcile against).
+--
+-- Two purposes live here and are kept apart (ruling 2026-10-11):
+--   FILE TRACKING — per-machine truth about where bytes are: machine, library_root, file_entity,
+--     identity_facet, track_location. Media is the primary key: file_entity.id is minted for the media,
+--     independent of any location; the content hash is a facet of it, not the key. Locations stack
+--     under it (machine → root → path); a common path tail is usual, not guaranteed, and is a MATCHING
+--     rung (hash first, path second), never identity. This half is what would merge across devices.
+--   SCANNING — measurements of the audio, the same whatever machine ran them: content-keyed (value,
+--     segment, artifact). run and work_item are per-machine by nature.
+--   The invariant: file 1 : locations many : audio description 1. track_feature (below) is the one
+--   table that breaks it — a measurement of the AUDIO keyed by LOCATION, kept that way in v1 for the
+--   byte-exact round-trip of a per-path catalog. It is the catalog's import/export mirror, not the
+--   canonical measurement, and nothing (sync, merge, a new producer) may be built on it. Schema v2 splits
+--   it into a content row once per entity and a location row per copy. Fleet merge/sync is out of
+--   scope for now; these rules only keep the schema from closing that door.
 --
 -- Conventions: all timestamps ISO-8601 UTC text ('o' format), ids are UUIDv7 text where the id must
 -- survive export (entity, machine) and INTEGER rowids otherwise; vectors are float64 little-endian
@@ -21,7 +36,7 @@ CREATE TABLE store_meta (
   value TEXT
 );
 
--- ---------------------------------------------------------------- identity (SST)
+-- ---------------------------------------------------------------- identity (file tracking)
 CREATE TABLE machine (
   id          TEXT PRIMARY KEY,            -- UUIDv7, minted by this store on creation
   hostname    TEXT NOT NULL,
@@ -52,7 +67,7 @@ CREATE TABLE file_entity (
 --   content_hash:audio-stream-sha256:whole-file      (fallback when invariant bounds were unavailable)
 --   path:canonical                                   (the only facet a no-sha entry has; confidence 0.5)
 --   external_id:<provider>                           (truedat's own ids land here when the hub imports)
--- Facets are never deleted during merge (SST). A superseded hash stays, so a key move is always
+-- Facets are never deleted during merge. A superseded hash stays, so a key move is always
 -- recoverable from the store (lesson of the 2026-10-11 FLAC-residuals finding).
 CREATE TABLE identity_facet (
   id             INTEGER PRIMARY KEY,
@@ -75,7 +90,7 @@ CREATE TABLE track_location (
   entity_id         TEXT NOT NULL REFERENCES file_entity(id),
   root_id           INTEGER NOT NULL REFERENCES library_root(id),
   rel_path          TEXT NOT NULL,         -- below root, original case, '/' separators
-  canonical_path    TEXT NOT NULL,         -- SST rules: root stripped, NFC, '/', case-folded
+  canonical_path    TEXT NOT NULL,         -- root stripped, NFC, '/', case-folded (CanonicalPath.cs)
   display_path      TEXT NOT NULL,         -- the catalog key, byte for byte, so the export can key on it
   last_modified_utc TEXT,                  -- the catalog's lastModified (file mtime, 'o')
   last_seen_utc     TEXT NOT NULL,
@@ -208,8 +223,11 @@ CREATE TABLE artifact (
 -- ---------------------------------------------------------------- the catalog entry, typed
 -- One row per location (ruling 2026-10-11: the catalog is per path; two paths sharing a sha can differ
 -- in per-copy facts, so collapsing by hash would make the round-trip lossy). content_key is indexed so
--- "same audio" is a query; promotion to content-keyed storage is a later migration decided on C8's
--- measurement. Column names are the catalog writer's JSON keys verbatim; nested blocks are flattened
+-- "same audio" is a query. THIS IS THE IMPORT/EXPORT MIRROR OF THE CATALOG, NOT THE CANONICAL
+-- MEASUREMENT (header): schema v2 splits it into a content row (every Essentia descriptor, bitUsage,
+-- HF, smfm — once per entity) and a location row (tags as found in the copy, fingerprint_v1_*, fileMd5,
+-- lastModified, analysisDuration, imported_run — per copy); export becomes a join on content_key and
+-- --store-roundtrip stays the gate. Column names are the catalog writer's JSON keys verbatim; nested blocks are flattened
 -- with '_' and '.' becomes '_' (fingerprint.v1.fileSize -> fingerprint_v1_fileSize). The write-time
 -- `truedat` verdict block is NOT stored: it is recomputed by the writer on export.
 CREATE TABLE track_feature (
