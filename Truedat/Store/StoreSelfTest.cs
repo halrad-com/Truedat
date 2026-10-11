@@ -27,6 +27,192 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C4: TrackEntry mapper + feature rows)");
             Block(assert, "TrackEntryMapper", () => TestMapper(assert));
             Block(assert, "FeatureRows", () => TestFeatureRows(assert));
+            Console.WriteLine("Store self-test (C5: import)");
+            Block(assert, "LedgerImport", () => TestLedgerReaders(assert));
+            Block(assert, "Import", () => TestImport(assert));
+        }
+
+        // ---------------------------------------------------------------- ledger readers
+        static void TestLedgerReaders(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "ledgers-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var errors = Path.Combine(dir, "mbxmoods-errors.csv");
+                File.WriteAllLines(errors, new[]
+                {
+                    "Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents",
+                    "\"TagLib: bad header, really\",Tool,\"The Grudge\",D:\\Music\\bad\\x.flac,42.1,500.0,sha;fingerprint",
+                    "essentia exit 1,,,D:\\Music\\bad\\y.mp3,3.0,0.0,essentia",
+                });
+                var old = Path.Combine(dir, "old-errors.csv");
+                File.WriteAllLines(old, new[] { "Error,Artist,Title,FilePath,SizeMB,Duration", "boom,A,T,D:\\Music\\bad\\z.mp3,1.0,2.0" });
+                var skipped = Path.Combine(dir, "mbxmoods-skipped.csv");
+                File.WriteAllLines(skipped, new[] { "path,extension,reason,timestamp", "D:\\Music\\skip\\s.dsf,.dsf,unsupported codec: DSD,2026-10-01T00:00:00Z" });
+                var verify = Path.Combine(dir, "mbxmoods-verify.csv");
+                File.WriteAllLines(verify, new[] { "status\tpath\tdetail\tbackfilledFields", "OK\tD:\\Music\\Tool\\a.flac\t\t", "DRIFT\tD:\\Music\\Tool\\b.mp3\tsha changed\t" });
+
+                var e = LedgerImport.ReadErrors(errors);
+                assert(e.Count == 2 && e[0].Path == @"D:\Music\bad\x.flac" && e[0].Error == "TagLib: bad header, really" && e[0].FailedComponents == "sha;fingerprint",
+                    "errors.csv: quoted fields with commas, FailedComponents column");
+                var eo = LedgerImport.ReadErrors(old);
+                assert(eo.Count == 1 && eo[0].Path == @"D:\Music\bad\z.mp3" && eo[0].FailedComponents == null, "errors.csv without the FailedComponents column still reads (old files)");
+                var s = LedgerImport.ReadSkipped(skipped);
+                assert(s.Count == 1 && s[0].Path == @"D:\Music\skip\s.dsf" && s[0].Reason == "unsupported codec: DSD" && s[0].Timestamp == "2026-10-01T00:00:00Z", "skipped.csv rows");
+                var v = LedgerImport.ReadVerify(verify);
+                assert(v.Count == 2 && v[1].Status == "DRIFT" && v[1].Path == @"D:\Music\Tool\b.mp3" && v[1].Detail == "sha changed" && v[0].Detail == null, "verify.csv (tab-separated) rows, empty detail reads as null");
+                assert(LedgerImport.ReadErrors(Path.Combine(dir, "absent.csv")).Count == 0, "a missing ledger reads as empty, not an error");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // ---------------------------------------------------------------- import fixture
+        static int _fixtureReviewAttempts;
+
+        static TrackEntry Entry(string? sha, string? shaSource, string codec, int durationMs, bool full = false)
+        {
+            var e = full ? FullyPopulatedEntry() : new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+            e.AudioStreamSha256 = sha; e.AudioStreamSha256Source = shaSource;
+            e.FingerprintV1 = new Program.FingerprintV1 { FileSize = 1234, PathTail = "x", DurationMs = durationMs, SampleRate = 44100, Channels = 2, Codec = codec, AudioHead64kMd5 = "m" };
+            return e;
+        }
+
+        static void WriteCatalog(string path, IEnumerable<KeyValuePair<string, TrackEntry>> entries)
+        {
+            using var fs = File.Create(path);
+            using var jw = new System.Text.Json.Utf8JsonWriter(fs);
+            jw.WriteStartObject();
+            jw.WritePropertyName("tracks"); jw.WriteStartObject();
+            foreach (var kv in entries) Program.WriteTrackEntryForStore(jw, kv.Key, kv.Value);
+            jw.WriteEndObject(); jw.WriteEndObject();
+        }
+
+        static Dictionary<string, TrackEntry> FixtureEntries(string root)
+        {
+            const string A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            const string B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            const string L = "1111111111111111111111111111111111111111111111111111111111111111";
+            const string S = "5555555555555555555555555555555555555555555555555555555555555555";
+            return new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                [root + @"\Tool\a.flac"] = Entry(A, "flac-frames", "flac", 300000, full: true),
+                [root + @"\Tool\b.mp3"] = Entry(B, null, "mp3", 180000),
+                [root + @"\odd\nosha.mp3"] = Entry(null, null, "mp3", 100000),
+                [root + @"\old\legacy.flac"] = Entry(L, null, "flac", 250000),
+                [root + @"\dup\d1.flac"] = Entry(S, "flac-frames", "flac", 100000),
+                [root + @"\dup\d2.flac"] = Entry(S, "flac-frames", "flac", 200000),   // same sha, duration differs by 100 s -> conflict
+            };
+        }
+
+        static void WriteLedgers(string dir, string root)
+        {
+            File.WriteAllLines(Path.Combine(dir, "mbxmoods-errors.csv"), new[]
+            {
+                "Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents",
+                $"\"TagLib: bad header\",Tool,X,{root}\\bad\\x.flac,42.1,500.0,sha;fingerprint",
+            });
+            File.WriteAllLines(Path.Combine(dir, "mbxmoods-skipped.csv"), new[]
+            {
+                "path,extension,reason,timestamp", $"{root}\\skip\\s.dsf,.dsf,unsupported codec: DSD,2026-10-01T00:00:00Z",
+            });
+            File.WriteAllLines(Path.Combine(dir, "mbxmoods-verify.csv"), new[]
+            {
+                "status\tpath\tdetail\tbackfilledFields", $"OK\t{root}\\Tool\\a.flac\t\t", $"DRIFT\t{root}\\Tool\\b.mp3\tsha changed\t",
+            });
+            File.WriteAllText(Path.Combine(dir, "mbxmoods-verify.receipt.json"),
+                "{\"schemaVersion\":1,\"kind\":\"verify-coverage-receipt\",\"catalog\":{\"path\":\"x\",\"trackCount\":6,\"digest\":\"00\"},\"shard\":{\"index\":1,\"total\":1,\"host\":\"ATOM\"},\"coverage\":{\"entries\":6,\"digest\":\"00\"}}");
+            var ledger = new ReviewLedger();
+            var rec = ledger.Upsert(new ReviewRecord { Path = root + @"\bad\x.flac", Reason = "TagLib: bad header", State = ReviewState.Auto, StateReason = "auto:failed-component:sha", Attempts = 2 },
+                new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc), isRetry: false);
+            _fixtureReviewAttempts = rec.Attempts;   // Upsert owns the attempt count; the import must carry what the ledger says
+            File.WriteAllText(Path.Combine(dir, ReviewLedger.FileName), ledger.ToJson("selftest", new DateTime(2026, 10, 2, 0, 0, 0, DateTimeKind.Utc)).ToJsonString());
+        }
+
+        // ---------------------------------------------------------------- import
+        static void TestImport(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "import-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var catDir = Path.Combine(dir, "lib"); var mirrorDir = Path.Combine(dir, "mirror");
+            Directory.CreateDirectory(catDir); Directory.CreateDirectory(mirrorDir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(catDir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                WriteLedgers(catDir, @"D:\Music");
+
+                bool refused = false;
+                try { ImportCommand.Execute(new ImportOptions { StorePath = null, CatalogPath = catalog }); } catch (StoreException) { refused = true; }
+                assert(refused, "no --store -> refusal (the store path is never guessed)");
+
+                var o = new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music", RootRole = "primary", BatchSize = 2 };
+                var r = ImportCommand.Execute(o);
+                assert(r.Entries == 6, $"6 entries read ({r.Entries})");
+                assert(r.Roots.Count == 1 && r.Roots[0] == @"D:\Music", "the given root is used");
+                assert(r.EntitiesCreated == 4 && r.MatchedHash == 1 && r.CreatedNoSha == 1, $"entities: 4 created with a sha, 1 matched by sha (d2), 1 created without ({r.EntitiesCreated}/{r.MatchedHash}/{r.CreatedNoSha})");
+                assert(r.Locations == 6 && r.Conflicts == 1, $"6 locations, 1 sha collision conflict ({r.Locations}/{r.Conflicts})");
+                assert(r.LegacySha == 1 && r.LegacyShaUnrecoverable == 3, $"1 legacy-sha FLAC (taglib-region kind), 3 flac-frames FLACs whose old sha is unrecoverable ({r.LegacySha}/{r.LegacyShaUnrecoverable})");
+                assert(r.ErrorsRows == 1 && r.SkippedRows == 1 && r.ReviewRows == 1 && r.VerifyRows == 2 && r.ReceiptRows == 1, $"ledgers: errors {r.ErrorsRows}, skipped {r.SkippedRows}, review {r.ReviewRows}, verify {r.VerifyRows}, receipts {r.ReceiptRows}");
+                assert(File.Exists(r.ResultPath) && File.ReadAllText(r.ResultPath).Contains("\"entries\": 6"), "store-import-result.json written beside the store with the counts");
+
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("file_entity") == 7, $"7 entities: 5 from the catalog + the errors path + the skipped path (review shares the errors path) ({os.Dal.Count("file_entity")})");
+                    assert(os.Dal.Count("track_feature") == 6 && os.Dal.Count("track_location") == 8,
+                        $"6 feature rows; 8 locations = 6 catalog entries + the errors path + the skipped path, which are real files too ({os.Dal.Count("track_feature")}/{os.Dal.Count("track_location")})");
+                    assert(os.Dal.Count("run") == 4, $"runs: import + errors + skipped + receipt = 4 ({os.Dal.Count("run")})");
+                    assert(os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1 && os.Dal.Count("conflict") == 1, "2 verify checks, 1 review work item, 1 conflict");
+                    assert(os.Db.ExecScalar("SELECT review_state FROM work_item;") == "auto" && os.Db.ExecScalar("SELECT attempts FROM work_item;") == _fixtureReviewAttempts.ToString(),
+                        $"review state and attempts carried onto the work item (state {os.Db.ExecScalar("SELECT review_state FROM work_item;")}, attempts {os.Db.ExecScalar("SELECT attempts FROM work_item;")} vs ledger {_fixtureReviewAttempts})");
+                    assert(os.Db.ExecScalar("SELECT outcome FROM run WHERE producer_key = 'import';") == "ok", "the import's own run is recorded ok");
+                    assert(os.Db.ExecScalar("SELECT failed_components FROM run WHERE outcome = 'failed';") == "sha;fingerprint", "errors.csv row became a failed essentia run with its components");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM identity_facet WHERE kind = '" + FacetKinds.ShaTaglibRegion + "';") == "1", "legacy FLAC sha recorded under the taglib-region kind");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_feature WHERE content_key_kind = 'entity';") == "1", "the no-sha entry's feature row is keyed entity:<uuid> with kind 'entity'");
+
+                    // Per-entry byte equality — the import side of the round-trip gate.
+                    long root = os.Dal.EnsureRoot(os.Machine.Id, @"D:\Music", "primary", DateTime.UtcNow.ToString("o"));
+                    int same = 0, total = 0;
+                    foreach (var (display, back) in os.Dal.ReadEntries(root))
+                    {
+                        total++;
+                        if (entries.TryGetValue(display, out var orig) && EntryJson(display, orig) == EntryJson(display, back)) same++;
+                    }
+                    assert(total == 6 && same == 6, $"every imported entry writes identical bytes to its original ({same}/{total})");
+                }
+
+                var r2 = ImportCommand.Execute(o);
+                assert(r2.EntitiesCreated == 0 && r2.CreatedNoSha == 0 && r2.Locations == 6 && r2.Conflicts == 0, $"re-import of the same catalog creates nothing ({r2.EntitiesCreated}/{r2.CreatedNoSha}/{r2.Locations}/{r2.Conflicts})");
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_feature") == 6 && os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1,
+                        "re-import leaves entity/feature/check/work counts unchanged");
+                    assert(os.Dal.Count("run") == 5, $"re-import adds exactly one run (its own); ledger runs are not duplicated ({os.Dal.Count("run")})");
+                }
+
+                // Mirror: the same library under X:\Library, imported as a mirror root -> locations, not entities.
+                var mirror = Path.Combine(mirrorDir, "mbxmoods.json");
+                WriteCatalog(mirror, FixtureEntries(@"X:\Library"));
+                var r3 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = mirror, LibraryRoot = @"X:\Library", RootRole = "mirror" });
+                assert(r3.EntitiesCreated == 0 && r3.CreatedNoSha == 0 && r3.Locations == 6 && r3.MatchedHash == 5 && r3.MatchedPath == 1,
+                    $"mirror import: 0 entities created, 6 new locations, 5 matched by sha, the no-sha one matched by canonical path across roots ({r3.EntitiesCreated}/{r3.CreatedNoSha}/{r3.Locations}/{r3.MatchedHash}/{r3.MatchedPath})");
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_location") == 14 && os.Dal.Count("library_root") == 2,
+                        $"after the mirror: 7 entities, 14 locations (8 + 6 mirrored), 2 roots ({os.Dal.Count("file_entity")}/{os.Dal.Count("track_location")}/{os.Dal.Count("library_root")})");
+
+                // Batch atomicity: fail after 3 entries with batches of 2 -> exactly the first batch is in the store.
+                var store2 = Path.Combine(dir, "partial.db");
+                bool threw = false;
+                try { ImportCommand.Execute(new ImportOptions { StorePath = store2, CatalogPath = catalog, LibraryRoot = @"D:\Music", BatchSize = 2, FailAfterEntries = 3 }); } catch (Exception) { threw = true; }
+                assert(threw, "the fail-after seam throws");
+                using (var os = OpenStore.Open(store2, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("track_feature") == 2, $"after a mid-import failure the store holds whole batches only ({os.Dal.Count("track_feature")} rows, batch size 2)");
+                    assert(os.Db.ExecScalar("SELECT outcome FROM run WHERE producer_key = 'import';") == "failed", "the interrupted import's run row says failed, not ok");
+                }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         /// <summary>The catalog writer's bytes for one entry, as a string — the unit of the round-trip gate.</summary>

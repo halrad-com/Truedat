@@ -838,6 +838,9 @@ namespace Truedat
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
             "config", "no-config", "fixup-after-scan",
+            // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
+            // catalog would put SQLite on SMB).
+            "store", "store-import", "library-root", "root-role", "machine-adopt",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -853,6 +856,7 @@ namespace Truedat
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
             "restore", "keep-backups", "prune-entry",
+            "store", "library-root", "root-role",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -2227,6 +2231,13 @@ namespace Truedat
             string? remapPrefix = null;  // --remap "<old>=<new>" with --fixup: wholesale prefix swap, no XML lookup
             bool verifyMode = false;
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
+            // v2 store (S1). --store <db> names the store explicitly; --store-import loads the catalog
+            // resolved like --stats (positional / --moods / discovery) plus its ledgers into it.
+            string? storePath = null;
+            bool storeImportMode = false;
+            string? storeLibraryRoot = null;
+            string storeRootRole = "primary";
+            bool storeMachineAdopt = false;
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2372,6 +2383,11 @@ namespace Truedat
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
+                else if (canonical == "store" && i + 1 < args.Length) storePath = args[++i];
+                else if (canonical == "store-import") storeImportMode = true;
+                else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
+                else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
+                else if (canonical == "machine-adopt") storeMachineAdopt = true;
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
                 // --json-output, which predates it and stays the canonical name.
@@ -2974,6 +2990,28 @@ namespace Truedat
                     }
                 }
                 Environment.ExitCode = 0;
+                return;
+            }
+
+            if (storeImportMode)
+            {
+                // Same catalog resolution as --stats; the store itself is never guessed.
+                string? importCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var importRefusal);
+                if (importRefusal != null)
+                {
+                    Console.Error.WriteLine(importRefusal);
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = global::Truedat.Store.ImportCommand.Run(new global::Truedat.Store.ImportOptions
+                {
+                    StorePath = storePath,
+                    CatalogPath = importCatalog,
+                    LibraryRoot = storeLibraryRoot,
+                    RootRole = storeRootRole,
+                    MachineAdopt = storeMachineAdopt,
+                    Audit = auditLog,
+                });
                 return;
             }
 
@@ -19727,6 +19765,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return true;
         }
 
+        /// <summary>v2 store: the ledger CSV parser, reachable from Truedat/Store. Additive shim; the
+        /// parser is unchanged.</summary>
+        internal static string[] ParseCsvLineForStore(string line) => ParseCsvLine(line);
+
         static string[] ParseCsvLine(string line)
         {
             var result = new List<string>();
@@ -21307,6 +21349,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             jw.WriteEndObject();
         }
+
+        /// <summary>v2 store: the catalog reader, reachable from Truedat/Store. Additive shim; the reader
+        /// is unchanged, so the store imports exactly what every other mode loads.</summary>
+        internal static int LoadExistingMoodsForStore(string path, ConcurrentDictionary<string, TrackEntry> allTracks) => LoadExistingMoods(path, allTracks);
 
         /// <summary>
         /// Load moods file using JsonDocument — compact read-only DOM, much more

@@ -168,6 +168,91 @@ namespace Truedat.Store
             }
         }
 
+        internal bool HasFacetOfKind(string entityId, string kind)
+        {
+            var st = Stmt("SELECT 1 FROM identity_facet WHERE entity_id = ? AND kind = ? LIMIT 1;");
+            st.Bind(1, entityId).Bind(2, kind);
+            return st.Step();
+        }
+
+        /// <summary>A location of the canonical path under ANY root — the mirror case: a declared mirror
+        /// root maps the same relative path to the same entity.</summary>
+        internal long? FindLocationAnyRoot(string canonicalPath, out string? entityId)
+        {
+            var st = Stmt("SELECT id, entity_id FROM track_location WHERE canonical_path = ? ORDER BY id LIMIT 1;");
+            st.Bind(1, canonicalPath);
+            if (!st.Step()) { entityId = null; return null; }
+            entityId = st.GetString(1);
+            return st.GetInt64(0);
+        }
+
+        /// <summary>Audio props of an existing feature row of the entity at some OTHER location, for the
+        /// sha-collision check.</summary>
+        internal (long DurationMs, string Codec, string Display)? FeatureProps(string entityId, long exceptRootId, string exceptCanonical)
+        {
+            var st = Stmt("SELECT f.fingerprint_v1_durationMs, f.fingerprint_v1_codec, l.display_path FROM track_feature f JOIN track_location l ON l.id = f.location_id " +
+                          "WHERE l.entity_id = ? AND NOT (l.root_id = ? AND l.canonical_path = ?) AND f.fingerprint_v1_durationMs IS NOT NULL LIMIT 1;");
+            st.Bind(1, entityId).Bind(2, exceptRootId).Bind(3, exceptCanonical);
+            if (!st.Step()) return null;
+            return (st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "");
+        }
+
+        // ---------------------------------------------------------------- runs, checks, work items
+        internal long InsertRun(string producerKey, string producerVersion, string? entityId, string? contentHash, string? contentHashKind, long? locationId,
+            string startedUtc, long? durationMs, string? host, string? toolVersion, string outcome, string? failedComponents, string? reason, string? errorText, string? source)
+        {
+            var st = Stmt("INSERT INTO run(producer_key, producer_version, entity_id, content_hash, content_hash_kind, location_id, started_utc, duration_ms, host, tool_version, outcome, failed_components, reason, error_text, source) " +
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+            st.Bind(1, producerKey).Bind(2, producerVersion).Bind(3, entityId).Bind(4, contentHash).Bind(5, contentHashKind);
+            if (locationId.HasValue) st.Bind(6, locationId.Value); else st.BindNull(6);
+            st.Bind(7, startedUtc);
+            if (durationMs.HasValue) st.Bind(8, durationMs.Value); else st.BindNull(8);
+            st.Bind(9, host).Bind(10, toolVersion).Bind(11, outcome).Bind(12, failedComponents).Bind(13, reason).Bind(14, errorText).Bind(15, source);
+            st.Step();
+            return Db.LastInsertRowId;
+        }
+
+        internal void UpdateRunOutcome(long runId, string outcome, long? durationMs, string? errorText)
+        {
+            var st = Stmt("UPDATE run SET outcome = ?, duration_ms = ?, error_text = ?, reason = NULL WHERE id = ?;");
+            st.Bind(1, outcome);
+            if (durationMs.HasValue) st.Bind(2, durationMs.Value); else st.BindNull(2);
+            st.Bind(3, errorText).Bind(4, runId);
+            st.Step();
+        }
+
+        internal bool RunExists(string producerKey, string? entityId, string outcome, string? source, string startedUtc)
+        {
+            var st = Stmt("SELECT 1 FROM run WHERE producer_key = ? AND entity_id IS ? AND outcome = ? AND source IS ? AND started_utc = ? LIMIT 1;");
+            st.Bind(1, producerKey).Bind(2, entityId).Bind(3, outcome).Bind(4, source).Bind(5, startedUtc);
+            return st.Step();
+        }
+
+        internal void InsertCheck(long? locationId, string? contentHash, string kind, string result, string? detail, string checkedUtc, string? source)
+        {
+            var st = Stmt("INSERT INTO check_result(location_id, content_hash, kind, result, detail, checked_utc, source) VALUES (?, ?, ?, ?, ?, ?, ?);");
+            if (locationId.HasValue) st.Bind(1, locationId.Value); else st.BindNull(1);
+            st.Bind(2, contentHash).Bind(3, kind).Bind(4, result).Bind(5, detail).Bind(6, checkedUtc).Bind(7, source);
+            st.Step();
+        }
+
+        internal bool CheckExists(long? locationId, string result, string? source)
+        {
+            var st = Stmt("SELECT 1 FROM check_result WHERE location_id IS ? AND result = ? AND source IS ? LIMIT 1;");
+            if (locationId.HasValue) st.Bind(1, locationId.Value); else st.BindNull(1);
+            st.Bind(2, result).Bind(3, source);
+            return st.Step();
+        }
+
+        internal void UpsertWorkItem(string entityId, string producerKey, string targetVersion, string state, int attempts, string? reviewState, string? reviewNote)
+        {
+            var st = Stmt("INSERT INTO work_item(entity_id, producer_key, target_version, state, attempts, review_state, review_note) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+                          "ON CONFLICT(entity_id, producer_key) DO UPDATE SET target_version = excluded.target_version, state = excluded.state, " +
+                          "attempts = max(attempts, excluded.attempts), review_state = excluded.review_state, review_note = excluded.review_note;");
+            st.Bind(1, entityId).Bind(2, producerKey).Bind(3, targetVersion).Bind(4, state).Bind(5, (long)attempts).Bind(6, reviewState).Bind(7, reviewNote);
+            st.Step();
+        }
+
         // ---------------------------------------------------------------- conflicts, counts
         internal void InsertConflict(string entityA, string? entityB, string kind, string detail, string nowUtc)
         {

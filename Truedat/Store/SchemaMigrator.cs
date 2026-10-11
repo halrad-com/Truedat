@@ -6,7 +6,9 @@ namespace Truedat.Store
     /// <summary>Thrown for store-level refusals that are not SQLite errors (schema newer than the exe, …).</summary>
     internal sealed class StoreException : Exception
     {
-        public StoreException(string message) : base(message) { }
+        /// <summary>Process exit code for this refusal: 1 generic, StoreExitCodes.StoreUnavailable (4) when SQLite itself is missing or too old.</summary>
+        public int ExitCode { get; }
+        public StoreException(string message, int exitCode = 1) : base(message) { ExitCode = exitCode; }
     }
 
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>

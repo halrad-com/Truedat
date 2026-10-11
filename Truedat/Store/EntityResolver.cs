@@ -38,7 +38,10 @@ namespace Truedat.Store
     /// feature rows to compare.</summary>
     internal static class EntityResolver
     {
-        internal static ResolveResult Resolve(StoreDal dal, string? contentHash, string shaKind, long rootId, string canonicalPath, string source, string nowUtc)
+        /// <param name="matchPathAcrossRoots">For a root the operator declared a MIRROR: the same canonical
+        /// path under any root is the same file (X:\Library mirrors D:\Music), so a no-sha entry still
+        /// resolves. Never on for a primary import — two unrelated libraries can share a relative path.</param>
+        internal static ResolveResult Resolve(StoreDal dal, string? contentHash, string shaKind, long rootId, string canonicalPath, string source, string nowUtc, bool matchPathAcrossRoots = false)
         {
             if (!string.IsNullOrEmpty(contentHash))
             {
@@ -51,6 +54,7 @@ namespace Truedat.Store
             }
 
             dal.FindLocation(rootId, canonicalPath, out var byPath);
+            if (byPath == null && matchPathAcrossRoots) dal.FindLocationAnyRoot(canonicalPath, out byPath);
             if (byPath != null)
             {
                 if (!string.IsNullOrEmpty(contentHash))
