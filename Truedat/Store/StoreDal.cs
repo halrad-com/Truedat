@@ -81,6 +81,15 @@ namespace Truedat.Store
             return Db.LastInsertRowId;
         }
 
+        internal List<(long Id, string Path, string Role)> ListRoots()
+        {
+            var list = new List<(long, string, string)>();
+            var st = Stmt("SELECT id, path, role FROM library_root ORDER BY id;");
+            try { while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
+            finally { st.Reset(); }
+            return list;
+        }
+
         // ---------------------------------------------------------------- entities and facets
         internal string CreateEntity(string nowUtc)
         {

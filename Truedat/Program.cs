@@ -841,6 +841,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
+            "store-export", "export-root", "store-roundtrip",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -856,7 +857,7 @@ namespace Truedat
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
             "restore", "keep-backups", "prune-entry",
-            "store", "library-root", "root-role",
+            "store", "library-root", "root-role", "store-export", "export-root", "store-roundtrip",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -2238,6 +2239,9 @@ namespace Truedat
             string? storeLibraryRoot = null;
             string storeRootRole = "primary";
             bool storeMachineAdopt = false;
+            string? storeExportPath = null;      // --store-export <out.json>: the store -> catalog, through the unchanged writer
+            string? storeExportRoot = null;      // --export-root <path>: which root to export when the store has several
+            string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2388,6 +2392,9 @@ namespace Truedat
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
                 else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
                 else if (canonical == "machine-adopt") storeMachineAdopt = true;
+                else if (canonical == "store-export" && i + 1 < args.Length) storeExportPath = args[++i];
+                else if (canonical == "export-root" && i + 1 < args.Length) storeExportRoot = args[++i];
+                else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
                 // --json-output, which predates it and stays the canonical name.
@@ -3012,6 +3019,19 @@ namespace Truedat
                     MachineAdopt = storeMachineAdopt,
                     Audit = auditLog,
                 });
+                return;
+            }
+            if (storeExportPath != null)
+            {
+                Environment.ExitCode = global::Truedat.Store.ExportCommand.Run(new global::Truedat.Store.ExportOptions
+                {
+                    StorePath = storePath, OutPath = storeExportPath, ExportRoot = storeExportRoot, Audit = auditLog,
+                });
+                return;
+            }
+            if (storeRoundtripCatalog != null)
+            {
+                Environment.ExitCode = global::Truedat.Store.ExportCommand.RunRoundtrip(storePath, storeRoundtripCatalog, storeExportRoot, auditLog);
                 return;
             }
 
@@ -20405,6 +20425,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Stream allTracks to disk using Utf8JsonWriter — writes UTF-8 directly to FileStream.
         /// No intermediate strings, no StreamWriter. Memory usage is O(1) per track.
         /// </summary>
+        /// <summary>v2 store: the catalog writer, reachable from Truedat/Store. Additive shim; SaveResults
+        /// is unchanged, so an export from the store is the same bytes, parts and sidecar as a scan's save.</summary>
+        internal static void SaveResultsForStore(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks) => SaveResults(moodsPath, allTracks);
+
         static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
         {
             // Snapshot the catalog once so the fast single-file write and any fallback split write

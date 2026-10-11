@@ -30,6 +30,81 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C5: import)");
             Block(assert, "LedgerImport", () => TestLedgerReaders(assert));
             Block(assert, "Import", () => TestImport(assert));
+            Console.WriteLine("Store self-test (C6: export + round-trip gate)");
+            Block(assert, "Export", () => TestExport(assert));
+        }
+
+        // ---------------------------------------------------------------- export
+        static void TestExport(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "export-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var catDir = Path.Combine(dir, "lib"); var outDir = Path.Combine(dir, "out");
+            Directory.CreateDirectory(catDir); Directory.CreateDirectory(outDir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(catDir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+
+                bool refused = false;
+                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = null }); } catch (StoreException) { refused = true; }
+                assert(refused, "no output path -> refusal");
+
+                var outPath = Path.Combine(outDir, "mbxmoods.json");
+                var r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath });
+                assert(r.Entries == 6 && r.Root == @"D:\Music", $"export picks the single primary root and writes 6 entries ({r.Entries}, {r.Root})");
+                assert(File.Exists(outPath), "the export file exists");
+                assert(r.KeyMoves == 0 && r.KeyMovesPath == null, "no superseded hashes -> no key-moves.json");
+
+                // The gate, writer-vs-writer: the exported catalog loads to the same key set and every entry writes the same bytes.
+                var back = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                int n = Program.LoadExistingMoodsForStore(outPath, back);
+                int same = 0;
+                foreach (var kv in entries) if (back.TryGetValue(kv.Key, out var b) && EntryJson(kv.Key, kv.Value) == EntryJson(kv.Key, b)) same++;
+                assert(n == 6 && same == 6, $"export reloads to 6 entries, 6/6 byte-identical through the writer ({n}, {same})");
+                var text = File.ReadAllText(outPath);
+                assert(text.Contains("\"trackCount\":6"), "the export carries the writer's header and trackCount");
+
+                var rt = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt.Equal && rt.CatalogEntries == 6 && rt.StoreEntries == 6 && rt.Same == 6, $"Roundtrip(store, catalog) reports equal: {rt.Same}/{rt.CatalogEntries}, only-in-catalog {rt.OnlyInCatalog}, only-in-store {rt.OnlyInStore}, different {rt.Different}");
+
+                // A changed catalog: one entry re-keyed (legacy.flac gains a frame-anchored sha) and one new entry.
+                var changed = FixtureEntries(@"D:\Music");
+                changed[@"D:\Music\old\legacy.flac"].AudioStreamSha256 = "2222222222222222222222222222222222222222222222222222222222222222";
+                changed[@"D:\Music\old\legacy.flac"].AudioStreamSha256Source = "flac-frames";
+                changed[@"D:\Music\new\n.mp3"] = Entry("9999999999999999999999999999999999999999999999999999999999999999", null, "mp3", 60000);
+                var catalog2 = Path.Combine(catDir, "mbxmoods.json");   // same path: the catalog changed in place
+                WriteCatalog(catalog2, changed);
+                var ri = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog2, LibraryRoot = @"D:\Music" });
+                // MatchedPath is 2: legacy.flac (re-keyed) AND nosha.mp3, which has no hash and can only ever match by path.
+                assert(ri.EntitiesCreated == 1 && ri.MatchedPath == 2 && ri.LocationsNew == 1, $"changed catalog: 1 new entity, 2 matched by path (the re-keyed FLAC and the no-sha entry), 1 new location ({ri.EntitiesCreated}/{ri.MatchedPath}/{ri.LocationsNew})");
+
+                var rt2 = ExportCommand.Roundtrip(store, catalog2, null);
+                assert(rt2.Equal && rt2.CatalogEntries == 7, $"after re-import the store matches the changed catalog, 7/7 ({rt2.Same}/{rt2.CatalogEntries}, different {rt2.Different})");
+                var rtOld = ExportCommand.Roundtrip(store, outPath, null);
+                assert(!rtOld.Equal && rtOld.Different == 1 && rtOld.OnlyInStore == 1 && rtOld.FirstDifferentPath != null && rtOld.FirstDifferentPath.EndsWith("legacy.flac", StringComparison.OrdinalIgnoreCase),
+                    $"against the OLD export the gate reports 1 different (legacy.flac) and 1 only-in-store (n.mp3) ({rtOld.Different}/{rtOld.OnlyInStore}, first {rtOld.FirstDifferentPath})");
+
+                var out2 = Path.Combine(outDir, "second", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(out2)!);
+                var r2 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = out2 });
+                assert(r2.Entries == 7 && r2.KeyMoves == 1 && r2.KeyMovesPath != null && File.Exists(r2.KeyMovesPath), $"export after a key move writes key-moves.json beside it with 1 move ({r2.KeyMoves})");
+                var km = File.ReadAllText(r2.KeyMovesPath ?? "");
+                assert(km.Contains("1111111111111111111111111111111111111111111111111111111111111111") && km.Contains("2222222222222222222222222222222222222222222222222222222222222222")
+                    && km.Contains(FacetKinds.ShaTaglibRegion) && km.Contains(FacetKinds.ShaFrames), "key-moves.json names old and new hash with their kinds");
+
+                // Two primary roots and no --export-root -> refuse, naming them.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    os.Dal.EnsureRoot(os.Machine.Id, @"E:\Other", "primary", DateTime.UtcNow.ToString("o"));
+                string? msg = null;
+                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json") }); } catch (StoreException ex) { msg = ex.Message; }
+                assert(msg != null && msg.Contains(@"D:\Music") && msg.Contains(@"E:\Other"), $"two primary roots without --export-root refuse and name both ({msg})");
+                var r3 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json"), ExportRoot = @"d:\music\" });
+                assert(r3.Entries == 7 && r3.Root == @"D:\Music", "--export-root selects the root case-insensitively, tolerating a trailing separator");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- ledger readers
@@ -218,17 +293,7 @@ namespace Truedat.Store
         }
 
         /// <summary>The catalog writer's bytes for one entry, as a string — the unit of the round-trip gate.</summary>
-        internal static string EntryJson(string path, TrackEntry entry)
-        {
-            using var ms = new MemoryStream();
-            using (var jw = new System.Text.Json.Utf8JsonWriter(ms))
-            {
-                jw.WriteStartObject();
-                Program.WriteTrackEntryForStore(jw, path, entry);
-                jw.WriteEndObject();
-            }
-            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
-        }
+        internal static string EntryJson(string path, TrackEntry entry) => ExportCommand.EntryJson(path, entry);
 
         // ---------------------------------------------------------------- mapper
         static void TestMapper(Action<bool, string> assert)
