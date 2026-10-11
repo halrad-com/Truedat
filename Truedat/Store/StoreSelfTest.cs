@@ -32,6 +32,40 @@ namespace Truedat.Store
             Block(assert, "Import", () => TestImport(assert));
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
+            Console.WriteLine("Store self-test (C7: verbs answering from the store)");
+            Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
+        }
+
+        // ---------------------------------------------------------------- store as the verbs' dictionary
+        static void TestStoreDictionary(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "dict-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+
+                var fromJson = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(catalog, fromJson);
+                var fromStore = StoreDictionary.Load(store, null, out var root);
+                assert(root == @"D:\Music" && fromStore.Count == fromJson.Count && fromStore.Count == 6, $"store dictionary has the catalog's 6 entries for the primary root ({fromStore.Count}, {root})");
+                int same = 0;
+                foreach (var kv in fromJson) if (fromStore.TryGetValue(kv.Key, out var s) && EntryJson(kv.Key, kv.Value) == EntryJson(kv.Key, s)) same++;
+                assert(same == 6, $"every entry in the store dictionary writes the same bytes as the JSON-loaded one ({same}/6)");
+                assert(fromStore.ContainsKey(@"d:\music\TOOL\A.FLAC") && fromStore.ContainsKey("D:/Music/Tool/a.flac"), "the dictionary keys compare like PathComparer (case- and separator-insensitive), as the verbs expect");
+
+                // The verb itself, on the store's dictionary: RunDuplicates groups the two same-sha entries.
+                var dupDir = Path.Combine(dir, "dupes"); Directory.CreateDirectory(dupDir);
+                int rc = Program.RunDuplicatesForStore(Path.Combine(dupDir, "mbxmoods.json"), fromStore);
+                assert(rc == 0 && File.Exists(Path.Combine(dupDir, "mbxmoods-duplicates.json")), "--duplicates runs on the store dictionary and writes its outputs beside the given moods path");
+                var dj = File.ReadAllText(Path.Combine(dupDir, "mbxmoods-duplicates.json"));
+                assert(dj.Contains("d1.flac") && dj.Contains("d2.flac"), "the exact-duplicate pair (same sha) is grouped");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- export

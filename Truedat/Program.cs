@@ -1158,6 +1158,10 @@ namespace Truedat
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
         static bool _audit;
+        // v2 store (S1, C7): --store / --export-root as seen by verbs that run deep in the scan path
+        // (RunDuplicates(outputDir)) and cannot see Main's locals. Null = the JSON-backed path, unchanged.
+        static string? _storePath;
+        static string? _storeExportRoot;
 
         /// <summary>--audit-verdicts: also emit the per-signal verdict vote trace.
         /// OFF even under --audit, because the trace is recomputed for EVERY catalog entry
@@ -2611,6 +2615,8 @@ namespace Truedat
             }
 
             _audit = auditLog;
+            _storePath = storePath;
+            _storeExportRoot = storeExportRoot;
 
             // --refresh-smfm forces an SMFM re-read on cache hits; --no-smfm suppresses
             // every SMFM read. Together the refresh silently does nothing, which is the
@@ -3044,15 +3050,26 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                if (!File.Exists(statsPath))
+                // With --store the catalog path only anchors the report's outputs and exclusion file; the
+                // entries come from the store (v2 S1, C7). Without it, today's path, unchanged.
+                if (!File.Exists(statsPath) && storePath == null)
                 {
                     Console.Error.WriteLine($"Error: moods file not found: {statsPath}");
                     Console.Error.WriteLine("Hint: pass the path to mbxmoods.json (or --moods <path>).");
                     Environment.ExitCode = 1;
                     return;
                 }
-                var statsTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-                LoadExistingMoods(statsPath!, statsTracks);
+                ConcurrentDictionary<string, TrackEntry> statsTracks;
+                if (storePath != null)
+                {
+                    try { statsTracks = global::Truedat.Store.StoreDictionary.Load(storePath, storeExportRoot, out var statsRoot); Console.WriteLine($"Source: store {storePath} (root {statsRoot})"); }
+                    catch (global::Truedat.Store.StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); Environment.ExitCode = ex.ExitCode; return; }
+                }
+                else
+                {
+                    statsTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    LoadExistingMoods(statsPath!, statsTracks);
+                }
                 // --audit: tee the summary to truedat.log next to the moods file.
                 TeeWriter? statsTee = null;
                 string statsLog = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log");
@@ -6768,6 +6785,19 @@ namespace Truedat
             // resolve the moods file next to the output dir and hand off to the
             // shared reporter.
             var moodsPath = Path.Combine(outputDir, "mbxmoods.json");
+            // With --store the entries come from the store and moodsPath only anchors the outputs
+            // (v2 S1, C7). Without it, today's path, unchanged.
+            if (_storePath != null)
+            {
+                try
+                {
+                    var storeTracks = global::Truedat.Store.StoreDictionary.Load(_storePath, _storeExportRoot, out var dupRoot);
+                    Console.WriteLine($"Source: store {_storePath} (root {dupRoot})");
+                    RunDuplicates(moodsPath, storeTracks);
+                }
+                catch (global::Truedat.Store.StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); Environment.ExitCode = ex.ExitCode; }
+                return;
+            }
             if (!File.Exists(moodsPath))
             {
                 Console.WriteLine("=== Duplicate Audio ===");
@@ -12009,6 +12039,10 @@ namespace Truedat
         /// is modified; the console + CSV just give the info to decide. Entries with no
         /// audioStreamSha256 can't join the exact tier; entries missing mfcc/bpm/key/
         /// duration can't join the probable tier — both are counted-but-skipped.</summary>
+        /// <summary>v2 store: the duplicates reporter, reachable from Truedat/Store. Additive shim; the
+        /// reporter is unchanged.</summary>
+        internal static int RunDuplicatesForStore(string moodsPath, IDictionary<string, TrackEntry> tracks) => RunDuplicates(moodsPath, tracks);
+
         static int RunDuplicates(string moodsPath, IDictionary<string, TrackEntry> tracks)
         {
             Console.WriteLine("=== Duplicate Audio ===");
