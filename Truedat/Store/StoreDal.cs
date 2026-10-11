@@ -137,6 +137,37 @@ namespace Truedat.Store
             return FindLocation(rootId, canonicalPath, out _) ?? throw new StoreException($"location vanished after upsert: {displayPath}");
         }
 
+        // ---------------------------------------------------------------- features
+        /// <summary>contentKeyKind is the facet kind of contentKey (FacetKinds.*), or "entity" when the
+        /// entry has no hash and contentKey is 'entity:&lt;uuid&gt;'.</summary>
+        internal void UpsertFeature(long locationId, string contentKey, string contentKeyKind, long? importedRunId, TrackEntry entry, string nowUtc)
+        {
+            var st = Stmt(TrackEntryMapper.UpsertSql);
+            st.Bind(1, locationId).Bind(2, contentKey).Bind(3, contentKeyKind);
+            if (importedRunId.HasValue) st.Bind(4, importedRunId.Value); else st.BindNull(4);
+            st.Bind(5, nowUtc);
+            TrackEntryMapper.BindRow(st, TrackEntryMapper.UpsertFirstFeatureParam, TrackEntryMapper.ToRow(entry));
+            st.Step();
+        }
+
+        /// <summary>Every entry under a root, with the display path the catalog keys it by. Its own
+        /// statement (not the cache) because callers iterate it while running other statements.</summary>
+        internal IEnumerable<(string DisplayPath, TrackEntry Entry)> ReadEntries(long rootId)
+        {
+            using var st = Db.Prepare(
+                "SELECT l.display_path, l.last_modified_utc, " + TrackEntryMapper.SelectList +
+                " FROM track_feature f JOIN track_location l ON l.id = f.location_id WHERE l.root_id = ? ORDER BY l.id;");
+            st.Bind(1, rootId);
+            while (st.Step())
+            {
+                var display = st.GetString(0)!;
+                var lm = st.GetString(1);
+                var lastModified = lm == null ? default
+                    : DateTime.ParseExact(lm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+                yield return (display, TrackEntryMapper.FromRow(st, 2, lastModified));
+            }
+        }
+
         // ---------------------------------------------------------------- conflicts, counts
         internal void InsertConflict(string entityA, string? entityB, string kind, string detail, string nowUtc)
         {

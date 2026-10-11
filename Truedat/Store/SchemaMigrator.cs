@@ -15,7 +15,7 @@ namespace Truedat.Store
         internal const int CurrentVersion = 1;
 
         /// <summary>Columns of track_feature that are not catalog JSON keys.</summary>
-        internal static readonly string[] TrackFeatureMetaColumns = { "location_id", "content_key", "imported_run_id", "updated_utc" };
+        internal static readonly string[] TrackFeatureMetaColumns = { "location_id", "content_key", "content_key_kind", "imported_run_id", "updated_utc" };
 
         /// <summary>The one flattening rule: nested blocks join with '_', and '.' in a key becomes '_'
         /// (<c>fingerprint.v1</c> → <c>fingerprint_v1</c>). Used by the drift test and the mapper so they

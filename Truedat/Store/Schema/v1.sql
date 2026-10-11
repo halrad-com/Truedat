@@ -4,8 +4,11 @@
 -- separately from the entity, G4 work tables, G5 value/segment/artifact edges, G8 machine identity).
 --
 -- Conventions: all timestamps ISO-8601 UTC text ('o' format), ids are UUIDv7 text where the id must
--- survive export (entity, machine) and INTEGER rowids otherwise; vectors are float32 little-endian
--- BLOBs; smfmScores is an int32 little-endian BLOB.
+-- survive export (entity, machine) and INTEGER rowids otherwise; vectors are float64 little-endian
+-- BLOBs (exactness first: mfcc is written at full double precision); smfmScores is int32 LE.
+-- Every content hash carries its scheme (restfulbee ask, 2026-10-11): facet.kind names the algorithm,
+-- and every other table that holds a hash has a *_kind column beside it, so "same content, new scheme"
+-- and "same scheme, different content" are never the same key.
 
 CREATE TABLE schema_version (
   version         INTEGER PRIMARY KEY,
@@ -102,6 +105,7 @@ CREATE TABLE run (
   producer_version  TEXT NOT NULL,
   entity_id         TEXT REFERENCES file_entity(id),
   content_hash      TEXT,
+  content_hash_kind TEXT,                  -- facet kind of content_hash
   location_id       INTEGER REFERENCES track_location(id),
   started_utc       TEXT NOT NULL,
   duration_ms       INTEGER,
@@ -138,6 +142,7 @@ CREATE TABLE check_result (
   id           INTEGER PRIMARY KEY,
   location_id  INTEGER REFERENCES track_location(id),
   content_hash TEXT,
+  content_hash_kind TEXT,
   kind         TEXT NOT NULL,              -- 'verify'
   result       TEXT NOT NULL,              -- OK | DRIFT | MISSING | NO_HASH | ERROR | BACKFILLED | REANALYZE_NEEDED
   detail       TEXT,
@@ -161,6 +166,7 @@ CREATE TABLE conflict (
 -- these are functions of the audio and the big ones (artifacts) must be stored once per audio.
 CREATE TABLE value (
   content_hash     TEXT NOT NULL,
+  content_hash_kind TEXT NOT NULL DEFAULT 'content_hash:audio-stream-sha256',
   field            TEXT NOT NULL,
   producer_key     TEXT NOT NULL REFERENCES producer(key),
   producer_version TEXT NOT NULL,
@@ -176,6 +182,7 @@ CREATE TABLE value (
 CREATE TABLE segment (
   id           INTEGER PRIMARY KEY,
   content_hash TEXT NOT NULL,
+  content_hash_kind TEXT NOT NULL DEFAULT 'content_hash:audio-stream-sha256',
   set_key      TEXT NOT NULL,              -- producer + version that defined the segmentation
   kind         TEXT NOT NULL,              -- 'head' | 'tail' | 'frac8' | 'section' | 'speech' | ...
   ordinal      INTEGER NOT NULL,
@@ -187,6 +194,7 @@ CREATE TABLE segment (
 CREATE TABLE artifact (
   id             INTEGER PRIMARY KEY,
   content_hash   TEXT NOT NULL,
+  content_hash_kind TEXT NOT NULL DEFAULT 'content_hash:audio-stream-sha256',
   run_id         INTEGER REFERENCES run(id),
   kind           TEXT NOT NULL,            -- 'main' | 'frames-head' | 'frames-tail' | ...
   format_version TEXT NOT NULL,            -- records grid/origin/profile so a re-fold lines up
@@ -207,6 +215,7 @@ CREATE TABLE artifact (
 CREATE TABLE track_feature (
   location_id     INTEGER PRIMARY KEY REFERENCES track_location(id),
   content_key     TEXT NOT NULL,           -- audioStreamSha256, or 'entity:<uuid>' when the entry has none
+  content_key_kind TEXT NOT NULL,          -- facet kind of content_key, or 'entity' for the no-sha fallback
   imported_run_id INTEGER REFERENCES run(id),
   updated_utc     TEXT NOT NULL,
 

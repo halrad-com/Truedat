@@ -24,6 +24,111 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C3b: machine identity + entity resolution)");
             Block(assert, "MachineIdentity", () => TestMachineIdentity(assert));
             Block(assert, "EntityResolver", () => TestEntityResolver(assert));
+            Console.WriteLine("Store self-test (C4: TrackEntry mapper + feature rows)");
+            Block(assert, "TrackEntryMapper", () => TestMapper(assert));
+            Block(assert, "FeatureRows", () => TestFeatureRows(assert));
+        }
+
+        /// <summary>The catalog writer's bytes for one entry, as a string — the unit of the round-trip gate.</summary>
+        internal static string EntryJson(string path, TrackEntry entry)
+        {
+            using var ms = new MemoryStream();
+            using (var jw = new System.Text.Json.Utf8JsonWriter(ms))
+            {
+                jw.WriteStartObject();
+                Program.WriteTrackEntryForStore(jw, path, entry);
+                jw.WriteEndObject();
+            }
+            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
+
+        // ---------------------------------------------------------------- mapper
+        static void TestMapper(Action<bool, string> assert)
+        {
+            // Column set == DDL minus the meta columns, both ways (the mapper and v1.sql cannot drift apart).
+            var db = FreshStore(out var dir);
+            try
+            {
+                var ddl = new HashSet<string>(StringComparer.Ordinal);
+                using (var st = db.Prepare("PRAGMA table_info(track_feature);"))
+                    while (st.Step()) ddl.Add(st.GetString(1)!);
+                foreach (var m in StoreSchema.TrackFeatureMetaColumns) ddl.Remove(m);
+                var mapper = new HashSet<string>(TrackEntryMapper.ColumnNames, StringComparer.Ordinal);
+                var onlyDdl = new List<string>(); foreach (var c in ddl) if (!mapper.Contains(c)) onlyDdl.Add(c);
+                var onlyMap = new List<string>(); foreach (var c in mapper) if (!ddl.Contains(c)) onlyMap.Add(c);
+                assert(onlyDdl.Count == 0 && onlyMap.Count == 0,
+                    "mapper columns == DDL columns" + (onlyDdl.Count > 0 ? " — DDL only: " + string.Join(",", onlyDdl) : "") + (onlyMap.Count > 0 ? " — mapper only: " + string.Join(",", onlyMap) : ""));
+                assert(TrackEntryMapper.ColumnNames.Count == ddl.Count && ddl.Count > 100, $"{ddl.Count} mapped columns");
+            }
+            finally { db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
+
+            const string path = @"D:\Music\x.flac";
+            var full = FullyPopulatedEntry();
+            var before = EntryJson(path, full);
+            var back = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(full), full.LastModified);
+            var after = EntryJson(path, back);
+            assert(before == after, "fully populated entry: writer bytes identical after ToRow → FromValues" + (before == after ? "" : FirstDiff(before, after)));
+
+            var minimal = new TrackEntry { Features = new TrackFeatures(), LastModified = new DateTime(2026, 10, 11, 0, 0, 0, DateTimeKind.Utc) };
+            var minBefore = EntryJson(path, minimal);
+            var minBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(minimal), minimal.LastModified);
+            assert(minBefore == EntryJson(path, minBack), "minimal entry (every nullable absent): writer bytes identical" + (minBefore == EntryJson(path, minBack) ? "" : FirstDiff(minBefore, EntryJson(path, minBack))));
+            assert(minBack.FingerprintV1 == null && minBack.Features.KeyVoteEdma == null && minBack.Features.BitUsage == null
+                && minBack.Features.HfSpectralStructure == null && minBack.Features.Mfcc == null && minBack.Features.SmfmScores == null,
+                "absent blocks come back null, not as empty objects");
+
+            // Full double precision survives: mfcc is written by WriteShortestNumber, not rounded.
+            var prec = new TrackEntry { Features = new TrackFeatures { Mfcc = new[] { -821.3456789012345, 1e-9, 0.1, 12345678.9 } }, LastModified = DateTime.UtcNow };
+            var precBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(prec), prec.LastModified);
+            assert(precBack.Features.Mfcc != null && precBack.Features.Mfcc.Length == 4
+                && precBack.Features.Mfcc[0] == -821.3456789012345 && precBack.Features.Mfcc[1] == 1e-9 && precBack.Features.Mfcc[3] == 12345678.9,
+                "vectors round-trip bit-exact (float64 blobs)");
+            var smfm = new TrackEntry { Features = new TrackFeatures { SmfmScores = new[] { 0, 255, 17 } }, LastModified = DateTime.UtcNow };
+            var smfmBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(smfm), smfm.LastModified);
+            assert(smfmBack.Features.SmfmScores != null && smfmBack.Features.SmfmScores.Length == 3 && smfmBack.Features.SmfmScores[1] == 255, "int vectors round-trip (int32 blobs)");
+        }
+
+        static string FirstDiff(string a, string b)
+        {
+            int i = 0; while (i < a.Length && i < b.Length && a[i] == b[i]) i++;
+            int from = Math.Max(0, i - 40);
+            return $" — first difference at {i}: before='{a.Substring(from, Math.Min(90, a.Length - from))}' after='{b.Substring(from, Math.Min(90, b.Length - from))}'";
+        }
+
+        // ---------------------------------------------------------------- feature rows in the store
+        static void TestFeatureRows(Action<bool, string> assert)
+        {
+            var db = FreshStore(out var dir);
+            try
+            {
+                using var dal = new StoreDal(db);
+                var now = "2026-10-11T10:00:00.0000000Z";
+                var m = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                long root = dal.EnsureRoot(m.Id, @"D:\Music", "primary", now);
+                var full = FullyPopulatedEntry();
+                const string display = @"D:\Music\Tool\a.flac";
+                var r = EntityResolver.Resolve(dal, full.AudioStreamSha256, FacetKinds.ShaFrames, root, "tool/a.flac", "import:test", now);
+                long loc = dal.UpsertLocation(r.EntityId, root, "Tool/a.flac", "tool/a.flac", display, full.LastModified.ToString("o"), now);
+
+                using (var tx = db.BeginTransaction())
+                {
+                    dal.UpsertFeature(loc, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
+                    dal.UpsertFeature(loc, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
+                    tx.Complete();
+                }
+                assert(dal.Count("track_feature") == 1, "UpsertFeature twice on one location -> one row");
+                assert(db.ExecScalar($"SELECT content_key_kind FROM track_feature WHERE location_id = {loc};") == FacetKinds.ShaFrames,
+                    "the feature row carries the scheme of its content key (restfulbee ask: version every hash)");
+
+                var read = new List<(string, TrackEntry)>(dal.ReadEntries(root));
+                assert(read.Count == 1 && read[0].Item1 == display, "ReadEntries yields the location's display path");
+                var before = EntryJson(display, full);
+                var after = read.Count == 1 ? EntryJson(display, read[0].Item2) : "";
+                assert(before == after, "entry read back from the store writes identical bytes" + (before == after ? "" : FirstDiff(before, after)));
+                assert(read.Count == 1 && read[0].Item2.LastModified == full.LastModified && read[0].Item2.LastModified.Kind == full.LastModified.Kind,
+                    "lastModified comes back from track_location, exact including Kind");
+            }
+            finally { db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
         }
 
         /// <summary>A fresh schema-v1 store in a temp dir; caller disposes and deletes.</summary>
