@@ -38,16 +38,23 @@ namespace Truedat.Store
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
             }
 
-            var db = SqliteDb.Open(full, create);
+            SqliteDb? db = null;
             try
             {
+                db = SqliteDb.Open(full, create);
                 SchemaMigrator.Apply(db, truedatVersion);
                 var dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);
                 StoreLog.Info($"store open: {full} (schema v{SchemaMigrator.ReadVersion(db)}, sqlite {probe.VersionText}, machine {machine.Id} on {machine.CreatedByHost})");
                 return new OpenStore(db, dal, machine, probe, full);
             }
-            catch { db.Dispose(); throw; }
+            catch (SqliteException ex)
+            {
+                // Not a database, locked, read-only share: one plain sentence, never an escaping stack trace (review #6).
+                db?.Dispose();
+                throw new StoreException($"The store {full} could not be opened: {ex.Message}");
+            }
+            catch { db?.Dispose(); throw; }
         }
 
         public void Dispose() { Dal.Dispose(); Db.Dispose(); }

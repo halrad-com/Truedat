@@ -67,9 +67,10 @@ namespace Truedat.Store
                 var info = StoreInfoCommand.Collect(store);
                 assert(info.SchemaVersion == 1 && info.SqliteVersion.StartsWith("3.") && info.MachineId.Length == 36, $"schema/sqlite/machine reported ({info.SchemaVersion}, {info.SqliteVersion})");
                 assert(info.Roots.Count == 1 && info.Roots[0].Path == @"D:\Music" && info.Roots[0].Role == "primary", "roots listed");
-                assert(info.Tracks == 6 && info.Counts["track_feature"] == 6 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4, $"counts: 6 tracks, 7 entities, runs {info.Counts["run"]}");
+                assert(info.Tracks == 5 && info.FeatureRows == 6 && info.Counts["track_feature"] == 6 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4,
+                    $"counts: 5 tracks (distinct entities with features; d1/d2 share one), 6 feature rows, 7 entities, runs {info.Counts["run"]} ({info.Tracks}/{info.FeatureRows})");
                 assert(info.FileBytes > 100_000 && info.PageSize == 4096 && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
-                assert(info.BytesPerTrack == (double)info.FileBytes / 6 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track and the 156k projection derive from the file size");
+                assert(info.BytesPerTrack == (double)info.FileBytes / 5 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track (per distinct track) and the 156k projection derive from the file size");
                 assert(info.RtfSamples == 3 && info.MedianRtf.HasValue && Math.Abs(info.MedianRtf.Value - 10.0) < 1e-9, $"median RTF over the 3 rows with both durations = 10 (got {info.MedianRtf}, n={info.RtfSamples})");
                 assert(info.FailedComponents.TryGetValue("sha", out var fsha) && fsha == 1 && info.FailedComponents.TryGetValue("fingerprint", out var ffp) && ffp == 1, "failed components split on ';' and counted per component");
                 assert(info.Coverage["loudnessMomentary"] == 1 && info.Coverage["dynamicComplexity"] == 1 && info.Coverage["fingerprint.v1"] == 6 && info.Coverage["smfmScores"] == 1,
@@ -104,6 +105,13 @@ namespace Truedat.Store
                 foreach (var kv in fromJson) if (fromStore.TryGetValue(kv.Key, out var s) && EntryJson(kv.Key, kv.Value) == EntryJson(kv.Key, s)) same++;
                 assert(same == 6, $"every entry in the store dictionary writes the same bytes as the JSON-loaded one ({same}/6)");
                 assert(fromStore.ContainsKey(@"d:\music\TOOL\A.FLAC") && fromStore.ContainsKey("D:/Music/Tool/a.flac"), "the dictionary keys compare like PathComparer (case- and separator-insensitive), as the verbs expect");
+
+                // #6: a --store that is not a database is a plain refusal, never an escaping SqliteException.
+                var notDb = Path.Combine(dir, "notadb.db");
+                File.WriteAllText(notDb, "this is not a database");
+                bool plain = false; string? why = null;
+                try { StoreDictionary.Load(notDb, null, out _); } catch (StoreException ex) { plain = true; why = ex.Message; } catch (Exception ex) { why = ex.GetType().Name + ": " + ex.Message; }
+                assert(plain && why != null && why.Contains("notadb.db"), $"#6 a non-database --store is a StoreException naming the file ({why})");
 
                 // The verb itself, on the store's dictionary: RunDuplicates groups the two same-sha entries.
                 var dupDir = Path.Combine(dir, "dupes"); Directory.CreateDirectory(dupDir);
@@ -268,9 +276,13 @@ namespace Truedat.Store
                 "Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents",
                 $"\"TagLib: bad header\",Tool,X,{root}\\bad\\x.flac,42.1,500.0,sha;fingerprint",
             });
+            // The second row names a path that IS in the catalog: an entry scanned before an exclusion rule
+            // existed stays in the catalog and is ledgered as skipped on every later scan (review #1).
             File.WriteAllLines(Path.Combine(dir, "mbxmoods-skipped.csv"), new[]
             {
-                "path,extension,reason,timestamp", $"{root}\\skip\\s.dsf,.dsf,unsupported codec: DSD,2026-10-01T00:00:00Z",
+                "path,extension,reason,timestamp",
+                $"{root}\\skip\\s.dsf,.dsf,unsupported codec: DSD,2026-10-01T00:00:00Z",
+                $"{root}\\Tool\\b.mp3,.mp3,excluded by rule,2026-10-02T00:00:00Z",
             });
             File.WriteAllLines(Path.Combine(dir, "mbxmoods-verify.csv"), new[]
             {
@@ -310,7 +322,9 @@ namespace Truedat.Store
                 assert(r.EntitiesCreated == 4 && r.MatchedHash == 1 && r.CreatedNoSha == 1, $"entities: 4 created with a sha, 1 matched by sha (d2), 1 created without ({r.EntitiesCreated}/{r.MatchedHash}/{r.CreatedNoSha})");
                 assert(r.Locations == 6 && r.Conflicts == 1, $"6 locations, 1 sha collision conflict ({r.Locations}/{r.Conflicts})");
                 assert(r.LegacySha == 1 && r.LegacyShaUnrecoverable == 3, $"1 legacy-sha FLAC (taglib-region kind), 3 flac-frames FLACs whose old sha is unrecoverable ({r.LegacySha}/{r.LegacyShaUnrecoverable})");
-                assert(r.ErrorsRows == 1 && r.SkippedRows == 1 && r.ReviewRows == 1 && r.VerifyRows == 2 && r.ReceiptRows == 1, $"ledgers: errors {r.ErrorsRows}, skipped {r.SkippedRows}, review {r.ReviewRows}, verify {r.VerifyRows}, receipts {r.ReceiptRows}");
+                assert(r.ErrorsRows == 1 && r.SkippedRows == 2 && r.ReviewRows == 1 && r.VerifyRows == 2 && r.ReceiptRows == 1, $"ledgers: errors {r.ErrorsRows}, skipped {r.SkippedRows}, review {r.ReviewRows}, verify {r.VerifyRows}, receipts {r.ReceiptRows}");
+                var rt0 = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt0.Equal, $"#1 a cataloged path that is also in skipped.csv keeps its lastModified: round-trip stays EQUAL ({rt0.Same}/{rt0.CatalogEntries}, different {rt0.Different}, first {rt0.FirstDifferentPath})");
                 assert(File.Exists(r.ResultPath) && File.ReadAllText(r.ResultPath).Contains("\"entries\": 6"), "store-import-result.json written beside the store with the counts");
                 assert(r.StoreBytesAfter > r.StoreBytesBefore && r.StoreBytesAfter > 100_000, $"store size is measured after a WAL checkpoint, so it reflects the rows ({r.StoreBytesBefore} -> {r.StoreBytesAfter})");
                 assert(!File.Exists(store + "-wal") || new FileInfo(store + "-wal").Length == 0, "the WAL is folded into the main file at the end of an import");
@@ -320,7 +334,7 @@ namespace Truedat.Store
                     assert(os.Dal.Count("file_entity") == 7, $"7 entities: 5 from the catalog + the errors path + the skipped path (review shares the errors path) ({os.Dal.Count("file_entity")})");
                     assert(os.Dal.Count("track_feature") == 6 && os.Dal.Count("track_location") == 8,
                         $"6 feature rows; 8 locations = 6 catalog entries + the errors path + the skipped path, which are real files too ({os.Dal.Count("track_feature")}/{os.Dal.Count("track_location")})");
-                    assert(os.Dal.Count("run") == 4, $"runs: import + errors + skipped + receipt = 4 ({os.Dal.Count("run")})");
+                    assert(os.Dal.Count("run") == 5, $"runs: import + errors + 2 skipped + receipt = 5 ({os.Dal.Count("run")})");
                     assert(os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1 && os.Dal.Count("conflict") == 1, "2 verify checks, 1 review work item, 1 conflict");
                     assert(os.Db.ExecScalar("SELECT review_state FROM work_item;") == "auto" && os.Db.ExecScalar("SELECT attempts FROM work_item;") == _fixtureReviewAttempts.ToString(),
                         $"review state and attempts carried onto the work item (state {os.Db.ExecScalar("SELECT review_state FROM work_item;")}, attempts {os.Db.ExecScalar("SELECT attempts FROM work_item;")} vs ledger {_fixtureReviewAttempts})");
@@ -346,7 +360,31 @@ namespace Truedat.Store
                 {
                     assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_feature") == 6 && os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1,
                         "re-import leaves entity/feature/check/work counts unchanged");
-                    assert(os.Dal.Count("run") == 5, $"re-import adds exactly one run (its own); ledger runs are not duplicated ({os.Dal.Count("run")})");
+                    assert(os.Dal.Count("run") == 6, $"re-import adds exactly one run (its own); ledger runs are not duplicated ({os.Dal.Count("run")})");
+                }
+
+                // #5: the ledger files are rewritten by every scan (mtime changes) — that must not duplicate their runs.
+                File.SetLastWriteTimeUtc(Path.Combine(catDir, "mbxmoods-errors.csv"), DateTime.UtcNow.AddMinutes(1));
+                File.SetLastWriteTimeUtc(Path.Combine(catDir, "mbxmoods-verify.receipt.json"), DateTime.UtcNow.AddMinutes(1));
+                ImportCommand.Execute(o);
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Dal.Count("run") == 7, $"#5 touching errors.csv and the receipt does not re-insert their runs on re-import (runs {os.Dal.Count("run")}, expected 7)");
+
+                // #4b: an OLDER catalog over a newer store must not regress rows.
+                var olderDir = Path.Combine(dir, "older"); Directory.CreateDirectory(olderDir);
+                var older = FixtureEntries(@"D:\Music");
+                older[@"D:\Music\Tool\b.mp3"].LastModified = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);   // older than the store's 2026-05-01
+                older[@"D:\Music\Tool\b.mp3"].Features.Bpm = 999;
+                var olderCatalog = Path.Combine(olderDir, "mbxmoods.json");
+                WriteCatalog(olderCatalog, older);
+                var rs = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = olderCatalog, LibraryRoot = @"D:\Music" });
+                assert(rs.Stale == 1, $"#4b an entry whose lastModified is older than the store's, with the same content key, is skipped and counted stale ({rs.Stale})");
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    long root = os.Dal.EnsureRoot(os.Machine.Id, @"D:\Music", "primary", DateTime.UtcNow.ToString("o"));
+                    double? bpm = null;
+                    foreach (var (display, back) in os.Dal.ReadEntries(root)) if (string.Equals(display, @"D:\Music\Tool\b.mp3", StringComparison.OrdinalIgnoreCase)) bpm = back.Features.Bpm;
+                    assert(bpm == 120, $"#4b the stale arrival did not overwrite the row (bpm {bpm}, expected 120)");
                 }
 
                 // Mirror: the same library under X:\Library, imported as a mirror root -> locations, not entities.
@@ -356,8 +394,14 @@ namespace Truedat.Store
                 assert(r3.EntitiesCreated == 0 && r3.CreatedNoSha == 0 && r3.Locations == 6 && r3.MatchedHash == 5 && r3.MatchedPath == 1,
                     $"mirror import: 0 entities created, 6 new locations, 5 matched by sha, the no-sha one matched by canonical path across roots ({r3.EntitiesCreated}/{r3.CreatedNoSha}/{r3.Locations}/{r3.MatchedHash}/{r3.MatchedPath})");
                 using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
                     assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_location") == 14 && os.Dal.Count("library_root") == 2,
                         $"after the mirror: 7 entities, 14 locations (8 + 6 mirrored), 2 roots ({os.Dal.Count("file_entity")}/{os.Dal.Count("track_location")}/{os.Dal.Count("library_root")})");
+                    assert(os.Dal.Count("track_feature") == 12, $"#3 features are per location: a mirror adds its own feature rows (6 → 12), deliberately and visibly ({os.Dal.Count("track_feature")})");
+                }
+                var infoAfterMirror = StoreInfoCommand.Collect(store);
+                assert(infoAfterMirror.Tracks == 5 && infoAfterMirror.FeatureRows == 12,
+                    $"#3 --store-info counts tracks as distinct entities with features (5: d1/d2 share one) and feature rows separately (12) ({infoAfterMirror.Tracks}/{infoAfterMirror.FeatureRows})");
 
                 // Batch atomicity: fail after 3 entries with batches of 2 -> exactly the first batch is in the store.
                 var store2 = Path.Combine(dir, "partial.db");
@@ -492,7 +536,7 @@ namespace Truedat.Store
 
                 var m2 = MachineIdentity.EnsureMinted(dal, "atom", now);
                 assert(m2.Id == m1.Id && dal.Count("machine") == 1, "second open reads the same id (case-insensitive host), mints nothing");
-                m2.RequireWritable(adopt: false);   // must not throw
+                assert(m2.ForWrites(dal, adopt: false, now) == m1.Id, "on the minting host, writes go under the store's own machine id");
                 var warns = lines.FindAll(l => l.Contains(" WARN "));
                 assert(warns.Count == 0, "matching host logs no warning (INFO lines are fine)");
 
@@ -502,10 +546,12 @@ namespace Truedat.Store
                 assert(warns.Count == 1 && warns[0].Contains("ATOM") && warns[0].Contains("MAX1"),
                     $"hostname mismatch warns once, naming both hosts ({(warns.Count > 0 ? warns[0] : "<none>")})");
                 bool refused = false;
-                try { m3.RequireWritable(adopt: false); } catch (StoreException) { refused = true; }
+                try { m3.ForWrites(dal, adopt: false, now); } catch (StoreException) { refused = true; }
                 assert(refused, "writes as this machine are refused on a host mismatch without --machine-adopt");
-                m3.RequireWritable(adopt: true);
-                assert(true, "--machine-adopt lets the write proceed");
+                var w3 = m3.ForWrites(dal, adopt: true, now);
+                assert(w3 != m1.Id && w3.Length == 36 && dal.Count("machine") == 2 && db.ExecScalar($"SELECT hostname FROM machine WHERE id = '{w3}';") == "MAX1",
+                    $"#2 --machine-adopt mints a machine row for the CURRENT host and writes go under it, not under the minting machine ({dal.Count("machine")} machines)");
+                assert(m3.ForWrites(dal, adopt: true, now) == w3 && dal.Count("machine") == 2, "adopting twice reuses the host's machine row");
 
                 long r1 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
                 long r2 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
@@ -572,9 +618,20 @@ namespace Truedat.Store
                 assert(EntityResolver.Resolve(dal, legacy, FacetKinds.ShaTaglibRegion, mirror, "old/f.flac", "import:mirror-old", now).EntityId == l1.EntityId,
                     "a mirror still carrying the OLD sha resolves to the same entity through the kept facet");
 
+                // #4a: an OLDER scheme arriving for a path must never demote the newer primary.
+                const string fr2 = "3333333333333333333333333333333333333333333333333333333333333333";
+                const string tl2 = "4444444444444444444444444444444444444444444444444444444444444444";
+                var q1 = EntityResolver.Resolve(dal, fr2, FacetKinds.ShaFrames, root, "prec/x.flac", "import:new", now);
+                dal.UpsertLocation(q1.EntityId, root, "prec/x.flac", "prec/x.flac", @"D:\Music\prec\x.flac", now, now);
+                var q2 = EntityResolver.Resolve(dal, tl2, FacetKinds.ShaTaglibRegion, root, "prec/x.flac", "import:old-mirror", now);
+                assert(q2.EntityId == q1.EntityId
+                    && dal.HasFacet(q1.EntityId, FacetKinds.ShaFrames, fr2, out var pfr) && pfr
+                    && dal.HasFacet(q1.EntityId, FacetKinds.ShaTaglibRegion, tl2, out var ptl) && !ptl,
+                    "#4a a taglib-region sha arriving for a path keyed by a frames sha is kept NON-primary; the frames sha stays primary");
+
                 long loc1 = dal.UpsertLocation(r1.EntityId, root, "Tool/a.flac", "tool/a.flac", @"D:\Music\Tool\a.flac", "2026-01-01T00:00:00.0000000Z", now);
                 long loc2 = dal.UpsertLocation(r1.EntityId, root, "Tool/a.flac", "tool/a.flac", @"D:\Music\Tool\a.flac", "2026-02-02T00:00:00.0000000Z", now);
-                assert(loc1 == loc2 && dal.Count("track_location") == 4, "UpsertLocation on the same (root, canonical) updates in place, same id");
+                assert(loc1 == loc2 && dal.Count("track_location") == 5, "UpsertLocation on the same (root, canonical) updates in place, same id");
                 assert(db.ExecScalar($"SELECT last_modified_utc FROM track_location WHERE id = {loc1};") == "2026-02-02T00:00:00.0000000Z", "upsert refreshed last_modified_utc");
                 assert(dal.FindLocation(root, "tool/a.flac", out var eid) == loc1 && eid == r1.EntityId, "FindLocation returns id and entity");
                 assert(dal.FindLocation(root, "nope/x.flac", out _) == null, "FindLocation misses cleanly");

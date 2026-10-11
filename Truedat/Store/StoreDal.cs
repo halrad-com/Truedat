@@ -72,6 +72,9 @@ namespace Truedat.Store
         internal void InsertMachine(string id, string hostname, string nowUtc)
             => Exec("INSERT INTO machine(id, hostname, created_utc) VALUES (?, ?, ?);", id, hostname, nowUtc);
 
+        internal string? FindMachineByHost(string hostname)
+            => Row("SELECT id FROM machine WHERE hostname = ? COLLATE NOCASE ORDER BY created_utc LIMIT 1;", s => s.GetString(0), null, hostname);
+
         internal long EnsureRoot(string machineId, string path, string role, string nowUtc)
         {
             var existing = Row("SELECT id FROM library_root WHERE machine_id = ? AND path = ?;", s => (long?)s.GetInt64(0), null, machineId, path);
@@ -127,6 +130,10 @@ namespace Truedat.Store
         internal bool HasFacetOfKind(string entityId, string kind)
             => Row("SELECT 1 FROM identity_facet WHERE entity_id = ? AND kind = ? LIMIT 1;", _ => true, false, entityId, kind);
 
+        /// <summary>The kind of the entity's primary content-hash facet, or null when it has none.</summary>
+        internal string? PrimaryContentHashKind(string entityId)
+            => Row("SELECT kind FROM identity_facet WHERE entity_id = ? AND is_primary = 1 AND substr(kind, 1, 13) = 'content_hash:' LIMIT 1;", s => s.GetString(0), null, entityId);
+
         // ---------------------------------------------------------------- locations
         internal long? FindLocation(long rootId, string canonicalPath, out string? entityId)
         {
@@ -148,13 +155,22 @@ namespace Truedat.Store
 
         internal long UpsertLocation(string entityId, long rootId, string relPath, string canonicalPath, string displayPath, string? lastModifiedUtc, string nowUtc)
         {
+            // An arrival with no mtime (a ledger row) never erases a known mtime or respells a display path
+            // (review #1: a skipped.csv row naming a cataloged path nulled lastModified and broke the gate).
             Exec("INSERT INTO track_location(entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
                  "VALUES (?, ?, ?, ?, ?, ?, ?, 'present') " +
                  "ON CONFLICT(root_id, canonical_path) DO UPDATE SET entity_id = excluded.entity_id, rel_path = excluded.rel_path, " +
-                 "display_path = excluded.display_path, last_modified_utc = excluded.last_modified_utc, last_seen_utc = excluded.last_seen_utc, state = 'present';",
+                 "display_path = CASE WHEN excluded.last_modified_utc IS NULL THEN display_path ELSE excluded.display_path END, " +
+                 "last_modified_utc = coalesce(excluded.last_modified_utc, last_modified_utc), last_seen_utc = excluded.last_seen_utc, state = 'present';",
                  entityId, rootId, relPath, canonicalPath, displayPath, lastModifiedUtc, nowUtc);
             return FindLocation(rootId, canonicalPath, out _) ?? throw new StoreException($"location vanished after upsert: {displayPath}");
         }
+
+        internal string? LocationLastModified(long locationId)
+            => Row("SELECT last_modified_utc FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId);
+
+        internal string? FeatureContentKey(long locationId)
+            => Row("SELECT content_key FROM track_feature WHERE location_id = ?;", s => s.GetString(0), null, locationId);
 
         /// <summary>Audio props of an existing feature row of the entity at some OTHER location, for the
         /// sha-collision check.</summary>
@@ -210,6 +226,15 @@ namespace Truedat.Store
         internal bool RunExists(string producerKey, string? entityId, string outcome, string? source, string startedUtc)
             => Row("SELECT 1 FROM run WHERE producer_key = ? AND entity_id IS ? AND outcome = ? AND source IS ? AND started_utc = ? LIMIT 1;", _ => true, false,
                    producerKey, entityId, outcome, source, startedUtc);
+
+        /// <summary>Dedupe by content, not by file mtime: the errors CSV is rewritten on every scan (review #5).</summary>
+        internal bool RunExistsContent(string producerKey, string? entityId, string outcome, string? source, string? errorText, string? failedComponents)
+            => Row("SELECT 1 FROM run WHERE producer_key = ? AND entity_id IS ? AND outcome = ? AND source IS ? AND error_text IS ? AND failed_components IS ? LIMIT 1;", _ => true, false,
+                   producerKey, entityId, outcome, source, errorText, failedComponents);
+
+        /// <summary>Dedupe a file-shaped run (a verify receipt) on its path and content hash, carried in tool_version.</summary>
+        internal bool RunExistsBySourceVersion(string producerKey, string? source, string? toolVersion)
+            => Row("SELECT 1 FROM run WHERE producer_key = ? AND source IS ? AND tool_version IS ? LIMIT 1;", _ => true, false, producerKey, source, toolVersion);
 
         internal void InsertCheck(long? locationId, string? contentHash, string kind, string result, string? detail, string checkedUtc, string? source)
             => Exec("INSERT INTO check_result(location_id, content_hash, kind, result, detail, checked_utc, source) VALUES (?, ?, ?, ?, ?, ?, ?);",

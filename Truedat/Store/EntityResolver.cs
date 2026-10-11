@@ -20,6 +20,10 @@ namespace Truedat.Store
         internal const string PathCanonical = "path:canonical";
         internal const string ContentHashPrefix = "content_hash:";
 
+        /// <summary>Scheme precedence: a newer scheme is never demoted by an older one arriving later
+        /// (review #4a — an old mirror must not promote a taglib-region sha over the frames sha).</summary>
+        internal static int Rank(string kind) => kind == ShaFrames ? 2 : kind == ShaWholeFile ? 1 : 0;
+
         /// <summary>Maps the catalog's <c>audioStreamSha256Source</c> to a facet kind. A FLAC with no
         /// source tag was hashed before 2026-07-21 (TagLib region); anything else without a tag is the
         /// invariant-region hash, which is the current algorithm for non-FLAC.</summary>
@@ -59,9 +63,19 @@ namespace Truedat.Store
             {
                 if (!string.IsNullOrEmpty(contentHash))
                 {
-                    dal.DemoteFacets(byPath, FacetKinds.ContentHashPrefix);
-                    dal.UpsertFacet(byPath, shaKind, contentHash!, isPrimary: true, confidence: 1.0, source, nowUtc);
-                    StoreLog.Debug($"path {canonicalPath} re-keyed to {shaKind} {contentHash}; previous hash kept as a non-primary facet");
+                    var current = dal.PrimaryContentHashKind(byPath);
+                    if (current != null && FacetKinds.Rank(current) > FacetKinds.Rank(shaKind))
+                    {
+                        // An older scheme arriving for a path the newer scheme already keys: record it, never promote it.
+                        dal.UpsertFacet(byPath, shaKind, contentHash!, isPrimary: false, confidence: 1.0, source, nowUtc);
+                        StoreLog.Debug($"path {canonicalPath}: {shaKind} {contentHash} recorded as non-primary under the newer {current}");
+                    }
+                    else
+                    {
+                        dal.DemoteFacets(byPath, FacetKinds.ContentHashPrefix);
+                        dal.UpsertFacet(byPath, shaKind, contentHash!, isPrimary: true, confidence: 1.0, source, nowUtc);
+                        StoreLog.Debug($"path {canonicalPath} re-keyed to {shaKind} {contentHash}; previous hash kept as a non-primary facet");
+                    }
                 }
                 return new ResolveResult { EntityId = byPath, How = ResolveHow.MatchedPath };
             }

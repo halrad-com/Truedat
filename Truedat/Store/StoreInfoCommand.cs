@@ -13,7 +13,8 @@ namespace Truedat.Store
         public List<(string Path, string Role)> Roots = new List<(string, string)>();
         public Dictionary<string, long> Counts = new Dictionary<string, long>(StringComparer.Ordinal);
         public long FileBytes, WalBytes, PageCount, PageSize, FreePages;
-        public long Tracks;                       // track_feature rows
+        public long Tracks;                       // distinct entities holding a feature row (a mirror does not double it)
+        public long FeatureRows;                  // track_feature rows (per location — a mirror does double this)
         public double BytesPerTrack;              // FileBytes / Tracks
         public long ProjectedBytesAt156k;         // BytesPerTrack * 156000
         public double? MedianRtf;                 // analysisDuration / (durationMs/1000), median over rows with both
@@ -58,7 +59,7 @@ namespace Truedat.Store
                 Console.WriteLine($"  schema v{i.SchemaVersion}, sqlite {i.SqliteVersion}, machine {i.MachineId} (created on {i.CreatedByHost})");
                 Console.WriteLine($"  roots: {string.Join(", ", i.Roots.Select(r => $"{r.Path} ({r.Role})"))}");
                 Console.WriteLine($"  size: {i.FileBytes:N0} bytes = {i.PageCount:N0} pages × {i.PageSize} ({i.FreePages:N0} free)" + (i.WalBytes > 0 ? $" + wal {i.WalBytes:N0}" : ""));
-                Console.WriteLine($"  tracks: {i.Tracks:N0}  →  {i.BytesPerTrack:N0} bytes/track; projected at 156k tracks: {i.ProjectedBytesAt156k / (1024.0 * 1024):N0} MB");
+                Console.WriteLine($"  tracks: {i.Tracks:N0} (distinct), feature rows: {i.FeatureRows:N0} (per location)  →  {i.BytesPerTrack:N0} bytes/track; projected at 156k tracks: {i.ProjectedBytesAt156k / (1024.0 * 1024):N0} MB");
                 Console.WriteLine("  rows: " + string.Join(", ", Tables.Select(t => $"{t} {i.Counts[t]:N0}")));
                 Console.WriteLine(i.MedianRtf.HasValue ? $"  analysis speed: median {i.MedianRtf:F1}× realtime over {i.RtfSamples:N0} tracks" : "  analysis speed: no analysisDuration data");
                 Console.WriteLine("  coverage: " + string.Join(", ", CoverageColumns.Select(c => $"{c.Key} {i.Coverage[c.Key]:N0}")));
@@ -93,7 +94,10 @@ namespace Truedat.Store
             i.PageCount = long.Parse(db.ExecScalar("PRAGMA page_count;") ?? "0");
             i.PageSize = long.Parse(db.ExecScalar("PRAGMA page_size;") ?? "0");
             i.FreePages = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "0");
-            i.Tracks = i.Counts["track_feature"];
+            i.FeatureRows = i.Counts["track_feature"];
+            // Tracks = distinct entities holding a feature row: features are stored per location, so a mirror
+            // doubles FeatureRows but not Tracks (review #3).
+            i.Tracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT l.entity_id) FROM track_feature f JOIN track_location l ON l.id = f.location_id;") ?? "0");
             i.BytesPerTrack = i.Tracks > 0 ? (double)i.FileBytes / i.Tracks : 0;
             i.ProjectedBytesAt156k = (long)(i.BytesPerTrack * 156_000);
 
@@ -139,7 +143,7 @@ namespace Truedat.Store
                 ["store"] = i.Path, ["storeSchema"] = i.SchemaVersion, ["sqlite"] = i.SqliteVersion, ["machine"] = i.MachineId, ["createdByHost"] = i.CreatedByHost,
                 ["roots"] = new JsonArray(i.Roots.Select(r => (JsonNode?)new JsonObject { ["path"] = r.Path, ["role"] = r.Role }).ToArray()),
                 ["fileBytes"] = i.FileBytes, ["walBytes"] = i.WalBytes, ["pageCount"] = i.PageCount, ["pageSize"] = i.PageSize, ["freePages"] = i.FreePages,
-                ["tracks"] = i.Tracks, ["bytesPerTrack"] = Math.Round(i.BytesPerTrack, 1), ["projectedBytesAt156k"] = i.ProjectedBytesAt156k,
+                ["tracks"] = i.Tracks, ["featureRows"] = i.FeatureRows, ["bytesPerTrack"] = Math.Round(i.BytesPerTrack, 1), ["projectedBytesAt156k"] = i.ProjectedBytesAt156k,
                 ["medianRtf"] = i.MedianRtf.HasValue ? Math.Round(i.MedianRtf.Value, 2) : (double?)null, ["rtfSamples"] = i.RtfSamples,
                 ["counts"] = counts, ["failedComponents"] = failed, ["coverage"] = cov,
                 ["contentKeysShared"] = i.ContentKeysShared, ["locationsOnSharedKeys"] = i.LocationsOnSharedKeys,

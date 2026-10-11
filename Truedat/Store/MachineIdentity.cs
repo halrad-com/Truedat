@@ -7,6 +7,7 @@ namespace Truedat.Store
     /// silently becoming that machine — a copied store must not impersonate its source.</summary>
     internal sealed class MachineIdentity
     {
+        /// <summary>The machine that created the store.</summary>
         internal string Id { get; }
         internal string CreatedByHost { get; }
         internal string CurrentHost { get; }
@@ -34,12 +35,23 @@ namespace Truedat.Store
             return mi;
         }
 
-        internal void RequireWritable(bool adopt)
+        /// <summary>The machine id writes must be recorded under. On the minting host that is the store's
+        /// own id. On another host it is a refusal unless --machine-adopt, and adopting means finding or
+        /// MINTING a machine row for the current host — never writing the current host's roots under the
+        /// creating machine's id (review #2: that collapsed two machines' D:\Music into one root).</summary>
+        internal string ForWrites(StoreDal dal, bool adopt, string nowUtc)
         {
-            if (HostMatches || adopt) return;
-            throw new StoreException(
-                $"This store was created on '{CreatedByHost}' and is being written from '{CurrentHost}'. " +
-                "Pass --machine-adopt to record locations as this machine, or open the store on its own host. Nothing was changed.");
+            if (HostMatches) return Id;
+            if (!adopt)
+                throw new StoreException(
+                    $"This store was created on '{CreatedByHost}' and is being written from '{CurrentHost}'. " +
+                    "Pass --machine-adopt to record locations as this machine, or open the store on its own host. Nothing was changed.");
+            var existing = dal.FindMachineByHost(CurrentHost);
+            if (existing != null) return existing;
+            var id = Uuid7.New();
+            dal.InsertMachine(id, CurrentHost, nowUtc);
+            StoreLog.Info($"machine id minted for adopting host {CurrentHost}: {id} (store created on {CreatedByHost})");
+            return id;
         }
     }
 }

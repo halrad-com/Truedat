@@ -32,6 +32,8 @@ namespace Truedat.Store
         public int ErrorsRows, SkippedRows, ReviewRows, VerifyRows, ReceiptRows;
         /// <summary>Ledger rows whose path is under no root (stream URLs, videos outside the library) — counted, not imported.</summary>
         public int LedgerUnrooted;
+        /// <summary>Entries whose lastModified is older than the store's for the same content key — skipped, never regress a row.</summary>
+        public int Stale;
         public long StoreBytesBefore, StoreBytesAfter, ElapsedMs;
         public string ResultPath = "";
     }
@@ -96,8 +98,11 @@ namespace Truedat.Store
 
             var now = DateTime.UtcNow.ToString("o");
             using var os = OpenStore.Open(o.StorePath, create: true, VersionInfo.Display, now);
-            os.Machine.RequireWritable(o.MachineAdopt);
             var dal = os.Dal; var db = os.Db;
+            // The machine this import writes AS: the store's own on its minting host; on another host a
+            // refusal unless --machine-adopt, which finds-or-mints a machine row for THIS host (review #2).
+            string writerMachine;
+            using (var tx = db.BeginTransaction()) { writerMachine = os.Machine.ForWrites(dal, o.MachineAdopt, now); tx.Complete(); }
             r.StoreBytesBefore = new FileInfo(os.Path).Length;
 
             // 2. Roots: given, else inferred and reported so a wrong inference is visible.
@@ -106,7 +111,7 @@ namespace Truedat.Store
             var rootIds = new List<(string Path, long Id)>();
             using (var tx = db.BeginTransaction())
             {
-                foreach (var root in roots) rootIds.Add((root, dal.EnsureRoot(os.Machine.Id, root, role, now)));
+                foreach (var root in roots) rootIds.Add((root, dal.EnsureRoot(writerMachine, root, role, now)));
                 tx.Complete();
             }
             r.Roots.AddRange(roots);
@@ -190,7 +195,8 @@ namespace Truedat.Store
             var sha = string.IsNullOrEmpty(entry.AudioStreamSha256) ? null : entry.AudioStreamSha256;
             var kind = FacetKinds.ForShaSource(entry.AudioStreamSha256Source, isFlac);
 
-            bool isNewLocation = dal.FindLocation(rf.Value.Id, canon, out _) == null;
+            long? existingLoc = dal.FindLocation(rf.Value.Id, canon, out _);
+            bool isNewLocation = existingLoc == null;
             var res = EntityResolver.Resolve(dal, sha, kind, rf.Value.Id, canon, source, now, matchPathAcrossRoots: mirror);
             switch (res.How)
             {
@@ -201,6 +207,24 @@ namespace Truedat.Store
             }
             if (sha != null && kind == FacetKinds.ShaTaglibRegion) r.LegacySha++;
             if (sha != null && isFlac && kind == FacetKinds.ShaFrames && !dal.HasFacetOfKind(res.EntityId, FacetKinds.ShaTaglibRegion)) r.LegacyShaUnrecoverable++;
+
+            var contentKey = sha ?? ("entity:" + res.EntityId);
+
+            // Recency (review #4b): an OLDER catalog imported over a newer store must not regress a row. Same
+            // content key and an older lastModified than the store holds -> skip, count stale, touch nothing.
+            if (existingLoc != null)
+            {
+                var storedLm = dal.LocationLastModified(existingLoc.Value);
+                var storedKey = dal.FeatureContentKey(existingLoc.Value);
+                if (storedLm != null && storedKey == contentKey
+                    && DateTime.ParseExact(storedLm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime()
+                       > entry.LastModified.ToUniversalTime())
+                {
+                    r.Stale++; r.Locations++;
+                    StoreLog.Debug($"stale arrival skipped: {key} (store {storedLm} > catalog {entry.LastModified:o})");
+                    return;
+                }
+            }
 
             // Review-focus 1: same sha, different audio props -> one entity, both locations, a conflict row.
             if (isNewLocation && res.How == ResolveHow.MatchedHash && entry.FingerprintV1 != null)
@@ -218,7 +242,6 @@ namespace Truedat.Store
 
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            var contentKey = sha ?? ("entity:" + res.EntityId);
             dal.UpsertFeature(loc, contentKey, sha != null ? kind : "entity", importRun, entry, now);
         }
 
@@ -232,7 +255,8 @@ namespace Truedat.Store
                 var e = EntityForPath(dal, roots, mirror, row.Path, errorsCsv, now, r);
                 if (e == null) continue;
                 var started = Mtime(errorsCsv);
-                if (dal.RunExists("essentia", e, "failed", errorsCsv, started)) continue;
+                // Keyed on content, not the CSV's mtime: every scan rewrites the file (review #5).
+                if (dal.RunExistsContent("essentia", e, "failed", errorsCsv, row.Error, row.FailedComponents)) continue;
                 dal.InsertRun("essentia", "unknown", e, null, null, null, started, null, null, null, "failed", row.FailedComponents, null, row.Error, errorsCsv);
                 r.ErrorsRows++;
             }
@@ -281,8 +305,9 @@ namespace Truedat.Store
             foreach (var receipt in Directory.GetFiles(dir, "*-verify*.receipt.json"))
             {
                 var started = Mtime(receipt);
-                if (dal.RunExists("verify", null, "ok", receipt, started)) continue;
-                dal.InsertRun("verify", "1", null, null, null, null, started, null, null, null, "ok", null, null, null, receipt);
+                var contentSha = FileSha256(receipt);   // the receipt's identity is its content, carried in tool_version (review #5)
+                if (dal.RunExistsBySourceVersion("verify", receipt, contentSha)) continue;
+                dal.InsertRun("verify", "1", null, null, null, null, started, null, null, contentSha, "ok", null, null, null, receipt);
                 r.ReceiptRows++;
             }
         }
@@ -296,9 +321,19 @@ namespace Truedat.Store
             // counted here (and in the result JSON), not warned one by one — 1,980 of them on X:\Library.
             if (rf == null) { r.LedgerUnrooted++; StoreLog.Debug($"ledger path under no root, not imported: {path}"); return null; }
             CanonicalPath.Split(rf.Value.Path, path, out var rel, out var canon);
+            // A path the catalog already holds keeps its location untouched (review #1: the ledger upsert
+            // nulled a cataloged entry's lastModified and broke the round-trip gate).
+            if (dal.FindLocation(rf.Value.Id, canon, out var existingEntity) != null) return existingEntity;
             var res = EntityResolver.Resolve(dal, null, FacetKinds.ShaFrames, rf.Value.Id, canon, source, now, matchPathAcrossRoots: mirror);
             dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, path, null, now);
             return res.EntityId;
+        }
+
+        static string FileSha256(string path)
+        {
+            using var sha = SHA256.Create();
+            using var fs = File.OpenRead(path);
+            return BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
         }
 
         static (string Path, long Id)? RootFor(List<(string Path, long Id)> roots, string path)
