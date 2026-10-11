@@ -13581,6 +13581,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             Console.WriteLine("Truedat FFT self-test");
 
+            // v2 store (Truedat/Store/*): its own file, same Assert, so the single exe stays self-contained.
+            global::Truedat.Store.StoreSelfTest.Run(Assert);
+
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);
             var h2 = Fft.Hann(4096);
