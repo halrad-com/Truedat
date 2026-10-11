@@ -21036,6 +21036,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             else jw.WriteNumber(name, v);
         }
 
+        /// <summary>v2 store (Truedat/Store): the catalog writer, reachable from outside Program. An
+        /// additive shim only — the writer itself is unchanged; the store's schema drift test and the
+        /// export call this so the JSON they produce is the writer's, byte for byte.</summary>
+        internal static void WriteTrackEntryForStore(Utf8JsonWriter jw, string path, TrackEntry entry) => WriteTrackEntry(jw, path, entry);
+
         static void WriteTrackEntry(Utf8JsonWriter jw, string path, TrackEntry entry)
         {
             var f = entry.Features;
