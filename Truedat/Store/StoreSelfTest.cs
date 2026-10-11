@@ -18,6 +18,65 @@ namespace Truedat.Store
             Block(assert, "SqliteDb", () => TestDb(assert));
             Console.WriteLine("Store self-test (C2: schema v1 + drift)");
             Block(assert, "Schema", () => TestSchema(assert));
+            Console.WriteLine("Store self-test (C3a: uuid v7 + canonical paths)");
+            Block(assert, "Uuid7", () => TestUuid7(assert));
+            Block(assert, "CanonicalPath", () => TestCanonicalPath(assert));
+        }
+
+        // ---------------------------------------------------------------- uuid v7
+        static void TestUuid7(Action<bool, string> assert)
+        {
+            var a = Uuid7.New();
+            assert(a.Length == 36 && a[8] == '-' && a[13] == '-' && a[18] == '-' && a[23] == '-', $"canonical 8-4-4-4-12 text ({a})");
+            assert(a == a.ToLowerInvariant(), "lowercase hex");
+            assert(a[14] == '7', $"version nibble is 7 (got '{a[14]}')");
+            assert("89ab".IndexOf(a[19]) >= 0, $"variant nibble is 8/9/a/b (got '{a[19]}')");
+            bool ok = true; string prev = a; int n = 2000;
+            for (int i = 0; i < n && ok; i++) { var next = Uuid7.New(); ok = string.CompareOrdinal(next, prev) > 0; prev = next; }
+            assert(ok, $"{n} ids minted back-to-back are strictly increasing as text (time-ordered within a millisecond)");
+            var distinct = new HashSet<string>();
+            for (int i = 0; i < 5000; i++) distinct.Add(Uuid7.New());
+            assert(distinct.Count == 5000, "5000 ids are distinct");
+            // Time field: the first 48 bits are unix milliseconds — must decode to roughly now.
+            long ms = Convert.ToInt64(a.Substring(0, 8) + a.Substring(9, 4), 16);
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            assert(Math.Abs(now - ms) < 60_000, $"leading 48 bits are unix ms (decoded {ms}, now {now})");
+        }
+
+        // ---------------------------------------------------------------- canonical paths
+        static void TestCanonicalPath(Action<bool, string> assert)
+        {
+            CanonicalPath.Split(@"D:\Music", @"D:\Music\Tool\Lateralus\01 - The Grudge.flac", out var rel, out var canon);
+            assert(rel == "Tool/Lateralus/01 - The Grudge.flac", $"rel keeps case, '/' separators ({rel})");
+            assert(canon == "tool/lateralus/01 - the grudge.flac", $"canonical is case-folded ({canon})");
+
+            CanonicalPath.Split(@"d:\music\", @"D:\Music\A\b.mp3", out rel, out canon);
+            assert(rel == "A/b.mp3" && canon == "a/b.mp3", "root match is case-insensitive and tolerates a trailing separator");
+
+            CanonicalPath.Split(@"\\nas\music", @"\\nas\music\X\y.flac", out rel, out canon);
+            assert(rel == "X/y.flac" && canon == "x/y.flac", "UNC root");
+
+            // NFD "é" (e + combining acute) becomes NFC "é" in both forms.
+            CanonicalPath.Split(@"D:\M", "D:\\M\\Caf\u0065\u0301\\t.flac", out rel, out canon);
+            assert(rel == "Caf\u00e9/t.flac" && canon == "caf\u00e9/t.flac", "NFC normalisation (decomposed é folds to composed)");
+
+            bool threw = false;
+            try { CanonicalPath.Split(@"D:\Music", @"E:\Other\x.flac", out _, out _); } catch (ArgumentException) { threw = true; }
+            assert(threw, "a path outside the root throws ArgumentException");
+
+            assert(CanonicalPath.VolumeOf(@"d:\Music\x.flac") == "D:" && CanonicalPath.VolumeOf(@"\\nas\music\x.flac") == @"\\nas\music",
+                "VolumeOf: drive letter upper-cased; UNC = \\\\server\\share");
+
+            var roots = CanonicalPath.InferRoots(new[]
+            {
+                @"D:\Music\Tool\a.flac", @"D:\Music\Tool\b.flac", @"D:\Music\Zeppelin\c.flac",
+                @"\\nas\music\Live\d.flac", @"\\nas\music\Live\e.flac",
+            });
+            roots.Sort(StringComparer.OrdinalIgnoreCase);
+            assert(roots.Count == 2 && roots[0] == @"D:\Music" && roots[1] == @"\\nas\music\Live",
+                $"InferRoots: longest common directory per volume ({string.Join(" | ", roots)})");
+            var one = CanonicalPath.InferRoots(new[] { @"D:\Music\Tool\a.flac" });
+            assert(one.Count == 1 && one[0] == @"D:\Music\Tool", "InferRoots: a single path yields its directory");
         }
 
         // ---------------------------------------------------------------- schema v1
