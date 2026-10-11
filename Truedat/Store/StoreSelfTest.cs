@@ -21,6 +21,126 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C3a: uuid v7 + canonical paths)");
             Block(assert, "Uuid7", () => TestUuid7(assert));
             Block(assert, "CanonicalPath", () => TestCanonicalPath(assert));
+            Console.WriteLine("Store self-test (C3b: machine identity + entity resolution)");
+            Block(assert, "MachineIdentity", () => TestMachineIdentity(assert));
+            Block(assert, "EntityResolver", () => TestEntityResolver(assert));
+        }
+
+        /// <summary>A fresh schema-v1 store in a temp dir; caller disposes and deletes.</summary>
+        static SqliteDb FreshStore(out string dir)
+        {
+            dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "store-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var db = SqliteDb.Open(Path.Combine(dir, "store.db"), create: true);
+            SchemaMigrator.Apply(db, "selftest");
+            return db;
+        }
+
+        // ---------------------------------------------------------------- machine identity
+        static void TestMachineIdentity(Action<bool, string> assert)
+        {
+            var db = FreshStore(out var dir);
+            var lines = new List<string>(); var oldSink = StoreLog.Sink; var oldThr = StoreLog.Threshold;
+            try
+            {
+                StoreLog.Sink = lines.Add; StoreLog.SetVerbose(false);
+                var dal = new StoreDal(db);
+                var now = "2026-10-11T10:00:00.0000000Z";
+                var m1 = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                assert(m1.Id.Length == 36 && m1.Id[14] == '7', "first open mints a UUIDv7 machine id");
+                assert(m1.HostMatches && m1.CreatedByHost == "ATOM", "created-by host recorded, matches");
+                assert(dal.Count("machine") == 1 && dal.MetaGet("machine_id") == m1.Id, "one machine row, id in store_meta");
+
+                var m2 = MachineIdentity.EnsureMinted(dal, "atom", now);
+                assert(m2.Id == m1.Id && dal.Count("machine") == 1, "second open reads the same id (case-insensitive host), mints nothing");
+                m2.RequireWritable(adopt: false);   // must not throw
+                var warns = lines.FindAll(l => l.Contains(" WARN "));
+                assert(warns.Count == 0, "matching host logs no warning (INFO lines are fine)");
+
+                var m3 = MachineIdentity.EnsureMinted(dal, "MAX1", now);
+                assert(!m3.HostMatches && m3.Id == m1.Id, "a copied store opened on another host keeps the id but HostMatches is false");
+                warns = lines.FindAll(l => l.Contains(" WARN "));
+                assert(warns.Count == 1 && warns[0].Contains("ATOM") && warns[0].Contains("MAX1"),
+                    $"hostname mismatch warns once, naming both hosts ({(warns.Count > 0 ? warns[0] : "<none>")})");
+                bool refused = false;
+                try { m3.RequireWritable(adopt: false); } catch (StoreException) { refused = true; }
+                assert(refused, "writes as this machine are refused on a host mismatch without --machine-adopt");
+                m3.RequireWritable(adopt: true);
+                assert(true, "--machine-adopt lets the write proceed");
+
+                long r1 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
+                long r2 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
+                long r3 = dal.EnsureRoot(m1.Id, @"X:\Library", "mirror", now);
+                assert(r1 == r2 && r3 != r1 && dal.Count("library_root") == 2, "EnsureRoot is idempotent per (machine, path) and distinct per path");
+            }
+            finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // ---------------------------------------------------------------- entity resolution
+        static void TestEntityResolver(Action<bool, string> assert)
+        {
+            var db = FreshStore(out var dir);
+            try
+            {
+                var dal = new StoreDal(db);
+                var now = "2026-10-11T10:00:00.0000000Z";
+                var m = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                long root = dal.EnsureRoot(m.Id, @"D:\Music", "primary", now);
+                long mirror = dal.EnsureRoot(m.Id, @"X:\Library", "mirror", now);
+                const string shaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                const string shaB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+                assert(FacetKinds.ForShaSource("flac-frames", true) == FacetKinds.ShaFrames
+                    && FacetKinds.ForShaSource(null, false) == FacetKinds.ShaFrames
+                    && FacetKinds.ForShaSource(null, true) == FacetKinds.ShaTaglibRegion
+                    && FacetKinds.ForShaSource("whole-file", false) == FacetKinds.ShaWholeFile,
+                    "sha source -> facet kind: flac-frames/invariant -> primary kind, FLAC with no source -> legacy taglib-region, whole-file -> whole-file");
+
+                var r1 = EntityResolver.Resolve(dal, shaA, FacetKinds.ShaFrames, root, "tool/a.flac", "import:test", now);
+                assert(r1.How == ResolveHow.Created && r1.EntityId.Length == 36, "new sha + new path -> Created");
+                assert(dal.HasFacet(r1.EntityId, FacetKinds.ShaFrames, shaA, out var prim) && prim && dal.CountFacets(r1.EntityId) == 1,
+                    "created entity has exactly one facet: the sha, primary");
+                dal.UpsertLocation(r1.EntityId, root, "Tool/a.flac", "tool/a.flac", @"D:\Music\Tool\a.flac", now, now);
+
+                var r2 = EntityResolver.Resolve(dal, shaA, FacetKinds.ShaFrames, root, "tool/a.flac", "import:test", now);
+                assert(r2.How == ResolveHow.MatchedHash && r2.EntityId == r1.EntityId && dal.Count("file_entity") == 1,
+                    "same sha again -> MatchedHash, same id, nothing minted (idempotent on content hash)");
+
+                var r3 = EntityResolver.Resolve(dal, shaA, FacetKinds.ShaFrames, mirror, "tool/a.flac", "import:mirror", now);
+                assert(r3.How == ResolveHow.MatchedHash && r3.EntityId == r1.EntityId, "same sha under a MIRROR root -> same entity (the X:/P: case)");
+                dal.UpsertLocation(r1.EntityId, mirror, "Tool/a.flac", "tool/a.flac", @"X:\Library\Tool\a.flac", now, now);
+                assert(dal.Count("track_location") == 2 && dal.Count("file_entity") == 1, "two locations, one entity");
+
+                var r4 = EntityResolver.Resolve(dal, null, FacetKinds.ShaFrames, root, "odd/nosha.mp3", "import:test", now);
+                assert(r4.How == ResolveHow.CreatedNoSha && dal.HasFacet(r4.EntityId, FacetKinds.PathCanonical, "odd/nosha.mp3", out _),
+                    "no sha, new path -> CreatedNoSha with a path:canonical facet only");
+                dal.UpsertLocation(r4.EntityId, root, "odd/nosha.mp3", "odd/nosha.mp3", @"D:\Music\odd\nosha.mp3", now, now);
+                var r5 = EntityResolver.Resolve(dal, shaB, FacetKinds.ShaFrames, root, "odd/nosha.mp3", "import:test", now);
+                assert(r5.How == ResolveHow.MatchedPath && r5.EntityId == r4.EntityId, "a sha arriving later for a known path -> MatchedPath, same entity");
+                assert(dal.HasFacet(r4.EntityId, FacetKinds.ShaFrames, shaB, out var p5) && p5 && dal.HasFacet(r4.EntityId, FacetKinds.PathCanonical, "odd/nosha.mp3", out _),
+                    "the new sha is added as primary; the path facet is kept (facets are never deleted)");
+
+                // Legacy FLAC: first seen with the pre-2026-07-21 sha, later the frame-anchored one at the same path.
+                const string legacy = "1111111111111111111111111111111111111111111111111111111111111111";
+                const string frames = "2222222222222222222222222222222222222222222222222222222222222222";
+                var l1 = EntityResolver.Resolve(dal, legacy, FacetKinds.ShaTaglibRegion, root, "old/f.flac", "import:2026-06", now);
+                dal.UpsertLocation(l1.EntityId, root, "old/f.flac", "old/f.flac", @"D:\Music\old\f.flac", now, now);
+                var l2 = EntityResolver.Resolve(dal, frames, FacetKinds.ShaFrames, root, "old/f.flac", "import:2026-10", now);
+                assert(l2.How == ResolveHow.MatchedPath && l2.EntityId == l1.EntityId, "re-keyed FLAC at the same path -> same entity");
+                assert(dal.HasFacet(l1.EntityId, FacetKinds.ShaTaglibRegion, legacy, out var pl) && !pl
+                    && dal.HasFacet(l1.EntityId, FacetKinds.ShaFrames, frames, out var pf) && pf,
+                    "old sha kept as a NON-primary facet, new sha primary - the key move is recoverable from the store");
+                assert(EntityResolver.Resolve(dal, legacy, FacetKinds.ShaTaglibRegion, mirror, "old/f.flac", "import:mirror-old", now).EntityId == l1.EntityId,
+                    "a mirror still carrying the OLD sha resolves to the same entity through the kept facet");
+
+                long loc1 = dal.UpsertLocation(r1.EntityId, root, "Tool/a.flac", "tool/a.flac", @"D:\Music\Tool\a.flac", "2026-01-01T00:00:00.0000000Z", now);
+                long loc2 = dal.UpsertLocation(r1.EntityId, root, "Tool/a.flac", "tool/a.flac", @"D:\Music\Tool\a.flac", "2026-02-02T00:00:00.0000000Z", now);
+                assert(loc1 == loc2 && dal.Count("track_location") == 4, "UpsertLocation on the same (root, canonical) updates in place, same id");
+                assert(db.ExecScalar($"SELECT last_modified_utc FROM track_location WHERE id = {loc1};") == "2026-02-02T00:00:00.0000000Z", "upsert refreshed last_modified_utc");
+                assert(dal.FindLocation(root, "tool/a.flac", out var eid) == loc1 && eid == r1.EntityId, "FindLocation returns id and entity");
+                assert(dal.FindLocation(root, "nope/x.flac", out _) == null, "FindLocation misses cleanly");
+            }
+            finally { db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- uuid v7
