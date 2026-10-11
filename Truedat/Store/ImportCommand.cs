@@ -30,6 +30,8 @@ namespace Truedat.Store
         public List<string> Roots = new List<string>();
         public int Entries, Unrooted, EntitiesCreated, MatchedHash, MatchedPath, CreatedNoSha, Locations, LocationsNew, LegacySha, LegacyShaUnrecoverable, Conflicts;
         public int ErrorsRows, SkippedRows, ReviewRows, VerifyRows, ReceiptRows;
+        /// <summary>Ledger rows whose path is under no root (stream URLs, videos outside the library) — counted, not imported.</summary>
+        public int LedgerUnrooted;
         public long StoreBytesBefore, StoreBytesAfter, ElapsedMs;
         public string ResultPath = "";
     }
@@ -51,7 +53,8 @@ namespace Truedat.Store
                 Console.WriteLine($"  roots: {string.Join(", ", r.Roots)}");
                 Console.WriteLine($"  entities: {r.EntitiesCreated} created, {r.MatchedHash} matched by sha, {r.MatchedPath} matched by path, {r.CreatedNoSha} created without a sha");
                 Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); conflicts: {r.Conflicts}; legacy FLAC sha: {r.LegacySha} kept, {r.LegacyShaUnrecoverable} unrecoverable");
-                Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts");
+                Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts" +
+                                  (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
                 if (r.Unrooted > 0) Console.WriteLine($"  WARNING: {r.Unrooted} entries were under none of the roots and were not imported (pass --library-root)");
                 return 0;
@@ -161,7 +164,17 @@ namespace Truedat.Store
             }
 
             r.ElapsedMs = sw.ElapsedMilliseconds;
+            // Fold the WAL into the main file before measuring, so the size reported is the size on disk
+            // and the operator is left with one file, not db + wal. Every cached statement must be reset
+            // first (a statement left on a row holds a WAL read mark — the first real import failed here).
+            // A checkpoint that still cannot complete is a warning, never a failed import: the rows are
+            // committed either way.
+            dal.ResetAll();
+            try { db.Exec("PRAGMA wal_checkpoint(TRUNCATE);"); }
+            catch (SqliteException ex) { StoreLog.Warn($"WAL checkpoint did not complete ({ex.Message}); the -wal file will fold on the next open"); }
             r.StoreBytesAfter = new FileInfo(os.Path).Length;
+            var wal = os.Path + "-wal";
+            if (File.Exists(wal)) r.StoreBytesAfter += new FileInfo(wal).Length;
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
             WriteResult(r, o);
             StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
@@ -216,7 +229,7 @@ namespace Truedat.Store
             var errorsCsv = Path.Combine(dir, "mbxmoods-errors.csv");
             foreach (var row in LedgerImport.ReadErrors(errorsCsv))
             {
-                var e = EntityForPath(dal, roots, mirror, row.Path, errorsCsv, now);
+                var e = EntityForPath(dal, roots, mirror, row.Path, errorsCsv, now, r);
                 if (e == null) continue;
                 var started = Mtime(errorsCsv);
                 if (dal.RunExists("essentia", e, "failed", errorsCsv, started)) continue;
@@ -227,7 +240,7 @@ namespace Truedat.Store
             var skippedCsv = Path.Combine(dir, "mbxmoods-skipped.csv");
             foreach (var row in LedgerImport.ReadSkipped(skippedCsv))
             {
-                var e = EntityForPath(dal, roots, mirror, row.Path, skippedCsv, now);
+                var e = EntityForPath(dal, roots, mirror, row.Path, skippedCsv, now, r);
                 if (e == null) continue;
                 var started = row.Timestamp ?? Mtime(skippedCsv);
                 if (dal.RunExists("essentia", e, "skipped", skippedCsv, started)) continue;
@@ -242,7 +255,7 @@ namespace Truedat.Store
                 if (err != null) StoreLog.Warn($"review ledger unreadable, skipped: {err}");
                 foreach (var rec in ledger.Records)
                 {
-                    var e = EntityForPath(dal, roots, mirror, rec.Path, reviewPath, now);
+                    var e = EntityForPath(dal, roots, mirror, rec.Path, reviewPath, now, r);
                     if (e == null) continue;
                     var note = rec.Reason + (rec.StateReason != null ? " | " + rec.StateReason : "");
                     dal.UpsertWorkItem(e, "essentia", "unknown", "parked", rec.Attempts, ReviewLedger.StateName(rec.State).ToLowerInvariant(), note);
@@ -276,10 +289,12 @@ namespace Truedat.Store
 
         /// <summary>A ledger row's path becomes an entity (path facet only) so runs and work items have
         /// something to hang on; a path under none of the roots is logged and dropped.</summary>
-        static string? EntityForPath(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string path, string source, string now)
+        static string? EntityForPath(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string path, string source, string now, ImportReport r)
         {
             var rf = RootFor(roots, path);
-            if (rf == null) { StoreLog.Warn($"ledger path under no root, skipped: {path}"); return null; }
+            // Stream URLs and files outside the library land in the skip ledger by design; they are
+            // counted here (and in the result JSON), not warned one by one — 1,980 of them on X:\Library.
+            if (rf == null) { r.LedgerUnrooted++; StoreLog.Debug($"ledger path under no root, not imported: {path}"); return null; }
             CanonicalPath.Split(rf.Value.Path, path, out var rel, out var canon);
             var res = EntityResolver.Resolve(dal, null, FacetKinds.ShaFrames, rf.Value.Id, canon, source, now, matchPathAcrossRoots: mirror);
             dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, path, null, now);
@@ -328,7 +343,7 @@ namespace Truedat.Store
                 ["entitiesCreated"] = r.EntitiesCreated, ["matchedBySha"] = r.MatchedHash, ["matchedByPath"] = r.MatchedPath, ["createdWithoutSha"] = r.CreatedNoSha,
                 ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew, ["conflicts"] = r.Conflicts,
                 ["legacySha"] = r.LegacySha, ["legacyShaUnrecoverable"] = r.LegacyShaUnrecoverable,
-                ["ledgers"] = new JsonObject { ["errors"] = r.ErrorsRows, ["skipped"] = r.SkippedRows, ["review"] = r.ReviewRows, ["verify"] = r.VerifyRows, ["receipts"] = r.ReceiptRows },
+                ["ledgers"] = new JsonObject { ["errors"] = r.ErrorsRows, ["skipped"] = r.SkippedRows, ["review"] = r.ReviewRows, ["verify"] = r.VerifyRows, ["receipts"] = r.ReceiptRows, ["unrooted"] = r.LedgerUnrooted },
                 ["storeBytesBefore"] = r.StoreBytesBefore, ["storeBytesAfter"] = r.StoreBytesAfter, ["elapsedMs"] = r.ElapsedMs,
             };
             File.WriteAllText(r.ResultPath, j.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));

@@ -156,6 +156,8 @@ namespace Truedat.Store
                 assert(r.LegacySha == 1 && r.LegacyShaUnrecoverable == 3, $"1 legacy-sha FLAC (taglib-region kind), 3 flac-frames FLACs whose old sha is unrecoverable ({r.LegacySha}/{r.LegacyShaUnrecoverable})");
                 assert(r.ErrorsRows == 1 && r.SkippedRows == 1 && r.ReviewRows == 1 && r.VerifyRows == 2 && r.ReceiptRows == 1, $"ledgers: errors {r.ErrorsRows}, skipped {r.SkippedRows}, review {r.ReviewRows}, verify {r.VerifyRows}, receipts {r.ReceiptRows}");
                 assert(File.Exists(r.ResultPath) && File.ReadAllText(r.ResultPath).Contains("\"entries\": 6"), "store-import-result.json written beside the store with the counts");
+                assert(r.StoreBytesAfter > r.StoreBytesBefore && r.StoreBytesAfter > 100_000, $"store size is measured after a WAL checkpoint, so it reflects the rows ({r.StoreBytesBefore} -> {r.StoreBytesAfter})");
+                assert(!File.Exists(store + "-wal") || new FileInfo(store + "-wal").Length == 0, "the WAL is folded into the main file at the end of an import");
 
                 using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
