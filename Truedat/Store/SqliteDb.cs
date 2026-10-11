@@ -19,7 +19,14 @@ namespace Truedat.Store
 
         SqliteDb(IntPtr db, string path) { _db = db; _path = path; }
 
-        internal static SqliteDb Open(string path, bool create)
+        /// <summary>Page size for a store created by this build. SQLite's default is 4096; a track_feature row
+        /// is ~2 KB with its 149-column header, so two never fit a 4 KB leaf and every row took a page of its
+        /// own (measured 2026-10-11: 368.9 MB for 131.7 MB of feature payload, 1.34x the JSON). At 16 KB
+        /// about seven rows share a page and the same store is 261.8 MB, 0.95x the JSON. 32 KB gains 2 more
+        /// points while doubling the bytes moved per point read and per small write — not worth it.</summary>
+        internal const int DefaultPageSize = 16384;
+
+        internal static SqliteDb Open(string path, bool create, int? pageSize = null)
         {
             int flags = SqliteNative.SQLITE_OPEN_READWRITE | (create ? SqliteNative.SQLITE_OPEN_CREATE : 0);
             int rc = SqliteNative.sqlite3_open_v2(SqliteNative.Z(path), out var handle, flags, IntPtr.Zero);
@@ -33,9 +40,13 @@ namespace Truedat.Store
             try
             {
                 SqliteNative.sqlite3_busy_timeout(handle, 5000);
+                // Page size is only settable while the file is empty and before WAL is on; an existing
+                // store keeps whatever it was built with (re-tune it with --store-vacuum --page-size).
+                bool empty = db.ExecScalar("PRAGMA page_count;") == "0";
+                if (empty) db.Exec($"PRAGMA page_size={pageSize ?? DefaultPageSize};");
                 db.Exec("PRAGMA journal_mode=WAL;");
                 db.Exec("PRAGMA foreign_keys=ON;");
-                StoreLog.Debug($"opened {path} (create={create}, wal, fk on)");
+                StoreLog.Debug($"opened {path} (create={create}, wal, fk on" + (empty ? $", new file at page_size {pageSize ?? DefaultPageSize}" : "") + ")");
                 return db;
             }
             catch { db.Dispose(); throw; }

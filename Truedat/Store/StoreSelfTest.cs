@@ -36,6 +36,55 @@ namespace Truedat.Store
             Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
             Console.WriteLine("Store self-test (C8: --store-info measurements)");
             Block(assert, "StoreInfo", () => TestStoreInfo(assert));
+            Console.WriteLine("Store self-test (page size: 16 KB pages by default, --store-vacuum repacks)");
+            Block(assert, "Vacuum", () => TestVacuum(assert));
+        }
+
+        // ---------------------------------------------------------------- page size / vacuum
+        // Measured 2026-10-11 on the real X: store: a feature row is ~2 KB, two do not fit a 4 KB leaf,
+        // so SQLite stored one row per page and the store was 1.34x the JSON. At 16 KB pages it is 0.95x.
+        static void TestVacuum(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "vac-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                // A store built the old way, at SQLite's 4 KB default.
+                using (var db = SqliteDb.Open(store, create: true, pageSize: 4096))
+                {
+                    SchemaMigrator.Apply(db, "selftest");
+                    assert(db.ExecScalar("PRAGMA page_size;") == "4096", "Open(pageSize: 4096) creates a 4 KB-page store");
+                }
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var db = SqliteDb.Open(store, create: false))
+                    assert(db.ExecScalar("PRAGMA page_size;") == "4096", "opening an existing 4 KB store never changes its page size");
+
+                bool bad = false;
+                try { VacuumCommand.Execute(store, 1000); } catch (StoreException) { bad = true; }
+                assert(bad, "a page size that is not a power of two in 512..65536 is a StoreException, nothing rewritten");
+                using (var db = SqliteDb.Open(store, create: false))
+                    assert(db.ExecScalar("PRAGMA page_size;") == "4096", "the refused vacuum left the page size alone");
+
+                var r = VacuumCommand.Execute(store, null);
+                assert(r.PageSizeBefore == 4096 && r.PageSizeAfter == SqliteDb.DefaultPageSize, $"vacuum with no size repacks to the default ({r.PageSizeBefore} -> {r.PageSizeAfter})");
+                assert(r.BytesBefore > 0 && r.BytesAfter > 0, "vacuum reports the file size before and after");
+                using (var db = SqliteDb.Open(store, create: false))
+                {
+                    assert(db.ExecScalar("PRAGMA page_size;") == SqliteDb.DefaultPageSize.ToString(), "the store reads back at the new page size");
+                    assert(string.Equals(db.ExecScalar("PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase), "the store is back in WAL after the vacuum");
+                    assert(db.ExecScalar("SELECT count(*) FROM track_feature;") == entries.Count.ToString(), "every feature row survived the repack");
+                }
+                var rt = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt.Equal && rt.Same == entries.Count, $"round-trip is EQUAL after the repack (same {rt.Same}, different {rt.Different})");
+
+                var r2 = VacuumCommand.Execute(store, 8192);
+                assert(r2.PageSizeBefore == SqliteDb.DefaultPageSize && r2.PageSizeAfter == 8192, "an explicit --page-size re-tunes an already-repacked store");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- store info
@@ -69,7 +118,7 @@ namespace Truedat.Store
                 assert(info.Roots.Count == 1 && info.Roots[0].Path == @"D:\Music" && info.Roots[0].Role == "primary", "roots listed");
                 assert(info.Tracks == 5 && info.FeatureRows == 6 && info.Counts["track_feature"] == 6 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4,
                     $"counts: 5 tracks (distinct entities with features; d1/d2 share one), 6 feature rows, 7 entities, runs {info.Counts["run"]} ({info.Tracks}/{info.FeatureRows})");
-                assert(info.FileBytes > 100_000 && info.PageSize == 4096 && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
+                assert(info.FileBytes > 100_000 && info.PageSize == SqliteDb.DefaultPageSize && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size at the default page size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
                 assert(info.BytesPerTrack == (double)info.FileBytes / 5 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track (per distinct track) and the 156k projection derive from the file size");
                 assert(info.RtfSamples == 3 && info.MedianRtf.HasValue && Math.Abs(info.MedianRtf.Value - 10.0) < 1e-9, $"median RTF over the 3 rows with both durations = 10 (got {info.MedianRtf}, n={info.RtfSamples})");
                 assert(info.FailedComponents.TryGetValue("sha", out var fsha) && fsha == 1 && info.FailedComponents.TryGetValue("fingerprint", out var ffp) && ffp == 1, "failed components split on ';' and counted per component");
@@ -916,6 +965,8 @@ namespace Truedat.Store
                 {
                     assert(string.Equals(db.ExecScalar("PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase), "WAL is on after Open");
                     assert(db.ExecScalar("PRAGMA foreign_keys;") == "1", "foreign_keys is ON after Open (recovery review: do not repeat FK-off)");
+                    assert(SqliteDb.DefaultPageSize == 16384, "the default page size is 16 KB (measured: ~2 KB feature rows pack 7 per page instead of 1 per 4 KB page)");
+                    assert(db.ExecScalar("PRAGMA page_size;") == "16384", "a fresh store is created at 16 KB pages, before WAL is switched on");
 
                     db.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, i INTEGER, d REAL, s TEXT, b BLOB, n TEXT);");
 

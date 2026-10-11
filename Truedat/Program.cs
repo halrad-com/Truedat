@@ -841,7 +841,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
-            "store-export", "export-root", "store-roundtrip", "store-info",
+            "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -857,7 +857,7 @@ namespace Truedat
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
             "restore", "keep-backups", "prune-entry",
-            "store", "library-root", "root-role", "store-export", "export-root", "store-roundtrip",
+            "store", "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -2247,6 +2247,8 @@ namespace Truedat
             string? storeExportRoot = null;      // --export-root <path>: which root to export when the store has several
             string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
             bool storeInfoMode = false;           // --store-info: measurements (bytes/track, RTF, coverage, dupes, key moves)
+            bool storeVacuumMode = false;         // --store-vacuum: repack the store (page size tuning; 4 KB pages held one ~2 KB row each)
+            string? storePageSizeText = null;     // --page-size N: page size for --store-vacuum (default SqliteDb.DefaultPageSize)
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2401,6 +2403,8 @@ namespace Truedat
                 else if (canonical == "export-root" && i + 1 < args.Length) storeExportRoot = args[++i];
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
                 else if (canonical == "store-info") storeInfoMode = true;
+                else if (canonical == "store-vacuum") storeVacuumMode = true;
+                else if (canonical == "page-size" && i + 1 < args.Length) storePageSizeText = args[++i];
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
                 // --json-output, which predates it and stays the canonical name.
@@ -3045,6 +3049,11 @@ namespace Truedat
             if (storeInfoMode)
             {
                 Environment.ExitCode = global::Truedat.Store.StoreInfoCommand.Run(storePath, auditLog);
+                return;
+            }
+            if (storeVacuumMode)
+            {
+                Environment.ExitCode = global::Truedat.Store.VacuumCommand.Run(storePath, storePageSizeText, auditLog);
                 return;
             }
 

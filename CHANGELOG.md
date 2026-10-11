@@ -24,6 +24,11 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   SQLite (`winsqlite3.dll`, 3.40+, checked at open with a plain refusal when missing); nothing is
   installed or shipped. `mbxmoods.json` stays what MBXHub reads; every existing mode is unchanged;
   the store path is always explicit.
+- **16 KB store pages and `--store-vacuum`.** A feature row is ~2 KB, so at SQLite's 4 KB default
+  each row took a page of its own and the store was 1.34× its JSON. New stores are created at
+  16 KB pages (0.95× the JSON on the same catalog); `--store-vacuum [--page-size N]` repacks an
+  existing store in seconds and reports before/after. Contents are unchanged — `--store-roundtrip`
+  stays EQUAL.
 
 ## [0.5.5.2-EV1] — 2026-10-03
 

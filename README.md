@@ -78,7 +78,7 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 - **Suspects** — Audio files under 50 KB that may be corrupt or truncated.
 - **Long paths** — Paths at or over the Windows 260-char MAX_PATH. The scan handles these automatically (`\\?\` long-path fallback through a staged copy), but other tools may not — consider shortening.
 
-### Store (preview, v2 S1) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`
+### Store (preview, v2 S1) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
 entity, content-hash facets that name their algorithm, one location row per copy on a machine),
@@ -103,6 +103,9 @@ truedat.exe --store-export "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db
 REM Measurements: bytes per track, projection to 156k tracks, analysis speed, coverage by wave, shared content
 truedat.exe --store-info --store "D:\truedat\truedat.db"
 
+REM Repack a store (a store created before 16 KB pages were the default shrinks ~29%; add --page-size N to re-tune)
+truedat.exe --store-vacuum --store "D:\truedat\truedat.db"
+
 REM The read-only verbs answer from the store instead of the JSON
 truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
 truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\truedat\truedat.db"
@@ -111,8 +114,11 @@ truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\trued
 Flags: `--store <db>`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
-store has several roots), `--store-roundtrip <catalog>`, `--store-info`. Measured on a 72,477-track
-catalog: import 25 s, export 7 s, round-trip EQUAL, store 5,090 bytes per track.
+store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`
+(`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
+row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own. Measured on a 72,477-track
+catalog: import 25 s, export 7 s, round-trip EQUAL, store 3,651 bytes per distinct track (0.95× the
+JSON it holds); vacuum of a 4 KB-page store 2 s, −29%.
 
 ## Quick Start
 
