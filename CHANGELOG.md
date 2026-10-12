@@ -12,6 +12,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **Console lines name their file.** `FAILED:` lines in the library scan carry artist, title and file name;
+  the ffmpeg transcode and downmix announcements and the under-decode retry name the source file. In a
+  parallel scan the track's own line can be far above the message.
 - **`--stats` shows the store.** With a store in force: a `Store:` line (size, descriptions, bytes per
   track, edge coverage) beside Catalog/Sidecar/Backups, and a Recommended entry pointing at `--refresh`
   while edge rows are missing. Detail stays in `--store-info`.

@@ -4091,7 +4091,7 @@ namespace Truedat
                         if (!healthPass)
                         {
                             var comps = string.Join(";", healthFailed);
-                            Console.Error.WriteLine($"FAILED: analysis incomplete: {comps}{TagsFailDetail(healthFailed, afTags)}");
+                            Console.Error.WriteLine($"FAILED: analysis incomplete: {comps}{TagsFailDetail(healthFailed, afTags)}  [{Path.GetFileName(analyzeFilePath)}]");
                             Environment.ExitCode = 1;
                             return;
                         }
@@ -6075,7 +6075,7 @@ namespace Truedat
                             var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                             AppendError(errorsPath, t.Location, t.Artist, t.Name, err, sizeMb, analyzeDuration.TotalSeconds, "essentia", errorsCsvLock);
                             AppendErrorLog(errorsLogPath, "scan", t.Location, "essentia", null, err, null, null, null, errorsCsvLock);
-                            Console.WriteLine($"  FAILED: {err}");
+                            Console.WriteLine($"  FAILED: {t.Artist} - {t.Name}: {err}  [{Path.GetFileName(t.Location)}]");   // parallel workers: the track's own line may be far above
                             Interlocked.Increment(ref failed);
                             if (err.Contains("Timeout")) Interlocked.Increment(ref timedOut);
                             return;
@@ -6109,7 +6109,7 @@ namespace Truedat
                                 AppendErrorLog(errorsLogPath, "scan", t.Location, comps,
                                     msResults.FingerprintError, null, feat.AnalyzedLengthSec,
                                     GateClaimedSec(fingerprintV1?.DurationMs, t.TotalTimeMs), null, errorsCsvLock);
-                                Console.WriteLine($"  FAILED: {comps}");
+                                Console.WriteLine($"  FAILED: {t.Artist} - {t.Name}: {comps}  [{Path.GetFileName(t.Location)}]");   // parallel workers: name the track on the line itself
                                 Interlocked.Increment(ref failed);
                                 trackClass = "skip·failed";
                                 if (_storePath != null) global::Truedat.Store.ScanSink.Discard(msStagedSrc!.Path);   // S2: no entry, so no aggregate artifact either
@@ -10382,7 +10382,7 @@ namespace Truedat
         static global::Truedat.Store.ProduceEdges RealProduceEdges(string essentiaExe) => (path, size, claimedSec) =>
         {
             using var src = OpenStagedSource(path, _stageOpts, size);
-            var res = AnalyzeWithEssentia(essentiaExe, src.Path, size);
+            var res = AnalyzeWithEssentia(essentiaExe, src.Path, size, default, path);
 
             // The scan's decode-coverage gate, which the drain lacked (review C1): an under-decoded file (essentia stops early)
             // would otherwise fold an "ok" tail INSIDE the track under the real sha. Same remedy as RunSourceWorkers: transcode
@@ -10396,7 +10396,7 @@ namespace Truedat
                 {
                     try
                     {
-                        Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {res.Features.AnalyzedLengthSec:F0}s of {refDur:F0}s)");
+                        Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {res.Features.AnalyzedLengthSec:F0}s of {refDur:F0}s)  [{Path.GetFileName(path)}]");
                         var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length);
                         if (retry.Features?.AnalyzedLengthSec is double got && got > (res.Features.AnalyzedLengthSec ?? 0))
                         {
@@ -13475,7 +13475,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             string auditName = Path.GetFileName(auditDisplayPath);
             var analyzeStart = Stopwatch.GetTimestamp();
 
-            var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct));
+            var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct, src.SourcePath));
             var fileMd5Task = precomputedHashes != null
                 ? Task.FromResult(precomputedHashes.Value.md5)   // computed with wantMd5=_fileMd5Enabled — null when the flag is off
                 : Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
@@ -13562,7 +13562,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     {
                         try
                         {
-                            Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {features!.AnalyzedLengthSec:F0}s of {refDurSec:F0}s)");
+                            Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {features!.AnalyzedLengthSec:F0}s of {refDurSec:F0}s)  [{Path.GetFileName(src.SourcePath)}]");
                             var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length, ct);
                             if (retry.Features?.AnalyzedLengthSec is double got
                                 && got > features!.AnalyzedLengthSec)
@@ -22362,10 +22362,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// instead of arbitrary timeouts. Creates hardlink for non-ASCII paths
         /// when 8.3 short names aren't available.
         /// </summary>
-        static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default)
+        static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default, string? displayName = null)
         {
             if (!File.Exists(audioPath))
                 return (null, "File not found");
+            // What the console calls this file: the SOURCE name when the caller staged a GUID-named copy, else the path itself.
+            string shown = Path.GetFileName(displayName ?? audioPath);
 
             var result = AnalyzeWithEssentiaCore(essentiaExe, audioPath, fileSizeBytes, ct);
 
@@ -22377,7 +22379,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     try
                     {
-                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)");
+                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)  [{shown}]");
                         var stereoSize = new FileInfo(stereoPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, stereoPath, stereoSize, ct);
                         if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(stereoPath, audioPath);   // S2: the stash follows the source the scan records
@@ -22412,7 +22414,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     try
                     {
-                        Console.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)");
+                        Console.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)  [{shown}]");
                         var wavSize = new FileInfo(wavPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, wavPath, wavSize, ct);
                         if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(wavPath, audioPath);   // S2: the stash follows the source the scan records
