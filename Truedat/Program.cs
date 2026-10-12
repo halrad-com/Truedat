@@ -10104,22 +10104,24 @@ namespace Truedat
         /// <summary>
         /// Find a tool exe by checking: app base directory, output/library directory, working directory.
         /// </summary>
-        // Known Essentia extractor builds by MD5, newest first. .4 is current; older builds
+        // Known Essentia extractor builds by MD5, newest first. .5 is current; older builds
         // run but lack fixes/speed. Capabilities tracked: optimized (-O2), accurate bpm
-        // (first-peak key-collision fixed), 13-hour file support (large-buffer chords).
-        internal const string LatestExtractorMd5 = "c6a436d0fe9a33a4c8eac120d9e6243f";
+        // (first-peak key-collision fixed), 13-hour file support (large-buffer chords),
+        // binary frames (.5: --frames-bin + framesInclude, the edges path's input; main
+        // output additive only — metadata.version.extractor_build is the one new key).
+        internal const string LatestExtractorMd5 = "6f47bdfcaadfd4f510c5e1621c07945d";
+        internal const string LatestExtractorSummary = "output-x64.5: .4 plus binary frames (--frames-bin, framesInclude) and a build id in the output";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support (current)",
+            ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges (current)",
+            ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support; no binary frames (--edges needs .5)",
             ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3 — optimized, 13-hour file support; INACCURATE bpm (first-peak key-collision bug)",
             ["f52e166e9063b23cdda538cdf8530ed4"] = "output-x64.2 — 13-hour file support; NOT optimized (~3x slower), inaccurate bpm",
             ["05c4c77bb204026e87b3a593e0d0ed2e"] = "output-x64.1 — 200-min cap only; NOT optimized (~3x slower), inaccurate bpm",
         };
 
-        /// <summary>Hash the resolved extractor, name its build, and warn if it isn't the
-        /// current .4. Best-effort — never blocks a scan.</summary>
         /// <summary>The extractor build as a short producer version for the store's run rows: the known build name
-        /// (<c>output-x64.4</c>) when the MD5 is in the table, else <c>md5:&lt;12 hex&gt;</c>, else <c>unknown</c>. S2 C3.</summary>
+        /// (<c>output-x64.5</c>) when the MD5 is in the table, else <c>md5:&lt;12 hex&gt;</c>, else <c>unknown</c>. S2 C3.</summary>
         internal static string ExtractorBuildId(string exePath)
         {
             try
@@ -10163,11 +10165,11 @@ namespace Truedat
                 {
                     Console.WriteLine($"  Extractor:  {desc}");
                     if (!string.Equals(md5, LatestExtractorMd5, StringComparison.OrdinalIgnoreCase))
-                        Console.WriteLine("  WARNING:    a newer extractor is available (output-x64.4: optimized, accurate bpm, 13-hour file support) — you should be using .4. Update dist/truedat/essentia_streaming_extractor_music.exe.");
+                        Console.WriteLine($"  WARNING:    a newer extractor is available ({LatestExtractorSummary}). Update dist/truedat/essentia_streaming_extractor_music.exe.");
                 }
                 else
                 {
-                    Console.WriteLine($"  Extractor:  unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...) — current is output-x64.4 (optimized, accurate bpm, 13-hour file support)");
+                    Console.WriteLine($"  Extractor:  unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...) — current is {LatestExtractorSummary}");
                 }
             }
             catch { /* extractor-build detection is best-effort */ }

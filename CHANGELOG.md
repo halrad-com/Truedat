@@ -12,6 +12,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **Extractor build `output-x64.5` recognised as current.** `.4` is still accepted but the startup
+  report now says what `.5` adds (a binary frames file behind `--frames-bin`, the `framesInclude`
+  profile key, `metadata.version.extractor_build` in the main output) and that `--edges` will need
+  it. The main output is otherwise unchanged against `.4`: verified on five real files across
+  MP3/M4A/WMA/FLAC, every difference within the extractor's own run-to-run noise.
+
 - **A SQLite store (preview, v2 S1).** `--store-import` loads a catalog and the ledgers beside it
   into a store keyed by identity — a UUID per file entity, content-hash facets that name their
   algorithm, one location per copy on a machine, a run row per attempt — idempotently, in
