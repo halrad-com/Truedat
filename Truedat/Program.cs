@@ -2718,6 +2718,26 @@ namespace Truedat
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || edgesExportMode;
+            // Built-in default when nothing chose (operator 2026-10-12: on for a new clean install): the store, and edges with it, are on
+            // for a library with no catalog yet or one whose store already exists. An existing catalog without a store stays off — a
+            // scan would create a store holding only the tracks it analysed; --store-import (or --config store true) opts it in. A
+            // default is softened like a config key: it never makes a plain command refuse.
+            if (!storeVerb && storePath == null)
+            {
+                bool storeChosen = noStore || _configValues.ContainsKey("store");
+                string? defCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var defRefusal);
+                if (!storeChosen && defRefusal == null && defCatalog != null)
+                {
+                    var defStore = global::Truedat.Store.StoreLocation.Resolve(null, storeDir, defCatalog, out _);
+                    if (StoreOnByDefault(false, File.Exists(defCatalog), File.Exists(defStore)))
+                    {
+                        storePath = "";
+                        _storeFromConfig = true;
+                        if (!_stageOpts.Edges && !noEdges && !_configValues.ContainsKey("edges")) { _stageOpts.Edges = true; _edgesFromConfig = true; }
+                        Console.WriteLine($"  store:      on by default ({(File.Exists(defCatalog) ? "a store already exists beside this catalog" : "new library")}); --no-store or truedat --config store false turns it off");
+                    }
+                }
+            }
             if (storeVerb || storePath != null)
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
@@ -10310,6 +10330,9 @@ namespace Truedat
         /// without --moods skips the edges with a warning instead of refusing.</summary>
         static bool _storeFromConfig, _edgesFromConfig;
 
+        /// <summary>Store/edges built-in default when neither the command line nor the config file chose (operator 2026-10-12).</summary>
+        internal static bool StoreOnByDefault(bool explicitChoice, bool catalogExists, bool storeExists) => !explicitChoice && (!catalogExists || storeExists);
+
         /// <summary>S2 C7: write mbxedges.v1.json from the store — to <paramref name="explicitPath"/>, else beside the catalog.
         /// Returns false (and says why) when there is no store or no target; never throws into a scan.</summary>
         static bool WriteEdgesCompanion(string? explicitPath, bool announce)
@@ -10392,6 +10415,12 @@ namespace Truedat
                 return "Error: --edges in --analyze-file / --file-list needs --moods <mbxmoods.json>: the store is written after the catalog entry, and without a catalog target nothing is recorded (measured: the run completes and writes no edge row).";
             var build = global::Truedat.Store.ScanSink.ExtractorBuild;
             var required = global::Truedat.Edges.EdgeProducer.RequiredBuild;
+            if (_edgesFromConfig && !string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"  edges: on by default/config but the extractor is {build}, not {required}; edges skipped this run (update the extractor from truedat-deps)");
+                _stageOpts.Edges = false;
+                return null;
+            }
             if (!string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
                 return $"Error: --edges needs extractor build {required} (binary frames via --frames-bin); the resolved extractor is {build} ({essentiaExe}). Update essentia_streaming_extractor_music.exe from truedat-deps.";
             var ffmpeg = _ffmpegPath.Value;
@@ -18481,6 +18510,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(HasCurrentEntry(lacking), "gate: a normal scan never re-analyses for edges");
                 _refreshFeatures = true;
                 Assert(!HasCurrentEntry(new TrackEntry { Features = batch2Missing, AudioStreamSha256 = "6b" + StaleSha.Substring(2) }), "gate: HasCurrentEntry still applies the feature-wave markers");
+                // Store/edges built-in default (operator 2026-10-12: "enabled by default on a new clean fresh install"): on for a library
+                // with no catalog yet, or one whose store already exists; an existing catalog without a store stays off (a scan would
+                // otherwise create a store holding only the tracks it analysed); any explicit choice (flag or config key) wins.
+                Assert(StoreOnByDefault(explicitChoice: false, catalogExists: false, storeExists: false), "default: a fresh install (no catalog yet) has the store on");
+                Assert(StoreOnByDefault(explicitChoice: false, catalogExists: true, storeExists: true), "default: a catalog whose store already exists keeps the store on");
+                Assert(!StoreOnByDefault(explicitChoice: false, catalogExists: true, storeExists: false), "default: an existing catalog without a store stays off (no half-filled store)");
+                Assert(!StoreOnByDefault(explicitChoice: true, catalogExists: false, storeExists: false), "default: an explicit choice (flag or config key) is never overridden");
                 _edgesStale = savedStale;
                 _refreshFeatures = savedRf;
             }

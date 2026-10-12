@@ -89,8 +89,8 @@ namespace Truedat
             // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
             // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
-            new Setting { Key = "store",           Kind = Kind.Bool, Default = "false", Help = "every scan also writes the store (default location); read-only verbs answer from it once it exists" },
-            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "false", Help = "every scan also folds edge rows (needs store = true and extractor output-x64.5)" },
+            new Setting { Key = "store",           Kind = Kind.Bool, Default = "auto", Help = "every scan also writes the store (default location); auto = on for a new library or when a store exists, off for an existing catalog until --store-import" },
+            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "auto", Help = "every scan also folds edge rows (needs the store and extractor output-x64.5); auto = follows the store default" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes
