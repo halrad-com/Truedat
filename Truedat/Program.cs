@@ -504,8 +504,8 @@ namespace Truedat
             {
                 var sample = stage.Snapshot();
                 if (sample.Count == 0) continue;
-                string mean = (sample.TotalSeconds / sample.Count).ToString("F3", CultureInfo.InvariantCulture);
-                string max = sample.MaxSeconds.ToString("F3", CultureInfo.InvariantCulture);
+                string mean = (sample.TotalSeconds / sample.Count).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+                string max = sample.MaxSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
                 rows.AppendLine($"    {stage.Name,-22} {mean,9}s avg {max,9}s max  ({sample.Count} {stage.Unit})");
             }
             if (cpuUnavailable > 0)
