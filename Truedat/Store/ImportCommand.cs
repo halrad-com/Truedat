@@ -396,13 +396,23 @@ namespace Truedat.Store
             // nothing else (constraint 2: no partial row); the catalog entry above is unaffected either way.
             if (edges != null)
             {
-                bool failed = edges.Status == "failed";
-                dal.EnsureProducer(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, "analysis", needsAudio: true);   // the run row references it, even for a failed fold
-                long edgesRun = dal.InsertRun(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
-                    edges.FoldMs + edges.PcmMs, Environment.MachineName, VersionInfo.Display, failed ? "failed" : "ok", failed ? "edges" : null, null, failed ? edges.Head.Error : null, source);
-                if (failed) { r.EdgesFailed++; StoreLog.Warn($"edges: fold failed for {key}: {edges.Head.Error}"); }
-                else { global::Truedat.Edges.EdgeStore.Write(dal, contentKey, sha != null ? kind : "entity", edgesRun, edges); r.Edges++; }
+                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key)) r.Edges++; else r.EdgesFailed++;
             }
+        }
+
+        /// <summary>S2 C4/C5 — one edges result for one entity: the 'edges' run row (outcome, fold + PCM ms, the reason on failure)
+        /// and, when it folded, the packed rows under the content key. Shared by the scan sink and the --work drain so the two
+        /// cannot record the same event differently. Returns true when rows were written.</summary>
+        internal static bool WriteEdges(StoreDal dal, string entityId, string contentKey, string contentKeyKind, string? sha, long? locationId,
+            global::Truedat.Edges.EdgeFoldResult edges, string source, string now, string displayPath)
+        {
+            bool failed = edges.Status == "failed";
+            dal.EnsureProducer(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, "analysis", needsAudio: true);   // the run row references it, even for a failed fold
+            long edgesRun = dal.InsertRun(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, entityId, sha, sha != null ? contentKeyKind : null, locationId, now,
+                edges.FoldMs + edges.PcmMs, Environment.MachineName, VersionInfo.Display, failed ? "failed" : "ok", failed ? "edges" : null, null, failed ? edges.Head.Error : null, source);
+            if (failed) { StoreLog.Warn($"edges: fold failed for {displayPath}: {edges.Head.Error}"); return false; }
+            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges);
+            return true;
         }
 
         /// <summary>S2 C2 — observation integrity. The media's description is written once; afterwards an arriving value that

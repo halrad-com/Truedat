@@ -381,6 +381,69 @@ namespace Truedat.Store
             return d;
         }
 
+        // ---------------------------------------------------------------- the work queue (S2 C5)
+        /// <summary>Queue the gap: entities with a description, no edges.status value at <paramref name="version"/> for their content
+        /// key, and a present copy on one of this machine's roots. A done item for an older version is re-queued; parked stays parked.</summary>
+        internal int EnqueueMissingEdges(string producerKey, string version, string machineId)
+        {
+            Exec("INSERT INTO work_item(entity_id, producer_key, target_version, state) " +
+                 "SELECT c.entity_id, ?, ?, 'queued' FROM track_content c " +
+                 "WHERE NOT EXISTS (SELECT 1 FROM value v WHERE v.content_hash = c.content_key AND v.producer_key = ? AND v.producer_version = ? AND v.segment_id = 0 AND v.field = 'edges.status') " +
+                 "AND EXISTS (SELECT 1 FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE l.entity_id = c.entity_id AND r.machine_id = ? AND l.state = 'present') " +
+                 // Only a DONE item for an older version is touched (re-queued for the new one); queued, failed and parked rows are
+                 // left exactly as they are, so the change count is the number of items this call actually put in the queue.
+                 "ON CONFLICT(entity_id, producer_key) DO UPDATE SET target_version = excluded.target_version, state = 'queued', attempts = 0 " +
+                 "WHERE work_item.state = 'done' AND work_item.target_version <> excluded.target_version;",
+                 producerKey, version, producerKey, version, machineId);
+            return Db.Changes;
+        }
+
+        /// <summary>The next item this machine may take: queued, or failed with attempts left whose retry time passed BEFORE this run
+        /// started, or a lease that expired before this run started. The run-start cutoff is what makes one run try an item at most
+        /// once: a failure recorded during the run carries a retry time at or after the start, so even a zero retry delay cannot
+        /// hammer one item three times in a row. Leases it (state leased, attempts + 1, lease_until) and returns it, or null.</summary>
+        internal (long Id, string EntityId, int Attempts)? LeaseNextWork(string producerKey, string runStartUtc, string leaseUntilUtc, int maxAttempts)
+        {
+            var next = Row("SELECT id, entity_id, attempts FROM work_item WHERE producer_key = ? AND (state = 'queued' " +
+                           "OR (state = 'failed' AND attempts < ? AND (next_eligible_utc IS NULL OR next_eligible_utc < ?)) " +
+                           "OR (state = 'leased' AND lease_until_utc IS NOT NULL AND lease_until_utc < ?)) ORDER BY priority DESC, id LIMIT 1;",
+                           s => ((long?)s.GetInt64(0), s.GetString(1)!, (int)s.GetInt64(2)), (null, "", 0), producerKey, (long)maxAttempts, runStartUtc, runStartUtc);
+            if (next.Item1 == null) return null;
+            Exec("UPDATE work_item SET state = 'leased', attempts = attempts + 1, lease_until_utc = ? WHERE id = ?;", leaseUntilUtc, next.Item1.Value);
+            return (next.Item1.Value, next.Item2, next.Item3 + 1);
+        }
+
+        internal void FinishWork(long id, string state, string? reviewNote, string? nextEligibleUtc)
+            => Exec("UPDATE work_item SET state = ?, review_note = ?, next_eligible_utc = ?, lease_until_utc = NULL WHERE id = ?;", state, reviewNote, nextEligibleUtc, id);
+
+        internal Dictionary<string, long> WorkCounts(string producerKey)
+        {
+            var d = new Dictionary<string, long>(StringComparer.Ordinal);
+            using var st = Db.Prepare("SELECT state, count(*) FROM work_item WHERE producer_key = ? GROUP BY state;");
+            st.Bind(1, producerKey);
+            while (st.Step()) d[st.GetString(0)!] = st.GetInt64(1);
+            return d;
+        }
+
+        internal string? NextEligibleWork(string producerKey)
+            => Row("SELECT min(next_eligible_utc) FROM work_item WHERE producer_key = ? AND state = 'failed';", s => s.GetString(0), null, producerKey);
+
+        /// <summary>Present copies of an entity on this machine's roots, as display paths with their location ids.</summary>
+        internal List<(long LocationId, string DisplayPath)> CopiesOnMachine(string entityId, string machineId)
+        {
+            var list = new List<(long, string)>();
+            using var st = Db.Prepare("SELECT l.id, l.display_path FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE l.entity_id = ? AND r.machine_id = ? AND l.state = 'present' ORDER BY l.id;");
+            st.Bind(1, entityId); st.Bind(2, machineId);
+            while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1)!));
+            return list;
+        }
+
+        internal (string ContentKey, string Kind)? ContentKeyOf(string entityId)
+            => Row("SELECT content_key, content_key_kind FROM track_content WHERE entity_id = ?;", s => ((string?)s.GetString(0), s.GetString(1)!), (null, ""), entityId) is var t && t.Item1 != null ? (t.Item1, t.Item2) : null;
+
+        internal void SetWorkLeaseForTest(string entityId, string producerKey, string leaseUntilUtc)
+            => Exec("UPDATE work_item SET state = 'leased', lease_until_utc = ? WHERE entity_id = ? AND producer_key = ?;", leaseUntilUtc, entityId, producerKey);
+
         internal long CountRuns(string producerKey, string outcome) => Row("SELECT count(*) FROM run WHERE producer_key = ? AND outcome = ?;", s => s.GetInt64(0), 0L, producerKey, outcome);
         internal string? RunErrorText(string producerKey, string outcome) => Row("SELECT error_text FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.GetString(0), null, producerKey, outcome);
         internal long? RunDurationMs(string producerKey, string outcome) => Row("SELECT duration_ms FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.IsNull(0) ? (long?)null : s.GetInt64(0), null, producerKey, outcome);
