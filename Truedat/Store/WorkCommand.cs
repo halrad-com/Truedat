@@ -30,6 +30,7 @@ namespace Truedat.Store
         public string Stopped = "";                 // 'empty' | 'budget' | 'error'
         public string? NextEligibleUtc, ResultPath, Error;
         public double ItemsPerHour => ElapsedMs > 0 ? Leased * 3600000.0 / ElapsedMs : 0;
+        public double ItemsPerHourLive(long elapsedMs) => elapsedMs > 0 ? Leased * 3600000.0 / elapsedMs : 0;
     }
 
     /// <summary>The C4 producer path for one reachable copy: run the extractor with the frames profile, fold, PCM pass. Never throws
@@ -47,7 +48,7 @@ namespace Truedat.Store
     {
         internal const string ResultFileName = "work-result.json";
 
-        internal static WorkReport Run(WorkOptions o, ProduceEdges produce, string producerVersion)
+        internal static WorkReport Run(WorkOptions o, ProduceEdges produce, string producerVersion, System.Threading.CancellationToken ct = default)
         {
             var sw = Stopwatch.StartNew();
             var r = new WorkReport { Producer = o.Producer, ProducerVersion = producerVersion, BudgetMs = (long)(o.Budget?.TotalMilliseconds ?? 0) };
@@ -72,13 +73,20 @@ namespace Truedat.Store
                     tx.Complete();
                 }
                 StoreLog.Info($"work: {r.Enqueued} item(s) enqueued for {producerVersion} on this machine");
+                // What this run has in front of it, for the progress line's n/total: every queued item plus the failed ones due a retry.
+                var startCounts = dal.WorkCounts(o.Producer);
+                long total = (startCounts.TryGetValue("queued", out var sq) ? sq : 0) + (startCounts.TryGetValue("failed", out var sf) ? sf : 0);
+                long processed = 0;
 
                 // One attempt per item per run: the lease query's cutoff is the run start, so a failure (or lease) recorded during
                 // this run is not eligible again until the next run, whatever the retry delay.
                 string runStart = DateTime.UtcNow.ToString("o");
                 while (true)
                 {
+                    // Ctrl+C (the scan's token, or --work's own handler): finish the item in hand, stop leasing, write the result.
+                    if (ct.IsCancellationRequested) { r.Stopped = "cancelled"; break; }
                     if (o.Budget.HasValue && sw.Elapsed >= o.Budget.Value) { r.Stopped = "budget"; break; }
+                    var itemSw = Stopwatch.StartNew();
                     string leaseUntil = DateTime.UtcNow.Add(o.Lease).ToString("o");
                     (long Id, string EntityId, int Attempts)? item;
                     using (var tx = db.BeginTransaction()) { item = dal.LeaseNextWork(o.Producer, runStart, leaseUntil, o.MaxAttempts, producerVersion); tx.Complete(); }
@@ -116,6 +124,8 @@ namespace Truedat.Store
                             tx.Complete();
                         }
                         Finish(dal, db, item.Value, o, r, false, why, done);
+                        processed++;
+                        Progress(r, sw, processed, total, itemSw.Elapsed.TotalSeconds, o.Budget, $"{item.Value.EntityId.Substring(0, 8)}…", $" (failed: {why})");
                         continue;
                     }
 
@@ -136,6 +146,10 @@ namespace Truedat.Store
                         tx.Complete();
                     }
                     Finish(dal, db, item.Value, o, r, ok, ok ? null : edges.Head.Error, done);
+                    processed++;
+                    var who = loc.HasValue ? dal.CopyArtistTitle(loc.Value) : (null, null);
+                    string label = !string.IsNullOrEmpty(who.Item1) || !string.IsNullOrEmpty(who.Item2) ? $"{who.Item1} - {who.Item2}" : Path.GetFileName(path);
+                    Progress(r, sw, processed, total, itemSw.Elapsed.TotalSeconds, o.Budget, label, ok ? "" : $" (failed: {edges.Head.Error})");
                     StoreLog.Debug($"work: {(ok ? "done" : "failed")} {path} (attempt {item.Value.Attempts}, fold {edges.FoldMs} ms, pcm {edges.PcmMs} ms)");
                 }
 
@@ -162,6 +176,30 @@ namespace Truedat.Store
                 try { WriteResult(r); } catch (Exception ex) { StoreLog.Warn($"work-result.json not written: {ex.Message}"); }
             }
             return r;
+        }
+
+        /// <summary>One line per item in the scan's own shape: [n/total pct · rate · ETA · s/trk] Artist - Title.</summary>
+        static void Progress(WorkReport r, Stopwatch sw, long processed, long total, double itemSec, TimeSpan? budget, string label, string suffix)
+        {
+            double perHour = r.ItemsPerHourLive(sw.ElapsedMilliseconds);
+            long left = Math.Max(0, total - processed);
+            string eta = perHour > 0 ? FormatHours(left / perHour) : "?";
+            if (budget.HasValue)
+            {
+                double budgetLeftH = (budget.Value - sw.Elapsed).TotalHours;
+                eta += $" (budget {FormatHours(budgetLeftH)} left)";
+            }
+            double pct = total > 0 ? 100.0 * processed / total : 100;
+            Console.WriteLine($"[{processed:N0}/{total:N0} {pct:F0}% · {perHour:F0}/h · ETA {eta} · {itemSec:F1}s/trk · edges] {label}{suffix}");
+        }
+
+        static string FormatHours(double hours)
+        {
+            if (hours < 0) hours = 0;
+            if (hours * 3600 < 90) return $"{Math.Round(hours * 3600):F0} s";
+            if (hours < 1) return $"{Math.Round(hours * 60):F0} min";
+            if (hours < 48) return $"{hours:F1} h";
+            return $"{hours / 24:F1} days";
         }
 
         /// <summary>The scan's tier-1 identity test: file mtime and the catalog's lastModified agree to the second.</summary>

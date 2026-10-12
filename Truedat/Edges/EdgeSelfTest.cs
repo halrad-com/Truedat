@@ -360,6 +360,13 @@ namespace Truedat.Edges
                 var r10 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e4;p10");
                 assert(r10.Leased == 2 && r10.Done == 0, $"an expired lease whose attempts are exhausted is left alone; only the two failed items retry ({r10.Leased} leased, {r10.Done} done)");
 
+                // Ctrl+C: cancellation finishes the item in hand, stops leasing, says 'cancelled'; the rest stay queued for the next run.
+                var cts = new System.Threading.CancellationTokenSource();
+                EdgeFoldResult CancelAfterOne(string path, long size, double? claimedSec) { cts.Cancel(); return okFold; }
+                var rc = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, CancelAfterOne, "edges@v1;e3;p10", cts.Token);
+                assert(rc.Stopped == "cancelled" && rc.Leased == 1 && rc.Done == 1 && rc.Remaining >= 2 && rc.ResultPath != null && System.IO.File.ReadAllText(rc.ResultPath).Contains("\"stopped\": \"cancelled\""),
+                    $"cancellation: the item in hand completes, nothing more is leased, the result says cancelled ({rc.Stopped}, leased {rc.Leased}, done {rc.Done}, remaining {rc.Remaining})");
+
                 // Review I4: a run that cannot open the store still writes work-result.json, saying error.
                 var bad = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = System.IO.Path.Combine(root, "nowhere", "truedat.db") }, Produce, version);
                 assert(bad.Stopped == "error" && bad.Error != null && bad.ResultPath != null && System.IO.File.Exists(bad.ResultPath) && System.IO.File.ReadAllText(bad.ResultPath).Contains("\"stopped\": \"error\""),
@@ -619,7 +626,7 @@ namespace Truedat.Edges
                 assert(t.Whole != null && t.Whole.Key != null && t.Whole.Key.Name == "A" && t.Whole.Key.Scale == "minor", $"tail key: A minor ({t.Whole?.Key?.Name} {t.Whole?.Key?.Scale})");
                 assert(h.Sub.Length == 3 && h.Sub[0].StartMs == 0 && h.Sub[0].EndMs == 10000 && h.Sub[2].StartMs == 20000 && h.Sub[2].EndMs == 30000 && h.Sub[1].Key != null && h.Sub[1].Key!.Name == "C", "three 10 s sub-windows, each with its own summary and key");
                 assert(h.Whole != null && h.Whole.MfccMean.Length == 13 && Math.Abs(h.Whole.MfccMean[0] - (-500)) < 1e-3 && Math.Abs(h.Whole.MfccMean[12] - (-380)) < 1e-3 && h.Whole.MfccSpread[0] < 1e-6,
-                    $"MFCC mean and spread over the window ({h.Whole.MfccMean[0]:F1}, spread {h.Whole.MfccSpread[0]:E1})");
+                    $"MFCC mean and spread over the window ({h.Whole!.MfccMean[0]:F1}, spread {h.Whole.MfccSpread[0]:E1})");
                 assert(h.Whole.SpectralMean.Length == 11 && Math.Abs(h.Whole.SpectralMean[0] - 100) < 1e-3 && Math.Abs(t.Whole!.SpectralMean[10] - 2200) < 1e-3 && h.Whole.SpectralSpread[3] < 1e-6,
                     $"the 11 spectral scalars in the declared order, mean and spread ({h.Whole.SpectralMean[0]:F1}, {t.Whole!.SpectralMean[10]:F1})");
                 // Fade and silence are quantised to the 0.1 s window grid and the fade is "departure from the plateau by 1 LU", so a

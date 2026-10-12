@@ -454,6 +454,10 @@ namespace Truedat.Store
         internal string? EdgesExtractorBuild(string producerVersion)
             => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);
 
+        /// <summary>Artist and title as the copy row holds them — the drain's progress line names tracks the way the scan does.</summary>
+        internal (string? Artist, string? Title) CopyArtistTitle(long locationId)
+            => Row("SELECT artist, title FROM track_copy WHERE location_id = ?;", s => (s.GetString(0), s.GetString(1)), ((string?)null, (string?)null), locationId);
+
         internal (string ContentKey, string Kind)? ContentKeyOf(string entityId)
             => Row("SELECT content_key, content_key_kind FROM track_content WHERE entity_id = ?;", s => ((string?)s.GetString(0), s.GetString(1)!), (null, ""), entityId) is var t && t.Item1 != null ? (t.Item1, t.Item2) : null;
 

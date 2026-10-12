@@ -3193,7 +3193,15 @@ namespace Truedat
                 if (workEssentia == null) { Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found (app dir, cwd)."); Environment.ExitCode = 2; return; }
                 _stageOpts.Edges = true;
                 if (EdgesPreflight(workEssentia) is string workRefusal) { Console.Error.WriteLine(workRefusal); Environment.ExitCode = 1; return; }
-                Environment.ExitCode = RunEdgeDrain(workEssentia, workBudgetText, workProducer, auditLog) ? 0 : 1;
+                // Ctrl+C: finish the track in hand, write work-result.json, exit; a second Ctrl+C terminates at once.
+                var workCts = new CancellationTokenSource();
+                Console.CancelKeyPress += (_, e) =>
+                {
+                    if (workCts.IsCancellationRequested) { Console.WriteLine("Force exit."); return; }
+                    e.Cancel = true; workCts.Cancel();
+                    Console.WriteLine(); Console.WriteLine("Ctrl+C received - finishing the current track, then stopping...");
+                };
+                Environment.ExitCode = RunEdgeDrain(workEssentia, workBudgetText, workProducer, auditLog, workCts.Token) ? 0 : 1;
                 return;
             }
 
@@ -6261,7 +6269,7 @@ namespace Truedat
             SaveResults(moodsPath, allTracks);
             finalSaveSw.Stop();
             FlushStoreSink(allTracks.Keys);     // S2 C3: the store is a second sink, written after the catalog, never instead of it
-            if (!wasCancelled) RunEdgeDrainAfterRefresh(essentiaExe, workBudgetText, chunkTotal, auditLog);   // S2 C5: --refresh also backfills edges
+            if (!wasCancelled) RunEdgeDrainAfterRefresh(essentiaExe, workBudgetText, chunkTotal, auditLog, cts.Token);   // S2 C5: --refresh also backfills edges; the scan's Ctrl+C stops it cleanly
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -10325,17 +10333,17 @@ namespace Truedat
         /// edge row at the current version and a present, unchanged copy on this machine, then fold them one at a time inside the
         /// budget. Called by --work on its own and by --refresh after its feature pass. Returns false only on an error; a budget
         /// stop or an empty queue is success. Writes work-result.json beside the store and rewrites the companion when rows landed.</summary>
-        static bool RunEdgeDrain(string essentiaExe, string? budgetText, string producer, bool audit)
+        static bool RunEdgeDrain(string essentiaExe, string? budgetText, string producer, bool audit, CancellationToken ct = default)
         {
             TimeSpan? budget = budgetText != null ? ParseBudget(budgetText) : null;
             global::Truedat.Store.ScanSink.SuppressMainStash = true;   // the drain files no description (it exists): no compress-then-delete per item (review M7)
             try
             {
                 var drainBuild = global::Truedat.Store.ScanSink.ExtractorBuild;
-                Console.WriteLine($"  Edges backfill: producer {producer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {drainBuild}");
+                Console.WriteLine($"  Edges backfill: producer {producer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {drainBuild}; Ctrl+C finishes the current track and stops");
                 var wr = global::Truedat.Store.WorkCommand.Run(
                     new global::Truedat.Store.WorkOptions { StorePath = _storePath, Producer = producer, Budget = budget, Audit = audit },
-                    RealProduceEdges(essentiaExe), _edgeSettings.ProducerVersion);
+                    RealProduceEdges(essentiaExe), _edgeSettings.ProducerVersion, ct);
                 if (wr.Error != null) { Console.Error.WriteLine($"Error: {wr.Error}"); return false; }
                 Console.WriteLine($"  edges backfill: {wr.Enqueued} enqueued, {wr.Leased} leased, {wr.Done} done, {wr.Failed} failed ({wr.Unreachable} unreachable, {wr.Changed} changed), {wr.Parked} parked, {wr.Remaining} remaining; stopped: {wr.Stopped}; {wr.ElapsedMs / 1000.0:F1} s" +
                                   (wr.Leased > 0 ? $" ({wr.ItemsPerHour:F0} items/h, {(wr.Done > 0 ? wr.BytesWritten / wr.Done : 0):N0} B/item)" : "") + (wr.NextEligibleUtc != null ? $"; next retry eligible {wr.NextEligibleUtc}" : ""));
@@ -10350,13 +10358,13 @@ namespace Truedat
         /// <summary>--refresh's second half: once the feature pass has saved and flushed, backfill edges for the tracks the catalog
         /// already had (a cache hit never folds). Only when a store and edges are in force; under --chunk the shards would each
         /// drain, so it is skipped with a note (single writer by design).</summary>
-        static void RunEdgeDrainAfterRefresh(string essentiaExe, string? budgetText, int chunkTotal, bool audit)
+        static void RunEdgeDrainAfterRefresh(string essentiaExe, string? budgetText, int chunkTotal, bool audit, CancellationToken ct = default)
         {
             if (!_refreshFeatures || _storePath == null || !_stageOpts.Edges) return;
             if (chunkTotal > 0) { Console.WriteLine("  edges backfill: skipped under --chunk (one drain per store; run --refresh without --chunk, or --work, on one machine)"); return; }
             Console.WriteLine();
             Console.WriteLine("=== --refresh: edge backfill ===");
-            RunEdgeDrain(essentiaExe, budgetText, global::Truedat.Edges.EdgeStore.ProducerKey, audit);
+            RunEdgeDrain(essentiaExe, budgetText, global::Truedat.Edges.EdgeStore.ProducerKey, audit, ct);
         }
 
         /// <summary>--budget: 90s, 30m, 2h, 1h30m, or a bare number of seconds. Null when it does not parse.</summary>

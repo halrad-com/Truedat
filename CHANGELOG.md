@@ -12,6 +12,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **The edge backfill shows progress and stops cleanly.** One line per track in the scan's shape
+  (`[n/total pct · rate · ETA · s/trk · edges] Artist - Title`, failures with their reason), and Ctrl+C
+  finishes the track in hand, writes `work-result.json` and exits (a second Ctrl+C terminates at once).
 - **Console lines name their file.** `FAILED:` lines in the library scan carry artist, title and file name;
   the ffmpeg transcode and downmix announcements and the under-decode retry name the source file. In a
   parallel scan the track's own line can be far above the message.
