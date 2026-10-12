@@ -13,7 +13,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 ### Added
 
 - **`STORE.md`** — the store, its tables, verbs, the edges layer, and how to open the file (DB Browser for
-  SQLite, `sqlite3 -readonly`). The store verbs are in `--help` too.
+  SQLite, `sqlite3 -readonly`). The store verbs are in `--help` too. The README's store section carries the
+  measured numbers (200-track slice: 2.8 s/track with edges, 6.4 KB/track of edge rows, 19.7 KB/track
+  all-in, 1.7 KB/track companion) and what is and is not verified yet.
 - **Store precision: six significant figures.** Every float enters the store and leaves it on
   `--store-export` at 6 sf, written exactly (`0.022454`, never `0.022454000000000002`); the round-trip
   gate compares both sides at that precision. The scan's catalog writer and its bytes are unchanged.

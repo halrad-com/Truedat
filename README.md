@@ -185,6 +185,28 @@ written from the store, compactly (about 1.8 KB per track), after any `--edges` 
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
 
+**Measured (2026-10-12, a 200-track slice of a local library, 83 FLAC / 111 MP3, local SSD, parallelism 20):**
+
+| | |
+|---|---|
+| Scan with `--store --edges` | 2.8 s per track wall; 200 of 200 edge rows, 0 failed folds |
+| Edge rows in the store | 6,404 bytes per track (one packed row per edge) |
+| Store, everything included | 19.7 KB per track; about 2.9 GB projected at 156k tracks |
+| `mbxedges.v1.json` | 1.7 KB per track |
+| `--work` drain | 130 to 440 items per hour on one box; the extractor run dominates, so track length decides |
+| `--store-roundtrip` on the scan-built store | EQUAL, 200 of 200, at the six-figure precision |
+
+**Verified on real audio:** `--edges` through `--analyze-file`, `--file-list` and the drain on MP3, M4A, WMA and
+FLAC; the `--work` decode-coverage gate (a file whose claimed duration exceeds what the extractor decodes
+is transcoded, then fails the fold rather than writing a wrong tail); the refusals on an older extractor
+and on a missing `--moods`; the stage directory left clean after parallel runs.
+
+**Not yet verified:** `--edges` or `--work` over a UNC share or a staged network copy; the library (iTunes
+XML) scan and `--folder` with `--edges`; slices beyond 200 tracks. **Known limits:** the fold reads each
+descriptor whole, so a multi-hour file costs several hundred MB of transient memory per worker;
+`--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
+file-list scans; `dist/` still ships extractor build `.4`, and `--edges` / `--work` need `.5`.
+
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
