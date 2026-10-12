@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -24,7 +25,7 @@ namespace Truedat.Store
     internal sealed class WorkReport
     {
         public string Producer = "", ProducerVersion = "", Store = "";
-        public int Enqueued, Leased, Done, Failed, Parked, Unreachable, Remaining, QueueQueued, QueueFailed, QueueParked, QueueDone;
+        public int Enqueued, Leased, Done, Failed, Parked, Unreachable, Changed, Remaining, QueueQueued, QueueFailed, QueueParked, QueueDone;
         public long ElapsedMs, BudgetMs, BytesWritten;
         public string Stopped = "";                 // 'empty' | 'budget' | 'error'
         public string? NextEligibleUtc, ResultPath, Error;
@@ -32,14 +33,16 @@ namespace Truedat.Store
     }
 
     /// <summary>The C4 producer path for one reachable copy: run the extractor with the frames profile, fold, PCM pass. Never throws
-    /// by contract (a failure is a failed <see cref="EdgeFoldResult"/>). The scan wires the real one; tests inject a synthetic one.</summary>
-    internal delegate EdgeFoldResult ProduceEdges(string audioPath, long sizeBytes);
+    /// by contract (a failure is a failed <see cref="EdgeFoldResult"/>). <paramref name="claimedDurationSec"/> is the copy's duration
+    /// as the store knows it (null when unknown) — the decode-coverage gate compares the extractor's decoded length against it.
+    /// The scan wires the real one; tests inject a synthetic one.</summary>
+    internal delegate EdgeFoldResult ProduceEdges(string audioPath, long sizeBytes, double? claimedDurationSec);
 
     /// <summary>S2 C5 — <c>--work</c>: the drain. Enqueue the gap (entities with a description but no edge row at the current
     /// producer version that have a copy on one of THIS machine's roots), then lease one item at a time inside the budget, run it
     /// through the C4 path, write the rows and its run row, and move it to done / failed (retry after a delay, 3 attempts then
-    /// parked). Leases expire, nothing is force-killed, outputs go to <c>work-result.json</c> beside the store. "Done" is a query:
-    /// <c>--store-info</c> prints eligible / captured / missing.</summary>
+    /// parked). Leases expire, nothing is force-killed, outputs go to <c>work-result.json</c> beside the store on EVERY exit
+    /// (review I4). "Done" is a query: <c>--store-info</c> prints eligible / captured / missing.</summary>
     internal static class WorkCommand
     {
         internal const string ResultFileName = "work-result.json";
@@ -48,14 +51,17 @@ namespace Truedat.Store
         {
             var sw = Stopwatch.StartNew();
             var r = new WorkReport { Producer = o.Producer, ProducerVersion = producerVersion, BudgetMs = (long)(o.Budget?.TotalMilliseconds ?? 0) };
+            // The result file's place is known before the store opens, so a failed open still leaves a fresh result (review I4).
+            if (!string.IsNullOrEmpty(o.StorePath)) r.ResultPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(o.StorePath!)) ?? ".", ResultFileName);
             StoreLog.SetVerbose(o.Audit);
-            if (o.Producer != EdgeStore.ProducerKey) { r.Stopped = "error"; r.Error = $"--work knows one producer in S2: {EdgeStore.ProducerKey} (got '{o.Producer}')."; return r; }
             try
             {
+                if (o.Producer != EdgeStore.ProducerKey) throw new StoreException($"--work knows one producer in S2: {EdgeStore.ProducerKey} (got '{o.Producer}').");
                 var now = DateTime.UtcNow.ToString("o");
                 using var os = OpenStore.Open(o.StorePath, create: false, VersionInfo.Display, now);
                 var dal = os.Dal; var db = os.Db;
                 r.Store = os.Path;
+                r.ResultPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(os.Path)) ?? ".", ResultFileName);
                 string machineId = os.Machine.Id;
                 string source = $"work:{Environment.MachineName}@{DateTime.UtcNow:o}";
 
@@ -75,28 +81,46 @@ namespace Truedat.Store
                     if (o.Budget.HasValue && sw.Elapsed >= o.Budget.Value) { r.Stopped = "budget"; break; }
                     string leaseUntil = DateTime.UtcNow.Add(o.Lease).ToString("o");
                     (long Id, string EntityId, int Attempts)? item;
-                    using (var tx = db.BeginTransaction()) { item = dal.LeaseNextWork(o.Producer, runStart, leaseUntil, o.MaxAttempts); tx.Complete(); }
+                    using (var tx = db.BeginTransaction()) { item = dal.LeaseNextWork(o.Producer, runStart, leaseUntil, o.MaxAttempts, producerVersion); tx.Complete(); }
                     if (item == null) { r.Stopped = "empty"; break; }
                     r.Leased++;
 
-                    // The copy to read: the first present location on this machine's roots whose file is actually there.
-                    string? path = null; long? loc = null; long size = 0;
+                    // The copy to read: the first present location on this machine's roots whose file is there AND still carries the
+                    // mtime the description was made from (review I1: a re-encode in place must not be folded under the old sha).
+                    string? path = null; long? loc = null; long size = 0; double? claimedSec = null; int changed = 0;
                     foreach (var c in dal.CopiesOnMachine(item.Value.EntityId, machineId))
                     {
-                        try { var fi = new FileInfo(c.DisplayPath); if (fi.Exists) { path = c.DisplayPath; loc = c.LocationId; size = fi.Length; break; } } catch { }
+                        try
+                        {
+                            var fi = new FileInfo(c.DisplayPath);
+                            if (!fi.Exists) continue;
+                            if (c.LastModifiedUtc != null && !SameSecond(fi.LastWriteTimeUtc, c.LastModifiedUtc)) { changed++; continue; }
+                            path = c.DisplayPath; loc = c.LocationId; size = fi.Length; claimedSec = c.DurationMs.HasValue && c.DurationMs > 0 ? c.DurationMs / 1000.0 : (double?)null;
+                            break;
+                        }
+                        catch { }
                     }
                     var ck = dal.ContentKeyOf(item.Value.EntityId);
                     string done = DateTime.UtcNow.ToString("o");
                     if (path == null || ck == null)
                     {
-                        string why = ck == null ? "no description (track_content row) for this entity" : "no reachable copy of this entity on this machine";
-                        r.Unreachable++;
+                        string why = ck == null ? "no description (track_content row) for this entity"
+                                   : changed > 0 ? $"the copy changed since its description was made ({changed} with a drifted mtime); rescan it first"
+                                   : "no reachable copy of this entity on this machine";
+                        if (changed > 0 && ck != null) r.Changed++; else r.Unreachable++;
+                        // An attempt that never reached the audio is still an observation: a failed 'edges' run row carries the reason.
+                        using (var tx = db.BeginTransaction())
+                        {
+                            dal.EnsureProducer(EdgeStore.ProducerKey, producerVersion, "analysis", needsAudio: true);
+                            dal.InsertRun(EdgeStore.ProducerKey, producerVersion, item.Value.EntityId, null, null, null, done, null, Environment.MachineName, VersionInfo.Display, "failed", "edges", null, why, source);
+                            tx.Complete();
+                        }
                         Finish(dal, db, item.Value, o, r, false, why, done);
                         continue;
                     }
 
                     EdgeFoldResult edges;
-                    try { edges = produce(path, size); }
+                    try { edges = produce(path, size, claimedSec); }
                     catch (Exception ex)
                     {
                         edges = new EdgeFoldResult { ProducerVersion = producerVersion };
@@ -125,9 +149,7 @@ namespace Truedat.Store
                 dal.ResetAll();
                 try { db.Exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (SqliteException ex) { StoreLog.Warn($"WAL checkpoint did not complete ({ex.Message})"); }
                 r.ElapsedMs = sw.ElapsedMilliseconds;
-                r.ResultPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(os.Path)) ?? ".", ResultFileName);
-                WriteResult(r);
-                StoreLog.Info($"work: {r.Leased} leased, {r.Done} done, {r.Failed} failed ({r.Unreachable} unreachable), {r.Parked} parked, {r.Remaining} remaining; stopped: {r.Stopped}; {r.ElapsedMs} ms" +
+                StoreLog.Info($"work: {r.Leased} leased, {r.Done} done, {r.Failed} failed ({r.Unreachable} unreachable, {r.Changed} changed), {r.Parked} parked, {r.Remaining} remaining; stopped: {r.Stopped}; {r.ElapsedMs} ms" +
                               (r.Leased > 0 ? $" ({r.ItemsPerHour:F0} items/h)" : ""));
             }
             catch (Exception ex)
@@ -135,7 +157,19 @@ namespace Truedat.Store
                 r.Stopped = "error"; r.Error = ex.Message; r.ElapsedMs = sw.ElapsedMilliseconds;
                 StoreLog.Error($"work: {ex.Message}");
             }
+            finally
+            {
+                try { WriteResult(r); } catch (Exception ex) { StoreLog.Warn($"work-result.json not written: {ex.Message}"); }
+            }
             return r;
+        }
+
+        /// <summary>The scan's tier-1 identity test: file mtime and the catalog's lastModified agree to the second.</summary>
+        static bool SameSecond(DateTime fileUtc, string storedUtc)
+        {
+            if (!DateTime.TryParseExact(storedUtc, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var stored)) return true;   // unparseable: cannot judge, do not refuse
+            long a = fileUtc.ToUniversalTime().Ticks / TimeSpan.TicksPerSecond, b = stored.ToUniversalTime().Ticks / TimeSpan.TicksPerSecond;
+            return a == b;
         }
 
         static void Finish(StoreDal dal, SqliteDb db, (long Id, string EntityId, int Attempts) item, WorkOptions o, WorkReport r, bool ok, string? why, string nowUtc)
@@ -149,18 +183,19 @@ namespace Truedat.Store
 
         static void WriteResult(WorkReport r)
         {
+            if (r.ResultPath == null) return;
             var j = new JsonObject
             {
                 ["kind"] = "work-result", ["schemaVersion"] = 1, ["generatedAt"] = DateTime.UtcNow.ToString("o"),
                 ["store"] = r.Store, ["producer"] = r.Producer, ["producerVersion"] = r.ProducerVersion,
-                ["budgetMs"] = r.BudgetMs, ["elapsedMs"] = r.ElapsedMs, ["stopped"] = r.Stopped,
-                ["enqueued"] = r.Enqueued, ["leased"] = r.Leased, ["done"] = r.Done, ["failed"] = r.Failed, ["unreachable"] = r.Unreachable, ["parked"] = r.Parked,
+                ["budgetMs"] = r.BudgetMs, ["elapsedMs"] = r.ElapsedMs, ["stopped"] = r.Stopped, ["error"] = r.Error,
+                ["enqueued"] = r.Enqueued, ["leased"] = r.Leased, ["done"] = r.Done, ["failed"] = r.Failed, ["unreachable"] = r.Unreachable, ["changed"] = r.Changed, ["parked"] = r.Parked,
                 ["remaining"] = r.Remaining, ["queue"] = new JsonObject { ["queued"] = r.QueueQueued, ["failed"] = r.QueueFailed, ["parked"] = r.QueueParked, ["done"] = r.QueueDone },
                 ["nextEligibleUtc"] = r.NextEligibleUtc, ["itemsPerHour"] = (decimal)Math.Round(r.ItemsPerHour, 1), ["bytesWritten"] = r.BytesWritten,   // decimal: net48 prints a double with round-trip noise
                 ["bytesPerItem"] = r.Done > 0 ? r.BytesWritten / r.Done : 0,
             };
-            if (r.ResultPath == null) return;
             var tmp = r.ResultPath + ".tmp";
+            Directory.CreateDirectory(Path.GetDirectoryName(r.ResultPath) ?? ".");   // the store's directory may not exist yet when the open failed
             File.WriteAllText(tmp, j.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             if (File.Exists(r.ResultPath)) File.Replace(tmp, r.ResultPath, null); else File.Move(tmp, r.ResultPath);
         }

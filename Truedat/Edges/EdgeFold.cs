@@ -65,6 +65,8 @@ namespace Truedat.Edges
         public int DurationMs;
         public string ProducerVersion = "";
         public long FoldMs, PcmMs;               // the per-component stopwatch on the run row
+        /// <summary>The extractor build the frames came from (e.g. output-x64.5); stored with the rows because the frames depend on it.</summary>
+        public string Extractor = "";
         /// <summary>The whole-track word: ok when both edges folded (either status), unavailable under the floor, failed otherwise.</summary>
         public string Status => Head.Status == "failed" || Tail.Status == "failed" ? "failed" : Head.Status == "unavailable" ? "unavailable" : "ok";
     }

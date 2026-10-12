@@ -96,7 +96,7 @@ namespace Truedat.Store
         /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
         internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
             string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, global::Truedat.Edges.EdgeFoldResult>? pendingEdges = null)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, string>? pendingEdges = null)
         {
             var sw = Stopwatch.StartNew();
             var r = new ImportReport { Entries = entries.Count, Catalog = source };
@@ -195,7 +195,7 @@ namespace Truedat.Store
         /// <summary>The batched entry loop shared by the file import and the in-memory entry.</summary>
         static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
             IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null, IReadOnlyDictionary<string, global::Truedat.Edges.EdgeFoldResult>? pendingEdges = null)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null, IReadOnlyDictionary<string, string>? pendingEdges = null)
         {
             var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
             int processed = 0;
@@ -206,8 +206,9 @@ namespace Truedat.Store
                 {
                     string? pendingArtifact = null;
                     if (pendingArtifacts != null) pendingArtifacts.TryGetValue(keys[i], out pendingArtifact);
+                    // The fold was spilled to disk by the sink (review I3): read it here, one entry at a time, and the file goes.
                     global::Truedat.Edges.EdgeFoldResult? edges = null;
-                    if (pendingEdges != null) pendingEdges.TryGetValue(keys[i], out edges);
+                    if (pendingEdges != null && pendingEdges.TryGetValue(keys[i], out var edgesFile)) edges = ScanSink.ReadEdges(edgesFile);
                     ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
                     processed++;
                     if (failAfterEntries > 0 && processed == failAfterEntries)

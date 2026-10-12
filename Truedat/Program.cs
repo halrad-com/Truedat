@@ -766,6 +766,7 @@ namespace Truedat
             Console.WriteLine("                      SMFM comes from the file's tag, not from analysis, so this is what");
             Console.WriteLine("                      makes a --strip-smfm durable: without it the next cache MISS on a");
             Console.WriteLine("                      file still carrying the block puts the data straight back.");
+            Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --edges             With --store: on every analysed track, also fold the first and last 30 s");
             Console.WriteLine("                      (loudness series, beats, key, texture, fades, PCM crest/transition) into");
             Console.WriteLine("                      the store's edge row for the hub's splicing. Needs extractor build");
@@ -795,7 +796,6 @@ namespace Truedat
             Console.WriteLine("  --store-info        Measurements: bytes/track, projection, speed, coverage, conflicts, edges, work queue.");
             Console.WriteLine("  --store-vacuum [--page-size N]");
             Console.WriteLine("                      Repack the store; --page-size sets the page size (default 16384).");
-            Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
@@ -1823,6 +1823,12 @@ namespace Truedat
                     // report the same recent file twice in the "left alone" line.
                     if (SweepAged(stageDir, "*", "staged/downmix/extractor file(s)") == 0)
                         try { Directory.Delete(stageDir); } catch { }
+                }
+                // The default stage dir is CreateExtractorOutputPath's fallback when --stage-dir is unusable (review M5): sweep it too.
+                if (!string.Equals(stageDir, DefaultStageDir, StringComparison.OrdinalIgnoreCase) && Directory.Exists(DefaultStageDir))
+                {
+                    if (SweepAged(DefaultStageDir, "*", "fallback extractor file(s)") == 0)
+                        try { Directory.Delete(DefaultStageDir); } catch { }
                 }
             }
             catch { }
@@ -3155,6 +3161,7 @@ namespace Truedat
                 var workEssentia = FindTool("essentia_streaming_extractor_music.exe", workBaseDir, Environment.CurrentDirectory);
                 if (workEssentia == null) { Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found (app dir, cwd)."); Environment.ExitCode = 2; return; }
                 _stageOpts.Edges = true;
+                global::Truedat.Store.ScanSink.SuppressMainStash = true;   // the drain files no description (it exists): no compress-then-delete per item (review M7)
                 if (EdgesPreflight(workEssentia) is string workRefusal) { Console.Error.WriteLine(workRefusal); Environment.ExitCode = 1; return; }
                 var workBuild = global::Truedat.Store.ScanSink.ExtractorBuild;
                 Console.WriteLine($"  Work:       producer {workProducer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {workBuild}");
@@ -10305,13 +10312,43 @@ namespace Truedat
         /// <summary>S2 C5: the C4 path as the drain's produce step — stage the copy as a scan would, run the extractor with the frames
         /// profile (the core stashes the fold under the path it read), take the fold, drop the main-JSON stash (the description
         /// already exists). A core failure is a failed fold naming it.</summary>
-        static global::Truedat.Store.ProduceEdges RealProduceEdges(string essentiaExe) => (path, size) =>
+        static global::Truedat.Store.ProduceEdges RealProduceEdges(string essentiaExe) => (path, size, claimedSec) =>
         {
             using var src = OpenStagedSource(path, _stageOpts, size);
             var res = AnalyzeWithEssentia(essentiaExe, src.Path, size);
+
+            // The scan's decode-coverage gate, which the drain lacked (review C1): an under-decoded file (essentia stops early)
+            // would otherwise fold an "ok" tail INSIDE the track under the real sha. Same remedy as RunSourceWorkers: transcode
+            // through ffmpeg and keep the retry only when it decoded more; still short after that -> a failed fold, never a row.
+            double refDur = claimedSec ?? 0;
+            if (refDur <= 0) { try { using var tf = TagLib.File.Create(src.Path); refDur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { } }
+            if (res.Features != null && refDur > 0 && ShouldRetryUnderDecode(res.Features.AnalyzedLengthSec, refDur, DecodeCoverageMinFraction) && _ffmpegPath.Value != null)
+            {
+                var wavPath = DownmixToStereo(src.Path);
+                if (wavPath != null)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {res.Features.AnalyzedLengthSec:F0}s of {refDur:F0}s)");
+                        var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length);
+                        if (retry.Features?.AnalyzedLengthSec is double got && got > (res.Features.AnalyzedLengthSec ?? 0))
+                        {
+                            res = retry;
+                            global::Truedat.Store.ScanSink.Rekey(wavPath, src.Path);
+                        }
+                        else global::Truedat.Store.ScanSink.Discard(wavPath);
+                    }
+                    finally { try { File.Delete(wavPath); } catch { } }
+                }
+            }
             var edges = global::Truedat.Store.ScanSink.TakeEdges(src.Path);
+            if (edges != null && res.Features != null && refDur > 0 && ShouldRetryUnderDecode(res.Features.AnalyzedLengthSec, refDur, DecodeCoverageMinFraction))
+            {
+                edges.Head.Status = edges.Tail.Status = "failed";
+                edges.Head.Error = edges.Tail.Error = $"under-decoded: essentia read {res.Features.AnalyzedLengthSec:F0}s of {refDur:F0}s (below {DecodeCoverageMinFraction:P0}); the edges would not be the track's edges";
+            }
             if (edges != null) return edges;
-            var failed = new global::Truedat.Edges.EdgeFoldResult { ProducerVersion = _edgeSettings.ProducerVersion };
+            var failed = new global::Truedat.Edges.EdgeFoldResult { ProducerVersion = _edgeSettings.ProducerVersion, Extractor = global::Truedat.Store.ScanSink.ExtractorBuild };
             failed.Head.Status = failed.Tail.Status = "failed";
             failed.Head.Error = failed.Tail.Error = res.Error ?? "the extractor produced no frames file";
             return failed;
@@ -10322,7 +10359,9 @@ namespace Truedat
         /// extractor build for the per-file modes, which only the library scan did before.</summary>
         static string? EdgesPreflight(string essentiaExe, bool hasCatalogTarget = true)
         {
-            global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);
+            // The exe hash (~20 MB read) only when something consumes it: the store's run rows or the --edges build gate. The
+            // autoscan plugin's frequent per-file calls run without either (review M9).
+            if (_storePath != null || _stageOpts.Edges) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);
             if (!_stageOpts.Edges) return null;
             if (_storePath == null)
                 return "Error: --edges writes the edge rows to the store and nowhere else — add --store (bare --store = the default location).";
@@ -11158,19 +11197,30 @@ namespace Truedat
                 // output path lands under a mojibake filename with exit 0 and the correct name logged — a silent
                 // file-not-found for the caller. The main JSON and the edges frames file (which is a sibling of this
                 // path) both depend on this fallback. Do not relax it.
-                if (!string.IsNullOrEmpty(stageDir) && IsAsciiPrintable(stageDir!))
+                // When the configured stage dir is unusable, fall back to the DEFAULT stage dir (an ASCII sibling under %TEMP% the
+                // startup sweep also covers) before resorting to a bare %TEMP% file: the frames and profile files are siblings of
+                // this path, and a bare temp file would put them outside every sweep (review M5).
+                foreach (var dir in new[] { stageDir, DefaultStageDir })
                 {
-                    Directory.CreateDirectory(stageDir!);
-                    var candidate = Path.Combine(stageDir!, $"essentia-{Guid.NewGuid():N}.json");
-                    // Create it now: GetTempFileName's callers expect the file to exist, and
-                    // creating it here keeps the "someone else grabs the name" window shut.
-                    using (File.Create(candidate)) { }
-                    return candidate;
+                    if (string.IsNullOrEmpty(dir) || !IsAsciiPrintable(dir!)) continue;
+                    try
+                    {
+                        Directory.CreateDirectory(dir!);
+                        var candidate = Path.Combine(dir!, $"essentia-{Guid.NewGuid():N}.json");
+                        // Create it now: GetTempFileName's callers expect the file to exist, and
+                        // creating it here keeps the "someone else grabs the name" window shut.
+                        using (File.Create(candidate)) { }
+                        return candidate;
+                    }
+                    catch { /* try the next */ }
                 }
             }
             catch { /* fall through to %TEMP% */ }
             return Path.GetTempFileName();
         }
+
+        /// <summary>The default staging directory — also the sweep's second target when --stage-dir points elsewhere.</summary>
+        internal static readonly string DefaultStageDir = Path.Combine(Path.GetTempPath(), ".truedat-stage");
 
         static bool IsAsciiPrintable(string ext)
         {
@@ -22407,7 +22457,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     // S2 C-A: with a store in force, the aggregate output is kept (compressed, content-addressed at the
                     // flush) instead of deleted — the end of rescanning for anything that is a fold of this file.
-                    if (global::Truedat.Store.ScanSink.StoreDirectory != null) global::Truedat.Store.ScanSink.StashMainJson(audioPath, json);
+                    if (global::Truedat.Store.ScanSink.StoreDirectory != null && !global::Truedat.Store.ScanSink.SuppressMainStash) global::Truedat.Store.ScanSink.StashMainJson(audioPath, json);
                     // S2 C4: fold the frames file + the PCM pass on the path the extractor read (the staged copy: one network
                     // read stays one), stashed under that same path so Record ties it exactly as the main-JSON stash.
                     if (_stageOpts.Edges)
@@ -22416,6 +22466,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                             ? global::Truedat.Edges.EdgeProducer.Produce("", audioPath, features.AnalyzedLengthSec, null, _edgeSettings)   // no frames file: a failed fold naming the cause below
                             : global::Truedat.Edges.EdgeProducer.Produce(edgesFrames!, audioPath, features.AnalyzedLengthSec, _ffmpegPath.Value, _edgeSettings);
                         if (edgesPrepError != null) edges.Head.Error = edges.Tail.Error = edgesPrepError;
+                        edges.Extractor = global::Truedat.Store.ScanSink.ExtractorBuild;   // the frames depend on the build (review M4)
                         global::Truedat.Store.ScanSink.StashEdges(audioPath, edges);
                     }
                     return (features, null);

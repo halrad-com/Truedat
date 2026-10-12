@@ -29,7 +29,7 @@ namespace Truedat.Store
         public long SupersededHashes;             // non-primary content-hash facets (key moves)
         public long NoShaFeatures;                // feature rows keyed entity:<uuid>
         // S2 C4: the edges producer — media with an edge row, bytes of packed rows, ok/failed 'edges' runs, median fold+PCM ms.
-        public long EdgeTracks, EdgeBytes, EdgeRunsOk, EdgeRunsFailed; public double? EdgeMedianMs;
+        public long EdgeTracks, EdgeUnavailable, EdgeBytes, EdgeRunsOk, EdgeRunsFailed; public double? EdgeMedianMs; public string EdgesVersion = "";
         public Dictionary<string, long> WorkQueue = new Dictionary<string, long>(StringComparer.Ordinal);   // C5: work_item states for the edges producer
     }
 
@@ -78,7 +78,7 @@ namespace Truedat.Store
                     ? "  open conflicts: " + string.Join(", ", i.ConflictsByKind.Select(kv => $"{kv.Key} {kv.Value:N0}"))
                     : "  open conflicts: none");
                 // Coverage per producer (C5: "done is a query"): eligible = every description, captured = those with an edge row.
-                Console.WriteLine($"  edges: eligible {i.Tracks:N0}, captured {i.EdgeTracks:N0}, missing {Math.Max(0, i.Tracks - i.EdgeTracks):N0}" +
+                Console.WriteLine($"  edges ({i.EdgesVersion}): eligible {i.Tracks:N0}, captured {i.EdgeTracks:N0} ({i.EdgeUnavailable:N0} unavailable: under the floor), missing {Math.Max(0, i.Tracks - i.EdgeTracks):N0}" +
                     (i.EdgeRunsOk + i.EdgeRunsFailed > 0
                         ? $"; {i.EdgeBytes:N0} bytes of packed rows ({(i.EdgeTracks > 0 ? i.EdgeBytes / (double)i.EdgeTracks : 0):N0}/track); runs {i.EdgeRunsOk:N0} ok, {i.EdgeRunsFailed:N0} failed" + (i.EdgeMedianMs.HasValue ? $"; median fold+PCM {i.EdgeMedianMs:F0} ms" : "")
                         : "") +
@@ -153,8 +153,14 @@ namespace Truedat.Store
             i.ArtifactCount = i.Counts["artifact"];
             i.ArtifactBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(bytes), 0) FROM artifact;") ?? "0");
             i.ConflictsByKind = dal.OpenConflictsByKind();
-            // S2 C4: edges coverage and cost, from the value and run tables.
-            i.EdgeTracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT content_hash) FROM value WHERE producer_key = 'edges' AND field = 'edges.status' AND txt = 'ok';") ?? "0");
+            // S2 C4/C5: edges coverage and cost, from the value and run tables — the SAME gap --work drains (review I2): the current
+            // producer version only, and 'unavailable' (a track under the floor) counts as captured because the drain treats it as done.
+            var edgesVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
+            i.EdgesVersion = edgesVersion;
+            using (var st = db.Prepare("SELECT count(DISTINCT content_hash) FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.status' AND txt IN ('ok', 'unavailable');"))
+            { st.Bind(1, edgesVersion); st.Step(); i.EdgeTracks = st.GetInt64(0); }
+            using (var st = db.Prepare("SELECT count(DISTINCT content_hash) FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.status' AND txt = 'unavailable';"))
+            { st.Bind(1, edgesVersion); st.Step(); i.EdgeUnavailable = st.GetInt64(0); }
             i.EdgeBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(length(vec)), 0) FROM value WHERE producer_key = 'edges';") ?? "0");
             i.EdgeRunsOk = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'ok';") ?? "0");
             i.EdgeRunsFailed = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed';") ?? "0");
@@ -186,7 +192,7 @@ namespace Truedat.Store
                 ["supersededHashes"] = i.SupersededHashes, ["noShaFeatures"] = i.NoShaFeatures,
                 ["edges"] = new JsonObject
                 {
-                    ["eligible"] = i.Tracks, ["captured"] = i.EdgeTracks, ["missing"] = Math.Max(0, i.Tracks - i.EdgeTracks),
+                    ["producerVersion"] = i.EdgesVersion, ["eligible"] = i.Tracks, ["captured"] = i.EdgeTracks, ["unavailable"] = i.EdgeUnavailable, ["missing"] = Math.Max(0, i.Tracks - i.EdgeTracks),
                     ["bytes"] = i.EdgeBytes, ["runsOk"] = i.EdgeRunsOk, ["runsFailed"] = i.EdgeRunsFailed, ["medianMs"] = i.EdgeMedianMs,
                     ["workQueue"] = new JsonObject(i.WorkQueue.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, JsonValue.Create(kv.Value)))),
                 },

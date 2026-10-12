@@ -33,7 +33,12 @@ namespace Truedat.Edges
         {
             var rep = new EdgeCompanionReport { Path = path };
             var keys = dal.ContentKeysWithEdges(producerVersion);
+            // The header names the extractor the ROWS record (review M4), falling back to what the caller resolved.
+            var recorded = dal.EdgesExtractorBuild(producerVersion);
+            if (!string.IsNullOrEmpty(recorded)) extractor = "essentia_streaming_extractor_music " + recorded;
             var tmp = path + ".tmp";
+            try
+            {
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
             using (var w = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))   // compact, like mbxmoods.json: indented measured 2x the bytes (3.3 KB/track vs the plan's ~1.6)
             {
@@ -65,6 +70,8 @@ namespace Truedat.Edges
                 w.Flush();
             }
             if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path);
+            }
+            catch { try { File.Delete(tmp); } catch { } throw; }   // never leave a half-written .tmp beside the catalog (review M6)
             rep.Bytes = new FileInfo(path).Length;
             return rep;
         }

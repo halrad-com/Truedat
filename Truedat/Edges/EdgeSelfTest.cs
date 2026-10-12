@@ -64,7 +64,7 @@ namespace Truedat.Edges
                 EdgeFold.ApplyPcm(r.Head, new EdgePcmResult { CrestDb = 4.25, TransitionMs = 300, SilenceMs = 0, Slices = 300 });
                 EdgeFold.ApplyPcm(r.Tail, new EdgePcmResult { CrestDb = 3.61, TransitionMs = 0, SilenceMs = 1100, Slices = 300 });
             }
-            r.FoldMs = 7; r.PcmMs = 210;
+            r.FoldMs = 7; r.PcmMs = 210; r.Extractor = "output-x64.5";
             return r;
         }
 
@@ -92,7 +92,7 @@ namespace Truedat.Edges
                 using (var tx = os.Db.BeginTransaction()) { values = EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
                 long segs = dal.CountSegments(Sha1, r.ProducerVersion), vrows = dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion); long vecBytes = dal.SumVecBytes(Sha1, EdgeStore.ProducerKey, r.ProducerVersion);
                 assert(segs == 2, $"2 segment rows: head and tail; the sub-windows ride inside the edge row ({segs})");
-                assert(values == vrows && vrows == 5, $"one packed row per edge plus three whole-track rows: 5 value rows ({vrows} rows, {values} written)");
+                assert(values == vrows && vrows == 6, $"one packed row per edge plus four whole-track rows (status, duration, extractor, head-tail divergence): 6 value rows ({vrows} rows, {values} written)");
                 assert(vecBytes >= 5000 && vecBytes <= 7500, $"the packed rows are the plan's payload: per edge EBU pair 1.2 KB + beats 0.4 KB + four summaries 1.4 KB -> ~6 KB per track ({vecBytes} bytes)");
                 var back = EdgeStore.Read(dal, Sha1, r.ProducerVersion);
                 assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.ProducerVersion == r.ProducerVersion, $"read back: status, duration, version ({back?.Status}, {back?.DurationMs})");
@@ -203,7 +203,10 @@ namespace Truedat.Edges
                         tx.Complete();
                     }
                     System.IO.File.WriteAllText(path, "{\"stale\": true}");       // an older file is replaced atomically
-                    rep = EdgeCompanion.WriteFromStore(os.Dal, path, version, "essentia_streaming_extractor_music output-x64.5");
+                    rep = EdgeCompanion.WriteFromStore(os.Dal, path, version, "essentia_streaming_extractor_music unknown");   // the rows record the build (review M4); the caller's fallback is overridden
+                    // Review I2: --store-info's coverage is the drain's gap — current version only, unavailable counted as captured.
+                    var info = Truedat.Store.StoreInfoCommand.Collect(os.Path);
+                    assert(info.EdgeTracks == 4 && info.EdgeUnavailable == 1 && info.EdgesVersion == version, $"store-info: captured 4 content keys at the current version (1 unavailable; the entity-keyed media counts, it is a description too) ({info.EdgeTracks}, {info.EdgeUnavailable}, {info.EdgesVersion})");
                 }
                 assert(rep.Tracks == 3 && rep.OmittedNoSha == 1 && rep.Bytes > 1000 && System.IO.File.Exists(path) && !System.IO.File.Exists(path + ".tmp"),
                     $"three sha-keyed media written, the entity-keyed one counted and omitted, no .tmp left ({rep.Tracks}, {rep.OmittedNoSha}, {rep.Bytes} B)");
@@ -212,8 +215,8 @@ namespace Truedat.Edges
                 assert(!text.Contains("\n"), "compact: one line, like mbxmoods.json");
                 using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllBytes(path));
                 var root = doc.RootElement;
-                assert(root.GetProperty("contract").GetString() == "mbxedges.v1" && root.GetProperty("producerVersion").GetString() == version && root.GetProperty("extractor").GetString()!.Contains("output-x64.5")
-                    && root.GetProperty("trackCount").GetInt32() == 3 && root.TryGetProperty("generatedUtc", out _), "header: contract, producerVersion, extractor, generatedUtc, trackCount");
+                assert(root.GetProperty("contract").GetString() == "mbxedges.v1" && root.GetProperty("producerVersion").GetString() == version && root.GetProperty("extractor").GetString() == "essentia_streaming_extractor_music output-x64.5"
+                    && root.GetProperty("trackCount").GetInt32() == 3 && root.TryGetProperty("generatedUtc", out _), $"header: contract, producerVersion, extractor FROM THE ROWS (not the caller's 'unknown'), generatedUtc, trackCount ({root.GetProperty("extractor").GetString()})");
                 var order = root.GetProperty("spectralOrder");
                 assert(order.GetArrayLength() == 11 && order[0].GetString() == "spectralCentroid" && order[10].GetString() == "spectralStrongPeak", "header: the fixed 11-name spectralOrder");
                 var words = root.GetProperty("statusWords");
@@ -263,7 +266,8 @@ namespace Truedat.Edges
             try
             {
                 var entries = Truedat.Store.StoreSelfTest.FixtureEntries(root);
-                foreach (var p in entries.Keys) { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(p)!); System.IO.File.WriteAllBytes(p, new byte[1024]); }
+                // Real files whose mtime is the entry's lastModified: the drain's changed-file guard (review I1) compares the two.
+                foreach (var kv in entries) { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(kv.Key)!); System.IO.File.WriteAllBytes(kv.Key, new byte[1024]); System.IO.File.SetLastWriteTimeUtc(kv.Key, kv.Value.LastModified.ToUniversalTime()); }
                 var imp = Truedat.Store.ImportCommand.ExecuteEntries(store, entries, root, "primary", true, "import", "1", "fixture", null, null);
                 // Six entries, five media: d1/d2 share one sha and resolve to one entity (a props-differ conflict, as the import test pins).
                 assert(imp.Entries == 6 && imp.EntitiesCreated + imp.CreatedNoSha == 5, $"six entries over five media imported onto a root of this machine ({imp.Entries}, {imp.EntitiesCreated} + {imp.CreatedNoSha} no-sha)");
@@ -272,7 +276,8 @@ namespace Truedat.Edges
                 EdgeFoldResult failedFold;
                 using (var f = EspbFile.Open(BuildSyntheticFrames(root, 240, withHpcp: false))) failedFold = EdgeFold.Fold(f, 240, new EdgeSettings());
                 var produced = new List<string>();
-                EdgeFoldResult Produce(string path, long size) { produced.Add(path); return path.EndsWith("b.mp3", StringComparison.OrdinalIgnoreCase) ? failedFold : okFold; }
+                var claimed = new List<double?>();
+                EdgeFoldResult Produce(string path, long size, double? claimedSec) { produced.Add(path); claimed.Add(claimedSec); return path.EndsWith("b.mp3", StringComparison.OrdinalIgnoreCase) ? failedFold : okFold; }
                 var opts = new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero };
                 var version = new EdgeSettings().ProducerVersion;
 
@@ -281,6 +286,7 @@ namespace Truedat.Edges
                 assert(r1.Enqueued == 5 && r1.Leased == 5 && r1.Done == 4 && r1.Failed == 1 && r1.Parked == 0 && r1.Stopped == "empty",
                     $"pass 1: 5 enqueued (one per media), 5 leased, 4 done, 1 failed, stopped on an empty queue ({r1.Enqueued}, {r1.Leased}, {r1.Done}, {r1.Failed}, {r1.Parked}, {r1.Stopped}{(r1.Error != null ? ": " + r1.Error : "")})");
                 assert(produced.Count == 5 && produced.TrueForAll(System.IO.File.Exists), $"the produce step was handed five real file paths, one per media ({produced.Count})");
+                assert(claimed.Count == 5 && claimed.Contains(300.0) && claimed.Contains(180.0), $"the produce step is handed each copy's claimed duration for the decode-coverage gate ({string.Join(",", claimed)})");
                 assert(r1.ResultPath != null && System.IO.File.Exists(r1.ResultPath) && System.IO.File.ReadAllText(r1.ResultPath).Contains("\"kind\": \"work-result\""), $"work-result.json beside the store ({r1.ResultPath})");
                 assert(r1.Remaining == 1 && r1.QueueDone == 4 && r1.QueueFailed == 1, $"the queue after pass 1: 4 done, 1 failed, 1 remaining ({r1.QueueDone}, {r1.QueueFailed}, {r1.Remaining})");
                 using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
@@ -310,7 +316,7 @@ namespace Truedat.Edges
 
                 // Budget: a fresh gap of 4 (new version; the parked item is not re-queued), a produce slower than the budget -> the
                 // budget is checked before each lease, so exactly one item runs, then the run stops on the budget.
-                EdgeFoldResult Slow(string path, long size) { System.Threading.Thread.Sleep(150); return okFold; }
+                EdgeFoldResult Slow(string path, long size, double? claimedSec) { System.Threading.Thread.Sleep(150); return okFold; }
                 var r6 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, Budget = TimeSpan.FromMilliseconds(60), RetryDelay = TimeSpan.Zero }, Slow, "edges@v1;e10;p10");
                 assert(r6.Enqueued == 4 && r6.Leased == 1 && r6.Done == 1 && r6.Remaining == 3 && r6.Stopped == "budget", $"budget: one item then stop, three still eligible (the parked one is not) ({r6.Enqueued}, {r6.Leased}, {r6.Done}, remaining {r6.Remaining}, {r6.Stopped})");
 
@@ -328,6 +334,36 @@ namespace Truedat.Edges
                 System.IO.File.Delete(System.IO.Path.Combine(root, "odd", "nosha.mp3"));
                 var r8 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e5;p10");
                 assert(r8.Enqueued == 4 && r8.Done == 3 && r8.Unreachable == 1 && r8.Failed == 1, $"a missing copy is a failed attempt naming it unreachable ({r8.Enqueued}, {r8.Done}, unreachable {r8.Unreachable}, failed {r8.Failed})");
+
+                // Review I1: a copy whose mtime no longer matches the description's lastModified is not folded under the old sha.
+                var legacyPath = System.IO.Path.Combine(root, "old", "legacy.flac");
+                System.IO.File.SetLastWriteTimeUtc(legacyPath, DateTime.UtcNow.AddDays(1));
+                var r9 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e4;p10");
+                assert(r9.Enqueued == 3 && r9.Done == 2 && r9.Changed == 1 && r9.Unreachable == 1 && r9.Failed == 2,
+                    $"a copy changed since its description is a failed attempt marked changed, never folded under the old sha ({r9.Enqueued}, done {r9.Done}, changed {r9.Changed}, unreachable {r9.Unreachable}, failed {r9.Failed})");
+                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("changed since its description") == true || os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("no reachable copy") == true,
+                        "the failed run names the reason");
+                    // Review M2: an item folded under the new version carries that version as its target.
+                    var dupSha = "5555555555555555555555555555555555555555555555555555555555555555";
+                    var dupEntity = os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaFrames, dupSha);
+                    assert(dupEntity != null && os.Dal.WorkTargetVersion(dupEntity, EdgeStore.ProducerKey) == "edges@v1;e4;p10", $"a done item records the version it was folded at ({os.Dal.WorkTargetVersion(dupEntity ?? "", EdgeStore.ProducerKey)})");
+                    // Review M1: an expired lease with the attempts exhausted is not retaken.
+                    var aEntity = os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaFrames, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!)
+                                  ?? os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaTaglibRegion, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!);
+                    using var tx = os.Db.BeginTransaction();
+                    os.Dal.SetWorkLeaseForTest(aEntity!, EdgeStore.ProducerKey, "2000-01-01T00:00:00.0000000Z");
+                    os.Dal.SetWorkAttemptsForTest(aEntity!, EdgeStore.ProducerKey, 3);
+                    tx.Complete();
+                }
+                var r10 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e4;p10");
+                assert(r10.Leased == 2 && r10.Done == 0, $"an expired lease whose attempts are exhausted is left alone; only the two failed items retry ({r10.Leased} leased, {r10.Done} done)");
+
+                // Review I4: a run that cannot open the store still writes work-result.json, saying error.
+                var bad = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = System.IO.Path.Combine(root, "nowhere", "truedat.db") }, Produce, version);
+                assert(bad.Stopped == "error" && bad.Error != null && bad.ResultPath != null && System.IO.File.Exists(bad.ResultPath) && System.IO.File.ReadAllText(bad.ResultPath).Contains("\"stopped\": \"error\""),
+                    $"a failed run writes work-result.json with stopped=error ({bad.Stopped}: {bad.Error}; {bad.ResultPath})");
             }
             finally { try { System.IO.Directory.Delete(root, true); } catch { } }
         }
@@ -359,8 +395,13 @@ namespace Truedat.Edges
                 Truedat.Store.ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"], @"C:\stage\def.mp3");
                 Truedat.Store.ScanSink.Record(@"D:\Music\odd\nosha.mp3", entries[@"D:\Music\odd\nosha.mp3"], @"C:\stage\nosha.mp3");
                 assert(Truedat.Store.ScanSink.PendingEdges == 2, $"two folds tied to their entries (the re-keyed one and the failed one), the discarded one gone ({Truedat.Store.ScanSink.PendingEdges})");
+                // Review I3: folds are spilled to disk, one packed file each, in the pending dir; nothing of them stays in memory.
+                var pendingDir = Truedat.Store.ArtifactStore.PendingDir(dir);
+                int spilled = System.IO.Directory.Exists(pendingDir) ? System.IO.Directory.GetFiles(pendingDir, "*.edges").Length : 0;
+                assert(spilled == 2, $"the two tied folds are two .edges files in artifacts\\pending, the discarded one deleted ({spilled})");
                 var r = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
                 assert(r.Ok && r.Edges == 1 && r.EdgesFailed == 1, $"the flush reports 1 edge row written and 1 failed fold ({r.Edges}, {r.EdgesFailed}, ok {r.Ok} {r.Error})");
+                assert(System.IO.Directory.GetFiles(pendingDir, "*.edges").Length == 0, "the flush consumed every spilled fold");
                 using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     var sha = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;

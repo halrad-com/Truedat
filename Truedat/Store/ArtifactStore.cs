@@ -91,8 +91,9 @@ namespace Truedat.Store
             var dir = PendingDir(storeDir);
             if (!Directory.Exists(dir)) return 0;
             int n = 0; var cutoff = DateTime.UtcNow - olderThan;
-            foreach (var f in Directory.GetFiles(dir, "*.z"))
+            foreach (var f in Directory.GetFiles(dir))
             {
+                if (!f.EndsWith(".z", StringComparison.OrdinalIgnoreCase) && !f.EndsWith(".edges", StringComparison.OrdinalIgnoreCase)) continue;   // main-JSON stashes and spilled edge folds
                 try { if (File.GetLastWriteTimeUtc(f) < cutoff) { File.Delete(f); n++; } } catch { }
             }
             return n;

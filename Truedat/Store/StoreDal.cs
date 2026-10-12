@@ -404,16 +404,21 @@ namespace Truedat.Store
         /// started, or a lease that expired before this run started. The run-start cutoff is what makes one run try an item at most
         /// once: a failure recorded during the run carries a retry time at or after the start, so even a zero retry delay cannot
         /// hammer one item three times in a row. Leases it (state leased, attempts + 1, lease_until) and returns it, or null.</summary>
-        internal (long Id, string EntityId, int Attempts)? LeaseNextWork(string producerKey, string runStartUtc, string leaseUntilUtc, int maxAttempts)
+        internal (long Id, string EntityId, int Attempts)? LeaseNextWork(string producerKey, string runStartUtc, string leaseUntilUtc, int maxAttempts, string targetVersion)
         {
+            // An expired lease is retaken only while attempts remain (review M1: a produce that crashed the process must park, not
+            // loop); the lease stamps the version being produced so a retried item finishes 'done' at the right version (M2).
             var next = Row("SELECT id, entity_id, attempts FROM work_item WHERE producer_key = ? AND (state = 'queued' " +
                            "OR (state = 'failed' AND attempts < ? AND (next_eligible_utc IS NULL OR next_eligible_utc < ?)) " +
-                           "OR (state = 'leased' AND lease_until_utc IS NOT NULL AND lease_until_utc < ?)) ORDER BY priority DESC, id LIMIT 1;",
-                           s => ((long?)s.GetInt64(0), s.GetString(1)!, (int)s.GetInt64(2)), (null, "", 0), producerKey, (long)maxAttempts, runStartUtc, runStartUtc);
+                           "OR (state = 'leased' AND attempts < ? AND lease_until_utc IS NOT NULL AND lease_until_utc < ?)) ORDER BY priority DESC, id LIMIT 1;",
+                           s => ((long?)s.GetInt64(0), s.GetString(1)!, (int)s.GetInt64(2)), (null, "", 0), producerKey, (long)maxAttempts, runStartUtc, (long)maxAttempts, runStartUtc);
             if (next.Item1 == null) return null;
-            Exec("UPDATE work_item SET state = 'leased', attempts = attempts + 1, lease_until_utc = ? WHERE id = ?;", leaseUntilUtc, next.Item1.Value);
+            Exec("UPDATE work_item SET state = 'leased', attempts = attempts + 1, lease_until_utc = ?, target_version = ? WHERE id = ?;", leaseUntilUtc, targetVersion, next.Item1.Value);
             return (next.Item1.Value, next.Item2, next.Item3 + 1);
         }
+
+        internal string? WorkTargetVersion(string entityId, string producerKey)
+            => Row("SELECT target_version FROM work_item WHERE entity_id = ? AND producer_key = ?;", s => s.GetString(0), null, entityId, producerKey);
 
         internal void FinishWork(long id, string state, string? reviewNote, string? nextEligibleUtc)
             => Exec("UPDATE work_item SET state = ?, review_note = ?, next_eligible_utc = ?, lease_until_utc = NULL WHERE id = ?;", state, reviewNote, nextEligibleUtc, id);
@@ -430,15 +435,24 @@ namespace Truedat.Store
         internal string? NextEligibleWork(string producerKey)
             => Row("SELECT min(next_eligible_utc) FROM work_item WHERE producer_key = ? AND state = 'failed';", s => s.GetString(0), null, producerKey);
 
-        /// <summary>Present copies of an entity on this machine's roots, as display paths with their location ids.</summary>
-        internal List<(long LocationId, string DisplayPath)> CopiesOnMachine(string entityId, string machineId)
+        /// <summary>Present copies of an entity on this machine's roots: location id, display path, the catalog's lastModified
+        /// (the scan's tier-1 identity for "same bytes") and the copy's claimed duration in ms.</summary>
+        internal List<(long LocationId, string DisplayPath, string? LastModifiedUtc, long? DurationMs)> CopiesOnMachine(string entityId, string machineId)
         {
-            var list = new List<(long, string)>();
-            using var st = Db.Prepare("SELECT l.id, l.display_path FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE l.entity_id = ? AND r.machine_id = ? AND l.state = 'present' ORDER BY l.id;");
+            var list = new List<(long, string, string?, long?)>();
+            using var st = Db.Prepare("SELECT l.id, l.display_path, l.last_modified_utc, p.fingerprint_v1_durationMs FROM track_location l JOIN library_root r ON r.id = l.root_id " +
+                                      "LEFT JOIN track_copy p ON p.location_id = l.id WHERE l.entity_id = ? AND r.machine_id = ? AND l.state = 'present' ORDER BY l.id;");
             st.Bind(1, entityId); st.Bind(2, machineId);
-            while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1)!));
+            while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1)!, st.GetString(2), st.IsNull(3) ? (long?)null : st.GetInt64(3)));
             return list;
         }
+
+        internal void SetWorkAttemptsForTest(string entityId, string producerKey, int attempts)
+            => Exec("UPDATE work_item SET attempts = ? WHERE entity_id = ? AND producer_key = ?;", (long)attempts, entityId, producerKey);
+
+        /// <summary>The extractor build most of this version's edge rows record (review M4) — the companion header's source.</summary>
+        internal string? EdgesExtractorBuild(string producerVersion)
+            => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);
 
         internal (string ContentKey, string Kind)? ContentKeyOf(string entityId)
             => Row("SELECT content_key, content_key_kind FROM track_content WHERE entity_id = ?;", s => ((string?)s.GetString(0), s.GetString(1)!), (null, ""), entityId) is var t && t.Item1 != null ? (t.Item1, t.Item2) : null;

@@ -41,25 +41,58 @@ namespace Truedat.Store
         // catalog key -> pending artifact file, once Record() has tied the two together
         static readonly ConcurrentDictionary<string, string> _artifacts = new ConcurrentDictionary<string, string>(PathComparer.Instance);
         // S2 C4: the edges producer's result per analysed path (stashed by the extractor core), then per catalog key (tied by Record).
-        static readonly ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult> _stashedEdges = new ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult>(StringComparer.OrdinalIgnoreCase);
-        static readonly ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult> _edges = new ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult>(PathComparer.Instance);
+        // Spilled to disk as one packed file each (review I3): ~11 KB of objects per track resident until the flush would have been
+        // ~800 MB at 72k tracks; the dictionaries hold paths. Same pending directory as the main-JSON stash, extension .edges.
+        static readonly ConcurrentDictionary<string, string> _stashedEdges = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        static readonly ConcurrentDictionary<string, string> _edges = new ConcurrentDictionary<string, string>(PathComparer.Instance);
+        /// <summary>S2 C5 (review M7): the --work drain does not file the main-JSON artifact (the description already exists), so it
+        /// asks the core not to compress one per item only to delete it.</summary>
+        internal static bool SuppressMainStash;
 
         internal static int Pending => _entries.Count;
         internal static int PendingFailures => _failures.Count;
         internal static int PendingArtifacts => _artifacts.Count;
         internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } }
+        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); SuppressMainStash = false; while (_failures.TryDequeue(out _)) { } }
 
-        /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.</summary>
-        internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges) => _stashedEdges[analysedPath] = edges;
+        /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
+        /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
+        internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges)
+        {
+            var dir = StoreDirectory;
+            if (dir == null) return;
+            try
+            {
+                var pending = ArtifactStore.PendingDir(dir);
+                System.IO.Directory.CreateDirectory(pending);
+                var path = System.IO.Path.Combine(pending, Guid.NewGuid().ToString("N") + ".edges");
+                System.IO.File.WriteAllBytes(path, global::Truedat.Edges.EdgeStore.PackResult(edges));
+                if (_stashedEdges.TryGetValue(analysedPath, out var previous)) TryDelete(previous);
+                _stashedEdges[analysedPath] = path;
+            }
+            catch (Exception ex) { StoreLog.Warn($"could not stash the edge fold for {analysedPath}: {ex.Message}"); }
+        }
 
         /// <summary>S2 C5: the --work drain takes the fold the core stashed for the path it analysed (and drops the main-JSON stash,
         /// which the drain does not file: the description already exists). Null when the core produced none.</summary>
         internal static global::Truedat.Edges.EdgeFoldResult? TakeEdges(string analysedPath)
         {
             if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
-            return _stashedEdges.TryRemove(analysedPath, out var edges) ? edges : null;
+            if (!_stashedEdges.TryRemove(analysedPath, out var file)) return null;
+            return ReadEdges(file);
+        }
+
+        /// <summary>Reads a spilled fold and deletes its file; null (logged) when the file is gone or unreadable.</summary>
+        internal static global::Truedat.Edges.EdgeFoldResult? ReadEdges(string file)
+        {
+            try
+            {
+                var r = global::Truedat.Edges.EdgeStore.UnpackResult(System.IO.File.ReadAllBytes(file));
+                TryDelete(file);
+                return r;
+            }
+            catch (Exception ex) { StoreLog.Warn($"spilled edge fold unreadable ({file}): {ex.Message}"); TryDelete(file); return null; }
         }
 
         /// <summary>Called by the extractor core right after a successful parse, with the JSON text it is about to delete.</summary>
@@ -76,7 +109,7 @@ namespace Truedat.Store
         /// replaced by the retry's. No-op when nothing is stashed under <paramref name="fromPath"/>.</summary>
         internal static void Rekey(string fromPath, string toPath)
         {
-            if (_stashedEdges.TryRemove(fromPath, out var edges)) _stashedEdges[toPath] = edges;
+            if (_stashedEdges.TryRemove(fromPath, out var edges)) { if (_stashedEdges.TryRemove(toPath, out var prevEdges)) TryDelete(prevEdges); _stashedEdges[toPath] = edges; }
             if (!_stashed.TryRemove(fromPath, out var pending)) return;
             if (_stashed.TryRemove(toPath, out var previous)) TryDelete(previous);
             _stashed[toPath] = pending;
@@ -86,7 +119,7 @@ namespace Truedat.Store
         /// delete its stash now (review #3).</summary>
         internal static void Discard(string analysedPath)
         {
-            _stashedEdges.TryRemove(analysedPath, out _);
+            if (_stashedEdges.TryRemove(analysedPath, out var edges)) TryDelete(edges);
             if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
         }
 
@@ -96,7 +129,7 @@ namespace Truedat.Store
         {
             int n = 0;
             foreach (var kv in _stashed) { if (_stashed.TryRemove(kv.Key, out var p)) { TryDelete(p); n++; } }
-            _stashedEdges.Clear();
+            foreach (var kv in _stashedEdges) { if (_stashedEdges.TryRemove(kv.Key, out var p)) { TryDelete(p); n++; } }
             return n;
         }
 
@@ -116,8 +149,9 @@ namespace Truedat.Store
 
         internal const string ResultFileName = "store-result.json";
 
-        /// <summary>Writes everything recorded since the last flush, then clears it (the catalog already holds these
-        /// entries, so nothing is lost if the store write fails — the next import recovers them). Never throws.</summary>
+        /// <summary>Writes everything recorded since the last flush, then clears it. The catalog already holds the ENTRIES, so a
+        /// failed store write loses no description — the next import recovers them; the edge folds are not in the catalog, so a
+        /// failed flush drops them (counted and logged) and --work re-folds them later, one extractor run each. Never throws.</summary>
         internal static ScanSinkReport Flush(string? storePath, string extractorBuild, IEnumerable<string>? rootHints = null)
         {
             var report = new ScanSinkReport { StorePath = storePath };
@@ -125,7 +159,7 @@ namespace Truedat.Store
             var failures = new List<ScanFailure>();
             while (_failures.TryDequeue(out var f)) failures.Add(f);
             var artifacts = new Dictionary<string, string>(PathComparer.Instance);
-            var edges = new Dictionary<string, global::Truedat.Edges.EdgeFoldResult>(PathComparer.Instance);
+            var edges = new Dictionary<string, string>(PathComparer.Instance);
             foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
             // Review #3: nothing will tie a stash after the entries are flushed; and a killed earlier scan may have left
             // pending files behind — both are swept here, so artifacts\pending cannot grow without bound.
@@ -149,7 +183,9 @@ namespace Truedat.Store
             {
                 report.Ok = false; report.Error = ex.Message;
                 foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
-                StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them)");
+                foreach (var p in edges.Values) TryDelete(p);
+                StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them" +
+                               (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — --work re-folds them" : "") + ")");
             }
             return report;
         }

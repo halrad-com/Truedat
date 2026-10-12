@@ -49,6 +49,7 @@ namespace Truedat.Edges
             { dal.UpsertValue(contentKey, contentKeyKind, seg, field, ProducerKey, r.ProducerVersion, runId, num, txt, vec, dims, unit); n++; }
             Put(WholeTrack, "edges.status", null, r.Status, null, null, null);
             Put(WholeTrack, "edges.durationMs", r.DurationMs, null, null, null, null);
+            if (!string.IsNullOrEmpty(r.Extractor)) Put(WholeTrack, "edges.extractor", null, r.Extractor, null, null, null);   // the frames depend on the build (review M4)
             if (r.Status == "unavailable") return n;
             if (r.HeadTail != null)
             {
@@ -69,6 +70,7 @@ namespace Truedat.Edges
             var whole = dal.ReadValues(contentKey, WholeTrack, ProducerKey, producerVersion);
             if (!whole.TryGetValue("edges.status", out var status) || status.Txt == null) return null;
             var r = new EdgeFoldResult { ProducerVersion = producerVersion, DurationMs = (int)(whole.TryGetValue("edges.durationMs", out var dm) && dm.Num.HasValue ? dm.Num.Value : 0) };
+            if (whole.TryGetValue("edges.extractor", out var ex) && ex.Txt != null) r.Extractor = ex.Txt;
             if (whole.TryGetValue("edges.headTail", out var ht) && ht.Vec != null && ht.Vec.Length == 12)
             {
                 var f = F32s(ht.Vec);
@@ -88,6 +90,46 @@ namespace Truedat.Edges
                 UnpackEdge(ev.Vec, row); row.StartMs = s.StartMs; row.EndMs = s.EndMs;
                 if (row.Whole != null) { row.Whole.StartMs = s.StartMs; row.Whole.EndMs = s.EndMs; }
             }
+            return r;
+        }
+
+        // ---------------------------------------------------------------- the whole result as bytes (the sink's spill, review I3)
+
+        static readonly byte[] ResultMagic = { (byte)'E', (byte)'D', (byte)'R', 1 };
+
+        /// <summary>A whole fold result as one blob: status words, duration, producer version, extractor, stopwatch, errors,
+        /// head-vs-tail divergence and the two packed edges. The scan sink writes this to disk per analysed track instead of
+        /// holding ~11 KB of objects per track until the flush (72k tracks would have been ~800 MB resident).</summary>
+        internal static byte[] PackResult(EdgeFoldResult r)
+        {
+            var ms = new MemoryStream(16384); var w = new BinaryWriter(ms);
+            w.Write(ResultMagic);
+            w.Write(r.ProducerVersion ?? ""); w.Write(r.Extractor ?? ""); w.Write(r.DurationMs); w.Write(r.FoldMs); w.Write(r.PcmMs);
+            w.Write(r.Head.Status ?? ""); w.Write(r.Tail.Status ?? ""); w.Write(r.Head.Error ?? ""); w.Write(r.Tail.Error ?? "");
+            w.Write(r.Head.StartMs); w.Write(r.Head.EndMs); w.Write(r.Tail.StartMs); w.Write(r.Tail.EndMs);
+            var d = r.HeadTail;
+            w.Write((float)(d?.Loudness ?? double.NaN)); w.Write((float)(d?.Texture ?? double.NaN)); w.Write((float)(d?.Harmony ?? double.NaN));
+            var h = PackEdge(r.Head); var t = PackEdge(r.Tail);
+            w.Write(h.Length); w.Write(h); w.Write(t.Length); w.Write(t);
+            w.Flush(); return ms.ToArray();
+        }
+
+        internal static EdgeFoldResult UnpackResult(byte[] blob)
+        {
+            var rd = new BinaryReader(new MemoryStream(blob));
+            Magic(rd, ResultMagic);
+            var r = new EdgeFoldResult { ProducerVersion = rd.ReadString(), Extractor = rd.ReadString(), DurationMs = rd.ReadInt32(), FoldMs = rd.ReadInt64(), PcmMs = rd.ReadInt64() };
+            string hs = rd.ReadString(), ts = rd.ReadString(), he = rd.ReadString(), te = rd.ReadString();
+            int hStart = rd.ReadInt32(), hEnd = rd.ReadInt32(), tStart = rd.ReadInt32(), tEnd = rd.ReadInt32();
+            float dl = rd.ReadSingle(), dt = rd.ReadSingle(), dh = rd.ReadSingle();
+            if (!float.IsNaN(dl) || !float.IsNaN(dt) || !float.IsNaN(dh)) r.HeadTail = new EdgeDivergence { Loudness = Opt(dl), Texture = Opt(dt), Harmony = Opt(dh) };
+            int hl = rd.ReadInt32(); var hb = rd.ReadBytes(hl); int tl = rd.ReadInt32(); var tb = rd.ReadBytes(tl);
+            UnpackEdge(hb, r.Head); UnpackEdge(tb, r.Tail);
+            // the status word and errors travel outside the edge blob (the blob only knows ok / short-context)
+            r.Head.Status = hs; r.Tail.Status = ts; r.Head.Error = he.Length == 0 ? null : he; r.Tail.Error = te.Length == 0 ? null : te;
+            r.Head.StartMs = hStart; r.Head.EndMs = hEnd; r.Tail.StartMs = tStart; r.Tail.EndMs = tEnd;
+            if (r.Head.Whole != null) { r.Head.Whole.StartMs = hStart; r.Head.Whole.EndMs = hEnd; }
+            if (r.Tail.Whole != null) { r.Tail.Whole.StartMs = tStart; r.Tail.Whole.EndMs = tEnd; }
             return r;
         }
 
