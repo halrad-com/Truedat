@@ -40,6 +40,11 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   replaces it with the old run kept as history; a key move re-keys it. Copy facts (tags, `fingerprint.v1`,
   SMFM) take the newer value, exactly. Identical drifts are recorded once. On the real catalog a re-import
   is 22 s, 72,445 unchanged, 32 drifted, the store unchanged in size.
+- **The extractor's aggregate output is kept.** With `--store`, the main JSON the extractor writes per
+  track (every descriptor's statistics, covariances, full HPCP, histograms — deleted at parse until now) is
+  compressed and filed once per content hash as `artifacts\<2>\<hash>.main.json.z` beside the store, with
+  an `artifact` row (kind `main`, format = the extractor build, bytes, sha256, run). Any future field that
+  is a fold of that output is a re-fold of the file, not a rescan. `--store-info` reports count and bytes.
 - **The scan writes the store.** With `--store`, every scan mode writes the entries it analysed this run
   into the store after the catalog is saved, through the import's new in-memory entry (no re-read of the
   catalog): producer `essentia@<build>`, one run row per entry with its analysis time, a failed run per

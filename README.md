@@ -96,7 +96,10 @@ the newer value. **A scan run with `--store` writes the store too**, as a second
 saved exactly as today: the entries it analysed this run (never cache hits) go in through the same
 rules as an import, as producer `essentia@<build>` with one run row per entry carrying the analysis
 time, and every failure becomes a failed run with its components. A store problem is reported and
-counted; it never costs a catalog entry. `store-result.json` beside the store records each write. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+counted; it never costs a catalog entry. `store-result.json` beside the store records each write. The
+scan also keeps the extractor's aggregate output — the main JSON with every descriptor's statistics that
+was deleted at parse until now — compressed and filed once per content hash under `artifacts\` beside
+the store, so a future field that is a fold of it is a re-fold of the file, never a rescan. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
 exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in

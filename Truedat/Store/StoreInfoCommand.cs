@@ -16,6 +16,7 @@ namespace Truedat.Store
         public long Tracks;                       // descriptions: track_content rows, one per media (a mirror does not add any)
         public long FeatureRows;                  // copies: track_copy rows, one per location (a mirror does add these)
         public long SplitConflicts;               // content-disagree-at-split conflicts recorded by the v1→v2 migration
+        public long ArtifactCount, ArtifactBytes;  // S2 C-A: aggregate artifacts (compressed extractor output) and their bytes on disk
         public double BytesPerTrack;              // FileBytes / Tracks
         public long ProjectedBytesAt156k;         // BytesPerTrack * 156000
         public double? MedianRtf;                 // analysisDuration / (durationMs/1000), median over rows with both
@@ -69,6 +70,9 @@ namespace Truedat.Store
                     ? "  failed components: " + string.Join(", ", i.FailedComponents.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value:N0}"))
                     : "  failed components: none recorded");
                 Console.WriteLine($"  descriptions held by several copies: {i.ContentKeysShared:N0} over {i.LocationsOnSharedKeys:N0} locations; no-sha descriptions: {i.NoShaFeatures:N0}; superseded hashes (key moves): {i.SupersededHashes:N0}; split conflicts (v1→v2): {i.SplitConflicts:N0}");
+                Console.WriteLine(i.ArtifactCount > 0
+                    ? $"  aggregate artifacts: {i.ArtifactCount:N0} files, {i.ArtifactBytes:N0} bytes beside the store ({i.ArtifactBytes / (double)i.ArtifactCount:N0} bytes each; {(i.Tracks > 0 ? i.ArtifactCount * 100.0 / i.Tracks : 0):F1}% of descriptions)"
+                    : "  aggregate artifacts: none (kept by scans run with --store)");
                 var outPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(i.Path) ?? ".", ResultFileName);
                 File.WriteAllText(outPath, ToJson(i).ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 Console.WriteLine($"  written: {outPath}");
@@ -133,6 +137,8 @@ namespace Truedat.Store
             i.SupersededHashes = long.Parse(db.ExecScalar("SELECT count(*) FROM identity_facet WHERE is_primary = 0 AND substr(kind, 1, 13) = 'content_hash:';") ?? "0");
             i.NoShaFeatures = long.Parse(db.ExecScalar("SELECT count(*) FROM track_content WHERE content_key_kind = 'entity';") ?? "0");
             i.SplitConflicts = long.Parse(db.ExecScalar($"SELECT count(*) FROM conflict WHERE kind = '{SchemaV2Migration.ConflictKind}';") ?? "0");
+            i.ArtifactCount = i.Counts["artifact"];
+            i.ArtifactBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(bytes), 0) FROM artifact;") ?? "0");
             return i;
         }
 
@@ -151,6 +157,7 @@ namespace Truedat.Store
                 ["medianRtf"] = i.MedianRtf.HasValue ? Math.Round(i.MedianRtf.Value, 2) : (double?)null, ["rtfSamples"] = i.RtfSamples,
                 ["counts"] = counts, ["failedComponents"] = failed, ["coverage"] = cov,
                 ["contentKeysShared"] = i.ContentKeysShared, ["locationsOnSharedKeys"] = i.LocationsOnSharedKeys, ["splitConflicts"] = i.SplitConflicts,
+                ["artifactCount"] = i.ArtifactCount, ["artifactBytes"] = i.ArtifactBytes,
                 ["supersededHashes"] = i.SupersededHashes, ["noShaFeatures"] = i.NoShaFeatures,
             };
         }

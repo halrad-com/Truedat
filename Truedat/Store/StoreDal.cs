@@ -313,6 +313,15 @@ namespace Truedat.Store
                     "attempts = max(attempts, excluded.attempts), review_state = excluded.review_state, review_note = excluded.review_note;",
                     entityId, producerKey, targetVersion, state, (long)attempts, reviewState, reviewNote);
 
+        // ---------------------------------------------------------------- artifacts (S2 C-A)
+        /// <summary>Records a content-addressed artifact file; the same (content, kind, format) is recorded once.</summary>
+        internal bool InsertArtifact(string contentHash, string contentHashKind, long? runId, string kind, string formatVersion, string relPath, long bytes, string sha256, string nowUtc)
+        {
+            Exec("INSERT OR IGNORE INTO artifact(content_hash, content_hash_kind, run_id, kind, format_version, path, bytes, sha256, created_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                 contentHash, contentHashKind, runId, kind, formatVersion, relPath, bytes, sha256, nowUtc);
+            return Db.Changes > 0;
+        }
+
         // ---------------------------------------------------------------- conflicts, counts
         internal void InsertConflict(string entityA, string? entityB, string kind, string detail, string nowUtc)
             => Exec("INSERT INTO conflict(entity_a, entity_b, kind, detail, state, created_utc) VALUES (?, ?, ?, ?, 'open', ?);", entityA, entityB, kind, detail, nowUtc);

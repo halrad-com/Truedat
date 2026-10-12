@@ -44,6 +44,72 @@ namespace Truedat.Store
             Block(assert, "Drift", () => TestDrift(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
             Block(assert, "ScanSink", () => TestScanSink(assert));
+            Console.WriteLine("Store self-test (S2 C-A: the extractor's aggregate output is kept, compressed, once per content)");
+            Block(assert, "Artifacts", () => TestArtifacts(assert));
+        }
+
+        // ---------------------------------------------------------------- S2 C-A: the aggregate artifact
+        static void TestArtifacts(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "art-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                // The file store on its own: stash -> commit -> read back; same content key -> one file.
+                const string json = "{\"lowlevel\":{\"spectral_centroid\":{\"mean\":1793.406,\"var\":12.5,\"median\":1790.1}},\"tonal\":{\"hpcp\":{\"mean\":[0.1,0.2,0.3]}}}";
+                var pending = ArtifactStore.Stash(dir, json);
+                assert(File.Exists(pending) && pending.StartsWith(ArtifactStore.PendingDir(dir), StringComparison.OrdinalIgnoreCase), "Stash writes a compressed pending file under artifacts\\pending");
+                var key = "ab".PadRight(64, 'c');
+                var c1 = ArtifactStore.Commit(dir, pending, key);
+                assert(c1.Created && File.Exists(Path.Combine(dir, c1.RelPath)) && c1.RelPath == Path.Combine("artifacts", "ab", key + ArtifactStore.Extension) && c1.Bytes > 0 && c1.Sha256.Length == 64,
+                    $"Commit files it under artifacts\\<2>\\<key>.main.json.z with bytes and sha ({c1.RelPath}, {c1.Bytes} B)");
+                assert(ArtifactStore.ReadMainJson(dir, c1.RelPath) == json, "the committed artifact inflates back to the exact extractor JSON (the re-fold entry point)");
+                assert(c1.Bytes < json.Length, $"it is smaller than the JSON it holds ({c1.Bytes} < {json.Length})");
+                var pending2 = ArtifactStore.Stash(dir, json);
+                var c2 = ArtifactStore.Commit(dir, pending2, key);
+                assert(!c2.Created && !File.Exists(pending2) && c2.Sha256 == c1.Sha256, "a second copy of the same content is discarded: one artifact per content key");
+                assert(ArtifactStore.RelativePathFor("entity:0123").StartsWith(Path.Combine("artifacts", "en")), "a no-sha media's artifact is keyed by its entity id, ':' made path-safe");
+
+                // Through the scan sink: the core stashes by the analysed (staged) path, Record ties it to the catalog key, the flush files it.
+                ScanSink.Reset();
+                ScanSink.StoreDirectory = dir;
+                var entries = FixtureEntries(@"D:\Music");
+                ScanSink.StashMainJson(@"C:\stage\abc.flac", json);
+                ScanSink.StashMainJson(@"C:\stage\def.mp3", json.Replace("1793.406", "900.0"));
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"], @"C:\stage\abc.flac");
+                ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"], @"C:\stage\def.mp3");
+                ScanSink.Record(@"D:\Music\odd\nosha.mp3", entries[@"D:\Music\odd\nosha.mp3"]);   // analysed without a stash (e.g. the stash failed): no artifact, still written
+                assert(ScanSink.PendingArtifacts == 2, "two stashed outputs are tied to their catalog entries");
+                var r = ScanSink.Flush(store, "output-x64.4", entries.Keys);
+                assert(r.Ok && r.Artifacts == 2 && r.ArtifactsShared == 0 && r.ArtifactBytes > 0, $"flush files 2 artifacts ({r.Artifacts} new, {r.ArtifactsShared} shared, {r.ArtifactBytes} B, ok {r.Ok} {r.Error})");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("artifact") == 2 && os.Db.ExecScalar("SELECT count(*) FROM artifact WHERE kind = 'main' AND format_version = 'output-x64.4' AND content_hash_kind = '" + FacetKinds.ShaFrames + "';") == "2",
+                        $"artifact rows: kind main, format = the extractor build, keyed by the primary sha kind ({os.Dal.Count("artifact")})");
+                    var sha = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;
+                    var rel = os.Db.ExecScalar($"SELECT path FROM artifact WHERE content_hash = '{sha}';");
+                    assert(rel != null && File.Exists(Path.Combine(dir, rel)) && ArtifactStore.ReadMainJson(dir, rel) == json, "the FLAC's artifact row points at a file that inflates to its extractor JSON");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM artifact a JOIN run r ON r.id = a.run_id WHERE r.producer_key = 'essentia';") == "2", "each artifact points at the run that produced it");
+                    assert(os.Dal.Count("track_content") == 3, "the entry without a stash is still written (3 descriptions)");
+                    var info = StoreInfoCommand.Collect(store);
+                    assert(info.ArtifactCount == 2 && info.ArtifactBytes == r.ArtifactBytes, $"--store-info reports artifact count and bytes ({info.ArtifactCount}, {info.ArtifactBytes})");
+                }
+                assert(Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length == 0, "nothing is left in pending after a flush");
+
+                // Same content again (a re-scan of the same file): shared, not duplicated.
+                ScanSink.StashMainJson(@"C:\stage\abc2.flac", json);
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"], @"C:\stage\abc2.flac");
+                var r2 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r2.Ok && r2.Artifacts == 0 && r2.ArtifactsShared == 1 && os.Dal.Count("artifact") == 2, $"re-analysing the same audio under the same build adds no artifact ({r2.Artifacts} new, {r2.ArtifactsShared} shared, rows {os.Dal.Count("artifact")})");
+
+                // A stale pending file from a killed scan is swept.
+                var stale = ArtifactStore.Stash(dir, "{}");
+                File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-3));
+                assert(ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1)) == 1 && !File.Exists(stale), "pending files older than a day are swept");
+            }
+            finally { ScanSink.Reset(); ScanSink.StoreDirectory = null; try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- S2 C3: the scan writes the store

@@ -2635,6 +2635,7 @@ namespace Truedat
                 if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
                 storePath = global::Truedat.Store.StoreLocation.Resolve(string.IsNullOrEmpty(storePath) ? null : storePath, storeDir, storeCatalog!, out var storeWhy);
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
+                global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -4042,7 +4043,7 @@ namespace Truedat
                     afMoodsTracks ??= new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
-                    if (_storePath != null) { global::Truedat.Store.ScanSink.Record(afKey, trackEntry); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3
+                    if (_storePath != null) { global::Truedat.Store.ScanSink.Record(afKey, trackEntry, afStagedSrc?.Path); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3/C-A
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                     // --analyze-file never consults the ledger, but its success still makes a
                     // review record for this file stale — clear it beside the catalog it wrote.
@@ -4769,7 +4770,7 @@ namespace Truedat
                         {
                             var flKey = Path.GetFullPath(filePath);
                             flMoodsTracks[flKey] = trackEntry;
-                            if (_storePath != null) global::Truedat.Store.ScanSink.Record(flKey, trackEntry);   // S2 C3
+                            if (_storePath != null) global::Truedat.Store.ScanSink.Record(flKey, trackEntry, flStagedSrc?.Path);   // S2 C3/C-A
                             ClearReviewRecord(filePath);
                         }
 
@@ -6010,7 +6011,7 @@ namespace Truedat
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
                         };
-                        if (_storePath != null) global::Truedat.Store.ScanSink.Record(t.Location, allTracks[t.Location]);   // S2 C3: analysed this run
+                        if (_storePath != null) global::Truedat.Store.ScanSink.Record(t.Location, allTracks[t.Location], msStagedSrc!.Path);   // S2 C3/C-A: analysed this run, with its stashed aggregate
                         // Duration throughput: numerator is what was ACTUALLY decoded
                         // (Essentia's reported length), falling back to the claimed
                         // duration when the extractor didn't emit it.
@@ -22067,7 +22068,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 var json = File.ReadAllText(tempJson);
                 var features = ParseEssentiaOutput(json);
-                if (features != null) return (features, null);
+                if (features != null)
+                {
+                    // S2 C-A: with a store in force, the aggregate output is kept (compressed, content-addressed at the
+                    // flush) instead of deleted — the end of rescanning for anything that is a fold of this file.
+                    if (global::Truedat.Store.ScanSink.StoreDirectory != null) global::Truedat.Store.ScanSink.StashMainJson(audioPath, json);
+                    return (features, null);
+                }
 
                 var jsonSize = new FileInfo(tempJson).Length;
                 Console.Error.WriteLine($"  DEBUG essentia: exit 0, output unparseable ({jsonSize} bytes), method={pathMethod}, path={toolPath}");

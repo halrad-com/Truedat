@@ -43,6 +43,9 @@ namespace Truedat.Store
         public int ContentReplaced;
         /// <summary>Entries whose media gained a new content hash (a key move): the description is re-keyed and rewritten from the arrival.</summary>
         public int ContentRekeyed;
+        /// <summary>Aggregate artifacts filed this call (new content-addressed files), ones already present for their content, and the bytes of the new ones (S2 C-A).</summary>
+        public int Artifacts, ArtifactsShared;
+        public long ArtifactBytes;
         public long StoreBytesBefore, StoreBytesAfter, ElapsedMs;
         public string ResultPath = "";
     }
@@ -88,7 +91,8 @@ namespace Truedat.Store
         /// <paramref name="producerKey"/>/<paramref name="producerVersion"/> name the observer (essentia@&lt;build&gt; for a scan,
         /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
         internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
-            string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null)
+            string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null,
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null)
         {
             var sw = Stopwatch.StartNew();
             var r = new ImportReport { Entries = entries.Count, Catalog = source };
@@ -149,7 +153,8 @@ namespace Truedat.Store
                 }
             try
             {
-                ImportEntriesCore(dal, db, 5000, 0, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r);
+                ImportEntriesCore(dal, db, 5000, 0, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
+                    pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".");
                 if (failures != null && failures.Count > 0)
                     using (var tx = db.BeginTransaction())
                     {
@@ -185,7 +190,8 @@ namespace Truedat.Store
 
         /// <summary>The batched entry loop shared by the file import and the in-memory entry.</summary>
         static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
-            IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r)
+            IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r,
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null)
         {
             var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
             int processed = 0;
@@ -194,7 +200,9 @@ namespace Truedat.Store
                 using var tx = db.BeginTransaction();
                 for (int i = b; i < Math.Min(keys.Count, b + Math.Max(1, batchSize)); i++)
                 {
-                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r);
+                    string? pendingArtifact = null;
+                    if (pendingArtifacts != null) pendingArtifacts.TryGetValue(keys[i], out pendingArtifact);
+                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir);
                     processed++;
                     if (failAfterEntries > 0 && processed == failAfterEntries)
                         throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
@@ -304,7 +312,7 @@ namespace Truedat.Store
         }
 
         static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
-            string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r)
+            string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r, string? pendingArtifact = null, string? storeDir = null)
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
@@ -367,6 +375,14 @@ namespace Truedat.Store
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
             WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r);
+
+            // S2 C-A: the extractor's aggregate output, kept once per content key as a compressed file beside the store.
+            if (pendingArtifact != null && storeDir != null)
+            {
+                var a = ArtifactStore.Commit(storeDir, pendingArtifact, contentKey);
+                dal.InsertArtifact(contentKey, sha != null ? kind : "entity", runPerEntry ? runId : (long?)null, ArtifactStore.MainKind, producerVersion, a.RelPath, a.Bytes, a.Sha256, now);
+                if (a.Created) { r.Artifacts++; r.ArtifactBytes += a.Bytes; } else r.ArtifactsShared++;
+            }
         }
 
         /// <summary>S2 C2 — observation integrity. The media's description is written once; afterwards an arriving value that
@@ -567,6 +583,7 @@ namespace Truedat.Store
                 ["entitiesCreated"] = r.EntitiesCreated, ["matchedBySha"] = r.MatchedHash, ["matchedByPath"] = r.MatchedPath, ["createdWithoutSha"] = r.CreatedNoSha,
                 ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew, ["conflicts"] = r.Conflicts,
                 ["unchanged"] = r.Unchanged, ["drift"] = r.Drift, ["contentReplaced"] = r.ContentReplaced, ["contentRekeyed"] = r.ContentRekeyed, ["stale"] = r.Stale,
+                ["artifacts"] = r.Artifacts, ["artifactsShared"] = r.ArtifactsShared, ["artifactBytes"] = r.ArtifactBytes,
                 ["legacySha"] = r.LegacySha, ["legacyShaUnrecoverable"] = r.LegacyShaUnrecoverable,
                 ["ledgers"] = new JsonObject { ["errors"] = r.ErrorsRows, ["skipped"] = r.SkippedRows, ["review"] = r.ReviewRows, ["verify"] = r.VerifyRows, ["receipts"] = r.ReceiptRows, ["unrooted"] = r.LedgerUnrooted },
                 ["storeBytesBefore"] = r.StoreBytesBefore, ["storeBytesAfter"] = r.StoreBytesAfter, ["elapsedMs"] = r.ElapsedMs,

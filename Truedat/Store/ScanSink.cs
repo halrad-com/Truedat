@@ -12,7 +12,8 @@ namespace Truedat.Store
     internal sealed class ScanSinkReport
     {
         public bool Ok; public string? Error;
-        public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Stale, EntitiesCreated;
+        public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Stale, EntitiesCreated, Artifacts, ArtifactsShared;
+        public long ArtifactBytes;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
     }
 
@@ -29,12 +30,37 @@ namespace Truedat.Store
         /// <summary>The extractor build the scan ran with (producer version of every run row); set at scan start.</summary>
         internal static string ExtractorBuild = "unknown";
 
+        /// <summary>The directory of the store in force (set when the store path is resolved); null = no store, keep nothing.
+        /// The extractor core stashes its main JSON here (C-A) before the content key is known.</summary>
+        internal static string? StoreDirectory;
+
+        // analysed-path (what the extractor was given: the staged copy or the original) -> pending artifact file
+        static readonly ConcurrentDictionary<string, string> _stashed = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // catalog key -> pending artifact file, once Record() has tied the two together
+        static readonly ConcurrentDictionary<string, string> _artifacts = new ConcurrentDictionary<string, string>(PathComparer.Instance);
+
         internal static int Pending => _entries.Count;
         internal static int PendingFailures => _failures.Count;
+        internal static int PendingArtifacts => _artifacts.Count;
 
-        internal static void Reset() { _entries.Clear(); while (_failures.TryDequeue(out _)) { } }
+        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); while (_failures.TryDequeue(out _)) { } }
 
-        internal static void Record(string path, TrackEntry entry) => _entries[path] = entry;
+        /// <summary>Called by the extractor core right after a successful parse, with the JSON text it is about to delete.</summary>
+        internal static void StashMainJson(string analysedPath, string json)
+        {
+            var dir = StoreDirectory;
+            if (dir == null) return;
+            try { _stashed[analysedPath] = ArtifactStore.Stash(dir, json); }
+            catch (Exception ex) { StoreLog.Warn($"could not stash the extractor output for {analysedPath}: {ex.Message}"); }
+        }
+
+        /// <summary><paramref name="analysedPath"/> is the path the extractor was given (staged copy or original); it ties the
+        /// stashed main JSON to this catalog entry so the flush can file it under the entry's content key.</summary>
+        internal static void Record(string path, TrackEntry entry, string? analysedPath = null)
+        {
+            _entries[path] = entry;
+            if (analysedPath != null && _stashed.TryRemove(analysedPath, out var pending)) _artifacts[path] = pending;
+        }
 
         internal static void RecordFailure(string path, string components, string error, double durationSec)
             => _failures.Enqueue(new ScanFailure { Path = path, Components = components, Error = error, DurationSec = durationSec });
@@ -49,21 +75,24 @@ namespace Truedat.Store
             var entries = new Dictionary<string, TrackEntry>(_entries, PathComparer.Instance);
             var failures = new List<ScanFailure>();
             while (_failures.TryDequeue(out var f)) failures.Add(f);
-            foreach (var k in entries.Keys) _entries.TryRemove(k, out _);
+            var artifacts = new Dictionary<string, string>(PathComparer.Instance);
+            foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; }
             if (entries.Count == 0 && failures.Count == 0) { report.Ok = true; return report; }
             try
             {
                 var resultPath = storePath == null ? null : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(storePath)) ?? ".", ResultFileName);
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
-                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints);
+                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints, artifacts);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
+                report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
                 report.StorePath = storePath;
             }
             catch (Exception ex)
             {
                 report.Ok = false; report.Error = ex.Message;
+                foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
                 StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them)");
             }
             return report;
