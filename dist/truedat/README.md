@@ -202,19 +202,18 @@ descriptor whole, so a multi-hour file costs several hundred MB of transient mem
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
 file-list scans; `--edges` needs extractor build `.5`.
 
-**Make it the default for an instance.** `truedat --config store true` (and `truedat --config edges true`)
-writes the keys into `truedat.config.json` beside the exe; from then on every scan on that instance also
-writes the store (and folds edges), and `--stats` / `--duplicates` answer from the store once a scan has
-created it. `--no-store` and `--no-edges` override the file for one run. A file-set default never makes a
-plain command refuse: before the first scan the read verbs still answer from the catalog, and a per-file
-mode without `--moods` skips the edges with a note.
+**On by default for a new library.** With nothing set, the store and edges are on when the library has no
+catalog yet (a fresh install) or a store already sits beside the catalog. An existing catalog without a
+store stays off until `--store-import` creates one, so a scan never builds a store holding only the tracks
+it happened to analyse. `truedat --config store true|false` (and `edges`) pins the choice for an instance;
+`--no-store` and `--no-edges` override for one run. A default never makes a plain command refuse: a
+per-file mode without `--moods` skips the store, and an extractor older than `.5` skips edges, each with a
+note.
 
-**Upgrading an instance that already has a catalog** — the recommended set, from the instance's truedat
-folder with the rebuilt exe and the `.5` extractor beside it:
+**Upgrading an instance that already has a catalog** — from the instance's truedat folder with the rebuilt
+exe and the `.5` extractor beside it:
 
 ```
-truedat --config store true
-truedat --config edges true
 truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
 truedat --refresh                      (one scan; Ctrl+C and re-run resumes)
 truedat                                (ongoing, unchanged)
