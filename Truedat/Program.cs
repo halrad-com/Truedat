@@ -1416,6 +1416,14 @@ namespace Truedat
             finally { Marshal.FreeHGlobal(ptr); }
         }
 
+        /// <summary>What every child ffmpeg gets: the CPU-limited job (when configured) and EcoQoS off. One call so a new
+        /// subprocess site (the edges PCM pass) cannot forget half of it.</summary>
+        internal static void PrepareChildProcess(Process proc)
+        {
+            ApplyCpuLimit(proc);
+            try { DisableEcoQos(proc.Handle); } catch { }
+        }
+
         /// <summary>Assign a process to the CPU-limited job. No-op if no job configured.</summary>
         static void ApplyCpuLimit(Process proc)
         {
@@ -13228,6 +13236,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 AnalyzeTicks = ticks,
             };
         }
+
+        /// <summary>The same ffmpeg the scan would use (app dir, cwd, PATH), for self-tests that drive the real pipe; null when absent.</summary>
+        internal static string? FindFfmpegForTests() => FindFfmpeg();
 
         static string? FindFfmpeg()
         {

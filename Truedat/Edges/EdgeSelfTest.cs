@@ -20,6 +20,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the fold on real frames files from the .5 build spike)");
             try { TestFoldReal(assert); }
             catch (Exception ex) { assert(false, $"FoldReal: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (S2 C4: the PCM pass — 100 ms slices to crest, transition and silence)");
+            try { TestPcm(assert); }
+            catch (Exception ex) { assert(false, $"Pcm: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -34,6 +37,82 @@ namespace Truedat.Edges
             var id = Program.ExtractorBuildId(exe);
             assert(id == "output-x64.5", $"the .5 exe resolves to output-x64.5 (got {id})");
             assert(string.Equals(Program.LatestExtractorMd5, "6f47bdfcaadfd4f510c5e1621c07945d", StringComparison.OrdinalIgnoreCase), $"the latest known extractor is .5 (got {Program.LatestExtractorMd5})");
+        }
+
+        // ---------------------------------------------------------------- the PCM pass
+        /// <summary>30 s of mono 44.1 kHz: a 0.5-amplitude sine (RMS 0.354), then either a 4 s linear fade to zero at 24-28 s or a
+        /// hard cut at 28 s, then digital silence to 30 s. Mirrored for the head.</summary>
+        static float[] SynthPcm(bool fade, bool outerAtStart, double amp = 0.5)
+        {
+            int n = 30 * EdgePcm.SampleRate; var s = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                double t = (double)i / EdgePcm.SampleRate;
+                double tt = outerAtStart ? 30 - t : t;             // time measured from the inner end toward the outer end
+                double g = tt < 24 ? 1 : tt < 28 ? (fade ? (28 - tt) / 4 : 1) : 0;
+                s[i] = (float)(amp * g * Math.Sin(2 * Math.PI * 440 * t));
+            }
+            return s;
+        }
+
+        static void TestPcm(Action<bool, string> assert)
+        {
+            // Tail, fade: silence = the 20 slices from 28 s (the fade's last 0.008 s dips under -60 dBFS inside the slice ending at 28.0,
+            // which still peaks above it); the transition is the steep end of the fade — from the last slice within 20 dB of the window's
+            // mean RMS (~-20 dB = amplitude ~0.043, reached at 27.65 s) to the silence floor at 28.0 s: 300 ms.
+            var r = EdgePcm.FromSamples(SynthPcm(fade: true, outerAtStart: false), outerAtStart: false);
+            assert(r != null && r.Slices == 300, $"300 slices of 100 ms from 30 s ({r?.Slices})");
+            assert(r != null && r.SilenceMs == 2000, $"tail fade: 2,000 ms of digital silence at the outer end ({r?.SilenceMs})");
+            assert(r != null && r.TransitionMs >= 200 && r.TransitionMs <= 400, $"tail fade: the transition is the last 20 dB of the fade, ~300 ms ({r?.TransitionMs})");
+            assert(r != null && r.CrestDb.HasValue && r.CrestDb > 3.5 && r.CrestDb < 5.0, $"crest: sine peak 0.5 over the window's mean slice RMS ~0.31 -> ~4.2 dB ({r?.CrestDb:F2})");
+            // Tail, hard cut at 28 s: the last loud slice ends exactly where silence starts -> 0 ms (a cut), silence 2,000.
+            r = EdgePcm.FromSamples(SynthPcm(fade: false, outerAtStart: false), outerAtStart: false);
+            assert(r != null && r.TransitionMs == 0 && r.SilenceMs == 2000, $"tail cut: transition 0 ms, silence 2,000 ms ({r?.TransitionMs}, {r?.SilenceMs})");
+            assert(r != null && r.CrestDb.HasValue && Math.Abs(r.CrestDb.Value - 20 * Math.Log10(0.5 / (0.5 / Math.Sqrt(2) * 28.0 / 30.0))) < 0.1,
+                $"tail cut: crest is exactly peak over mean RMS, 28 loud slices of 30 ({r?.CrestDb:F3})");
+            // Head, mirrored: silence first, then the fade-in.
+            r = EdgePcm.FromSamples(SynthPcm(fade: true, outerAtStart: true), outerAtStart: true);
+            assert(r != null && r.SilenceMs == 2000 && r.TransitionMs >= 200 && r.TransitionMs <= 400, $"head fade: 2,000 ms of leading silence, ~300 ms transition ({r?.SilenceMs}, {r?.TransitionMs})");
+            // No sound at all: silence is the whole window, crest null (mean RMS 0), transition 0.
+            r = EdgePcm.FromSamples(new float[30 * EdgePcm.SampleRate], outerAtStart: false);
+            assert(r != null && r.CrestDb == null && r.SilenceMs == 30000 && r.TransitionMs == 0, $"all silent: crest null, silence 30,000 ms ({r?.CrestDb}, {r?.SilenceMs})");
+            // Under 1 s: null, by the fixture's definition.
+            assert(EdgePcm.FromSamples(new float[EdgePcm.SliceSamples * 9], false) == null, "under ten slices (1 s) is null");
+            // Without ffmpeg: null, never a substitute.
+            assert(EdgePcm.Analyze("nowhere.flac", null, 0, 30, false) == null, "no ffmpeg -> null");
+
+            // The real pipe, on a WAV we write (found beside the test binary, as the scan finds it); skipped when ffmpeg is absent.
+            var ffmpeg = Program.FindFfmpegForTests();
+            if (ffmpeg == null) { Console.WriteLine("  SKIP  ffmpeg.exe not found beside the test binary"); return; }
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "pcm-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                // 60 s WAV: 30 s of the head shape (silence then fade-in) followed by 30 s of the tail shape (fade-out then silence).
+                var head = SynthPcm(fade: true, outerAtStart: true); var tail = SynthPcm(fade: true, outerAtStart: false);
+                var all = new float[head.Length + tail.Length]; Array.Copy(head, all, head.Length); Array.Copy(tail, 0, all, head.Length, tail.Length);
+                var wav = System.IO.Path.Combine(dir, "edges.wav"); WriteWav16(wav, all, EdgePcm.SampleRate);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var h = EdgePcm.Analyze(wav, ffmpeg, 0, 30, outerAtStart: true);
+                var t = EdgePcm.Analyze(wav, ffmpeg, 30, 30, outerAtStart: false);
+                sw.Stop();
+                assert(h != null && h.Slices == 300 && h.SilenceMs == 2000 && h.TransitionMs >= 200 && h.TransitionMs <= 400, $"ffmpeg head window: 300 slices, 2,000 ms silence, ~300 ms transition ({h?.Slices}, {h?.SilenceMs}, {h?.TransitionMs})");
+                assert(t != null && t.Slices == 300 && t.SilenceMs == 2000 && t.TransitionMs >= 200 && t.TransitionMs <= 400 && t.CrestDb > 3.5 && t.CrestDb < 5.0, $"ffmpeg tail window: 300 slices, 2,000 ms silence, ~300 ms transition, crest ~4.2 ({t?.Slices}, {t?.SilenceMs}, {t?.TransitionMs}, {t?.CrestDb:F2})");
+                Console.WriteLine($"        two 30 s windows through ffmpeg in {sw.ElapsedMilliseconds} ms");
+                assert(EdgePcm.Analyze(System.IO.Path.Combine(dir, "missing.wav"), ffmpeg, 0, 30, false) == null, "a file ffmpeg cannot decode -> null, no throw");
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+        }
+
+        static void WriteWav16(string path, float[] mono, int rate)
+        {
+            using var fs = System.IO.File.Create(path);
+            using var w = new System.IO.BinaryWriter(fs);
+            int dataBytes = mono.Length * 2;
+            w.Write(new[] { 'R', 'I', 'F', 'F' }); w.Write(36 + dataBytes); w.Write(new[] { 'W', 'A', 'V', 'E' });
+            w.Write(new[] { 'f', 'm', 't', ' ' }); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+            w.Write(new[] { 'd', 'a', 't', 'a' }); w.Write(dataBytes);
+            foreach (var s in mono) w.Write((short)Math.Max(-32768, Math.Min(32767, Math.Round(s * 32767))));
         }
 
         // ---------------------------------------------------------------- the fold on real audio
