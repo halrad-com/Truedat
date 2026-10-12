@@ -12,6 +12,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **`--stats` shows the store.** With a store in force: a `Store:` line (size, descriptions, bytes per
+  track, edge coverage) beside Catalog/Sidecar/Backups, and a Recommended entry pointing at `--refresh`
+  while edge rows are missing. Detail stays in `--store-info`.
 - **`--refresh` backfills edges.** With the store and edges on, `--refresh` follows its feature pass with
   the edge backfill (one extractor run per track lacking an edge row, resumable, `--budget` caps the
   session). `--work` is that backfill on its own. The import's "legacy FLAC sha: N unrecoverable" line now

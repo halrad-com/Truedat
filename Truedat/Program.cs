@@ -12205,6 +12205,16 @@ namespace Truedat
             var scAdvice = SidecarAdvice(sc, scCurrent);
             if (scAdvice != null) rec.Add(scAdvice);
 
+            // The store, when one is in force (operator, 2026-10-12: --stats "does not say anything about the db store"): its size
+            // and edge coverage here, the detail in --store-info; the edges gap gets the command that closes it (--refresh).
+            global::Truedat.Store.StoreInfo? storeInfo = null;
+            if (_storePath != null && File.Exists(_storePath))
+            {
+                try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath); } catch { /* the store block is best-effort */ }
+                if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
+                    rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh --budget 2h  (repeat until --store-info says missing 0)");
+            }
+
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
             {
@@ -12246,6 +12256,13 @@ namespace Truedat
                         double avgBak = (double)bakBytes / baks.Length;
                         Console.WriteLine($"  Backups:  {baks.Length} compressed .zip, {bakBytes / (1024.0 * 1024.0):F1} MB total  (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
                     }
+                }
+                if (storeInfo != null)
+                {
+                    long missing = Math.Max(0, storeInfo.Tracks - storeInfo.EdgeTracks);
+                    Console.WriteLine($"  Store:    {storeInfo.FileBytes / (1024.0 * 1024.0):F1} MB  (truedat.db, {storeInfo.Tracks:N0} descriptions, {storeInfo.BytesPerTrack:N0} bytes/track; "
+                        + $"edges {storeInfo.EdgeTracks:N0} of {storeInfo.Tracks:N0}" + (missing > 0 ? $", {missing:N0} missing" : ", complete")
+                        + (storeInfo.EdgeRunsFailed > 0 ? $", {storeInfo.EdgeRunsFailed:N0} failed folds" : "") + ")  — detail: truedat --store-info");
                 }
             }
             catch { /* size/compression stats are best-effort */ }
