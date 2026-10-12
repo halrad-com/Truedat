@@ -81,7 +81,7 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 ### Store (preview, v2) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
 
 **`STORE.md` is the reference** for the store: what the tables hold, where the file lives, the edges
-layer (`--edges`, `--work`, `--edges-export`), the six-significant-figure precision rule, and how to open
+layer (`--edges`, `--edges-export`), the six-significant-figure precision rule, and how to open
 the file with DB Browser for SQLite or `sqlite3`. This section is the summary.
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
@@ -166,22 +166,17 @@ roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` rep
 `--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
 catalog entry.
 
-**The drain (`--work`).** A library imported into the store has descriptions but no edge rows, and a
-cache hit never folds; `--work [--producer edges] [--budget <time>]` closes that gap. It queues every
-media with a description, no edge row at the current producer version and a copy on one of this
-machine's roots, then leases one item at a time, runs the same extractor-with-frames path a scan uses
-over a staged copy, writes the rows and an `edges` run row, and moves the item to done, failed (retried
-after an hour) or parked after three attempts; leases expire, nothing is force-killed. `--budget` takes
-`90s`, `30m`, `2h`, `1h30m` or bare seconds and stops the run from leasing more once spent. The run
-writes `work-result.json` beside the store (counts, items per hour, bytes per item, next retry time) and
-rewrites the companion file. Measured on a local library: about 440 items per hour on one box, almost
-all of it the extractor run. Single instance by design: run one drain per store.
+**Filling the gap (`--refresh`).** A library imported into the store has descriptions but no edge rows,
+and a cache hit never folds. `--refresh` closes that gap inside the normal scan: a track the store lists
+as lacking edge rows is re-analysed by the scan's own parallel workers, and the store saves at the scan's
+five-minute checkpoint and at the end. `--budget 90s|30m|2h|1h30m` makes the library scan finish the tracks
+in hand, save and exit once that long has passed; run the same command again to continue.
 
 **The companion file (`mbxedges.v1.json`).** The hub reads edges from a small JSON file beside
 `mbxmoods.json`, keyed by `audioStreamSha256`, carrying per edge the status word, window, key vote,
 bpm, loudness scalars, texture means and spreads, divergences and the PCM `rms` block, and per track the
 head-vs-tail divergence; the 10/s series, beats, HPCP and sub-window summaries stay in the store. It is
-written from the store, compactly (about 1.8 KB per track), after any `--edges` scan or `--work` run
+written from the store, compactly (about 1.8 KB per track), after any `--edges` scan
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
 
@@ -193,19 +188,19 @@ Absent means not yet. The hub never reads the store.
 | Edge rows in the store | 6,404 bytes per track (one packed row per edge) |
 | Store, everything included | 19.7 KB per track; about 2.9 GB projected at 156k tracks |
 | `mbxedges.v1.json` | 1.7 KB per track |
-| `--work` drain | 130 to 440 items per hour on one box; the extractor run dominates, so track length decides |
+| `--refresh` filling edges | about 1,100 tracks per hour at parallelism 18 (the old one-at-a-time drain: 130 to 440) |
 | `--store-roundtrip` on the scan-built store | EQUAL, 200 of 200, at the six-figure precision |
 
-**Verified on real audio:** `--edges` through `--analyze-file`, `--file-list` and the drain on MP3, M4A, WMA and
-FLAC; the `--work` decode-coverage gate (a file whose claimed duration exceeds what the extractor decodes
+**Verified on real audio:** `--edges` through `--analyze-file` and `--file-list` on MP3, M4A, WMA and
+FLAC; the decode-coverage gate (a file whose claimed duration exceeds what the extractor decodes
 is transcoded, then fails the fold rather than writing a wrong tail); the refusals on an older extractor
 and on a missing `--moods`; the stage directory left clean after parallel runs.
 
-**Not yet verified:** `--edges` or `--work` over a UNC share or a staged network copy; the library (iTunes
-XML) scan and `--folder` with `--edges`; slices beyond 200 tracks. **Known limits:** the fold reads each
+**Not yet verified:** the library (iTunes
+XML) scan and `--folder` with `--edges`; the store checkpoint save in a real library scan. **Known limits:** the fold reads each
 descriptor whole, so a multi-hour file costs several hundred MB of transient memory per worker;
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
-file-list scans; `dist/` still ships extractor build `.4`, and `--edges` / `--work` need `.5`.
+file-list scans; `--edges` needs extractor build `.5`.
 
 **Make it the default for an instance.** `truedat --config store true` (and `truedat --config edges true`)
 writes the keys into `truedat.config.json` beside the exe; from then on every scan on that instance also
@@ -221,16 +216,16 @@ folder with the rebuilt exe and the `.5` extractor beside it:
 truedat --config store true
 truedat --config edges true
 truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
-truedat --refresh --budget 2h          (repeat until --store-info says missing 0)
+truedat --refresh                      (one scan; Ctrl+C and re-run resumes)
 truedat                                (ongoing, unchanged)
 ```
 
 `--store-import` gives the store every track you have already scanned, with no re-analysis. `--refresh`
 then does what it always did (re-analyse entries missing the newest feature fields) and, with the store
-and edges on, backfills edge rows for every track that has none — one extractor run per track, resumable,
-`--budget` capping each session. A normal scan keeps everything current from then on; a cached track is
-never re-analysed, which is why the backfill exists. `--work` is the backfill on its own, for an edges-only
-session.
+and edges on, also re-analyses every track the store lists as lacking edge rows. It is one ordinary scan:
+the scan's parallel workers, progress line and ETA, the catalog and the store saved every five minutes, so
+Ctrl+C and a re-run picks up where it stopped. A normal scan keeps everything current from then on; a
+cached track is never re-analysed, which is why `--refresh` is the step that fills the gap.
 
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
@@ -481,11 +476,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           store's edge row (loudness series, beats, key, texture, fades, PCM crest/
                           transition). Needs extractor build output-x64.5. Writes nothing to mbxmoods.json;
                           rewrites mbxedges.v1.json beside the catalog when edge rows were added.
-  --work [--producer edges] [--budget <time>]
-                          With --store: fold edges for every media with a description but no edge row
-                          and a copy on this machine, one at a time, until the queue is empty or the
-                          budget (90s, 30m, 2h, 1h30m) is spent; 3 attempts then parked. Writes
-                          work-result.json beside the store; --store-info reports eligible/captured/missing.
+  --budget <time>         Library scan: after 90s / 30m / 2h / 1h30m, finish the tracks in hand, save and
+                          exit. Run the same command again to continue.
   --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
   --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
                           and the --refresh-smfm backfill alike (omits the smfm* fields).

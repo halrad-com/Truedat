@@ -20,7 +20,7 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   catalog until a scan has created the store; a per-file mode without `--moods` skips edges with a note).
 - Beside the store: `artifacts\<build>\<2>\<key>.main.json.z` (the extractor's compressed main output,
   one per content key), `artifacts\pending\` (in-flight stashes, swept), `store-result.json`,
-  `store-import-result.json`, `work-result.json`, `store-info.json`.
+  `store-import-result.json`, `store-info.json`.
 
 ## What is in it
 
@@ -38,7 +38,7 @@ One row of file facts per copy, one audio description per media:
 | `producer` | producer | key, current version, kind |
 | `value`, `segment` | content key (+ segment) | the edge rows (below); any future measurement that is a function of the audio |
 | `artifact` | (content key, build) | where the compressed extractor output sits, bytes, sha |
-| `work_item` | (entity, producer) | the drain's queue: queued / leased / done / failed / parked, attempts, lease, retry time |
+| `work_item` | (entity, producer) | review records imported from the scan ledgers (review state, attempts) |
 | `conflict`, `check_result` | event | drift between runs, sha collisions, split disagreements; checks |
 
 Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql`, `v2.sql`); a v1 store migrates
@@ -63,7 +63,7 @@ nothing in SQLite (eight bytes regardless); the savings are in the exported text
 | `--store-vacuum [--page-size N]` | repacks the file (16 KB pages by default) |
 | `--stats --store`, `--duplicates --store` | the existing reports answering from the store instead of the catalog |
 
-## Edges — the splicing layer (`--edges`, `--work`, `--edges-export`)
+## Edges — the splicing layer (`--edges`, `--refresh`, `--edges-export`)
 
 The hub splices tracks on their edges, so the store holds a compact *edge row* per media: the first
 and last 30 s folded from a binary frames file the `output-x64.5` extractor writes beside its main
@@ -79,23 +79,20 @@ attributable.
 
 - `--edges` on any scan with `--store`: fold every analysed track. Refuses plainly without `--store`,
   on an extractor older than `.5`, and in `--analyze-file` / `--file-list` without `--moods`.
-- `--refresh` with the store and edges on: after its feature pass, runs the edge backfill below for
-  every track that has no edge row; `--budget` caps the session. This is the verb to type.
-- `--work [--producer edges] [--budget 90s|30m|2h|1h30m]`: the backfill on its own. Queues every media with a
-  description, no edge row at the current version and a present copy on this machine whose mtime still
-  matches its description; leases one at a time; runs the same extractor-with-frames path a scan does
-  over a staged copy, with the scan's decode-coverage gate (an under-decoded file is a failed fold, never
-  a wrong tail); three attempts then parked; leases expire; `work-result.json` beside the store on every
-  exit. About 400 items per hour on one box, almost all of it the extractor run.
+- `--refresh` with the store and edges on: a track the store lists as lacking edge rows at the current
+  version is stale to the scan's cache gate, so the scan re-analyses it with its own workers, progress and
+  ETA, and the store hand-off writes the edges. The store saves at the scan's five-minute checkpoint and at
+  the end. A failed fold is not retried until `--retry-errors`. `--budget 90s|30m|2h|1h30m` stops the
+  library scan cleanly (save and exit) once that long has passed; run it again to continue.
 - `mbxedges.v1.json` beside `mbxmoods.json`: the hub-facing companion, keyed by `audioStreamSha256`,
   scalars only (status, window, key, bpm, loudness, texture, divergences, rms), about 1.8 KB per track,
-  compact. Rewritten after any `--edges` scan or `--work` run that added rows, and on demand by
+  compact. Rewritten after any `--edges` scan that added rows, and on demand by
   `--edges-export [path]`. Media without a sha are counted and omitted. Absent means not yet.
 
 ## Looking inside
 
 Any SQLite client of version 3.40 or newer opens the file. The store runs in WAL mode, so a read-only
-browser can look while truedat runs (do not write to it from another tool while a scan or drain is
+browser can look while truedat runs (do not write to it from another tool while a scan is
 running; truedat is the single writer by design).
 
 - **DB Browser for SQLite** (sqlitebrowser.org): free, open source, Windows installer; open the file
@@ -112,7 +109,7 @@ SELECT (SELECT count(*) FROM track_content), (SELECT count(*) FROM track_copy),
 -- what ran, by producer and outcome
 SELECT producer_key, producer_version, outcome, count(*) FROM run GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
 
--- the edges coverage the drain works from (the current version is what --store-info prints)
+-- edges coverage by version (the current version is what --store-info prints)
 SELECT producer_version, txt, count(*) FROM value
  WHERE producer_key = 'edges' AND field = 'edges.status' AND segment_id = 0 GROUP BY 1, 2;
 
