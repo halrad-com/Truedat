@@ -71,8 +71,26 @@ namespace Truedat.Edges
         internal const double TonalHop = 2048.0 / 44100.0;
         internal const double EbuHop = 0.1;
         internal const double SilenceLufs = -60;       // the EBU fallback floor for silenceMs (the PCM pass uses -60 dBFS slice peaks)
-        internal const double FadeMinLu = 10;          // a fade is a monotonic ramp of at least this much ...
+        internal const double FadeMinLu = 10;          // a fade is a departure from the edge's plateau of at least this much ...
         internal const int FadeMinMs = 1000;           // ... lasting at least this long; anything else is a cut (fadeMs null)
+        internal const double FadePlateauLu = 1;       // "on the plateau" = within this of the median non-silent level
+
+        /// <summary>EBU frames are TRAILING windows (400 ms momentary, 3 s short-term) emitted every 0.1 s, so a series has
+        /// fewer frames than duration/0.1 and its first frame does not sit at t = 0 (a 60 s track: 597 and 571 frames). Frame i
+        /// is therefore addressed by the time its window ENDS, anchored to the decoded length: the last frame ends at the end of
+        /// the audio, which is the splice point. Measured on the .5 spike's five real files; a frame-i-at-0.1·i rule left the
+        /// last 3 and 29 bins of every real tail undefined.</summary>
+        internal static double EbuTimeOf(int n, double durationSec, int i) => durationSec - (n - 1 - i) * EbuHop;
+
+        /// <summary>Frames whose window end lies in (a, b] — half-open on the LEFT, so the bin [x, x+0.1) is described by the
+        /// window that ends at x+0.1, and the tail's last bin holds the window ending exactly at the track end.</summary>
+        internal static void EbuRange(int n, double durationSec, double a, double b, out int i0, out int i1)
+        {
+            const double eps = 1e-6;
+            i0 = (int)Math.Floor(n - 1 - (durationSec - a) / EbuHop + eps) + 1;
+            i1 = (int)Math.Floor(n - 1 - (durationSec - b) / EbuHop + eps) + 1;
+            i0 = Math.Max(0, Math.Min(n, i0)); i1 = Math.Max(i0, Math.Min(n, i1));
+        }
         internal static readonly string[] SpectralOrder =
         {
             "lowlevel.spectral_centroid", "lowlevel.spectral_flux", "lowlevel.spectral_rolloff", "lowlevel.spectral_entropy",
@@ -112,8 +130,8 @@ namespace Truedat.Edges
                 return r;
             }
 
-            FoldEdge(r.Head, 0, e, clipped, inp, settings, outerAtStart: true);
-            FoldEdge(r.Tail, durationSec - e, durationSec, clipped, inp, settings, outerAtStart: false);
+            FoldEdge(r.Head, 0, e, clipped, inp, settings, durationSec, outerAtStart: true);
+            FoldEdge(r.Tail, durationSec - e, durationSec, clipped, inp, settings, durationSec, outerAtStart: false);
             if (r.Head.Whole != null && r.Tail.Whole != null)
                 r.HeadTail = Diverge(r.Head.Whole.MfccMean, r.Tail.Whole.MfccMean, r.Head.Whole.HpcpMean, r.Tail.Whole.HpcpMean, r.Head.Loudness?.MeanLufs, r.Tail.Loudness?.MeanLufs);
             return r;
@@ -145,12 +163,12 @@ namespace Truedat.Edges
             return inp;
         }
 
-        static void FoldEdge(EdgeRow row, double start, double end, bool clipped, Inputs inp, EdgeSettings s, bool outerAtStart)
+        static void FoldEdge(EdgeRow row, double start, double end, bool clipped, Inputs inp, EdgeSettings s, double durationSec, bool outerAtStart)
         {
             row.Status = clipped ? "short-context" : "ok";
             // --- stored series: the EBU pair pooled at PoolHz as int16 centi-dB
-            row.MomentaryCentiDb = PoolCentiDb(inp.Momentary, start, end, s.PoolHz);
-            row.ShortTermCentiDb = PoolCentiDb(inp.ShortTerm, start, end, s.PoolHz);
+            row.MomentaryCentiDb = PoolCentiDb(inp.Momentary, durationSec, start, end, s.PoolHz);
+            row.ShortTermCentiDb = PoolCentiDb(inp.ShortTerm, durationSec, start, end, s.PoolHz);
             // --- beats inside the window, ms from the track start
             var beatsMs = new List<int>(); var beatsLoud = new List<float>();
             for (int i = 0; i < inp.BeatPos.Length; i++)
@@ -165,12 +183,13 @@ namespace Truedat.Edges
             double third = (end - start) / 3;
             row.Sub = new[] { Summarise(start, start + third, inp), Summarise(start + third, start + 2 * third, inp), Summarise(start + 2 * third, end, inp) };
             // --- loudness scalars from the momentary series (EBU, the fallback source; the PCM pass may replace silenceMs)
-            row.Loudness = LoudnessFrom(inp.Momentary, start, end, outerAtStart);
+            row.Loudness = LoudnessFrom(inp.Momentary, durationSec, start, end, outerAtStart);
             row.Divergence = Diverge(row.Whole.MfccMean, inp.WholeMfcc, row.Whole.HpcpMean, inp.WholeHpcp, row.Loudness.MeanLufs, inp.Integrated);
         }
 
-        /// <summary>EBU frames (0.1 s hop, frame i at t = 0.1 i) inside [start, end), averaged per 1/poolHz bin, as centi-dB.</summary>
-        static short[] PoolCentiDb(float[] series, double start, double end, int poolHz)
+        /// <summary>EBU frames whose window ends inside each 1/poolHz bin of [start, end), energy-averaged per bin, as centi-dB.
+        /// A bin no window ends in (the first 0.3 s / 2.9 s of a track) is <see cref="short.MinValue"/>: undefined, never 0.</summary>
+        static short[] PoolCentiDb(float[] series, double durationSec, double start, double end, int poolHz)
         {
             int bins = Math.Max(0, (int)Math.Round((end - start) * poolHz));
             var outp = new short[bins];
@@ -178,10 +197,8 @@ namespace Truedat.Edges
             for (int b = 0; b < bins; b++)
             {
                 double bs = start + b * binLen, be = bs + binLen;
-                int i0 = (int)Math.Ceiling(bs / EbuHop - 1e-9), i1 = (int)Math.Ceiling(be / EbuHop - 1e-9);   // frames with t in [bs, be)
-                double sum = 0; int n = 0;
-                for (int i = Math.Max(0, i0); i < Math.Min(series.Length, i1); i++) { sum += series[i]; n++; }
-                double v = n > 0 ? sum / n : double.NaN;
+                EbuRange(series.Length, durationSec, bs, be, out int i0, out int i1);
+                double v = EnergyMean(series, i0, i1);
                 outp[b] = double.IsNaN(v) ? short.MinValue : (short)Math.Max(short.MinValue + 1, Math.Min(short.MaxValue, Math.Round(v * 100)));
             }
             return outp;
@@ -232,44 +249,68 @@ namespace Truedat.Edges
             return w;
         }
 
-        /// <summary>From the momentary series inside [start, end): level at the outer and inner second, mean, the outer-end
-        /// silence run (frames under -60 LUFS) and the fade: the span from the outer boundary of the non-silent region to the
-        /// frame where the level stops changing monotonically, kept only when it spans ≥ FadeMinMs and ≥ FadeMinLu.</summary>
-        static EdgeLoudness LoudnessFrom(float[] momentary, double start, double end, bool outerAtStart)
+        /// <summary>From the momentary windows ending inside (start, end]: energy-mean level over the outer and inner second and
+        /// the whole edge, the outer-end silence run (windows under -60 LUFS; the EBU fallback source), and the fade. A fade is a
+        /// departure from the edge's PLATEAU — the median non-silent level — by more than <see cref="FadePlateauLu"/>, measured to
+        /// the silence boundary (or the window's outer end when there is no silence), kept when it spans ≥ FadeMinMs and the
+        /// level at the boundary sits ≥ FadeMinLu under the plateau. Real momentary loudness wobbles frame to frame, so a
+        /// monotonic-ramp rule found no fade on tracks that audibly fade; this one is measured against the .5 spike's real files.</summary>
+        static EdgeLoudness LoudnessFrom(float[] momentary, double durationSec, double start, double end, bool outerAtStart)
         {
-            int i0 = Math.Max(0, (int)Math.Ceiling(start / EbuHop - 1e-9)), i1 = Math.Min(momentary.Length, (int)Math.Ceiling(end / EbuHop - 1e-9));
+            EbuRange(momentary.Length, durationSec, start, end, out int i0, out int i1);
             var l = new EdgeLoudness();
             if (i1 - i0 <= 0) return l;
             int perSec = (int)Math.Round(1 / EbuHop);
-            l.MeanLufs = Mean(momentary, i0, i1);
-            l.StartLufs = Mean(momentary, i0, Math.Min(i1, i0 + perSec));
-            l.EndLufs = Mean(momentary, Math.Max(i0, i1 - perSec), i1);
+            l.MeanLufs = EnergyMean(momentary, i0, i1);
+            l.StartLufs = EnergyMean(momentary, i0, Math.Min(i1, i0 + perSec));
+            l.EndLufs = EnergyMean(momentary, Math.Max(i0, i1 - perSec), i1);
             // silence run at the outer end
             int silence = 0;
             if (outerAtStart) { for (int i = i0; i < i1 && momentary[i] < SilenceLufs; i++) silence++; }
             else { for (int i = i1 - 1; i >= i0 && momentary[i] < SilenceLufs; i--) silence++; }
             l.SilenceMs = (int)Math.Round(silence * EbuHop * 1000);
-            // fade: head = a rising ramp from the first non-silent frame; tail = a falling ramp into the silence run
-            const double tol = 0.01;
+            // plateau: median of the non-silent windows in the edge
+            var loud = new List<float>(i1 - i0);
+            for (int i = i0; i < i1; i++) if (momentary[i] >= SilenceLufs) loud.Add(momentary[i]);
+            if (loud.Count == 0) return l;
+            loud.Sort(); double plateau = loud[loud.Count / 2];
+            double n = momentary.Length;
             if (outerAtStart)
             {
-                int b = i0 + silence; int j = b;
-                while (j + 1 < i1 && momentary[j + 1] - momentary[j] > tol) j++;
-                double rise = j > b ? momentary[j] - momentary[b] : 0; int ms = (int)Math.Round((j - b) * EbuHop * 1000);
+                int b = i0 + silence;                                   // first non-silent window
+                if (b >= i1) return l;
+                int j = b; while (j < i1 && momentary[j] < plateau - FadePlateauLu) j++;   // first window on the plateau
+                if (j >= i1) return l;
+                double from = silence > 0 ? EbuTimeOf(momentary.Length, durationSec, b - 1) : start;   // the silence boundary, or the window's outer end
+                int ms = (int)Math.Round((EbuTimeOf(momentary.Length, durationSec, j) - from) * 1000);
+                double rise = plateau - momentary[b];
                 l.FadeMs = rise >= FadeMinLu && ms >= FadeMinMs ? ms : (int?)null;
             }
             else
             {
-                int b = i1 - silence;                       // first silent frame (or i1 when there is no silence)
-                int j = b - 1;                              // last non-silent frame
-                while (j - 1 >= i0 && momentary[j - 1] - momentary[j] > tol) j--;
-                double drop = b - 1 > j ? momentary[j] - momentary[b - 1] : 0; int ms = (int)Math.Round((b - j) * EbuHop * 1000);
+                int b = i1 - silence;                                   // first silent window (i1 when there is no silence)
+                if (b <= i0) return l;
+                int j = b - 1; while (j >= i0 && momentary[j] < plateau - FadePlateauLu) j--;   // last window on the plateau
+                if (j < i0) return l;
+                double to = silence > 0 ? EbuTimeOf(momentary.Length, durationSec, b - 1) : end;   // the silence boundary, or the window's outer end
+                int ms = (int)Math.Round((to - EbuTimeOf(momentary.Length, durationSec, j)) * 1000);
+                double drop = plateau - momentary[b - 1];
                 l.FadeMs = drop >= FadeMinLu && ms >= FadeMinMs ? ms : (int?)null;
             }
             return l;
         }
 
-        static double Mean(float[] v, int from, int to) { double s = 0; int n = 0; for (int i = from; i < to; i++) { s += v[i]; n++; } return n > 0 ? s / n : double.NaN; }
+        /// <summary>Loudness combines in the energy domain: 10·log10 of the mean of 10^(L/10). An arithmetic mean of LUFS values
+        /// over a window holding digital silence (Essentia emits about -300 for it) says -68 for a tail that is -16 where there is
+        /// sound; the energy mean says what a listener hears.</summary>
+        static double EnergyMean(float[] v, int from, int to)
+        {
+            double s = 0; int n = 0;
+            for (int i = from; i < to; i++) { s += Math.Pow(10, v[i] / 10.0); n++; }
+            if (n == 0) return double.NaN;
+            double m = s / n;
+            return m > 0 ? 10 * Math.Log10(m) : -300;
+        }
 
         /// <summary>Loudness: |Δ| over 20 LU clamped to 0..1. Texture and harmony: cosine distance of the mean vectors.</summary>
         static EdgeDivergence Diverge(double[] mfccA, double[] mfccB, double[] hpcpA, double[] hpcpB, double? lufsA, double? lufsB)

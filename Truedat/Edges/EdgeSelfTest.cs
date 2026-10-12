@@ -17,6 +17,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the fold — frames file -> the ruled 6 KB row)");
             try { TestFold(assert); }
             catch (Exception ex) { assert(false, $"Fold: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (S2 C4: the fold on real frames files from the .5 build spike)");
+            try { TestFoldReal(assert); }
+            catch (Exception ex) { assert(false, $"FoldReal: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -33,6 +36,49 @@ namespace Truedat.Edges
             assert(string.Equals(Program.LatestExtractorMd5, "6f47bdfcaadfd4f510c5e1621c07945d", StringComparison.OrdinalIgnoreCase), $"the latest known extractor is .5 (got {Program.LatestExtractorMd5})");
         }
 
+        // ---------------------------------------------------------------- the fold on real audio
+        /// <summary>Every full frames file the build spike left under essentia-build/spike-x5/real (MP3, M4A, WMA, two FLACs; found
+        /// upward, skipped when absent) folds to two ok edges whose TAIL series are fully defined — the tail is the splice point,
+        /// and the EBU series are trailing windows that start late, so a fold that assumed frame i sits at 0.1·i would leave the
+        /// last bins of every real tail empty. Keys, bpm and loudness must be present and plausible; the rows are printed for review.</summary>
+        static void TestFoldReal(Action<bool, string> assert)
+        {
+            var realDir = FindUpwardDir(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x5", "real"));
+            if (realDir == null) { Console.WriteLine("  SKIP  essentia-build/spike-x5/real not found from the test binary"); return; }
+            var settings = new EdgeSettings(); int files = 0;
+            foreach (var bin in System.IO.Directory.GetFiles(realDir, "*.x5fb.bin"))
+            {
+                var json = System.IO.Path.ChangeExtension(bin, ".json");
+                if (!System.IO.File.Exists(json)) continue;
+                double duration;
+                using (var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllBytes(json)))
+                    duration = doc.RootElement.GetProperty("metadata").GetProperty("audio_properties").GetProperty("length").GetDouble();
+                EdgeFoldResult r;
+                using (var f = EspbFile.Open(bin)) r = EdgeFold.Fold(f, duration, settings);
+                files++;
+                var name = System.IO.Path.GetFileName(bin).Replace(".x5fb.bin", "");
+                var h = r.Head; var t = r.Tail;
+                assert(h.Status == "ok" && t.Status == "ok", $"{name}: both edges ok ({h.Status} / {t.Status}{(h.Error != null ? ": " + h.Error : "")})");
+                if (h.Status != "ok" || t.Status != "ok") continue;
+                int tailMomUndef = CountUndefined(t.MomentaryCentiDb), tailStUndef = CountUndefined(t.ShortTermCentiDb);
+                int headMomUndef = CountUndefined(h.MomentaryCentiDb), headStUndef = CountUndefined(h.ShortTermCentiDb);
+                assert(t.MomentaryCentiDb.Length == 300 && tailMomUndef == 0 && t.ShortTermCentiDb.Length == 300 && tailStUndef == 0,
+                    $"{name}: the tail's EBU series are 300 samples with no undefined bin (momentary {tailMomUndef} undefined, short-term {tailStUndef})");
+                assert(headMomUndef >= 2 && headMomUndef <= 4 && headStUndef >= 28 && headStUndef <= 30,
+                    $"{name}: the head's EBU series are undefined exactly before the first full window, 400 ms and 3 s (momentary {headMomUndef} ~3, short-term {headStUndef} ~29)");
+                assert(h.Whole?.Key != null && t.Whole?.Key != null, $"{name}: a key on both edges ({h.Whole?.Key?.Name} {h.Whole?.Key?.Scale} / {t.Whole?.Key?.Name} {t.Whole?.Key?.Scale})");
+                assert(h.Bpm != null && t.Bpm != null && h.Bpm.Value > 40 && h.Bpm.Value < 240 && t.Bpm.Value > 40 && t.Bpm.Value < 240,
+                    $"{name}: a plausible bpm on both edges ({h.Bpm?.Value:F1} x{h.Bpm?.Beats} / {t.Bpm?.Value:F1} x{t.Bpm?.Beats})");
+                assert(h.Loudness?.MeanLufs != null && t.Loudness?.MeanLufs != null && h.Loudness.MeanLufs > -60 && h.Loudness.MeanLufs < 0 && t.Loudness.MeanLufs > -60 && t.Loudness.MeanLufs < 0,
+                    $"{name}: mean loudness inside -60..0 LUFS on both edges ({h.Loudness?.MeanLufs:F1} / {t.Loudness?.MeanLufs:F1})");
+                Console.WriteLine($"        {name,-5} {duration,7:F1}s  head: {h.Whole?.Key?.Name}{(h.Whole?.Key?.Scale == "minor" ? "m" : "")} {h.Whole?.Key?.Code} agree {h.Whole?.Key?.Agreement}/{h.Whole?.Key?.VotesPresent}, {h.Bpm?.Value:F1} bpm reg {h.Bpm?.Regularity:F2}, {h.Loudness?.StartLufs:F1}->{h.Loudness?.EndLufs:F1} LUFS fade {h.Loudness?.FadeMs?.ToString() ?? "-"} sil {h.Loudness?.SilenceMs}");
+                Console.WriteLine($"        {"",-5} {"",7}   tail: {t.Whole?.Key?.Name}{(t.Whole?.Key?.Scale == "minor" ? "m" : "")} {t.Whole?.Key?.Code} agree {t.Whole?.Key?.Agreement}/{t.Whole?.Key?.VotesPresent}, {t.Bpm?.Value:F1} bpm reg {t.Bpm?.Regularity:F2}, {t.Loudness?.StartLufs:F1}->{t.Loudness?.EndLufs:F1} LUFS fade {t.Loudness?.FadeMs?.ToString() ?? "-"} sil {t.Loudness?.SilenceMs}; head-tail div L {r.HeadTail?.Loudness:F2} T {r.HeadTail?.Texture:F2} H {r.HeadTail?.Harmony:F2}");
+            }
+            assert(files >= 1, $"at least one real frames file folded ({files})");
+        }
+
+        static int CountUndefined(short[] s) { int n = 0; foreach (var v in s) if (v == short.MinValue) n++; return n; }
+
         // ---------------------------------------------------------------- the fold
         /// <summary>A synthetic 240 s track: a 6 s fade-in from silence then steady -14 LUFS; a 4 s fade-out to silence at the end
         /// with 1 s of digital silence after it; beats every 0.5 s (120 bpm) throughout; C-major chroma in the head, A-minor in
@@ -40,16 +86,18 @@ namespace Truedat.Edges
         static string BuildSyntheticFrames(string dir, double durationSec = 240, bool withBeats = true, bool withHpcp = true)
         {
             int ll = (int)Math.Round(durationSec / EdgeFold.LowLevelHop), tn = (int)Math.Round(durationSec / EdgeFold.TonalHop), eb = (int)Math.Round(durationSec / EdgeFold.EbuHop);
-            var momentary = new float[eb]; var shortTerm = new float[eb];
-            for (int i = 0; i < eb; i++)
+            // EBU series as the extractor emits them: trailing windows every 0.1 s, so momentary has eb-3 frames (400 ms window) and
+            // short-term eb-29 (3 s window); frame i's value is the level at the time its window ENDS. (A 60 s track: 597 / 571.)
+            Func<double, double> lufsAt = t =>
             {
-                double t = i * EdgeFold.EbuHop;
-                double lufs = -14;
-                if (t < 6) lufs = -40 + (26.0 * t / 6.0);                   // fade-in: -40 -> -14 over 6 s
-                else if (t >= durationSec - 1) lufs = -90;                     // trailing digital silence (1 s)
-                else if (t >= durationSec - 5) lufs = -14 - 30.0 * (t - (durationSec - 5)) / 4.0;   // fade-out 4 s: -14 -> -44
-                momentary[i] = (float)lufs; shortTerm[i] = (float)lufs;
-            }
+                if (t < 6) return -40 + (26.0 * t / 6.0);                       // fade-in: -40 -> -14 over 6 s
+                if (t >= durationSec - 1) return -90;                           // trailing digital silence (1 s)
+                if (t >= durationSec - 5) return -14 - 30.0 * (t - (durationSec - 5)) / 4.0;   // fade-out 4 s: -14 -> -44
+                return -14;
+            };
+            var momentary = new float[Math.Max(0, eb - 3)]; var shortTerm = new float[Math.Max(0, eb - 29)];
+            for (int i = 0; i < momentary.Length; i++) momentary[i] = (float)lufsAt(EdgeFold.EbuTimeOf(momentary.Length, durationSec, i));
+            for (int i = 0; i < shortTerm.Length; i++) shortTerm[i] = (float)lufsAt(EdgeFold.EbuTimeOf(shortTerm.Length, durationSec, i));
             var hpcp = new float[tn * 36];
             for (int i = 0; i < tn; i++)
             {
@@ -70,8 +118,8 @@ namespace Truedat.Edges
 
             var descs = new List<(string, EspbType, uint, uint, uint, byte[])>
             {
-                ("lowlevel.loudness_ebu128.momentary", EspbType.F32Vector, 0u, (uint)eb, 1u, F32(momentary)),
-                ("lowlevel.loudness_ebu128.short_term", EspbType.F32Vector, 0u, (uint)eb, 1u, F32(shortTerm)),
+                ("lowlevel.loudness_ebu128.momentary", EspbType.F32Vector, 0u, (uint)momentary.Length, 1u, F32(momentary)),
+                ("lowlevel.loudness_ebu128.short_term", EspbType.F32Vector, 0u, (uint)shortTerm.Length, 1u, F32(shortTerm)),
                 ("lowlevel.loudness_ebu128.integrated", EspbType.F32Scalar, 1u, 1u, 1u, F32(-15f)),
                 ("lowlevel.mfcc", EspbType.F32Matrix, 0u, (uint)ll, 13u, F32(mfcc)),
                 ("metadata.audio_properties.length", EspbType.F32Scalar, 1u, 1u, 1u, F32((float)durationSec)),
@@ -98,8 +146,11 @@ namespace Truedat.Edges
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir))) r = EdgeFold.Fold(f, 240, settings);
                 var h = r.Head; var t = r.Tail;
                 assert(h.Status == "ok" && t.Status == "ok" && h.StartMs == 0 && h.EndMs == 30000 && t.StartMs == 210000 && t.EndMs == 240000, $"a 240 s track has two full 30 s edges, status ok ({h.Status} {h.StartMs}-{h.EndMs}; {t.Status} {t.StartMs}-{t.EndMs})");
-                assert(h.MomentaryCentiDb.Length == 300 && h.ShortTermCentiDb.Length == 300 && h.MomentaryCentiDb[299] == -1400 && h.MomentaryCentiDb[0] == -4000,
-                    $"the EBU pair is stored at 10/s as int16 centi-dB: 300 values, first -4000, last -1400 ({h.MomentaryCentiDb.Length}, {h.MomentaryCentiDb[0]}, {h.MomentaryCentiDb[h.MomentaryCentiDb.Length - 1]})");
+                assert(h.MomentaryCentiDb.Length == 300 && h.ShortTermCentiDb.Length == 300 && h.MomentaryCentiDb[299] == -1400 && h.MomentaryCentiDb[3] == -3827
+                    && h.MomentaryCentiDb[0] == short.MinValue && h.MomentaryCentiDb[2] == short.MinValue && h.ShortTermCentiDb[28] == short.MinValue && h.ShortTermCentiDb[29] != short.MinValue,
+                    $"the EBU pair is stored at 10/s as int16 centi-dB: 300 values; bins before the first full window are undefined (3 momentary, 29 short-term), then -3827 at 0.4 s, -1400 at 30 s ({h.MomentaryCentiDb.Length}, [0]={h.MomentaryCentiDb[0]}, [3]={h.MomentaryCentiDb[3]}, [299]={h.MomentaryCentiDb[299]}, st[28]={h.ShortTermCentiDb[28]}, st[29]={h.ShortTermCentiDb[29]})");
+                assert(t.MomentaryCentiDb.Length == 300 && t.MomentaryCentiDb[299] == -9000 && t.ShortTermCentiDb[299] == -9000 && t.MomentaryCentiDb[0] == -1400 && CountUndefined(t.MomentaryCentiDb) == 0 && CountUndefined(t.ShortTermCentiDb) == 0,
+                    $"the tail's series are fully defined and end on the window that ends at the track end: -1400 first, -9000 last ([0]={t.MomentaryCentiDb[0]}, [299]={t.MomentaryCentiDb[299]}, undefined {CountUndefined(t.MomentaryCentiDb)}/{CountUndefined(t.ShortTermCentiDb)})");
                 assert(h.BeatsMs.Length == 60 && h.BeatsMs[0] == 250 && h.BeatsMs[59] == 29750 && h.BeatsLoudness.Length == 60 && t.BeatsMs.Length == 60 && t.BeatsMs[0] == 210250,
                     $"beats inside each window, as ms from the track start ({h.BeatsMs.Length} head, first {(h.BeatsMs.Length > 0 ? h.BeatsMs[0] : -1)}; {t.BeatsMs.Length} tail)");
                 assert(h.Bpm != null && Math.Abs(h.Bpm.Value - 120) < 0.01 && h.Bpm.Beats == 60 && h.Bpm.Regularity > 0.99, $"bpm from in-window intervals: 120, 60 beats, regularity ~1 ({h.Bpm?.Value:F2}, {h.Bpm?.Beats}, {h.Bpm?.Regularity:F3})");
@@ -110,10 +161,13 @@ namespace Truedat.Edges
                     $"MFCC mean and spread over the window ({h.Whole.MfccMean[0]:F1}, spread {h.Whole.MfccSpread[0]:E1})");
                 assert(h.Whole.SpectralMean.Length == 11 && Math.Abs(h.Whole.SpectralMean[0] - 100) < 1e-3 && Math.Abs(t.Whole!.SpectralMean[10] - 2200) < 1e-3 && h.Whole.SpectralSpread[3] < 1e-6,
                     $"the 11 spectral scalars in the declared order, mean and spread ({h.Whole.SpectralMean[0]:F1}, {t.Whole!.SpectralMean[10]:F1})");
-                assert(h.Loudness != null && h.Loudness.StartLufs < -35 && Math.Abs(h.Loudness.EndLufs!.Value - (-14)) < 0.01 && h.Loudness.FadeMs == 6000 && h.Loudness.SilenceMs == 0 && h.Loudness.SilenceSource == "ebu",
-                    $"head loudness: start ~-39, end -14, a 6 s fade-in, no silence, source ebu ({h.Loudness?.StartLufs:F1}, {h.Loudness?.EndLufs:F1}, fade {h.Loudness?.FadeMs}, silence {h.Loudness?.SilenceMs})");
-                assert(t.Loudness != null && Math.Abs(t.Loudness.StartLufs!.Value - (-14)) < 0.01 && t.Loudness.EndLufs < -80 && t.Loudness.FadeMs == 4000 && t.Loudness.SilenceMs == 1000,
-                    $"tail loudness: start -14, end silent, a 4 s fade-out, 1,000 ms of trailing silence ({t.Loudness?.StartLufs:F1}, {t.Loudness?.EndLufs:F1}, fade {t.Loudness?.FadeMs}, silence {t.Loudness?.SilenceMs})");
+                // Fade and silence are quantised to the 0.1 s window grid and the fade is "departure from the plateau by 1 LU", so a
+                // 6 s linear ramp reads 5,800 ms (it reaches -15 at 5.77 s) and the 4 s ramp 3,900 ms; the digital silence from
+                // 239 s is the 11 windows ending in [239, 240].
+                assert(h.Loudness != null && h.Loudness.StartLufs < -35 && Math.Abs(h.Loudness.EndLufs!.Value - (-14)) < 0.01 && h.Loudness.FadeMs.HasValue && Math.Abs(h.Loudness.FadeMs.Value - 6000) <= 300 && h.Loudness.SilenceMs == 0 && h.Loudness.SilenceSource == "ebu",
+                    $"head loudness: start ~-36, end -14, a ~6 s fade-in, no silence, source ebu ({h.Loudness?.StartLufs:F1}, {h.Loudness?.EndLufs:F1}, fade {h.Loudness?.FadeMs}, silence {h.Loudness?.SilenceMs})");
+                assert(t.Loudness != null && Math.Abs(t.Loudness.StartLufs!.Value - (-14)) < 0.01 && t.Loudness.EndLufs < -80 && t.Loudness.FadeMs.HasValue && Math.Abs(t.Loudness.FadeMs.Value - 4000) <= 300 && t.Loudness.SilenceMs >= 1000 && t.Loudness.SilenceMs <= 1100,
+                    $"tail loudness: start -14, end silent, a ~4 s fade-out, ~1,000 ms of trailing silence ({t.Loudness?.StartLufs:F1}, {t.Loudness?.EndLufs:F1}, fade {t.Loudness?.FadeMs}, silence {t.Loudness?.SilenceMs})");
                 assert(h.Divergence != null && h.Divergence.Loudness.HasValue && h.Divergence.Texture.HasValue && h.Divergence.Harmony.HasValue
                     && r.HeadTail != null && r.HeadTail.Harmony > 0.3 && r.HeadTail.Texture > 0 && r.HeadTail.Loudness < 0.5,
                     $"divergence per edge vs the whole and head vs tail (head-tail harmony {r.HeadTail?.Harmony:F2}, texture {r.HeadTail?.Texture:F2}, loudness {r.HeadTail?.Loudness:F2})");
