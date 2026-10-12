@@ -343,6 +343,50 @@ namespace Truedat.Store
         /// <summary>Row count of a schema table. Internal callers only — the name is interpolated.</summary>
         internal long Count(string table) => Row($"SELECT count(*) FROM \"{table}\";", s => s.GetInt64(0), 0L);
 
+        // ---------------------------------------------------------------- segments and values (S2 C4, the edges producer)
+        internal void EnsureProducer(string key, string version, string kind, bool needsAudio)
+            => Exec("INSERT INTO producer(key, version, kind, needs_audio) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET version = excluded.version;", key, version, kind, needsAudio ? 1L : 0L);
+        internal string? ProducerVersion(string key) => Row("SELECT version FROM producer WHERE key = ?;", s => s.GetString(0), null, key);
+
+        internal long UpsertSegment(string contentHash, string contentHashKind, string setKey, string kind, int ordinal, int startMs, int endMs)
+        {
+            Exec("INSERT INTO segment(content_hash, content_hash_kind, set_key, kind, ordinal, start_ms, end_ms) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+                 "ON CONFLICT(content_hash, set_key, kind, ordinal) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms;",
+                 contentHash, contentHashKind, setKey, kind, (long)ordinal, (long)startMs, (long)endMs);
+            return Row("SELECT id FROM segment WHERE content_hash = ? AND set_key = ? AND kind = ? AND ordinal = ?;", s => s.GetInt64(0), 0L, contentHash, setKey, kind, (long)ordinal);
+        }
+
+        internal IEnumerable<(long Id, string Kind, int Ordinal, int StartMs, int EndMs)> ReadSegments(string contentHash, string setKey)
+        {
+            using var st = Db.Prepare("SELECT id, kind, ordinal, start_ms, end_ms FROM segment WHERE content_hash = ? AND set_key = ? ORDER BY kind, ordinal;");
+            st.Bind(1, contentHash); st.Bind(2, setKey);
+            while (st.Step()) yield return (st.GetInt64(0), st.GetString(1)!, (int)st.GetInt64(2), (int)st.GetInt64(3), (int)st.GetInt64(4));
+        }
+
+        internal void UpsertValue(string contentHash, string contentHashKind, long segmentId, string field, string producerKey, string producerVersion, long? runId,
+            double? num, string? txt, byte[]? vec, long? dims, string? unit)
+            => Exec("INSERT INTO value(content_hash, content_hash_kind, segment_id, field, producer_key, producer_version, run_id, num, txt, vec, dims, unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                    "ON CONFLICT(content_hash, segment_id, field, producer_key, producer_version) DO UPDATE SET run_id = excluded.run_id, num = excluded.num, txt = excluded.txt, vec = excluded.vec, dims = excluded.dims, unit = excluded.unit;",
+                    contentHash, contentHashKind, segmentId, field, producerKey, producerVersion, runId, num, txt, vec, dims, unit);
+
+        internal sealed class StoredValue { public double? Num; public string? Txt; public byte[]? Vec; public long? Dims; public string? Unit; }
+
+        internal Dictionary<string, StoredValue> ReadValues(string contentHash, long segmentId, string producerKey, string producerVersion)
+        {
+            var d = new Dictionary<string, StoredValue>(StringComparer.Ordinal);
+            using var st = Db.Prepare("SELECT field, num, txt, vec, dims, unit FROM value WHERE content_hash = ? AND segment_id = ? AND producer_key = ? AND producer_version = ?;");
+            st.Bind(1, contentHash); st.Bind(2, segmentId); st.Bind(3, producerKey); st.Bind(4, producerVersion);
+            while (st.Step())
+                d[st.GetString(0)!] = new StoredValue { Num = st.IsNull(1) ? (double?)null : st.GetDouble(1), Txt = st.GetString(2), Vec = st.GetBlob(3), Dims = st.IsNull(4) ? (long?)null : st.GetInt64(4), Unit = st.GetString(5) };
+            return d;
+        }
+
+        internal long CountSegments(string contentHash, string setKey) => Row("SELECT count(*) FROM segment WHERE content_hash = ? AND set_key = ?;", s => s.GetInt64(0), 0L, contentHash, setKey);
+        internal long CountValues(string contentHash, string producerKey, string producerVersion)
+            => Row("SELECT count(*) FROM value WHERE content_hash = ? AND producer_key = ? AND producer_version = ?;", s => s.GetInt64(0), 0L, contentHash, producerKey, producerVersion);
+        internal long SumVecBytes(string contentHash, string producerKey, string producerVersion)
+            => Row("SELECT coalesce(sum(length(vec)), 0) FROM value WHERE content_hash = ? AND producer_key = ? AND producer_version = ?;", s => s.GetInt64(0), 0L, contentHash, producerKey, producerVersion);
+
         public void Dispose()
         {
             foreach (var st in _stmts.Values) st.Dispose();

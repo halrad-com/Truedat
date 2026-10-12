@@ -32,6 +32,9 @@ namespace Truedat.Edges
 
     internal sealed class EdgeDivergence { public double? Loudness, Texture, Harmony; }
 
+    /// <summary>RMS option D from the PCM pass; null on the edge when the pass did not run.</summary>
+    internal sealed class EdgeRms { public double? CrestDb; public int TransitionMs; }
+
     /// <summary>One edge of the ruled 6 KB row: status word, window, the stored series (EBU pair as centi-dB, beats), the
     /// summaries over the edge and its three sub-windows, and the hub-facing scalars.</summary>
     internal sealed class EdgeRow
@@ -48,6 +51,7 @@ namespace Truedat.Edges
         public EdgeBpm? Bpm;
         public EdgeLoudness? Loudness;
         public EdgeDivergence? Divergence;       // this edge vs the whole track
+        public EdgeRms? Rms;                     // the PCM pass (null without ffmpeg)
         public string? Error;
     }
 
@@ -57,6 +61,9 @@ namespace Truedat.Edges
         public EdgeDivergence? HeadTail;         // head vs tail
         public int DurationMs;
         public string ProducerVersion = "";
+        public long FoldMs, PcmMs;               // the per-component stopwatch on the run row
+        /// <summary>The whole-track word: ok when both edges folded (either status), unavailable under the floor, failed otherwise.</summary>
+        public string Status => Head.Status == "failed" || Tail.Status == "failed" ? "failed" : Head.Status == "unavailable" ? "unavailable" : "ok";
     }
 
     /// <summary>S2 C4 — folds a frames file into the ruled row. Time-addressed only (constraint 1): low-level frames at
@@ -135,6 +142,15 @@ namespace Truedat.Edges
             if (r.Head.Whole != null && r.Tail.Whole != null)
                 r.HeadTail = Diverge(r.Head.Whole.MfccMean, r.Tail.Whole.MfccMean, r.Head.Whole.HpcpMean, r.Tail.Whole.HpcpMean, r.Head.Loudness?.MeanLufs, r.Tail.Loudness?.MeanLufs);
             return r;
+        }
+
+        /// <summary>The PCM pass replaces the EBU silence run (source 'pcm') and adds the rms block; a null pass leaves the
+        /// EBU answer standing, tagged 'ebu', and rms null — never a substitute.</summary>
+        internal static void ApplyPcm(EdgeRow row, EdgePcmResult? pcm)
+        {
+            if (pcm == null || row.Loudness == null) return;
+            row.Loudness.SilenceMs = pcm.SilenceMs; row.Loudness.SilenceSource = "pcm";
+            row.Rms = new EdgeRms { CrestDb = pcm.CrestDb, TransitionMs = pcm.TransitionMs };
         }
 
         static Inputs Load(EspbFile f, List<string> missing)

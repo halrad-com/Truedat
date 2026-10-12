@@ -23,6 +23,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the PCM pass — 100 ms slices to crest, transition and silence)");
             try { TestPcm(assert); }
             catch (Exception ex) { assert(false, $"Pcm: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (S2 C4: the ruled row in the store — segments, values, idempotent, versions coexist)");
+            try { TestStore(assert); }
+            catch (Exception ex) { assert(false, $"Store: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -37,6 +40,132 @@ namespace Truedat.Edges
             var id = Program.ExtractorBuildId(exe);
             assert(id == "output-x64.5", $"the .5 exe resolves to output-x64.5 (got {id})");
             assert(string.Equals(Program.LatestExtractorMd5, "6f47bdfcaadfd4f510c5e1621c07945d", StringComparison.OrdinalIgnoreCase), $"the latest known extractor is .5 (got {Program.LatestExtractorMd5})");
+        }
+
+        // ---------------------------------------------------------------- the store rows
+        const string Sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string ShaKind = "content_hash:audio-stream-sha256";
+
+        static EdgeFoldResult SyntheticFold(string dir, double duration = 240, bool withPcm = true)
+        {
+            EdgeFoldResult r;
+            using (var f = EspbFile.Open(BuildSyntheticFrames(dir, duration))) r = EdgeFold.Fold(f, duration, new EdgeSettings());
+            if (withPcm && r.Status == "ok")
+            {
+                EdgeFold.ApplyPcm(r.Head, new EdgePcmResult { CrestDb = 4.25, TransitionMs = 300, SilenceMs = 0, Slices = 300 });
+                EdgeFold.ApplyPcm(r.Tail, new EdgePcmResult { CrestDb = 3.61, TransitionMs = 0, SilenceMs = 1100, Slices = 300 });
+            }
+            r.FoldMs = 7; r.PcmMs = 210;
+            return r;
+        }
+
+        static void TestStore(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "edgestore-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                var now = DateTime.UtcNow.ToString("o");
+                using var os = Truedat.Store.OpenStore.Open(System.IO.Path.Combine(dir, "truedat.db"), true, VersionInfo.Display, now);
+                var dal = os.Dal;
+                // ApplyPcm: the PCM answer replaces the EBU silence run and adds rms; a null pass leaves 'ebu' standing.
+                var r = SyntheticFold(dir, withPcm: false);
+                assert(r.Tail.Loudness!.SilenceSource == "ebu" && r.Tail.Rms == null, "before the PCM pass: silence from EBU, rms null");
+                EdgeFold.ApplyPcm(r.Tail, null);
+                assert(r.Tail.Loudness.SilenceSource == "ebu" && r.Tail.Rms == null, "a null PCM pass changes nothing (never a substitute)");
+                r = SyntheticFold(dir);
+                assert(r.Tail.Loudness!.SilenceSource == "pcm" && r.Tail.Loudness.SilenceMs == 1100 && r.Tail.Rms != null && r.Tail.Rms.CrestDb == 3.61 && r.Tail.Rms.TransitionMs == 0,
+                    $"ApplyPcm: silence 1,100 ms from 'pcm', rms crest 3.61 / transition 0 ({r.Tail.Loudness.SilenceSource}, {r.Tail.Loudness.SilenceMs}, {r.Tail.Rms?.CrestDb})");
+                assert(r.Status == "ok", $"whole-track status ok ({r.Status})");
+
+                // Write + read back.
+                int values;
+                using (var tx = os.Db.BeginTransaction()) { values = EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
+                long segs = dal.CountSegments(Sha1, r.ProducerVersion), vrows = dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion); long vecBytes = dal.SumVecBytes(Sha1, EdgeStore.ProducerKey, r.ProducerVersion);
+                assert(segs == 2, $"2 segment rows: head and tail; the sub-windows ride inside the edge row ({segs})");
+                assert(values == vrows && vrows == 5, $"one packed row per edge plus three whole-track rows: 5 value rows ({vrows} rows, {values} written)");
+                assert(vecBytes >= 5000 && vecBytes <= 7500, $"the packed rows are the plan's payload: per edge EBU pair 1.2 KB + beats 0.4 KB + four summaries 1.4 KB -> ~6 KB per track ({vecBytes} bytes)");
+                var back = EdgeStore.Read(dal, Sha1, r.ProducerVersion);
+                assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.ProducerVersion == r.ProducerVersion, $"read back: status, duration, version ({back?.Status}, {back?.DurationMs})");
+                assert(back != null && back.Head.StartMs == 0 && back.Head.EndMs == 30000 && back.Tail.StartMs == 210000 && back.Tail.EndMs == 240000 && back.Head.Status == "ok", "read back: the edge windows");
+                assert(back != null && back.Head.MomentaryCentiDb.Length == 300 && back.Head.MomentaryCentiDb[3] == -3827 && back.Head.MomentaryCentiDb[0] == short.MinValue && back.Tail.ShortTermCentiDb[299] == -9000,
+                    $"read back: the EBU pair as int16 centi-dB, undefined bins intact ([3]={back?.Head.MomentaryCentiDb[3]}, [0]={back?.Head.MomentaryCentiDb[0]})");
+                assert(back != null && back.Head.BeatsMs.Length == 60 && back.Head.BeatsMs[0] == 250 && back.Head.BeatsLoudness.Length == 60 && Math.Abs(back.Head.BeatsLoudness[0] - 0.3) < 1e-6, "read back: beats ms and loudness");
+                assert(back != null && back.Head.Bpm != null && Math.Abs(back.Head.Bpm.Value - 120) < 0.01 && back.Head.Bpm.Beats == 60, "read back: bpm");
+                assert(back != null && back.Head.Whole?.Key != null && back.Head.Whole.Key.Name == "C" && back.Head.Whole.Key.Scale == "major" && back.Head.Whole.Key.Code == "8B" && back.Head.Whole.Key.Agreement == r.Head.Whole!.Key!.Agreement,
+                    $"read back: the key vote ({back?.Head.Whole?.Key?.Name} {back?.Head.Whole?.Key?.Scale} {back?.Head.Whole?.Key?.Code})");
+                assert(back != null && back.Head.Sub.Length == 3 && back.Head.Sub[2].StartMs == 20000 && back.Head.Sub[1].Key?.Name == "C" && Math.Abs(back.Head.Sub[1].MfccMean[12] - (-380)) < 1e-3,
+                    "read back: three sub-windows with their own summaries");
+                assert(back != null && Math.Abs(back.Head.Whole.HpcpMean[9] - r.Head.Whole.HpcpMean[9]) < 1e-6 && Math.Abs(back.Head.Whole.SpectralMean[10] - 1100) < 1e-3 && back.Head.Whole.MfccSpread[0] == 0,
+                    "read back: hpcp mean, spectral means, spreads");
+                // Scalars are stored as float32: equal to ~1e-6 relative, so compare with a tolerance, never ==.
+                assert(back != null && back.Tail.Loudness != null && back.Tail.Loudness.SilenceMs == 1100 && back.Tail.Loudness.SilenceSource == "pcm" && back.Tail.Loudness.FadeMs == r.Tail.Loudness!.FadeMs
+                    && Math.Abs(back.Tail.Loudness.MeanLufs!.Value - r.Tail.Loudness.MeanLufs!.Value) < 1e-4 && back.Tail.Rms != null && Math.Abs(back.Tail.Rms.CrestDb!.Value - 3.61) < 1e-5,
+                    $"read back: loudness scalars, silence source, rms ({back?.Tail.Loudness?.SilenceMs} {back?.Tail.Loudness?.SilenceSource} fade {back?.Tail.Loudness?.FadeMs} vs {r.Tail.Loudness!.FadeMs}; mean {back?.Tail.Loudness?.MeanLufs} vs {r.Tail.Loudness.MeanLufs}; crest {back?.Tail.Rms?.CrestDb})");
+                assert(back != null && back.HeadTail != null && Math.Abs(back.HeadTail.Harmony!.Value - r.HeadTail!.Harmony!.Value) < 1e-5 && back.Head.Divergence != null && Math.Abs(back.Head.Divergence.Texture!.Value - r.Head.Divergence!.Texture!.Value) < 1e-5,
+                    "read back: divergences");
+
+                // Idempotent: the same version rewrites itself; a different version coexists.
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
+                assert(dal.CountSegments(Sha1, r.ProducerVersion) == 2 && dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion) == vrows, "a second write of the same version adds no rows");
+                var r2 = SyntheticFold(dir); r2.ProducerVersion = "edges@v1;e20;p10";
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r2); tx.Complete(); }
+                assert(dal.CountSegments(Sha1, r2.ProducerVersion) == 2 && dal.CountSegments(Sha1, r.ProducerVersion) == 2 && EdgeStore.Read(dal, Sha1, r.ProducerVersion)?.Head.MomentaryCentiDb.Length == 300,
+                    "a different producer version coexists: its own 2 segments, the first version's rows untouched");
+                assert(EdgeStore.Read(dal, Sha1, "edges@v9;e30;p10") == null, "an unknown version reads as null");
+
+                // Unavailable: no edge rows, the whole-track word only. Failed: nothing at all.
+                const string Sha2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+                var shortR = SyntheticFold(dir, 15);
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha2, ShaKind, null, shortR); tx.Complete(); }
+                var backShort = EdgeStore.Read(dal, Sha2, shortR.ProducerVersion);
+                assert(dal.CountSegments(Sha2, shortR.ProducerVersion) == 0 && backShort != null && backShort.Status == "unavailable" && backShort.DurationMs == 15000 && backShort.Head.Status == "unavailable",
+                    $"unavailable: no segment rows, the whole-track word reads back ({backShort?.Status})");
+                const string Sha3 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+                EdgeFoldResult failed;
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, withHpcp: false))) failed = EdgeFold.Fold(f, 240, new EdgeSettings());
+                int wrote; using (var tx = os.Db.BeginTransaction()) { wrote = EdgeStore.Write(dal, Sha3, ShaKind, null, failed); tx.Complete(); }
+                assert(failed.Status == "failed" && wrote == 0 && dal.CountSegments(Sha3, failed.ProducerVersion) == 0 && dal.CountValues(Sha3, EdgeStore.ProducerKey, failed.ProducerVersion) == 0 && EdgeStore.Read(dal, Sha3, failed.ProducerVersion) == null,
+                    "failed: no partial row lands — nothing written, nothing to read");
+                assert(dal.ProducerVersion(EdgeStore.ProducerKey) == shortR.ProducerVersion, $"the producer row names the version last written ({dal.ProducerVersion(EdgeStore.ProducerKey)})");
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+
+            // The real budget is file bytes per track, not vector bytes: every value row repeats the content hash, the field
+            // name and the producer version in the row AND in its primary-key index. Measured over 20 distinct tracks in a
+            // fresh store (vacuumed), printed, and held to the plan's ceiling (the ruled row: ~6.6 KB/track at 72k = 0.48 GB).
+            var dir2 = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "edgesize-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir2);
+            try
+            {
+                var now = DateTime.UtcNow.ToString("o");
+                var dbPath = System.IO.Path.Combine(dir2, "truedat.db");
+                long before, after, vecBytes;
+                using (var os = Truedat.Store.OpenStore.Open(dbPath, true, VersionInfo.Display, now))
+                {
+                    os.Db.Exec("VACUUM;"); before = LogicalBytes(os.Db);
+                    var r = SyntheticFold(dir2);
+                    using (var tx = os.Db.BeginTransaction())
+                    {
+                        for (int i = 0; i < 20; i++) EdgeStore.Write(os.Dal, i.ToString("x2") + Sha1.Substring(2), ShaKind, null, r);
+                        tx.Complete();
+                    }
+                    vecBytes = os.Dal.SumVecBytes("00" + Sha1.Substring(2), EdgeStore.ProducerKey, r.ProducerVersion);
+                    os.Dal.ResetAll(); os.Db.Exec("VACUUM;"); after = LogicalBytes(os.Db);
+                }
+                long perTrack = (after - before) / 20;
+                Console.WriteLine($"        store bytes per track with edges: {perTrack:N0} (20 tracks, vacuumed, page_count x page_size; vector payload {vecBytes:N0}/track)");
+                assert(perTrack > 0 && perTrack <= 10000, $"the ruled row costs under 10 KB/track in the store, payload included ({perTrack:N0} bytes/track; plan ~6,600; per-field rows measured 43,417)");
+            }
+            finally { try { System.IO.Directory.Delete(dir2, true); } catch { } }
+        }
+
+        static long LogicalBytes(Truedat.Store.SqliteDb db)
+        {
+            long pages, size;
+            using (var st = db.Prepare("PRAGMA page_count;")) { st.Step(); pages = st.GetInt64(0); }
+            using (var st = db.Prepare("PRAGMA page_size;")) { st.Step(); size = st.GetInt64(0); }
+            return pages * size;
         }
 
         // ---------------------------------------------------------------- the PCM pass
