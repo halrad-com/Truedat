@@ -24,6 +24,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   SQLite (`winsqlite3.dll`, 3.40+, checked at open with a plain refusal when missing); nothing is
   installed or shipped. `mbxmoods.json` stays what MBXHub reads; every existing mode is unchanged;
   the store path is always explicit.
+- **Schema v2: one audio description per media.** `track_feature` (one wide row per location) is split
+  into `track_content` (every Essentia descriptor, bitUsage, HF, the content hash — once per media) and
+  `track_copy` (tags, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` — once per location). A v1
+  store migrates on first open; the first-imported copy's description wins, differences within the
+  extractor's run-to-run noise are counted and differences beyond it become queryable `conflict` rows
+  (`field`, `value_a`, `value_b`). On a 72,477-track catalog: 787 extra copies of duplicate audio, 559
+  within noise, 32 beyond (128 conflicts, led by one genuine sha collision). `--store-roundtrip` reports
+  merged copies apart from unexplained differences and stays EQUAL for every single-copy entry.
+  `value` gains `segment_id`; `conflict` gains `field`, `run_a`/`run_b`, `value_a`/`value_b`.
 - **The store has a home.** `truedat.db` beside `mbxmoods.json`, found by the same resolver as the
   catalog, so the store verbs need no `--store`; bare `--store` on `--stats` / `--duplicates` means that
   default. The file is always local: a catalog on a network share gets a local per-library store under

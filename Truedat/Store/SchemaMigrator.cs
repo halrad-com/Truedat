@@ -14,10 +14,11 @@ namespace Truedat.Store
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>
     internal static class StoreSchema
     {
-        internal const int CurrentVersion = 1;
+        internal const int CurrentVersion = 2;
 
-        /// <summary>Columns of track_feature that are not catalog JSON keys.</summary>
-        internal static readonly string[] TrackFeatureMetaColumns = { "location_id", "content_key", "content_key_kind", "imported_run_id", "updated_utc" };
+        /// <summary>Columns of track_content / track_copy that are not catalog JSON keys (v2 split).</summary>
+        internal static readonly string[] TrackContentMetaColumns = { "entity_id", "content_key", "content_key_kind", "run_id", "updated_utc" };
+        internal static readonly string[] TrackCopyMetaColumns = { "location_id", "run_id", "updated_utc" };
 
         /// <summary>The one flattening rule: nested blocks join with '_', and '.' in a key becomes '_'
         /// (<c>fingerprint.v1</c> → <c>fingerprint_v1</c>). Used by the drift test and the mapper so they
@@ -39,14 +40,17 @@ namespace Truedat.Store
             return string.IsNullOrEmpty(v) ? 0 : int.Parse(v!);
         }
 
-        internal static void Apply(SqliteDb db, string truedatVersion)
+        /// <summary><paramref name="targetVersion"/> is a test seam (build an older store to migrate from); production
+        /// callers leave it null and always reach <see cref="StoreSchema.CurrentVersion"/>.</summary>
+        internal static void Apply(SqliteDb db, string truedatVersion, int? targetVersion = null)
         {
+            int target = targetVersion ?? StoreSchema.CurrentVersion;
             int current = ReadVersion(db);
             if (current > StoreSchema.CurrentVersion)
                 throw new StoreException(
                     $"The store {db.Path} is at schema version {current}, which is newer than this truedat understands " +
                     $"(schema {StoreSchema.CurrentVersion}). Use the truedat that created it, or newer. Nothing was changed.");
-            if (current == StoreSchema.CurrentVersion)
+            if (current >= target)
             {
                 StoreLog.Debug($"schema at v{current}, nothing to apply");
                 return;
@@ -54,10 +58,11 @@ namespace Truedat.Store
 
             using (var tx = db.BeginTransaction())
             {
-                for (int v = current + 1; v <= StoreSchema.CurrentVersion; v++)
+                for (int v = current + 1; v <= target; v++)
                 {
                     StoreLog.Info($"applying schema v{v} to {db.Path}");
                     db.Exec(LoadScript(v));
+                    SchemaV2Migration.RunDataStep(db, v);
                     using (var st = db.Prepare("INSERT INTO schema_version(version, applied_utc, truedat_version) VALUES (?, ?, ?);"))
                     {
                         st.Bind(1, (long)v).Bind(2, DateTime.UtcNow.ToString("o")).Bind(3, truedatVersion);

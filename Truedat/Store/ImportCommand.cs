@@ -242,7 +242,7 @@ namespace Truedat.Store
 
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            dal.UpsertFeature(loc, contentKey, sha != null ? kind : "entity", importRun, entry, now);
+            dal.UpsertFeature(loc, res.EntityId, contentKey, sha != null ? kind : "entity", importRun, entry, now);
         }
 
         static void ImportLedgers(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string dir, string now, ImportReport r)

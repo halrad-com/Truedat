@@ -13,8 +13,9 @@ namespace Truedat.Store
         public List<(string Path, string Role)> Roots = new List<(string, string)>();
         public Dictionary<string, long> Counts = new Dictionary<string, long>(StringComparer.Ordinal);
         public long FileBytes, WalBytes, PageCount, PageSize, FreePages;
-        public long Tracks;                       // distinct entities holding a feature row (a mirror does not double it)
-        public long FeatureRows;                  // track_feature rows (per location — a mirror does double this)
+        public long Tracks;                       // descriptions: track_content rows, one per media (a mirror does not add any)
+        public long FeatureRows;                  // copies: track_copy rows, one per location (a mirror does add these)
+        public long SplitConflicts;               // content-disagree-at-split conflicts recorded by the v1→v2 migration
         public double BytesPerTrack;              // FileBytes / Tracks
         public long ProjectedBytesAt156k;         // BytesPerTrack * 156000
         public double? MedianRtf;                 // analysisDuration / (durationMs/1000), median over rows with both
@@ -38,15 +39,16 @@ namespace Truedat.Store
 
         static readonly string[] Tables =
         {
-            "machine", "library_root", "file_entity", "identity_facet", "track_location", "track_feature",
+            "machine", "library_root", "file_entity", "identity_facet", "track_location", "track_content", "track_copy",
             "producer", "run", "work_item", "check_result", "conflict", "value", "segment", "artifact",
         };
 
-        static readonly (string Key, string Column)[] CoverageColumns =
+        // v2: content columns count per media (track_content); copy facts count per location (track_copy).
+        static readonly (string Key, string Table, string Column)[] CoverageColumns =
         {
-            ("audioStreamSha256", "audioStreamSha256"), ("fingerprint.v1", "fingerprint_v1_fileSize"),
-            ("loudnessMomentary", "loudnessMomentary"), ("averageLoudness", "averageLoudness"), ("dynamicComplexity", "dynamicComplexity"),
-            ("hpcp12", "hpcp12"), ("bitUsage", "bitUsage_lowestNonZeroBit"), ("hfEnergyRatio", "hfEnergyRatio"), ("smfmScores", "smfmScores"),
+            ("audioStreamSha256", "track_content", "audioStreamSha256"), ("fingerprint.v1", "track_copy", "fingerprint_v1_fileSize"),
+            ("loudnessMomentary", "track_content", "loudnessMomentary"), ("averageLoudness", "track_content", "averageLoudness"), ("dynamicComplexity", "track_content", "dynamicComplexity"),
+            ("hpcp12", "track_content", "hpcp12"), ("bitUsage", "track_content", "bitUsage_lowestNonZeroBit"), ("hfEnergyRatio", "track_content", "hfEnergyRatio"), ("smfmScores", "track_copy", "smfmScores"),
         };
 
         internal static int Run(string? storePath, bool audit)
@@ -59,14 +61,14 @@ namespace Truedat.Store
                 Console.WriteLine($"  schema v{i.SchemaVersion}, sqlite {i.SqliteVersion}, machine {i.MachineId} (created on {i.CreatedByHost})");
                 Console.WriteLine($"  roots: {string.Join(", ", i.Roots.Select(r => $"{r.Path} ({r.Role})"))}");
                 Console.WriteLine($"  size: {i.FileBytes:N0} bytes = {i.PageCount:N0} pages × {i.PageSize} ({i.FreePages:N0} free)" + (i.WalBytes > 0 ? $" + wal {i.WalBytes:N0}" : ""));
-                Console.WriteLine($"  tracks: {i.Tracks:N0} (distinct), feature rows: {i.FeatureRows:N0} (per location)  →  {i.BytesPerTrack:N0} bytes/track; projected at 156k tracks: {i.ProjectedBytesAt156k / (1024.0 * 1024):N0} MB");
+                Console.WriteLine($"  descriptions: {i.Tracks:N0} (one per media), copies: {i.FeatureRows:N0} (one per location)  →  {i.BytesPerTrack:N0} bytes/track; projected at 156k tracks: {i.ProjectedBytesAt156k / (1024.0 * 1024):N0} MB");
                 Console.WriteLine("  rows: " + string.Join(", ", Tables.Select(t => $"{t} {i.Counts[t]:N0}")));
                 Console.WriteLine(i.MedianRtf.HasValue ? $"  analysis speed: median {i.MedianRtf:F1}× realtime over {i.RtfSamples:N0} tracks" : "  analysis speed: no analysisDuration data");
                 Console.WriteLine("  coverage: " + string.Join(", ", CoverageColumns.Select(c => $"{c.Key} {i.Coverage[c.Key]:N0}")));
                 Console.WriteLine(i.FailedComponents.Count > 0
                     ? "  failed components: " + string.Join(", ", i.FailedComponents.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value:N0}"))
                     : "  failed components: none recorded");
-                Console.WriteLine($"  content shared by several locations: {i.ContentKeysShared:N0} keys over {i.LocationsOnSharedKeys:N0} locations; no-sha feature rows: {i.NoShaFeatures:N0}; superseded hashes (key moves): {i.SupersededHashes:N0}");
+                Console.WriteLine($"  descriptions held by several copies: {i.ContentKeysShared:N0} over {i.LocationsOnSharedKeys:N0} locations; no-sha descriptions: {i.NoShaFeatures:N0}; superseded hashes (key moves): {i.SupersededHashes:N0}; split conflicts (v1→v2): {i.SplitConflicts:N0}");
                 var outPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(i.Path) ?? ".", ResultFileName);
                 File.WriteAllText(outPath, ToJson(i).ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 Console.WriteLine($"  written: {outPath}");
@@ -94,15 +96,15 @@ namespace Truedat.Store
             i.PageCount = long.Parse(db.ExecScalar("PRAGMA page_count;") ?? "0");
             i.PageSize = long.Parse(db.ExecScalar("PRAGMA page_size;") ?? "0");
             i.FreePages = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "0");
-            i.FeatureRows = i.Counts["track_feature"];
-            // Tracks = distinct entities holding a feature row: features are stored per location, so a mirror
-            // doubles FeatureRows but not Tracks (review #3).
-            i.Tracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT l.entity_id) FROM track_feature f JOIN track_location l ON l.id = f.location_id;") ?? "0");
+            // v2: FeatureRows = copies (one per location); Tracks = descriptions (one per media). A mirror adds
+            // copies, never descriptions — the operator's 1 : many : 1 made visible.
+            i.FeatureRows = i.Counts["track_copy"];
+            i.Tracks = i.Counts["track_content"];
             i.BytesPerTrack = i.Tracks > 0 ? (double)i.FileBytes / i.Tracks : 0;
             i.ProjectedBytesAt156k = (long)(i.BytesPerTrack * 156_000);
 
             var rtfs = new List<double>();
-            using (var st = db.Prepare("SELECT analysisDuration, fingerprint_v1_durationMs FROM track_feature WHERE analysisDuration IS NOT NULL AND fingerprint_v1_durationMs > 0;"))
+            using (var st = db.Prepare("SELECT analysisDuration, fingerprint_v1_durationMs FROM track_copy WHERE analysisDuration IS NOT NULL AND fingerprint_v1_durationMs > 0;"))
                 while (st.Step())
                 {
                     // Nx realtime = audio seconds per wall second, truedat's throughput convention.
@@ -123,12 +125,14 @@ namespace Truedat.Store
                     }
 
             foreach (var c in CoverageColumns)
-                i.Coverage[c.Key] = long.Parse(db.ExecScalar($"SELECT count(*) FROM track_feature WHERE \"{c.Column}\" IS NOT NULL;") ?? "0");
+                i.Coverage[c.Key] = long.Parse(db.ExecScalar($"SELECT count(*) FROM {c.Table} WHERE \"{c.Column}\" IS NOT NULL;") ?? "0");
 
-            i.ContentKeysShared = long.Parse(db.ExecScalar("SELECT count(*) FROM (SELECT content_key FROM track_feature WHERE content_key_kind != 'entity' GROUP BY content_key HAVING count(*) > 1);") ?? "0");
-            i.LocationsOnSharedKeys = long.Parse(db.ExecScalar("SELECT coalesce(sum(c), 0) FROM (SELECT count(*) AS c FROM track_feature WHERE content_key_kind != 'entity' GROUP BY content_key HAVING count(*) > 1);") ?? "0");
+            // v2: "shared" = descriptions held by more than one copy; the locations figure counts those copies.
+            i.ContentKeysShared = long.Parse(db.ExecScalar("SELECT count(*) FROM (SELECT l.entity_id FROM track_copy p JOIN track_location l ON l.id = p.location_id GROUP BY l.entity_id HAVING count(*) > 1);") ?? "0");
+            i.LocationsOnSharedKeys = long.Parse(db.ExecScalar("SELECT coalesce(sum(c), 0) FROM (SELECT count(*) AS c FROM track_copy p JOIN track_location l ON l.id = p.location_id GROUP BY l.entity_id HAVING count(*) > 1);") ?? "0");
             i.SupersededHashes = long.Parse(db.ExecScalar("SELECT count(*) FROM identity_facet WHERE is_primary = 0 AND substr(kind, 1, 13) = 'content_hash:';") ?? "0");
-            i.NoShaFeatures = long.Parse(db.ExecScalar("SELECT count(*) FROM track_feature WHERE content_key_kind = 'entity';") ?? "0");
+            i.NoShaFeatures = long.Parse(db.ExecScalar("SELECT count(*) FROM track_content WHERE content_key_kind = 'entity';") ?? "0");
+            i.SplitConflicts = long.Parse(db.ExecScalar($"SELECT count(*) FROM conflict WHERE kind = '{SchemaV2Migration.ConflictKind}';") ?? "0");
             return i;
         }
 
@@ -146,7 +150,7 @@ namespace Truedat.Store
                 ["tracks"] = i.Tracks, ["featureRows"] = i.FeatureRows, ["bytesPerTrack"] = Math.Round(i.BytesPerTrack, 1), ["projectedBytesAt156k"] = i.ProjectedBytesAt156k,
                 ["medianRtf"] = i.MedianRtf.HasValue ? Math.Round(i.MedianRtf.Value, 2) : (double?)null, ["rtfSamples"] = i.RtfSamples,
                 ["counts"] = counts, ["failedComponents"] = failed, ["coverage"] = cov,
-                ["contentKeysShared"] = i.ContentKeysShared, ["locationsOnSharedKeys"] = i.LocationsOnSharedKeys,
+                ["contentKeysShared"] = i.ContentKeysShared, ["locationsOnSharedKeys"] = i.LocationsOnSharedKeys, ["splitConflicts"] = i.SplitConflicts,
                 ["supersededHashes"] = i.SupersededHashes, ["noShaFeatures"] = i.NoShaFeatures,
             };
         }

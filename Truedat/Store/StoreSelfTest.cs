@@ -134,7 +134,7 @@ namespace Truedat.Store
                 {
                     assert(db.ExecScalar("PRAGMA page_size;") == SqliteDb.DefaultPageSize.ToString(), "the store reads back at the new page size");
                     assert(string.Equals(db.ExecScalar("PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase), "the store is back in WAL after the vacuum");
-                    assert(db.ExecScalar("SELECT count(*) FROM track_feature;") == entries.Count.ToString(), "every feature row survived the repack");
+                    assert(db.ExecScalar("SELECT count(*) FROM track_copy;") == entries.Count.ToString(), "every copy row survived the repack");
                 }
                 var rt = ExportCommand.Roundtrip(store, catalog, null);
                 assert(rt.Equal && rt.Same == entries.Count, $"round-trip is EQUAL after the repack (same {rt.Same}, different {rt.Different})");
@@ -172,9 +172,9 @@ namespace Truedat.Store
                 ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
 
                 var info = StoreInfoCommand.Collect(store);
-                assert(info.SchemaVersion == 1 && info.SqliteVersion.StartsWith("3.") && info.MachineId.Length == 36, $"schema/sqlite/machine reported ({info.SchemaVersion}, {info.SqliteVersion})");
+                assert(info.SchemaVersion == StoreSchema.CurrentVersion && info.SqliteVersion.StartsWith("3.") && info.MachineId.Length == 36, $"schema/sqlite/machine reported ({info.SchemaVersion}, {info.SqliteVersion})");
                 assert(info.Roots.Count == 1 && info.Roots[0].Path == @"D:\Music" && info.Roots[0].Role == "primary", "roots listed");
-                assert(info.Tracks == 5 && info.FeatureRows == 6 && info.Counts["track_feature"] == 6 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4,
+                assert(info.Tracks == 5 && info.FeatureRows == 6 && info.Counts["track_copy"] == 6 && info.Counts["track_content"] == 5 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4,
                     $"counts: 5 tracks (distinct entities with features; d1/d2 share one), 6 feature rows, 7 entities, runs {info.Counts["run"]} ({info.Tracks}/{info.FeatureRows})");
                 assert(info.FileBytes > 100_000 && info.PageSize == SqliteDb.DefaultPageSize && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size at the default page size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
                 assert(info.BytesPerTrack == (double)info.FileBytes / 5 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track (per distinct track) and the 156k projection derive from the file size");
@@ -439,8 +439,8 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     assert(os.Dal.Count("file_entity") == 7, $"7 entities: 5 from the catalog + the errors path + the skipped path (review shares the errors path) ({os.Dal.Count("file_entity")})");
-                    assert(os.Dal.Count("track_feature") == 6 && os.Dal.Count("track_location") == 8,
-                        $"6 feature rows; 8 locations = 6 catalog entries + the errors path + the skipped path, which are real files too ({os.Dal.Count("track_feature")}/{os.Dal.Count("track_location")})");
+                    assert(os.Dal.Count("track_copy") == 6 && os.Dal.Count("track_content") == 5 && os.Dal.Count("track_location") == 8,
+                        $"6 copy rows, 5 content rows (d1/d2 share a media); 8 locations = 6 catalog entries + the errors path + the skipped path, which are real files too ({os.Dal.Count("track_copy")}/{os.Dal.Count("track_content")}/{os.Dal.Count("track_location")})");
                     assert(os.Dal.Count("run") == 5, $"runs: import + errors + 2 skipped + receipt = 5 ({os.Dal.Count("run")})");
                     assert(os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1 && os.Dal.Count("conflict") == 1, "2 verify checks, 1 review work item, 1 conflict");
                     assert(os.Db.ExecScalar("SELECT review_state FROM work_item;") == "auto" && os.Db.ExecScalar("SELECT attempts FROM work_item;") == _fixtureReviewAttempts.ToString(),
@@ -448,7 +448,7 @@ namespace Truedat.Store
                     assert(os.Db.ExecScalar("SELECT outcome FROM run WHERE producer_key = 'import';") == "ok", "the import's own run is recorded ok");
                     assert(os.Db.ExecScalar("SELECT failed_components FROM run WHERE outcome = 'failed';") == "sha;fingerprint", "errors.csv row became a failed essentia run with its components");
                     assert(os.Db.ExecScalar("SELECT count(*) FROM identity_facet WHERE kind = '" + FacetKinds.ShaTaglibRegion + "';") == "1", "legacy FLAC sha recorded under the taglib-region kind");
-                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_feature WHERE content_key_kind = 'entity';") == "1", "the no-sha entry's feature row is keyed entity:<uuid> with kind 'entity'");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_content WHERE content_key_kind = 'entity';") == "1", "the no-sha entry's content row is keyed entity:<uuid> with kind 'entity'");
 
                     // Per-entry byte equality — the import side of the round-trip gate.
                     long root = os.Dal.EnsureRoot(os.Machine.Id, @"D:\Music", "primary", DateTime.UtcNow.ToString("o"));
@@ -465,7 +465,7 @@ namespace Truedat.Store
                 assert(r2.EntitiesCreated == 0 && r2.CreatedNoSha == 0 && r2.Locations == 6 && r2.Conflicts == 0, $"re-import of the same catalog creates nothing ({r2.EntitiesCreated}/{r2.CreatedNoSha}/{r2.Locations}/{r2.Conflicts})");
                 using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_feature") == 6 && os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1,
+                    assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_copy") == 6 && os.Dal.Count("check_result") == 2 && os.Dal.Count("work_item") == 1,
                         "re-import leaves entity/feature/check/work counts unchanged");
                     assert(os.Dal.Count("run") == 6, $"re-import adds exactly one run (its own); ledger runs are not duplicated ({os.Dal.Count("run")})");
                 }
@@ -504,7 +504,8 @@ namespace Truedat.Store
                 {
                     assert(os.Dal.Count("file_entity") == 7 && os.Dal.Count("track_location") == 14 && os.Dal.Count("library_root") == 2,
                         $"after the mirror: 7 entities, 14 locations (8 + 6 mirrored), 2 roots ({os.Dal.Count("file_entity")}/{os.Dal.Count("track_location")}/{os.Dal.Count("library_root")})");
-                    assert(os.Dal.Count("track_feature") == 12, $"#3 features are per location: a mirror adds its own feature rows (6 → 12), deliberately and visibly ({os.Dal.Count("track_feature")})");
+                    assert(os.Dal.Count("track_copy") == 12 && os.Dal.Count("track_content") == 5,
+                        $"v2: a mirror adds copy rows (6 → 12) and no content rows (still 5: one description per media) ({os.Dal.Count("track_copy")}/{os.Dal.Count("track_content")})");
                 }
                 var infoAfterMirror = StoreInfoCommand.Collect(store);
                 assert(infoAfterMirror.Tracks == 5 && infoAfterMirror.FeatureRows == 12,
@@ -517,7 +518,7 @@ namespace Truedat.Store
                 assert(threw, "the fail-after seam throws");
                 using (var os = OpenStore.Open(store2, create: false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(os.Dal.Count("track_feature") == 2, $"after a mid-import failure the store holds whole batches only ({os.Dal.Count("track_feature")} rows, batch size 2)");
+                    assert(os.Dal.Count("track_copy") == 2, $"after a mid-import failure the store holds whole batches only ({os.Dal.Count("track_copy")} copy rows, batch size 2)");
                     assert(os.Db.ExecScalar("SELECT outcome FROM run WHERE producer_key = 'import';") == "failed", "the interrupted import's run row says failed, not ok");
                 }
             }
@@ -530,14 +531,17 @@ namespace Truedat.Store
         // ---------------------------------------------------------------- mapper
         static void TestMapper(Action<bool, string> assert)
         {
-            // Column set == DDL minus the meta columns, both ways (the mapper and v1.sql cannot drift apart).
+            // Column set == DDL minus the meta columns, both ways (the mapper and the DDL cannot drift apart). v2: union of both tables.
             var db = FreshStore(out var dir);
             try
             {
                 var ddl = new HashSet<string>(StringComparer.Ordinal);
-                using (var st = db.Prepare("PRAGMA table_info(track_feature);"))
+                using (var st = db.Prepare("PRAGMA table_info(track_content);"))
                     while (st.Step()) ddl.Add(st.GetString(1)!);
-                foreach (var m in StoreSchema.TrackFeatureMetaColumns) ddl.Remove(m);
+                foreach (var m in StoreSchema.TrackContentMetaColumns) ddl.Remove(m);
+                using (var st = db.Prepare("PRAGMA table_info(track_copy);"))
+                    while (st.Step()) ddl.Add(st.GetString(1)!);
+                foreach (var m in StoreSchema.TrackCopyMetaColumns) ddl.Remove(m);
                 var mapper = new HashSet<string>(TrackEntryMapper.ColumnNames, StringComparer.Ordinal);
                 var onlyDdl = new List<string>(); foreach (var c in ddl) if (!mapper.Contains(c)) onlyDdl.Add(c);
                 var onlyMap = new List<string>(); foreach (var c in mapper) if (!ddl.Contains(c)) onlyMap.Add(c);
@@ -597,12 +601,12 @@ namespace Truedat.Store
 
                 using (var tx = db.BeginTransaction())
                 {
-                    dal.UpsertFeature(loc, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
-                    dal.UpsertFeature(loc, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
+                    dal.UpsertFeature(loc, r.EntityId, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
+                    dal.UpsertFeature(loc, r.EntityId, full.AudioStreamSha256!, FacetKinds.ShaFrames, null, full, now);
                     tx.Complete();
                 }
-                assert(dal.Count("track_feature") == 1, "UpsertFeature twice on one location -> one row");
-                assert(db.ExecScalar($"SELECT content_key_kind FROM track_feature WHERE location_id = {loc};") == FacetKinds.ShaFrames,
+                assert(dal.Count("track_copy") == 1 && dal.Count("track_content") == 1, "UpsertFeature twice on one location -> one copy row and one content row");
+                assert(db.ExecScalar($"SELECT c.content_key_kind FROM track_copy p JOIN track_location l ON l.id = p.location_id JOIN track_content c ON c.entity_id = l.entity_id WHERE p.location_id = {loc};") == FacetKinds.ShaFrames,
                     "the feature row carries the scheme of its content key (restfulbee ask: version every hash)");
 
                 var read = new List<(string, TrackEntry)>(dal.ReadEntries(root));
@@ -807,7 +811,7 @@ namespace Truedat.Store
         {
             "schema_version", "store_meta", "machine", "library_root", "file_entity", "identity_facet",
             "track_location", "producer", "run", "work_item", "check_result", "conflict",
-            "value", "segment", "artifact", "track_feature",
+            "value", "segment", "artifact", "track_content", "track_copy",
         };
 
         static void TestSchema(Action<bool, string> assert)
@@ -829,27 +833,47 @@ namespace Truedat.Store
                         assert(db.ExecScalar($"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{t}';") == "1", $"table {t} exists");
                     assert(db.ExecScalar("SELECT count(*) FROM producer;") == "3", "producer seeded with essentia/import/verify");
                     assert(db.ExecScalar("SELECT truedat_version FROM schema_version WHERE version = 1;") == "selftest", "schema_version records the truedat version that applied it");
+                    assert(db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_feature';") == "0", "v2: the per-location wide row is gone (split into track_content + track_copy)");
+                    assert(db.ExecScalar("SELECT count(*) FROM pragma_table_info('value') WHERE name = 'segment_id';") == "1", "v2: value has segment_id (values can hang off a segment)");
+                    assert(db.ExecScalar("SELECT count(*) FROM pragma_table_info('conflict') WHERE name IN ('field','run_a','run_b','value_a','value_b');") == "5", "v2: conflict carries field, run_a/run_b, value_a/value_b");
 
                     SchemaMigrator.Apply(db, "selftest-again");
-                    assert(SchemaMigrator.ReadVersion(db) == StoreSchema.CurrentVersion && db.ExecScalar("SELECT count(*) FROM schema_version;") == "1",
-                        "Apply is idempotent on a current store (no second row, no error)");
+                    assert(SchemaMigrator.ReadVersion(db) == StoreSchema.CurrentVersion && db.ExecScalar("SELECT count(*) FROM schema_version;") == StoreSchema.CurrentVersion.ToString(),
+                        $"Apply is idempotent on a current store (one row per applied version = {StoreSchema.CurrentVersion}, no extra row, no error)");
 
                     // The drift test: every key the catalog writer emits has a column, and every column is an emitted key.
                     var emitted = EmittedCatalogKeys();
                     assert(emitted.Count > 100, $"writer emits a populated entry with >100 flattened keys (got {emitted.Count})");
-                    var columns = new HashSet<string>(StringComparer.Ordinal);
-                    using (var st = db.Prepare("PRAGMA table_info(track_feature);"))
-                        while (st.Step()) columns.Add(st.GetString(1)!);
-                    foreach (var meta in StoreSchema.TrackFeatureMetaColumns) columns.Remove(meta);
+                    // v2: the keys are split over two tables — content (once per media) and copy (per location).
+                    var contentCols = new HashSet<string>(StringComparer.Ordinal);
+                    using (var st = db.Prepare("PRAGMA table_info(track_content);"))
+                        while (st.Step()) contentCols.Add(st.GetString(1)!);
+                    var copyCols = new HashSet<string>(StringComparer.Ordinal);
+                    using (var st = db.Prepare("PRAGMA table_info(track_copy);"))
+                        while (st.Step()) copyCols.Add(st.GetString(1)!);
+                    foreach (var meta in StoreSchema.TrackContentMetaColumns) contentCols.Remove(meta);
+                    foreach (var meta in StoreSchema.TrackCopyMetaColumns) copyCols.Remove(meta);
+                    var overlap = new List<string>(); foreach (var c in contentCols) if (copyCols.Contains(c)) overlap.Add(c);
+                    assert(overlap.Count == 0, "v2: no key lives in both tables" + (overlap.Count == 0 ? "" : " — " + string.Join(", ", overlap)));
+                    var columns = new HashSet<string>(contentCols, StringComparer.Ordinal); columns.UnionWith(copyCols);
                     columns.Add("lastModified");   // lives on track_location.last_modified_utc by design
                     var missing = new List<string>();
                     foreach (var k in emitted) if (!columns.Contains(k)) missing.Add(k);
-                    assert(missing.Count == 0, "DRIFT: every emitted catalog key has a track_feature column" + (missing.Count == 0 ? "" : " — missing: " + string.Join(", ", missing)));
+                    assert(missing.Count == 0, "DRIFT: every emitted catalog key has a column in track_content or track_copy" + (missing.Count == 0 ? "" : " — missing: " + string.Join(", ", missing)));
                     var dead = new List<string>();
                     // A column the writer does not emit is dead UNLESS the emission registry (FieldPolicy) is what
                     // cuts it: trackId and bpmHistogram are TrackFeatures fields the store still captures.
                     foreach (var c in columns) if (!emitted.Contains(c) && !FieldPolicy.IsExcluded(c) && c != "lastModified") dead.Add(c);
-                    assert(dead.Count == 0, "DRIFT: every track_feature column is an emitted catalog key" + (dead.Count == 0 ? "" : " — dead: " + string.Join(", ", dead)));
+                    assert(dead.Count == 0, "DRIFT: every content/copy column is an emitted catalog key" + (dead.Count == 0 ? "" : " — dead: " + string.Join(", ", dead)));
+                    // The mapper's own split must be the DDL's split (the C4 pin, both directions).
+                    var mapperContent = new HashSet<string>(TrackEntryMapper.ContentColumnNames, StringComparer.Ordinal);
+                    var mapperCopy = new HashSet<string>(TrackEntryMapper.CopyColumnNames, StringComparer.Ordinal);
+                    assert(mapperContent.SetEquals(contentCols), "mapper content columns == track_content DDL columns");
+                    assert(mapperCopy.SetEquals(copyCols), "mapper copy columns == track_copy DDL columns");
+                    assert(mapperCopy.Contains("smfmScores") && mapperCopy.Contains("fingerprint_v1_fileSize") && mapperCopy.Contains("artist") && mapperCopy.Contains("analysisDuration"),
+                        "copy = tags as found in the copy, fingerprint_v1_*, SMFM (tag-sourced), analysisDuration, fileMd5");
+                    assert(mapperContent.Contains("bpm") && mapperContent.Contains("mfcc") && mapperContent.Contains("audioStreamSha256") && mapperContent.Contains("bitUsage_effectiveBits") && mapperContent.Contains("hfEnergyRatio"),
+                        "content = every Essentia descriptor, bitUsage, HF, the content hash itself");
 
                     // Refuses a store newer than the exe.
                     db.Exec("INSERT INTO schema_version(version, applied_utc, truedat_version) VALUES (999, '2099-01-01T00:00:00Z', 'future');");
@@ -858,6 +882,66 @@ namespace Truedat.Store
                     assert(refused && msg != null && msg.Contains("999") && msg.IndexOf("newer", StringComparison.OrdinalIgnoreCase) >= 0,
                         $"a store at schema 999 is refused with a sentence naming the versions ({msg})");
                 }
+
+                // ---- v1 -> v2 migration: the wide row splits; the first-imported copy's content wins; disagreements become conflicts.
+                var v1Path = Path.Combine(dir, "v1.db");
+                using (var db = SqliteDb.Open(v1Path, create: true))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v1", targetVersion: 1);
+                    assert(SchemaMigrator.ReadVersion(db) == 1 && db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_feature';") == "1", "a v1 store can still be built for the migration test (targetVersion seam)");
+                    var now = "2026-10-12T10:00:00.0000000Z";
+                    db.Exec($"INSERT INTO machine(id, hostname, created_utc) VALUES ('m1', 'ATOM', '{now}');");
+                    db.Exec($"INSERT INTO library_root(id, machine_id, path, role, created_utc) VALUES (1, 'm1', 'D:\\Music', 'primary', '{now}');");
+                    db.Exec($"INSERT INTO file_entity(id, created_utc) VALUES ('e1', '{now}');");
+                    db.Exec($"INSERT INTO file_entity(id, created_utc) VALUES ('e2', '{now}');");
+                    db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (10, 'e1', 1, 'a/one.flac', 'a/one.flac', 'D:\\Music\\a\\one.flac', '{now}', '{now}', 'present');");
+                    db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (11, 'e1', 1, 'b/one copy.flac', 'b/one copy.flac', 'D:\\Music\\b\\one copy.flac', '{now}', '{now}', 'present');");
+                    db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (12, 'e2', 1, 'c/two.mp3', 'c/two.mp3', 'D:\\Music\\c\\two.mp3', '{now}', '{now}', 'present');");
+                    // e1 has two copies: the second differs by run-to-run NOISE on spectralCentroid (1793.406 vs 1793.656, 0.014%)
+                    // and by a REAL disagreement on bpm (120 vs 135). e2 has one copy.
+                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (10, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'Tool', 120.0, 1793.406, 1.5, 118, 'sha1');");
+                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (11, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'TOOL', 135.0, 1793.656, 2.5, NULL, 'sha1');");
+                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, analysisDuration, audioStreamSha256) VALUES (12, 'sha2', '{FacetKinds.ShaFrames}', '{now}', 'Zep', 90.0, 3.0, 'sha2');");
+                }
+                var v1Now = DateTime.ParseExact("2026-10-12T10:00:00.0000000Z", "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+                using (var db = SqliteDb.Open(v1Path, create: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2");
+                    assert(SchemaMigrator.ReadVersion(db) == 2, "v1 store migrates forward to v2 in one Apply");
+                    assert(db.ExecScalar("SELECT count(*) FROM track_content;") == "2" && db.ExecScalar("SELECT count(*) FROM track_copy;") == "3",
+                        $"split: 2 content rows (one per media) and 3 copy rows (one per location) ({db.ExecScalar("SELECT count(*) FROM track_content;")}/{db.ExecScalar("SELECT count(*) FROM track_copy;")})");
+                    assert(db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';") == "120.0", "the first-imported copy's content values win (bpm 120 from location 10)");
+                    assert(db.ExecScalar("SELECT content_key FROM track_content WHERE entity_id = 'e1';") == "sha1" && db.ExecScalar("SELECT audioStreamSha256 FROM track_content WHERE entity_id = 'e1';") == "sha1", "content key and the hash itself sit on the content row");
+                    assert(db.ExecScalar("SELECT artist FROM track_copy WHERE location_id = 11;") == "TOOL" && db.ExecScalar("SELECT analysisDuration FROM track_copy WHERE location_id = 11;") == "2.5" && db.ExecScalar("SELECT smfmBpm FROM track_copy WHERE location_id = 10;") == "118.0",
+                        "per-copy facts (tags, analysisDuration, SMFM) stay with their own copy");
+                    assert(db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'content-disagree-at-split';") == "1", $"ONE conflict: bpm 120 vs 135 is a disagreement; spectralCentroid 1793.406 vs 1793.656 is run-to-run noise and is not ({db.ExecScalar("SELECT count(*) FROM conflict;")})");
+                    assert(db.ExecScalar("SELECT field FROM conflict WHERE kind = 'content-disagree-at-split';") == "bpm" && db.ExecScalar("SELECT value_a FROM conflict WHERE kind = 'content-disagree-at-split';") == "120" && db.ExecScalar("SELECT value_b FROM conflict WHERE kind = 'content-disagree-at-split';") == "135",
+                        $"the conflict names the field and both values ({db.ExecScalar("SELECT field || ' ' || value_a || ' ' || value_b FROM conflict WHERE kind = 'content-disagree-at-split';")})");
+                    assert(db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_feature';") == "0", "the wide row is dropped after the split");
+                    using (var dal = new StoreDal(db))
+                    {
+                        var back = new List<(string, TrackEntry)>(dal.ReadEntries(1));
+                        assert(back.Count == 3, $"ReadEntries joins copy and content: 3 entries ({back.Count})");
+                        var two = back.Find(x => x.Item1.EndsWith("one copy.flac"));
+                        assert(two.Item2 != null && two.Item2.Features!.Bpm == 120.0 && two.Item2.Features.Artist == "TOOL" && two.Item2.AnalysisDurationSecs == 2.5,
+                            "a non-primary copy exports the media's single description (bpm 120) with its own copy facts (artist TOOL, analysisDuration 2.5)");
+                        var merged = dal.NonPrimaryCopyPaths(1);
+                        assert(merged.Count == 1 && merged.Contains(@"D:\Music\b\one copy.flac"), $"the DAL names the non-primary copies of multi-copy media ({merged.Count})");
+                    }
+                }
+                // The round-trip gate against a catalog holding the v1 values: the merged copy differs (by design, it now
+                // carries its media's description) and is reported as merged, not as unexplained; the gate is EQUAL.
+                var v1Catalog = Path.Combine(dir, "v1-mbxmoods.json");
+                var v1Entries = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    [@"D:\Music\a\one.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 1.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "Tool", Bpm = 120.0, SpectralCentroid = 1793.406, SmfmBpm = 118 } },
+                    [@"D:\Music\b\one copy.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 2.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "TOOL", Bpm = 135.0, SpectralCentroid = 1793.656 } },
+                    [@"D:\Music\c\two.mp3"] = new TrackEntry { AudioStreamSha256 = "sha2", AnalysisDurationSecs = 3.0, LastModified = v1Now, Features = new TrackFeatures { Artist = "Zep", Bpm = 90.0 } },
+                };
+                WriteCatalog(v1Catalog, v1Entries);
+                var rt = ExportCommand.Roundtrip(v1Path, v1Catalog, null);
+                assert(rt.Same == 2 && rt.DifferentMerged == 1 && rt.Different == 0 && rt.Equal,
+                    $"round-trip after the split: 2 identical, 1 merged copy (expected), 0 unexplained → EQUAL ({rt.Same}/{rt.DifferentMerged}/{rt.Different}, equal {rt.Equal})");
             }
             finally { try { Directory.Delete(dir, recursive: true); } catch { } }
         }

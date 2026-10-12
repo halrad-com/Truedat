@@ -82,7 +82,14 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
 entity, content-hash facets that name their algorithm, one location row per copy on a machine),
-with provenance for every run. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+with provenance for every run. **Schema v2 holds one audio description per media and one row of
+file facts per copy**: every Essentia descriptor, bitUsage, the HF signals and the content hash live
+once on `track_content`; tags as found in the copy, `fingerprint.v1`, `fileMd5`, SMFM and
+`analysisDuration` live per location on `track_copy`. A v1 store migrates forward the first time a v2
+build opens it: the first-imported copy's description wins, differences within the extractor's
+run-to-run noise (1%) are counted, and differences beyond it become `conflict` rows you can query by
+field. An exported copy of duplicate audio therefore carries its media's one description, and
+`--store-roundtrip` reports those copies separately from unexplained differences. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
 exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in

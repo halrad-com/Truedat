@@ -26,6 +26,9 @@ namespace Truedat.Store
     internal sealed class RoundtripReport
     {
         public int CatalogEntries, StoreEntries, Same, OnlyInCatalog, OnlyInStore, Different;
+        /// <summary>Differing entries whose location is a non-primary copy of a multi-copy media: by the 1:many:1
+        /// ruling they export their media's single description, so a difference there is expected, not a defect.</summary>
+        public int DifferentMerged;
         public string? FirstDifferentPath;
         public bool Equal => OnlyInCatalog == 0 && OnlyInStore == 0 && Different == 0 && CatalogEntries == StoreEntries;
     }
@@ -94,9 +97,13 @@ namespace Truedat.Store
             {
                 StoreLog.SetVerbose(audit);
                 var r = Roundtrip(storePath, catalogPath, exportRoot);
-                Console.WriteLine($"Round-trip {storePath} vs {catalogPath}: catalog {r.CatalogEntries}, store {r.StoreEntries}, identical {r.Same}, different {r.Different}, only in catalog {r.OnlyInCatalog}, only in store {r.OnlyInStore}");
+                Console.WriteLine($"Round-trip {storePath} vs {catalogPath}: catalog {r.CatalogEntries}, store {r.StoreEntries}, identical {r.Same}, different {r.Different}, only in catalog {r.OnlyInCatalog}, only in store {r.OnlyInStore}" +
+                                  (r.DifferentMerged > 0 ? $", merged copies differing {r.DifferentMerged} (expected: a non-primary copy exports its media's single description)" : ""));
                 if (r.FirstDifferentPath != null) Console.WriteLine($"  first difference: {r.FirstDifferentPath}");
-                Console.WriteLine(r.Equal ? "RESULT: EQUAL — every entry writes the same bytes from the store as from the catalog" : "RESULT: NOT EQUAL");
+                Console.WriteLine(r.Equal
+                    ? (r.DifferentMerged == 0 ? "RESULT: EQUAL — every entry writes the same bytes from the store as from the catalog"
+                                              : $"RESULT: EQUAL — every single-copy entry writes the same bytes; {r.DifferentMerged} extra copies of duplicate audio now carry their media's one description (1 : many : 1)")
+                    : "RESULT: NOT EQUAL");
                 return r.Equal ? 0 : 1;
             }
             catch (StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); return ex.ExitCode; }
@@ -114,6 +121,9 @@ namespace Truedat.Store
             r.CatalogEntries = Program.LoadExistingMoodsForStore(Path.GetFullPath(catalogPath), catalog);
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
             var root = PickRoot(os.Dal, exportRoot);
+            // v2: a non-primary copy of a multi-copy media exports its media's single description (operator's
+            // 1 : many : 1), so a difference there is expected and reported apart from unexplained ones.
+            var merged = os.Dal.NonPrimaryCopyPaths(root.Id);
             var seen = new HashSet<string>(PathComparer.Instance);
             foreach (var (display, entry) in os.Dal.ReadEntries(root.Id))
             {
@@ -121,6 +131,7 @@ namespace Truedat.Store
                 seen.Add(display);
                 if (!catalog.TryGetValue(display, out var orig)) { r.OnlyInStore++; continue; }
                 if (EntryJson(display, orig) == EntryJson(display, entry)) r.Same++;
+                else if (merged.Contains(display)) { r.DifferentMerged++; StoreLog.Debug($"differs (merged copy, expected): {display}"); }
                 else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"differs: {display}"); }
             }
             foreach (var key in catalog.Keys) if (!seen.Contains(key)) r.OnlyInCatalog++;

@@ -169,36 +169,60 @@ namespace Truedat.Store
         internal string? LocationLastModified(long locationId)
             => Row("SELECT last_modified_utc FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId);
 
-        internal string? FeatureContentKey(long locationId)
-            => Row("SELECT content_key FROM track_feature WHERE location_id = ?;", s => s.GetString(0), null, locationId);
-
-        /// <summary>Audio props of an existing feature row of the entity at some OTHER location, for the
-        /// sha-collision check.</summary>
-        internal (long DurationMs, string Codec, string Display)? FeatureProps(string entityId, long exceptRootId, string exceptCanonical)
-            => Row("SELECT f.fingerprint_v1_durationMs, f.fingerprint_v1_codec, l.display_path FROM track_feature f JOIN track_location l ON l.id = f.location_id " +
-                   "WHERE l.entity_id = ? AND NOT (l.root_id = ? AND l.canonical_path = ?) AND f.fingerprint_v1_durationMs IS NOT NULL LIMIT 1;",
-                   s => ((long, string, string)?)(s.GetInt64(0), s.GetString(1) ?? "", s.GetString(2) ?? ""), null, entityId, exceptRootId, exceptCanonical);
-
-        // ---------------------------------------------------------------- features
-        /// <summary>contentKeyKind is the facet kind of contentKey (FacetKinds.*), or "entity" when the
-        /// entry has no hash and contentKey is 'entity:&lt;uuid&gt;'.</summary>
-        internal void UpsertFeature(long locationId, string contentKey, string contentKeyKind, long? importedRunId, TrackEntry entry, string nowUtc)
+        /// <summary>Display paths under a root whose location is NOT its media's primary (lowest-id) copy: the copies
+        /// that export their media's single description rather than the values they were imported with.</summary>
+        internal HashSet<string> NonPrimaryCopyPaths(long rootId)
         {
-            var st = Stmt(TrackEntryMapper.UpsertSql);
-            st.Bind(1, locationId).Bind(2, contentKey).Bind(3, contentKeyKind);
-            if (importedRunId.HasValue) st.Bind(4, importedRunId.Value); else st.BindNull(4);
-            st.Bind(5, nowUtc);
-            TrackEntryMapper.BindRow(st, TrackEntryMapper.UpsertFirstFeatureParam, TrackEntryMapper.ToRow(entry));
-            try { while (st.Step()) { } } finally { st.Reset(); }
+            var set = new HashSet<string>(PathComparer.Instance);
+            using var st = Db.Prepare(
+                "SELECT l.display_path FROM track_copy p JOIN track_location l ON l.id = p.location_id " +
+                "WHERE l.root_id = ? AND l.id <> (SELECT min(l2.id) FROM track_copy p2 JOIN track_location l2 ON l2.id = p2.location_id WHERE l2.entity_id = l.entity_id);");
+            st.Bind(1, rootId);
+            while (st.Step()) set.Add(st.GetString(0)!);
+            return set;
         }
 
-        /// <summary>Every entry under a root, with the display path the catalog keys it by. Its own
-        /// statement (not the cache) because callers iterate it while running other statements.</summary>
+        /// <summary>The content key of the media a location belongs to (v2: on track_content, reached through the location's entity).</summary>
+        internal string? FeatureContentKey(long locationId)
+            => Row("SELECT c.content_key FROM track_location l JOIN track_content c ON c.entity_id = l.entity_id WHERE l.id = ?;", s => s.GetString(0), null, locationId);
+
+        /// <summary>Audio props of an existing copy of the entity at some OTHER location, for the
+        /// sha-collision check (v2: file facts live on track_copy).</summary>
+        internal (long DurationMs, string Codec, string Display)? FeatureProps(string entityId, long exceptRootId, string exceptCanonical)
+            => Row("SELECT p.fingerprint_v1_durationMs, p.fingerprint_v1_codec, l.display_path FROM track_copy p JOIN track_location l ON l.id = p.location_id " +
+                   "WHERE l.entity_id = ? AND NOT (l.root_id = ? AND l.canonical_path = ?) AND p.fingerprint_v1_durationMs IS NOT NULL LIMIT 1;",
+                   s => ((long, string, string)?)(s.GetInt64(0), s.GetString(1) ?? "", s.GetString(2) ?? ""), null, entityId, exceptRootId, exceptCanonical);
+
+        // ---------------------------------------------------------------- features (v2: description per media + facts per copy)
+        /// <summary>Writes one entry as the media's description (track_content, keyed by entity) plus the copy's own
+        /// facts (track_copy, keyed by location). contentKeyKind is the facet kind of contentKey (FacetKinds.*),
+        /// or "entity" when the entry has no hash and contentKey is 'entity:&lt;uuid&gt;'.</summary>
+        internal void UpsertFeature(long locationId, string entityId, string contentKey, string contentKeyKind, long? runId, TrackEntry entry, string nowUtc)
+        {
+            var row = TrackEntryMapper.ToRow(entry);
+            var sc = Stmt(TrackEntryMapper.UpsertContentSql);
+            sc.Bind(1, entityId).Bind(2, contentKey).Bind(3, contentKeyKind);
+            if (runId.HasValue) sc.Bind(4, runId.Value); else sc.BindNull(4);
+            sc.Bind(5, nowUtc);
+            TrackEntryMapper.BindContent(sc, TrackEntryMapper.UpsertContentFirstParam, row);
+            try { while (sc.Step()) { } } finally { sc.Reset(); }
+
+            var sp = Stmt(TrackEntryMapper.UpsertCopySql);
+            sp.Bind(1, locationId);
+            if (runId.HasValue) sp.Bind(2, runId.Value); else sp.BindNull(2);
+            sp.Bind(3, nowUtc);
+            TrackEntryMapper.BindCopy(sp, TrackEntryMapper.UpsertCopyFirstParam, row);
+            try { while (sp.Step()) { } } finally { sp.Reset(); }
+        }
+
+        /// <summary>Every entry under a root, with the display path the catalog keys it by: the copy's facts joined
+        /// to its media's description. Its own statement (not the cache) because callers iterate it while
+        /// running other statements.</summary>
         internal IEnumerable<(string DisplayPath, TrackEntry Entry)> ReadEntries(long rootId)
         {
             using var st = Db.Prepare(
                 "SELECT l.display_path, l.last_modified_utc, " + TrackEntryMapper.SelectList +
-                " FROM track_feature f JOIN track_location l ON l.id = f.location_id WHERE l.root_id = ? ORDER BY l.id;");
+                " FROM track_copy p JOIN track_location l ON l.id = p.location_id JOIN track_content c ON c.entity_id = l.entity_id WHERE l.root_id = ? ORDER BY l.id;");
             st.Bind(1, rootId);
             while (st.Step())
             {

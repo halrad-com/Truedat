@@ -221,6 +221,8 @@ CREATE TABLE artifact (
 );
 
 -- ---------------------------------------------------------------- the catalog entry, typed
+-- SUPERSEDED BY v2.sql: this table exists only in a v1 store and is split into track_content + track_copy
+-- (and dropped) the first time a v2 exe opens it. Kept verbatim so the migration has a v1 to migrate from.
 -- One row per location (ruling 2026-10-11: the catalog is per path; two paths sharing a sha can differ
 -- in per-copy facts, so collapsing by hash would make the round-trip lossy). content_key is indexed so
 -- "same audio" is a query. THIS IS THE IMPORT/EXPORT MIRROR OF THE CATALOG, NOT THE CANONICAL

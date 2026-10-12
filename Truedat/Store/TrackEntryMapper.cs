@@ -186,6 +186,111 @@ namespace Truedat.Store
         static readonly string[] Names = Array.ConvertAll(Cols, c => c.Name);
         internal static IReadOnlyList<string> ColumnNames => Names;
 
+        // ---- v2 split (operator invariant: file 1 : locations many : audio description 1).
+        // COPY = facts about one file on disk: tags as found in that copy, fingerprint_v1_* (size, codec,
+        // encoder, LAME, head hash, path tail), fileMd5, SMFM (read from that copy's tags — copies differ,
+        // the dedupe keeper rule depends on it), analysisDuration, trackId. Everything else describes the
+        // AUDIO and is stored once per media: every Essentia descriptor, bitUsage, HF, the content hash.
+        static readonly HashSet<string> CopySet = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "trackId", "artist", "title", "album", "genre",
+            "smfmScores", "smfmChannel", "smfmChannelName", "smfmBpm",
+            "analysisDuration", "fileMd5",
+        };
+        static bool IsCopy(Col c) => CopySet.Contains(c.Name) || c.Name.StartsWith("fingerprint_v1_", StringComparison.Ordinal);
+
+        /// <summary>Indexes into Cols (= ToRow positions) of the content and copy columns, in Cols order.</summary>
+        static readonly int[] ContentIdx = BuildIdx(false);
+        static readonly int[] CopyIdx = BuildIdx(true);
+        static int[] BuildIdx(bool copy)
+        {
+            var l = new List<int>();
+            for (int i = 0; i < Cols.Length; i++) if (IsCopy(Cols[i]) == copy) l.Add(i);
+            return l.ToArray();
+        }
+        internal static IReadOnlyList<string> ContentColumnNames => Array.ConvertAll(ContentIdx, i => Cols[i].Name);
+        internal static IReadOnlyList<string> CopyColumnNames => Array.ConvertAll(CopyIdx, i => Cols[i].Name);
+
+        // ---- content comparison (the v2 split, later C2's drift rule): run-to-run extractor noise is NOT a disagreement.
+        // Measured 2026-10-12 on the real store: 590 duplicate-sha copies scanned on different days differed only in the
+        // 4th decimal of spectral-shape and band statistics (constraint 3); one real collision differed in 91 fields.
+        internal const double NoiseRelative = 0.01;
+        internal const double NoiseAbsolute = 1e-6;
+        internal static int ContentColumnCount => ContentIdx.Length;
+        internal static string ContentColumnName(int k) => Cols[ContentIdx[k]].Name;
+
+        /// <summary>Reads the content columns (in <see cref="ContentColumnNames"/> order) starting at <paramref name="firstColumn"/>.</summary>
+        internal static object?[] ReadContentValues(SqliteStmt st, int firstColumn)
+        {
+            var values = new object?[ContentIdx.Length];
+            for (int k = 0; k < ContentIdx.Length; k++)
+            {
+                int c = firstColumn + k;
+                if (st.IsNull(c)) continue;
+                values[k] = Cols[ContentIdx[k]].Kind switch
+                {
+                    Kind.Real => st.GetDouble(c),
+                    Kind.Int => st.GetInt64(c),
+                    Kind.Text => st.GetString(c),
+                    Kind.VecF64 => DecodeF64(st.GetBlob(c)!),
+                    _ => DecodeI32(st.GetBlob(c)!),
+                };
+            }
+            return values;
+        }
+
+        /// <summary>True when two values of content column k agree within noise: reals and float vectors within
+        /// 1% relative or 1e-6 absolute (element-wise); ints, text and int vectors exactly; null only equals null.</summary>
+        internal static bool ContentEqualWithinNoise(int k, object? a, object? b)
+        {
+            if (a == null || b == null) return a == null && b == null;
+            switch (Cols[ContentIdx[k]].Kind)
+            {
+                case Kind.Real: return Near((double)a, (double)b);
+                case Kind.Int: return (long)a == (long)b;
+                case Kind.Text: return string.Equals((string)a, (string)b, StringComparison.Ordinal);
+                case Kind.VecF64:
+                {
+                    var x = (double[])a; var y = (double[])b;
+                    if (x.Length != y.Length) return false;
+                    for (int i = 0; i < x.Length; i++) if (!Near(x[i], y[i])) return false;
+                    return true;
+                }
+                default:
+                {
+                    var x = (int[])a; var y = (int[])b;
+                    if (x.Length != y.Length) return false;
+                    for (int i = 0; i < x.Length; i++) if (x[i] != y[i]) return false;
+                    return true;
+                }
+            }
+        }
+        static bool Near(double a, double b) => Math.Abs(a - b) <= Math.Max(NoiseAbsolute, NoiseRelative * Math.Max(Math.Abs(a), Math.Abs(b)));
+
+        /// <summary>A content value as conflict text: numbers round-trip exactly, vectors as hex of their blob.</summary>
+        internal static string? FormatContent(int k, object? v)
+        {
+            if (v == null) return null;
+            switch (Cols[ContentIdx[k]].Kind)
+            {
+                case Kind.Real: return ((double)v).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+                case Kind.Int: return ((long)v).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                case Kind.Text: return (string)v;
+                case Kind.VecF64: return BitConverter.ToString(EncodeF64((double[])v)).Replace("-", "");
+                default: return BitConverter.ToString(EncodeI32((int[])v)).Replace("-", "");
+            }
+        }
+
+        /// <summary>Quoted, comma-separated column lists for SQL built outside this class (the v2 migration).</summary>
+        internal static string ContentColumnList(string? alias = null) => JoinQuoted(ContentIdx, alias);
+        internal static string CopyColumnList(string? alias = null) => JoinQuoted(CopyIdx, alias);
+        static string JoinQuoted(int[] idx, string? alias)
+        {
+            var sb = new StringBuilder();
+            for (int k = 0; k < idx.Length; k++) { if (k > 0) sb.Append(", "); if (alias != null) sb.Append(alias).Append('.'); sb.Append(Q(Cols[idx[k]].Name)); }
+            return sb.ToString();
+        }
+
         internal static object?[] ToRow(TrackEntry entry)
         {
             var row = new object?[Cols.Length];
@@ -220,16 +325,22 @@ namespace Truedat.Store
             return FromValues(values, lastModified);
         }
 
-        /// <summary>1-based parameter index of the first feature column in <see cref="UpsertSql"/>
-        /// (after location_id, content_key, content_key_kind, imported_run_id, updated_utc).</summary>
-        internal const int UpsertFirstFeatureParam = 6;
+        /// <summary>1-based parameter index of the first content column in <see cref="UpsertContentSql"/>
+        /// (after entity_id, content_key, content_key_kind, run_id, updated_utc).</summary>
+        internal const int UpsertContentFirstParam = 6;
+        /// <summary>1-based parameter index of the first copy column in <see cref="UpsertCopySql"/>
+        /// (after location_id, run_id, updated_utc).</summary>
+        internal const int UpsertCopyFirstParam = 4;
 
-        /// <summary>Binds a ToRow() row at parameter indexes firstParam … firstParam + N - 1.</summary>
-        internal static void BindRow(SqliteStmt st, int firstParam, object?[] row)
+        internal static void BindContent(SqliteStmt st, int firstParam, object?[] row) => BindIdx(st, firstParam, row, ContentIdx);
+        internal static void BindCopy(SqliteStmt st, int firstParam, object?[] row) => BindIdx(st, firstParam, row, CopyIdx);
+
+        /// <summary>Binds the chosen columns of a ToRow() row at parameter indexes firstParam … firstParam + idx.Length - 1.</summary>
+        static void BindIdx(SqliteStmt st, int firstParam, object?[] row, int[] idx)
         {
-            for (int i = 0; i < Cols.Length; i++)
+            for (int k = 0; k < idx.Length; k++)
             {
-                int p = firstParam + i;
+                int i = idx[k], p = firstParam + k;
                 var v = row[i];
                 if (v == null) { st.BindNull(p); continue; }
                 switch (Cols[i].Kind)
@@ -250,27 +361,32 @@ namespace Truedat.Store
 
         static string Q(string name) => "\"" + name + "\"";
 
-        internal static readonly string UpsertSql = BuildUpsert();
+        internal static readonly string UpsertContentSql = BuildUpsert(ContentIdx,
+            "track_content", "entity_id, content_key, content_key_kind, run_id, updated_utc", "?, ?, ?, ?, ?", "entity_id",
+            "content_key = excluded.content_key, content_key_kind = excluded.content_key_kind, run_id = excluded.run_id, updated_utc = excluded.updated_utc");
+        internal static readonly string UpsertCopySql = BuildUpsert(CopyIdx,
+            "track_copy", "location_id, run_id, updated_utc", "?, ?, ?", "location_id",
+            "run_id = excluded.run_id, updated_utc = excluded.updated_utc");
+        /// <summary>Every mapped column in Cols order, aliased c. (track_content) or p. (track_copy), for the
+        /// copy ⋈ content read that <see cref="FromRow"/> consumes.</summary>
         internal static readonly string SelectList = BuildSelectList();
 
-        static string BuildUpsert()
+        static string BuildUpsert(int[] idx, string table, string metaCols, string metaQs, string conflictCol, string metaUpdate)
         {
             var cols = new StringBuilder(); var qs = new StringBuilder(); var upd = new StringBuilder();
-            foreach (var c in Cols)
+            foreach (var i in idx)
             {
-                cols.Append(", ").Append(Q(c.Name));
+                cols.Append(", ").Append(Q(Cols[i].Name));
                 qs.Append(", ?");
-                upd.Append(", ").Append(Q(c.Name)).Append(" = excluded.").Append(Q(c.Name));
+                upd.Append(", ").Append(Q(Cols[i].Name)).Append(" = excluded.").Append(Q(Cols[i].Name));
             }
-            return "INSERT INTO track_feature(location_id, content_key, content_key_kind, imported_run_id, updated_utc" + cols + ") VALUES (?, ?, ?, ?, ?" + qs + ") " +
-                   "ON CONFLICT(location_id) DO UPDATE SET content_key = excluded.content_key, content_key_kind = excluded.content_key_kind, " +
-                   "imported_run_id = excluded.imported_run_id, updated_utc = excluded.updated_utc" + upd + ";";
+            return $"INSERT INTO {table}({metaCols}{cols}) VALUES ({metaQs}{qs}) ON CONFLICT({conflictCol}) DO UPDATE SET {metaUpdate}{upd};";
         }
 
         static string BuildSelectList()
         {
             var sb = new StringBuilder();
-            for (int i = 0; i < Cols.Length; i++) { if (i > 0) sb.Append(", "); sb.Append("f.").Append(Q(Cols[i].Name)); }
+            for (int i = 0; i < Cols.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(IsCopy(Cols[i]) ? "p." : "c.").Append(Q(Cols[i].Name)); }
             return sb.ToString();
         }
     }
