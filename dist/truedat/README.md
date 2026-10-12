@@ -78,6 +78,144 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 - **Suspects** — Audio files under 50 KB that may be corrupt or truncated.
 - **Long paths** — Paths at or over the Windows 260-char MAX_PATH. The scan handles these automatically (`\\?\` long-path fallback through a staged copy), but other tools may not — consider shortening.
 
+### Store (preview, v2) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
+
+**`STORE.md` is the reference** for the store: what the tables hold, where the file lives, the edges
+layer (`--edges`, `--work`, `--edges-export`), the six-significant-figure precision rule, and how to open
+the file with DB Browser for SQLite or `sqlite3`. This section is the summary.
+
+A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
+entity, content-hash facets that name their algorithm, one location row per copy on a machine),
+with provenance for every run. **Schema v2 holds one audio description per media and one row of
+file facts per copy**: every Essentia descriptor, bitUsage, the HF signals and the content hash live
+once on `track_content`; tags as found in the copy, `fingerprint.v1`, `fileMd5`, SMFM and
+`analysisDuration` live per location on `track_copy`. A v1 store migrates forward the first time a v2
+build opens it: the first-imported copy's description wins, differences within the extractor's
+run-to-run noise (1%) are counted, and differences beyond it become `conflict` rows you can query by
+field. An exported copy of duplicate audio therefore carries its media's one description, and
+`--store-roundtrip` reports those copies separately from unexplained differences. Re-importing writes
+only what changed: an equal entry touches nothing, a value that differs beyond noise under the same
+producer is recorded as a `value-drift` conflict and the stored description is kept, and copy facts take
+the newer value. **A scan run with `--store` writes the store too**, as a second sink after the catalog is
+saved exactly as today: the entries it analysed this run (never cache hits) go in through the same
+rules as an import, as producer `essentia@<build>` with one run row per entry carrying the analysis
+time, and every failure becomes a failed run with its components. Only the flag activates this: a
+`truedat.db` sitting beside the catalog does **not** make a bare scan write it. A store problem is
+reported and counted; it never costs a catalog entry. `store-result.json` beside the store records
+each write. A scan killed before its final save leaves the already-saved entries in the catalog but
+not in the store; the next `--store-import` reconciles them. The scan also keeps the extractor's
+aggregate output — the main JSON with every descriptor's statistics that was deleted at parse until
+now — compressed and filed once per content hash **and extractor build** under `artifacts\` beside the
+store, so a future field that is a fold of it is a re-fold of the file, never a rescan. A stored value
+that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
+scan measures it; an older extractor build never overwrites a newer build's description, and a newer
+one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
+is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
+exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in
+the library folder — and is found the same way the catalog is, so the store verbs need no `--store`
+at all and `--stats --store` / `--duplicates --store` (bare) use that default. **The store file is
+always local:** when the catalog folder is itself a network share, the default is a local per-library
+path under `%LOCALAPPDATA%\truedat\` instead, and `--store-dir <dir>` (also settable in
+`truedat.config.json`) moves that per-library layout elsewhere. `--store <file.db>` names a store
+explicitly, anywhere; a store on a network path is opened with exclusive locking and a warning, and is
+not recommended. `--paths` shows which store a run would use and why.
+
+```cmd
+REM Load a catalog and the ledgers beside it (errors, skipped, review, verify) into a store; idempotent
+truedat.exe --store-import "X:\Library\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM A mirror of the same library: same entities, extra locations
+truedat.exe --store-import "P:\Library\mbxmoods.json" --store "D:\truedat\truedat.db" --library-root "D:\Music" --root-role mirror
+
+REM Prove the store holds the catalog: per-entry byte equality through the catalog writer
+truedat.exe --store-roundtrip "X:\Library\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM Write a catalog (+ .mbxs) back out; key-moves.json beside it lists any superseded content hash
+truedat.exe --store-export "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
+
+REM Measurements: bytes per track, projection to 156k tracks, analysis speed, coverage by wave, shared content
+truedat.exe --store-info --store "D:\truedat\truedat.db"
+
+REM Repack a store (a store created before 16 KB pages were the default shrinks ~29%; add --page-size N to re-tune)
+truedat.exe --store-vacuum --store "D:\truedat\truedat.db"
+
+REM A scan with --store (bare = the default location) also writes what it analysed into the store, after the catalog
+truedat.exe --store
+truedat.exe --file-list new.txt --moods "D:\MusicBee\Library\mbxmoods.json" --store
+
+REM The read-only verbs answer from the store instead of the JSON
+truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
+truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\truedat\truedat.db"
+```
+
+**Edges (`--edges`, preview, v2 S2).** On a scan run with `--store`, `--edges` asks the extractor for a
+small binary frames file per analysed track (build `output-x64.5` is required; the run refuses on an
+older one and names what it found) and folds the first and last 30 s into one packed *edge row* per
+edge in the store: the EBU momentary and short-term loudness series at 10/s, the beats inside the
+window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
+Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
+from a short ffmpeg PCM pass over the two windows the RMS crest and the transition into silence
+(null without ffmpeg, never approximated). Each track also gets an `edges` run row carrying the fold
+and PCM time, and a fold that fails is a failed run naming the reason and no rows. The frames file and
+the profile live beside the extractor's temp output in the stage directory and are deleted with it;
+nothing is written to `mbxmoods.json`, and a cache hit folds nothing, so `--edges` populates the tracks
+a scan actually analyses. Measured on a local library: about 6.3 KB per track in the store and
+roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage
+(eligible, captured, missing), bytes per track, median time and the work queue by state. In
+`--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
+catalog entry.
+
+**The drain (`--work`).** A library imported into the store has descriptions but no edge rows, and a
+cache hit never folds; `--work [--producer edges] [--budget <time>]` closes that gap. It queues every
+media with a description, no edge row at the current producer version and a copy on one of this
+machine's roots, then leases one item at a time, runs the same extractor-with-frames path a scan uses
+over a staged copy, writes the rows and an `edges` run row, and moves the item to done, failed (retried
+after an hour) or parked after three attempts; leases expire, nothing is force-killed. `--budget` takes
+`90s`, `30m`, `2h`, `1h30m` or bare seconds and stops the run from leasing more once spent. The run
+writes `work-result.json` beside the store (counts, items per hour, bytes per item, next retry time) and
+rewrites the companion file. Measured on a local library: about 440 items per hour on one box, almost
+all of it the extractor run. Single instance by design: run one drain per store.
+
+**The companion file (`mbxedges.v1.json`).** The hub reads edges from a small JSON file beside
+`mbxmoods.json`, keyed by `audioStreamSha256`, carrying per edge the status word, window, key vote,
+bpm, loudness scalars, texture means and spreads, divergences and the PCM `rms` block, and per track the
+head-vs-tail divergence; the 10/s series, beats, HPCP and sub-window summaries stay in the store. It is
+written from the store, compactly (about 1.8 KB per track), after any `--edges` scan or `--work` run
+that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
+Absent means not yet. The hub never reads the store.
+
+**Measured (2026-10-12, a 200-track slice of a local library, 83 FLAC / 111 MP3, local SSD, parallelism 20):**
+
+| | |
+|---|---|
+| Scan with `--store --edges` | 2.8 s per track wall; 200 of 200 edge rows, 0 failed folds |
+| Edge rows in the store | 6,404 bytes per track (one packed row per edge) |
+| Store, everything included | 19.7 KB per track; about 2.9 GB projected at 156k tracks |
+| `mbxedges.v1.json` | 1.7 KB per track |
+| `--work` drain | 130 to 440 items per hour on one box; the extractor run dominates, so track length decides |
+| `--store-roundtrip` on the scan-built store | EQUAL, 200 of 200, at the six-figure precision |
+
+**Verified on real audio:** `--edges` through `--analyze-file`, `--file-list` and the drain on MP3, M4A, WMA and
+FLAC; the `--work` decode-coverage gate (a file whose claimed duration exceeds what the extractor decodes
+is transcoded, then fails the fold rather than writing a wrong tail); the refusals on an older extractor
+and on a missing `--moods`; the stage directory left clean after parallel runs.
+
+**Not yet verified:** `--edges` or `--work` over a UNC share or a staged network copy; the library (iTunes
+XML) scan and `--folder` with `--edges`; slices beyond 200 tracks. **Known limits:** the fold reads each
+descriptor whole, so a multi-hour file costs several hundred MB of transient memory per worker;
+`--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
+file-list scans; `dist/` still ships extractor build `.4`, and `--edges` / `--work` need `.5`.
+
+Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
+reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
+the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
+store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`
+(`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
+row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own. Measured on a 72,477-track
+catalog: import 25 s, export 7 s, round-trip EQUAL, store 3,651 bytes per distinct track (0.95× the
+JSON it holds); vacuum of a 4 KB-page store 2 s, −29%.
+
 ## Quick Start
 
 ```cmd
@@ -314,6 +452,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
+  --edges                 With --store: fold the first and last 30 s of every analysed track into the
+                          store's edge row (loudness series, beats, key, texture, fades, PCM crest/
+                          transition). Needs extractor build output-x64.5. Writes nothing to mbxmoods.json;
+                          rewrites mbxedges.v1.json beside the catalog when edge rows were added.
+  --work [--producer edges] [--budget <time>]
+                          With --store: fold edges for every media with a description but no edge row
+                          and a copy on this machine, one at a time, until the queue is empty or the
+                          budget (90s, 30m, 2h, 1h30m) is spent; 3 attempts then parked. Writes
+                          work-result.json beside the store; --store-info reports eligible/captured/missing.
+  --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
   --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
                           and the --refresh-smfm backfill alike (omits the smfm* fields).
                           Unlike its two siblings above this saves no meaningful time: SMFM

@@ -76,6 +76,16 @@ if errorlevel 1 (
 )
 echo Done: SBOM.md
 
+REM STORE.md — the v2 store reference the README points at (tables, verbs, edges, precision, how to open the file).
+echo Copying STORE.md...
+copy /Y STORE.md "dist\truedat\" >nul
+if errorlevel 1 (
+    echo ERROR: STORE.md copy failed
+    pause
+    exit /b 1
+)
+echo Done: STORE.md
+
 REM mbxmoods-schema.json — the field-emission policy the writer + --fixup read at runtime
 REM (beside the exe). Absent it, truedat falls back to a built-in default that still cuts
 REM bpmHistogram, so shipping it is what lets the policy be edited without a rebuild.
