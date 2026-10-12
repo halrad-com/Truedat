@@ -758,6 +758,8 @@ namespace Truedat
             Console.WriteLine("  --stage-dir <path>  Override staging dir (default %TEMP%\\.truedat-stage)");
             Console.WriteLine("  --no-quick-cache    Disable the tags-only quick cache tier (head-64k check);");
             Console.WriteLine("                      mtime-drifted files always take the full audio-hash check");
+            Console.WriteLine("  --no-dir-batch      Stat each file individually instead of enumerating its folder once");
+            Console.WriteLine("                      (the batch saves one SMB round trip per cached track; this reverts it)");
             Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
             Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
             Console.WriteLine("  --no-smfm           Suppress every Sony 12-TONE (SMFM) read (omits smfm* JSON fields).");
@@ -835,7 +837,7 @@ namespace Truedat
             "transcode", "transcode-out", "sample-rate", "bit-depth", "moods",
             "convert-dir", "compression-level", "convert-codecs", "wma-only", "wma-lossless-only",
             "json-output", "output", "chunk", "self-test", "no-stage",
-            "no-quick-cache", "file-md5", "apply-exclusions", "preview",
+            "no-quick-cache", "no-dir-batch", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "version", "v",
@@ -1200,6 +1202,11 @@ namespace Truedat
         // Tier-1.5 tags-only quick cache (head-64k evidence check on mtime drift).
         // Default ON; --no-quick-cache forces the full audio-hash tier instead.
         internal static bool _quickCache = true;
+
+        // Directory-batched metadata for the per-track existence/mtime/size stat that every
+        // scan mode pays — one enumeration per folder instead of one round trip per file over
+        // SMB. Default ON; --no-dir-batch (DirStatCache.Disabled) makes every call direct.
+        internal static readonly DirStatCache _dirStats = new DirStatCache();
 
         // Explicit scan-exclusion file. Default location is beside the moods file;
         // --exclusions overrides it, --no-exclusions ignores it for one run.
@@ -2553,6 +2560,7 @@ namespace Truedat
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "edges") _stageOpts.Edges = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
+                else if (canonical == "no-dir-batch") DirStatCache.Disabled = true;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
                 else if (canonical == "preview")
@@ -4144,9 +4152,10 @@ namespace Truedat
                 {
                     // One stat for existence AND size (see the scan paths) — two syscalls
                     // over SMB otherwise, and --hash-only exists to run fast.
-                    FileInfo? hoStat = null;
-                    try { hoStat = new FileInfo(filePath); } catch { }
-                    if (hoStat == null || !hoStat.Exists)
+                    // Served from the folder's one enumeration when a sibling already paid for
+                    // it (DirStatCache); a direct FileInfo otherwise. Same three facts either way.
+                    var hoStat = _dirStats.Stat(filePath);
+                    if (!hoStat.Exists)
                     {
                         Interlocked.Increment(ref hoFailed);
                         hoErrors.Add($"{filePath}\tfile not found");
@@ -4456,9 +4465,12 @@ namespace Truedat
                     // playlist path, so it is exactly where a "scan just these few tracks"
                     // run pays it. try because the FileInfo ctor throws on invalid path
                     // characters where File.Exists swallowed to false.
-                    FileInfo? flStat = null;
-                    try { flStat = new FileInfo(filePath); } catch { }
-                    if (flStat == null || !flStat.Exists)
+                    // Now served from the folder's one enumeration when a sibling already paid
+                    // for it (DirStatCache) — an album piped in by the plugin costs ~one round
+                    // trip, not one per file — with a direct FileInfo as the fallback. The
+                    // folder walk seeds this too, so --folder's re-stat is free.
+                    var flStat = _dirStats.Stat(filePath);
+                    if (!flStat.Exists)
                     {
                         // Volume gone, or file gone? This is the autoscan path — the plugin pipes
                         // new paths here continuously — so a NAS blip would otherwise ledger a
@@ -4893,6 +4905,7 @@ namespace Truedat
 
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
+                EmitDirStatSummary();
                 FlushRunLedger(flLedgerPath);
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                     PruneErrorsCsv(Path.Combine(flLedgerDir, "mbxmoods-errors.csv"));
@@ -5608,9 +5621,14 @@ namespace Truedat
                         // this, a pathological XML entry would stop reading as "[skipped
                         // missing]" and start reading as an analysis failure — a behaviour
                         // change smuggled in by what is meant to be a pure IO refactor.
-                        FileInfo? scanStat = null;
-                        try { scanStat = new FileInfo(scanPath); } catch { }
-                        if (scanStat == null || !scanStat.Exists)
+                        // Now ONE enumeration per FOLDER rather than one round trip per file:
+                        // DirStatCache lists the directory the first time any track in it is
+                        // reached and serves every sibling from that listing (albums are
+                        // contiguous in the XML). A folder that cannot be listed falls back to
+                        // exactly the direct FileInfo described above, so the share-dropped
+                        // path below is unchanged. --no-dir-batch reverts to per-file stats.
+                        var scanStat = _dirStats.Stat(scanPath);
+                        if (!scanStat.Exists)
                         {
                             // Deleted, or did the volume just go? Re-probe this file's ROOT before
                             // recording anything: a healthy root always answers, so an error here
@@ -6279,6 +6297,7 @@ namespace Truedat
                     Console.WriteLine($"  Analyzed IO: {sizeTagStr} @ {mb / wallSecs:F1} MB/s scan-wide");
             }
             EmitStagingSummary();
+            EmitDirStatSummary();
             }
             PrintScanTallies();
             if (_shaReadsRecovered > 0)
@@ -11213,6 +11232,22 @@ namespace Truedat
         /// when no staging was attempted (happy path stays quiet on local-only scans).
         /// Resets the counters so back-to-back scan modes report independently.
         /// </summary>
+        static void EmitDirStatSummary()
+        {
+            // Round-trip COUNT is the proof surface for directory batching: it is
+            // deterministic and shows the win without a slow network, where wall-clock
+            // on a local disk shows nothing. Peek, no reset (same reason as the staging
+            // summary). Silent when no scan path looked anything up.
+            long enumerated = _dirStats.Enumerations, served = _dirStats.Served,
+                 direct = _dirStats.Direct, failed = _dirStats.DirFailures;
+            if (served + direct == 0) return;
+            if (DirStatCache.Disabled)
+                Console.WriteLine($"  Metadata:   {direct} direct stat(s) (--no-dir-batch)");
+            else
+                Console.WriteLine($"  Metadata:   {enumerated} dir(s) enumerated served {served} stat(s); {direct} direct" +
+                    (failed > 0 ? $" ({failed} dir(s) could not be listed, stat'd per file)" : ""));
+        }
+
         static void EmitStagingSummary()
         {
             // Peek (no reset): the MoodsMode summary prints on every Ctrl+C break as
@@ -14475,6 +14510,79 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             try { Fft.Forward(new double[100], new double[100]); }
             catch (ArgumentException) { threw = true; }
             Assert(threw, "non-power-of-2 size throws ArgumentException");
+
+            // -- DirStatCache: one directory enumeration serves every sibling's stat ----
+            // The point of the cache is round-trip COUNT over SMB, so every test pins the
+            // exact counters, not just the returned values: a cache that silently fell back
+            // to per-file stats would return correct answers and still have lost the win.
+            Console.WriteLine("DirStatCache");
+            {
+                var dsDir = Path.Combine(Path.GetTempPath(), ".truedat-selftest-dirstat-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(dsDir);
+                    var dsNames = new[] { "a.flac", "b.mp3", "c.m4a", "d.wav", "e.ogg" };
+                    foreach (var n in dsNames) File.WriteAllText(Path.Combine(dsDir, n), n);
+                    var dsPrev = DirStatCache.Disabled;
+                    DirStatCache.Disabled = false;
+                    try
+                    {
+                        // 1. Five siblings, ONE enumeration, zero direct stats.
+                        var c1 = new DirStatCache();
+                        foreach (var n in dsNames)
+                        {
+                            var s = c1.Stat(Path.Combine(dsDir, n));
+                            var fi = new FileInfo(Path.Combine(dsDir, n));
+                            Assert(s.Exists, $"dirstat: {n} exists via the cache");
+                            Assert(s.Length == fi.Length, $"dirstat: {n} length from enumeration == FileInfo ({s.Length} vs {fi.Length})");
+                            Assert(s.LastWriteTimeUtc == fi.LastWriteTimeUtc, $"dirstat: {n} mtime from enumeration == FileInfo");
+                        }
+                        Assert(c1.Enumerations == 1, $"dirstat: five siblings cost exactly ONE enumeration (got {c1.Enumerations})");
+                        Assert(c1.Served == 5, $"dirstat: all five served from the map (got {c1.Served})");
+                        Assert(c1.Direct == 0, $"dirstat: zero direct stats for siblings (got {c1.Direct})");
+
+                        // 2. A known-absent sibling costs no round trip at all.
+                        var sMissing = c1.Stat(Path.Combine(dsDir, "nope.flac"));
+                        Assert(!sMissing.Exists, "dirstat: absent sibling reports Exists=false");
+                        Assert(c1.Direct == 0, $"dirstat: absent sibling spent no direct stat (got {c1.Direct})");
+                        Assert(c1.Enumerations == 1, $"dirstat: absent sibling did not re-enumerate (got {c1.Enumerations})");
+
+                        // 3. Windows filename semantics survive: casing from the XML need not match disk.
+                        var sUpper = c1.Stat(Path.Combine(dsDir, "A.FLAC"));
+                        Assert(sUpper.Exists, "dirstat: upper-cased filename still resolves (case-insensitive like the filesystem)");
+
+                        // 4. A directory that cannot be enumerated falls back to a direct stat and
+                        //    never throws — this is what keeps the share-dropped path identical.
+                        var c4 = new DirStatCache();
+                        var sGone = c4.Stat(Path.Combine(dsDir, "no-such-subdir", "x.flac"));
+                        Assert(!sGone.Exists, "dirstat: file in a nonexistent directory reports Exists=false");
+                        Assert(c4.DirFailures == 1, $"dirstat: the failed enumeration is counted (got {c4.DirFailures})");
+                        Assert(c4.Direct == 1, $"dirstat: failed dir falls back to exactly one direct stat (got {c4.Direct})");
+                        var sGone2 = c4.Stat(Path.Combine(dsDir, "no-such-subdir", "y.flac"));
+                        Assert(!sGone2.Exists && c4.Direct == 2 && c4.DirFailures == 1,
+                            $"dirstat: second file in the failed dir goes direct too without re-enumerating (direct={c4.Direct}, failures={c4.DirFailures})");
+
+                        // 5. --no-dir-batch: every call is a direct stat, nothing is enumerated.
+                        DirStatCache.Disabled = true;
+                        var c5 = new DirStatCache();
+                        foreach (var n in dsNames) Assert(c5.Stat(Path.Combine(dsDir, n)).Exists, $"dirstat: disabled still answers {n}");
+                        Assert(c5.Enumerations == 0, $"dirstat: disabled enumerates nothing (got {c5.Enumerations})");
+                        Assert(c5.Direct == 5, $"dirstat: disabled goes direct for all five (got {c5.Direct})");
+                        DirStatCache.Disabled = false;
+
+                        // 6. Seed from a walk (the --folder path): served without any enumeration.
+                        var c6 = new DirStatCache();
+                        foreach (var fi in new DirectoryInfo(dsDir).EnumerateFiles()) c6.Seed(fi);
+                        var sSeeded = c6.Stat(Path.Combine(dsDir, "c.m4a"));
+                        Assert(sSeeded.Exists && sSeeded.Length == 5, $"dirstat: seeded entry served with its length (exists={sSeeded.Exists}, len={sSeeded.Length})");
+                        Assert(c6.Enumerations == 0, $"dirstat: seeding did not trigger an enumeration (got {c6.Enumerations})");
+                        Assert(c6.Direct == 0, $"dirstat: seeded lookup spent no direct stat (got {c6.Direct})");
+                        Assert(c6.Served == 1, $"dirstat: seeded lookup counted as served (got {c6.Served})");
+                    }
+                    finally { DirStatCache.Disabled = dsPrev; }
+                }
+                finally { try { Directory.Delete(dsDir, true); } catch { } }
+            }
 
             // -- SourceStager: pass-through / staging / failure ----------------
             Console.WriteLine("SourceStager");
