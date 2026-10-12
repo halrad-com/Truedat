@@ -214,6 +214,24 @@ created it. `--no-store` and `--no-edges` override the file for one run. A file-
 plain command refuse: before the first scan the read verbs still answer from the catalog, and a per-file
 mode without `--moods` skips the edges with a note.
 
+**Upgrading an instance that already has a catalog** — the recommended set, from the instance's truedat
+folder with the rebuilt exe and the `.5` extractor beside it:
+
+```
+truedat --config store true
+truedat --config edges true
+truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
+truedat --refresh --budget 2h          (repeat until --store-info says missing 0)
+truedat                                (ongoing, unchanged)
+```
+
+`--store-import` gives the store every track you have already scanned, with no re-analysis. `--refresh`
+then does what it always did (re-analyse entries missing the newest feature fields) and, with the store
+and edges on, backfills edge rows for every track that has none — one extractor run per track, resumable,
+`--budget` capping each session. A normal scan keeps everything current from then on; a cached track is
+never re-analysed, which is why the backfill exists. `--work` is the backfill on its own, for an edges-only
+session.
+
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the

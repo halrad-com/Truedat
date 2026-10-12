@@ -560,7 +560,8 @@ namespace Truedat
             Console.WriteLine();
             Console.WriteLine("Everyday:");
             Console.WriteLine("  (zero-arg)            scan the library");
-            Console.WriteLine("  --refresh             re-analyze entries missing the newest feature fields");
+            Console.WriteLine("  --refresh             re-analyze entries missing the newest feature fields; with the store and");
+            Console.WriteLine("                        edges on, then backfill edge rows for tracks that lack them (--budget 2h caps it)");
             Console.WriteLine("                        (resumable; run in sessions until coverage completes)");
             Console.WriteLine("  --stats [path]        read-only catalog summary + recommended next commands");
             Console.WriteLine("  --verify --backfill   integrity check + fill missing fields (no re-analysis)");
@@ -773,10 +774,10 @@ namespace Truedat
             Console.WriteLine("                      output-x64.5 (binary frames). Writes nothing to mbxmoods.json; rewrites");
             Console.WriteLine("                      mbxedges.v1.json beside the catalog when edge rows were added.");
             Console.WriteLine("  --work [--producer edges] [--budget <time>]");
-            Console.WriteLine("                      With --store: fold edges for every media that has a description but no");
-            Console.WriteLine("                      edge row and a copy on this machine, one at a time, until the queue is");
-            Console.WriteLine("                      empty or the budget (90s, 30m, 2h, 1h30m) is spent. 3 attempts then parked.");
-            Console.WriteLine("                      Writes work-result.json beside the store; --store-info shows coverage.");
+            Console.WriteLine("                      The edge backfill on its own (what --refresh runs after its feature pass):");
+            Console.WriteLine("                      fold edges for every media with a description but no edge row and a copy");
+            Console.WriteLine("                      on this machine, one at a time, until the queue is empty or the budget is");
+            Console.WriteLine("                      spent; 3 attempts then parked. work-result.json beside the store.");
             Console.WriteLine("  --edges-export [path]");
             Console.WriteLine("                      With --store: write mbxedges.v1.json from the store (default: beside the catalog).");
             Console.WriteLine();
@@ -802,7 +803,9 @@ namespace Truedat
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
-            Console.WriteLine("  --refresh           Re-analyze entries missing the 2026-07-22 tonal/rhythm fields");
+            Console.WriteLine("  --refresh           Re-analyze entries missing the newest feature fields; with the store and");
+            Console.WriteLine("                      edges on (config or flags), then backfill edge rows for every track that has");
+            Console.WriteLine("                      none, one extractor run each, resumable; --budget 90s|30m|2h caps the session.");
             Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
             Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
             Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
@@ -2709,6 +2712,8 @@ namespace Truedat
             // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
             if (noStore) { storePath = null; _storeFromConfig = false; }
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
+            if (workBudgetText != null && !workMode && !_refreshFeatures)
+                Console.Error.WriteLine("  WARNING: --budget caps the edge backfill, which runs under --refresh or --work; it does nothing on this command");
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || workMode || edgesExportMode;
             if (storeVerb || storePath != null)
             {
@@ -3181,31 +3186,14 @@ namespace Truedat
             }
             if (workMode)
             {
-                // S2 C5: the drain. Same gate as --edges on a scan (store, .5 build, ffmpeg warning); the produce step is the
-                // C4 path over a staged copy of each reachable file.
-                TimeSpan? budget = null;
-                if (workBudgetText != null)
-                {
-                    budget = ParseBudget(workBudgetText);
-                    if (budget == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
-                }
-                var workBaseDir = AppDomain.CurrentDomain.BaseDirectory;
-                var workEssentia = FindTool("essentia_streaming_extractor_music.exe", workBaseDir, Environment.CurrentDirectory);
+                // S2 C5: the drain on its own. Internal since 2026-10-12: --refresh runs the same thing after its feature pass,
+                // so this verb is for an edges-only session; it stays for that.
+                if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
+                var workEssentia = FindTool("essentia_streaming_extractor_music.exe", AppDomain.CurrentDomain.BaseDirectory, Environment.CurrentDirectory);
                 if (workEssentia == null) { Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found (app dir, cwd)."); Environment.ExitCode = 2; return; }
                 _stageOpts.Edges = true;
-                global::Truedat.Store.ScanSink.SuppressMainStash = true;   // the drain files no description (it exists): no compress-then-delete per item (review M7)
                 if (EdgesPreflight(workEssentia) is string workRefusal) { Console.Error.WriteLine(workRefusal); Environment.ExitCode = 1; return; }
-                var workBuild = global::Truedat.Store.ScanSink.ExtractorBuild;
-                Console.WriteLine($"  Work:       producer {workProducer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {workBuild}");
-                var wr = global::Truedat.Store.WorkCommand.Run(
-                    new global::Truedat.Store.WorkOptions { StorePath = storePath, Producer = workProducer, Budget = budget, Audit = auditLog },
-                    RealProduceEdges(workEssentia), _edgeSettings.ProducerVersion);
-                if (wr.Error != null) { Console.Error.WriteLine($"Error: {wr.Error}"); Environment.ExitCode = 1; return; }
-                Console.WriteLine($"  work: {wr.Enqueued} enqueued, {wr.Leased} leased, {wr.Done} done, {wr.Failed} failed ({wr.Unreachable} unreachable), {wr.Parked} parked, {wr.Remaining} remaining; stopped: {wr.Stopped}; {wr.ElapsedMs / 1000.0:F1} s" +
-                                  (wr.Leased > 0 ? $" ({wr.ItemsPerHour:F0} items/h, {(wr.Done > 0 ? wr.BytesWritten / wr.Done : 0):N0} B/item)" : "") + (wr.NextEligibleUtc != null ? $"; next retry eligible {wr.NextEligibleUtc}" : ""));
-                Console.WriteLine($"  result:     {wr.ResultPath}");
-                if (wr.Done > 0) WriteEdgesCompanion(null, announce: true);
-                Environment.ExitCode = 0;
+                Environment.ExitCode = RunEdgeDrain(workEssentia, workBudgetText, workProducer, auditLog) ? 0 : 1;
                 return;
             }
 
@@ -4970,6 +4958,7 @@ namespace Truedat
                     SaveResults(analyzeFileMoods!, flMoodsTracks);
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                     FlushStoreSink(flMoodsTracks.Keys);   // S2 C3
+                    RunEdgeDrainAfterRefresh(flEssentiaExe, workBudgetText, chunkTotal, auditLog);   // S2 C5: --refresh also backfills edges (folder / file-list)
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
@@ -6272,6 +6261,7 @@ namespace Truedat
             SaveResults(moodsPath, allTracks);
             finalSaveSw.Stop();
             FlushStoreSink(allTracks.Keys);     // S2 C3: the store is a second sink, written after the catalog, never instead of it
+            if (!wasCancelled) RunEdgeDrainAfterRefresh(essentiaExe, workBudgetText, chunkTotal, auditLog);   // S2 C5: --refresh also backfills edges
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -10329,6 +10319,44 @@ namespace Truedat
                 return true;
             }
             catch (Exception ex) { Console.Error.WriteLine($"  WARNING: mbxedges.v1.json not written ({ex.Message})"); return false; }
+        }
+
+        /// <summary>The edge backfill (S2 C5, "--work made internal", operator 2026-10-12): queue every media with a description but no
+        /// edge row at the current version and a present, unchanged copy on this machine, then fold them one at a time inside the
+        /// budget. Called by --work on its own and by --refresh after its feature pass. Returns false only on an error; a budget
+        /// stop or an empty queue is success. Writes work-result.json beside the store and rewrites the companion when rows landed.</summary>
+        static bool RunEdgeDrain(string essentiaExe, string? budgetText, string producer, bool audit)
+        {
+            TimeSpan? budget = budgetText != null ? ParseBudget(budgetText) : null;
+            global::Truedat.Store.ScanSink.SuppressMainStash = true;   // the drain files no description (it exists): no compress-then-delete per item (review M7)
+            try
+            {
+                var drainBuild = global::Truedat.Store.ScanSink.ExtractorBuild;
+                Console.WriteLine($"  Edges backfill: producer {producer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {drainBuild}");
+                var wr = global::Truedat.Store.WorkCommand.Run(
+                    new global::Truedat.Store.WorkOptions { StorePath = _storePath, Producer = producer, Budget = budget, Audit = audit },
+                    RealProduceEdges(essentiaExe), _edgeSettings.ProducerVersion);
+                if (wr.Error != null) { Console.Error.WriteLine($"Error: {wr.Error}"); return false; }
+                Console.WriteLine($"  edges backfill: {wr.Enqueued} enqueued, {wr.Leased} leased, {wr.Done} done, {wr.Failed} failed ({wr.Unreachable} unreachable, {wr.Changed} changed), {wr.Parked} parked, {wr.Remaining} remaining; stopped: {wr.Stopped}; {wr.ElapsedMs / 1000.0:F1} s" +
+                                  (wr.Leased > 0 ? $" ({wr.ItemsPerHour:F0} items/h, {(wr.Done > 0 ? wr.BytesWritten / wr.Done : 0):N0} B/item)" : "") + (wr.NextEligibleUtc != null ? $"; next retry eligible {wr.NextEligibleUtc}" : ""));
+                Console.WriteLine($"  result:     {wr.ResultPath}");
+                if (wr.Remaining > 0 && wr.Stopped == "budget") Console.WriteLine($"  {wr.Remaining} still to fold: run again (same command) to continue; --store-info shows eligible / captured / missing");
+                if (wr.Done > 0) WriteEdgesCompanion(null, announce: true);
+                return true;
+            }
+            finally { global::Truedat.Store.ScanSink.SuppressMainStash = false; }
+        }
+
+        /// <summary>--refresh's second half: once the feature pass has saved and flushed, backfill edges for the tracks the catalog
+        /// already had (a cache hit never folds). Only when a store and edges are in force; under --chunk the shards would each
+        /// drain, so it is skipped with a note (single writer by design).</summary>
+        static void RunEdgeDrainAfterRefresh(string essentiaExe, string? budgetText, int chunkTotal, bool audit)
+        {
+            if (!_refreshFeatures || _storePath == null || !_stageOpts.Edges) return;
+            if (chunkTotal > 0) { Console.WriteLine("  edges backfill: skipped under --chunk (one drain per store; run --refresh without --chunk, or --work, on one machine)"); return; }
+            Console.WriteLine();
+            Console.WriteLine("=== --refresh: edge backfill ===");
+            RunEdgeDrain(essentiaExe, budgetText, global::Truedat.Edges.EdgeStore.ProducerKey, audit);
         }
 
         /// <summary>--budget: 90s, 30m, 2h, 1h30m, or a bare number of seconds. Null when it does not parse.</summary>
@@ -15040,6 +15068,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.WriteAllText(cfgFile, "{ \"store\": false, \"edges\": false }");
                     Assert(TruedatConfig.BuildArgs(TruedatConfig.Load(cfgDir).Values).Length == 0, "config: store = false / edges = false emit nothing");
                     Assert(KnownFlags.Contains("no-store") && KnownFlags.Contains("no-edges"), "config: --no-store and --no-edges exist as the one-run overrides");
+                    // --budget forms (the edge backfill's session cap under --refresh and --work).
+                    Assert(ParseBudget("90s") == TimeSpan.FromSeconds(90) && ParseBudget("30m") == TimeSpan.FromMinutes(30) && ParseBudget("2h") == TimeSpan.FromHours(2)
+                        && ParseBudget("1h30m") == TimeSpan.FromMinutes(90) && ParseBudget("120") == TimeSpan.FromSeconds(120),
+                        "budget: 90s, 30m, 2h, 1h30m and bare seconds parse");
+                    Assert(ParseBudget("soon") == null && ParseBudget("0") == null && ParseBudget("2x") == null && ParseBudget("") == null,
+                        "budget: nonsense, zero and an unknown unit are refused (null)");
 
                     // Refuse, never fall back to defaults and never rewrite the file.
                     File.WriteAllText(cfgFile, "{ oops,, }");

@@ -79,7 +79,9 @@ attributable.
 
 - `--edges` on any scan with `--store`: fold every analysed track. Refuses plainly without `--store`,
   on an extractor older than `.5`, and in `--analyze-file` / `--file-list` without `--moods`.
-- `--work [--producer edges] [--budget 90s|30m|2h|1h30m]`: the drain. Queues every media with a
+- `--refresh` with the store and edges on: after its feature pass, runs the edge backfill below for
+  every track that has no edge row; `--budget` caps the session. This is the verb to type.
+- `--work [--producer edges] [--budget 90s|30m|2h|1h30m]`: the backfill on its own. Queues every media with a
   description, no edge row at the current version and a present copy on this machine whose mtime still
   matches its description; leases one at a time; runs the same extractor-with-frames path a scan does
   over a staged copy, with the scan's decode-coverage gate (an under-decoded file is a failed fold, never

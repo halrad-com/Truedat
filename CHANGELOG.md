@@ -12,6 +12,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **`--refresh` backfills edges.** With the store and edges on, `--refresh` follows its feature pass with
+  the edge backfill (one extractor run per track lacking an edge row, resumable, `--budget` caps the
+  session). `--work` is that backfill on its own. The import's "legacy FLAC sha: N unrecoverable" line now
+  says what it counts (FLAC entries with only the current hash; normal).
 - **Config keys `store` and `edges`** make the store (and edge folding) the default for an instance:
   `truedat --config store true`. `--no-store` / `--no-edges` override for one run; a file-set default never
   makes a plain command refuse (read verbs use the catalog until a scan creates the store).
