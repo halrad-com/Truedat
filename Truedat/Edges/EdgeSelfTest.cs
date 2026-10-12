@@ -105,7 +105,7 @@ namespace Truedat.Edges
                     $"read back: the key vote ({back?.Head.Whole?.Key?.Name} {back?.Head.Whole?.Key?.Scale} {back?.Head.Whole?.Key?.Code})");
                 assert(back != null && back.Head.Sub.Length == 3 && back.Head.Sub[2].StartMs == 20000 && back.Head.Sub[1].Key?.Name == "C" && Math.Abs(back.Head.Sub[1].MfccMean[12] - (-380)) < 1e-3,
                     "read back: three sub-windows with their own summaries");
-                assert(back != null && Math.Abs(back.Head.Whole.HpcpMean[9] - r.Head.Whole.HpcpMean[9]) < 1e-6 && Math.Abs(back.Head.Whole.SpectralMean[10] - 1100) < 1e-3 && back.Head.Whole.MfccSpread[0] == 0,
+                assert(back != null && back.Head.Whole != null && Math.Abs(back.Head.Whole.HpcpMean[9] - r.Head.Whole!.HpcpMean[9]) < 1e-6 && Math.Abs(back.Head.Whole.SpectralMean[10] - 1100) < 1e-3 && back.Head.Whole.MfccSpread[0] == 0,
                     "read back: hpcp mean, spectral means, spreads");
                 // Scalars are stored as float32: equal to ~1e-6 relative, so compare with a tolerance, never ==.
                 assert(back != null && back.Tail.Loudness != null && back.Tail.Loudness.SilenceMs == 1100 && back.Tail.Loudness.SilenceSource == "pcm" && back.Tail.Loudness.FadeMs == r.Tail.Loudness!.FadeMs
@@ -617,8 +617,8 @@ namespace Truedat.Edges
                 assert(h.Bpm != null && Math.Abs(h.Bpm.Value - 120) < 0.01 && h.Bpm.Beats == 60 && h.Bpm.Regularity > 0.99, $"bpm from in-window intervals: 120, 60 beats, regularity ~1 ({h.Bpm?.Value:F2}, {h.Bpm?.Beats}, {h.Bpm?.Regularity:F3})");
                 assert(h.Whole != null && h.Whole.Key != null && h.Whole.Key.Name == "C" && h.Whole.Key.Scale == "major" && h.Whole.Key.Code == "8B", $"head key from the window's HPCP mean: C major 8B ({h.Whole?.Key?.Name} {h.Whole?.Key?.Scale})");
                 assert(t.Whole != null && t.Whole.Key != null && t.Whole.Key.Name == "A" && t.Whole.Key.Scale == "minor", $"tail key: A minor ({t.Whole?.Key?.Name} {t.Whole?.Key?.Scale})");
-                assert(h.Sub.Length == 3 && h.Sub[0].StartMs == 0 && h.Sub[0].EndMs == 10000 && h.Sub[2].StartMs == 20000 && h.Sub[2].EndMs == 30000 && h.Sub[1].Key != null && h.Sub[1].Key.Name == "C", "three 10 s sub-windows, each with its own summary and key");
-                assert(h.Whole.MfccMean.Length == 13 && Math.Abs(h.Whole.MfccMean[0] - (-500)) < 1e-3 && Math.Abs(h.Whole.MfccMean[12] - (-380)) < 1e-3 && h.Whole.MfccSpread[0] < 1e-6,
+                assert(h.Sub.Length == 3 && h.Sub[0].StartMs == 0 && h.Sub[0].EndMs == 10000 && h.Sub[2].StartMs == 20000 && h.Sub[2].EndMs == 30000 && h.Sub[1].Key != null && h.Sub[1].Key!.Name == "C", "three 10 s sub-windows, each with its own summary and key");
+                assert(h.Whole != null && h.Whole.MfccMean.Length == 13 && Math.Abs(h.Whole.MfccMean[0] - (-500)) < 1e-3 && Math.Abs(h.Whole.MfccMean[12] - (-380)) < 1e-3 && h.Whole.MfccSpread[0] < 1e-6,
                     $"MFCC mean and spread over the window ({h.Whole.MfccMean[0]:F1}, spread {h.Whole.MfccSpread[0]:E1})");
                 assert(h.Whole.SpectralMean.Length == 11 && Math.Abs(h.Whole.SpectralMean[0] - 100) < 1e-3 && Math.Abs(t.Whole!.SpectralMean[10] - 2200) < 1e-3 && h.Whole.SpectralSpread[3] < 1e-6,
                     $"the 11 spectral scalars in the declared order, mean and spread ({h.Whole.SpectralMean[0]:F1}, {t.Whole!.SpectralMean[10]:F1})");

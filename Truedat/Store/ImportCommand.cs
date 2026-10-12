@@ -315,7 +315,7 @@ namespace Truedat.Store
             var wal = os.Path + "-wal";
             if (File.Exists(wal)) r.StoreBytesAfter += new FileInfo(wal).Length;
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
-            WriteResult(r, os.Path, o.RootRole, "import@1");
+            WriteResult(r, os.Path, o.RootRole ?? "primary", "import@1");
             StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
             return r;
         }
