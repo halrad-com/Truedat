@@ -381,6 +381,10 @@ namespace Truedat.Store
             return d;
         }
 
+        internal long CountRuns(string producerKey, string outcome) => Row("SELECT count(*) FROM run WHERE producer_key = ? AND outcome = ?;", s => s.GetInt64(0), 0L, producerKey, outcome);
+        internal string? RunErrorText(string producerKey, string outcome) => Row("SELECT error_text FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.GetString(0), null, producerKey, outcome);
+        internal long? RunDurationMs(string producerKey, string outcome) => Row("SELECT duration_ms FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.IsNull(0) ? (long?)null : s.GetInt64(0), null, producerKey, outcome);
+
         internal long CountSegments(string contentHash, string setKey) => Row("SELECT count(*) FROM segment WHERE content_hash = ? AND set_key = ?;", s => s.GetInt64(0), 0L, contentHash, setKey);
         internal long CountValues(string contentHash, string producerKey, string producerVersion)
             => Row("SELECT count(*) FROM value WHERE content_hash = ? AND producer_key = ? AND producer_version = ?;", s => s.GetInt64(0), 0L, contentHash, producerKey, producerVersion);

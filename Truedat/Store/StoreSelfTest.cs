@@ -658,7 +658,7 @@ namespace Truedat.Store
             jw.WriteEndObject(); jw.WriteEndObject();
         }
 
-        static Dictionary<string, TrackEntry> FixtureEntries(string root)
+        internal static Dictionary<string, TrackEntry> FixtureEntries(string root)
         {
             const string A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             const string B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

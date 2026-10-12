@@ -14,6 +14,8 @@ namespace Truedat.Store
         public bool Ok; public string? Error;
         public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Stale, EntitiesCreated, Artifacts, ArtifactsShared;
         public long ArtifactBytes;
+        /// <summary>S2 C4: edge rows written / edge folds that failed (a failed 'edges' run row, no partial row).</summary>
+        public int Edges, EdgesFailed;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
     }
 
@@ -38,12 +40,19 @@ namespace Truedat.Store
         static readonly ConcurrentDictionary<string, string> _stashed = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // catalog key -> pending artifact file, once Record() has tied the two together
         static readonly ConcurrentDictionary<string, string> _artifacts = new ConcurrentDictionary<string, string>(PathComparer.Instance);
+        // S2 C4: the edges producer's result per analysed path (stashed by the extractor core), then per catalog key (tied by Record).
+        static readonly ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult> _stashedEdges = new ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult>(StringComparer.OrdinalIgnoreCase);
+        static readonly ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult> _edges = new ConcurrentDictionary<string, global::Truedat.Edges.EdgeFoldResult>(PathComparer.Instance);
 
         internal static int Pending => _entries.Count;
         internal static int PendingFailures => _failures.Count;
         internal static int PendingArtifacts => _artifacts.Count;
+        internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); while (_failures.TryDequeue(out _)) { } }
+        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } }
+
+        /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.</summary>
+        internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges) => _stashedEdges[analysedPath] = edges;
 
         /// <summary>Called by the extractor core right after a successful parse, with the JSON text it is about to delete.</summary>
         internal static void StashMainJson(string analysedPath, string json)
@@ -59,6 +68,7 @@ namespace Truedat.Store
         /// replaced by the retry's. No-op when nothing is stashed under <paramref name="fromPath"/>.</summary>
         internal static void Rekey(string fromPath, string toPath)
         {
+            if (_stashedEdges.TryRemove(fromPath, out var edges)) _stashedEdges[toPath] = edges;
             if (!_stashed.TryRemove(fromPath, out var pending)) return;
             if (_stashed.TryRemove(toPath, out var previous)) TryDelete(previous);
             _stashed[toPath] = pending;
@@ -68,6 +78,7 @@ namespace Truedat.Store
         /// delete its stash now (review #3).</summary>
         internal static void Discard(string analysedPath)
         {
+            _stashedEdges.TryRemove(analysedPath, out _);
             if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
         }
 
@@ -77,6 +88,7 @@ namespace Truedat.Store
         {
             int n = 0;
             foreach (var kv in _stashed) { if (_stashed.TryRemove(kv.Key, out var p)) { TryDelete(p); n++; } }
+            _stashedEdges.Clear();
             return n;
         }
 
@@ -88,6 +100,7 @@ namespace Truedat.Store
         {
             _entries[path] = entry;
             if (analysedPath != null && _stashed.TryRemove(analysedPath, out var pending)) _artifacts[path] = pending;
+            if (analysedPath != null && _stashedEdges.TryRemove(analysedPath, out var edges)) _edges[path] = edges;
         }
 
         internal static void RecordFailure(string path, string components, string error, double durationSec)
@@ -104,7 +117,8 @@ namespace Truedat.Store
             var failures = new List<ScanFailure>();
             while (_failures.TryDequeue(out var f)) failures.Add(f);
             var artifacts = new Dictionary<string, string>(PathComparer.Instance);
-            foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; }
+            var edges = new Dictionary<string, global::Truedat.Edges.EdgeFoldResult>(PathComparer.Instance);
+            foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
             // Review #3: nothing will tie a stash after the entries are flushed; and a killed earlier scan may have left
             // pending files behind — both are swept here, so artifacts\pending cannot grow without bound.
             int untied = DropUntied();
@@ -115,11 +129,12 @@ namespace Truedat.Store
             {
                 var resultPath = storePath == null ? null : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(storePath)) ?? ".", ResultFileName);
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
-                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints, artifacts);
+                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints, artifacts, edges);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
+                report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed;
                 report.StorePath = storePath;
             }
             catch (Exception ex)

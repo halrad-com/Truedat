@@ -26,6 +26,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the ruled row in the store — segments, values, idempotent, versions coexist)");
             try { TestStore(assert); }
             catch (Exception ex) { assert(false, $"Store: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (S2 C4: through the scan sink — stash by analysed path, tie at Record, write at the flush)");
+            try { TestSink(assert); }
+            catch (Exception ex) { assert(false, $"Sink: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -166,6 +169,54 @@ namespace Truedat.Edges
             using (var st = db.Prepare("PRAGMA page_count;")) { st.Step(); pages = st.GetInt64(0); }
             using (var st = db.Prepare("PRAGMA page_size;")) { st.Step(); size = st.GetInt64(0); }
             return pages * size;
+        }
+
+        // ---------------------------------------------------------------- through the sink
+        /// <summary>The same shape as the artifact stash: the extractor core stashes the fold under the path it analysed (the staged
+        /// copy), Record ties it to the catalog key, the flush writes it under the entry's content key with an 'edges' run row.
+        /// A failed fold leaves a failed run row and no rows; a Rekey follows a retry; a Discard drops it.</summary>
+        static void TestSink(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "edgesink-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                var store = System.IO.Path.Combine(dir, "truedat.db");
+                Truedat.Store.ScanSink.Reset();
+                Truedat.Store.ScanSink.StoreDirectory = dir;
+                var entries = Truedat.Store.StoreSelfTest.FixtureEntries(@"D:\Music");
+                var ok = SyntheticFold(dir);
+                EdgeFoldResult failed;
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, withHpcp: false))) failed = EdgeFold.Fold(f, 240, new EdgeSettings());
+                // a.flac: folded under a retry's WAV path, re-keyed to the staged path the scan records with; b.mp3: failed fold; nosha.mp3: discarded.
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\abc.wav", ok);
+                Truedat.Store.ScanSink.Rekey(@"C:\stage\abc.wav", @"C:\stage\abc.flac");
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\def.mp3", failed);
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\nosha.mp3", ok);
+                Truedat.Store.ScanSink.Discard(@"C:\stage\nosha.mp3");
+                Truedat.Store.ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"], @"C:\stage\abc.flac");
+                Truedat.Store.ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"], @"C:\stage\def.mp3");
+                Truedat.Store.ScanSink.Record(@"D:\Music\odd\nosha.mp3", entries[@"D:\Music\odd\nosha.mp3"], @"C:\stage\nosha.mp3");
+                assert(Truedat.Store.ScanSink.PendingEdges == 2, $"two folds tied to their entries (the re-keyed one and the failed one), the discarded one gone ({Truedat.Store.ScanSink.PendingEdges})");
+                var r = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                assert(r.Ok && r.Edges == 1 && r.EdgesFailed == 1, $"the flush reports 1 edge row written and 1 failed fold ({r.Edges}, {r.EdgesFailed}, ok {r.Ok} {r.Error})");
+                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var sha = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;
+                    assert(os.Dal.CountSegments(sha, ok.ProducerVersion) == 2, $"a.flac's edges are in the store under its content hash ({os.Dal.CountSegments(sha, ok.ProducerVersion)} segments)");
+                    var back = EdgeStore.Read(os.Dal, sha, ok.ProducerVersion);
+                    assert(back != null && back.Head.Whole?.Key?.Name == "C" && back.Tail.Rms != null, "and read back whole");
+                    long okRuns = os.Dal.CountRuns(EdgeStore.ProducerKey, "ok"), failedRuns = os.Dal.CountRuns(EdgeStore.ProducerKey, "failed");
+                    assert(okRuns == 1 && failedRuns == 1, $"one ok and one failed 'edges' run row ({okRuns}, {failedRuns})");
+                    var shaB = entries[@"D:\Music\Tool\b.mp3"].AudioStreamSha256!;
+                    assert(os.Dal.CountSegments(shaB, failed.ProducerVersion) == 0 && EdgeStore.Read(os.Dal, shaB, failed.ProducerVersion) == null, "the failed fold left no segment or value rows");
+                    assert(os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("tonal.hpcp") == true, $"the failed run names the missing descriptor ({os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")})");
+                    long ms = os.Dal.RunDurationMs(EdgeStore.ProducerKey, "ok") ?? -1;
+                    assert(ms == ok.FoldMs + ok.PcmMs, $"the ok run row carries fold + PCM milliseconds ({ms} vs {ok.FoldMs + ok.PcmMs})");
+                }
+                assert(Truedat.Store.ScanSink.PendingEdges == 0, "the flush cleared the tied folds");
+            }
+            finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- the PCM pass

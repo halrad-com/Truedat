@@ -764,6 +764,10 @@ namespace Truedat
             Console.WriteLine("                      SMFM comes from the file's tag, not from analysis, so this is what");
             Console.WriteLine("                      makes a --strip-smfm durable: without it the next cache MISS on a");
             Console.WriteLine("                      file still carrying the block puts the data straight back.");
+            Console.WriteLine("  --edges             With --store: on every analysed track, also fold the first and last 30 s");
+            Console.WriteLine("                      (loudness series, beats, key, texture, fades, PCM crest/transition) into");
+            Console.WriteLine("                      the store's edge row for the hub's splicing. Needs extractor build");
+            Console.WriteLine("                      output-x64.5 (binary frames). Writes nothing to mbxmoods.json.");
             Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
@@ -842,6 +846,8 @@ namespace Truedat
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
             "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size", "store-dir",
+            // v2 S2: the edges producer rides on a scan; opt-in, store-only output.
+            "edges",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1156,6 +1162,8 @@ namespace Truedat
             return baseRemainingSecs / savePeriodSecs * avgSecs;
         }
         static readonly Lazy<string?> _ffmpegPath = new Lazy<string?>(FindFfmpeg);
+        /// <summary>S2 C4: the edges producer's settings for this run (edge length, pool rate); they ride on the producer version.</summary>
+        static readonly global::Truedat.Edges.EdgeSettings _edgeSettings = new global::Truedat.Edges.EdgeSettings();
         static readonly Lazy<string?> _ffprobePath = new Lazy<string?>(FindFfprobe);
 
         static bool _audit;
@@ -2543,6 +2551,7 @@ namespace Truedat
                     { chunkIndex = cIdx; chunkTotal = cTot; i++; }
                 else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
+                else if (canonical == "edges") _stageOpts.Edges = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
                 else if (canonical == "apply-exclusions" && i + 1 < args.Length) { applyExclusionsMode = true; applyExclusionsPath = args[++i]; }
@@ -3769,6 +3778,7 @@ namespace Truedat
                     Environment.ExitCode = 2;
                     return;
                 }
+                if (EdgesPreflight(afEssentiaExe, analyzeFileMoods != null) is string afEdgesRefusal) { Console.Error.WriteLine(afEdgesRefusal); Environment.ExitCode = 1; return; }
 
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
@@ -4380,6 +4390,7 @@ namespace Truedat
                     Environment.ExitCode = 2;
                     return;
                 }
+                if (EdgesPreflight(flEssentiaExe, analyzeFileMoods != null) is string flEdgesRefusal) { Console.Error.WriteLine(flEdgesRefusal); Environment.ExitCode = 1; return; }
 
                 var flProcessed = 0;
                 var flAnalyzed = 0;
@@ -5024,7 +5035,7 @@ namespace Truedat
             }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
             if (essentiaExe != null) ReportExtractorBuild(essentiaExe);
-            if (essentiaExe != null) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);   // S2 C3: the run rows' producer version
+            string? edgesRefusal = essentiaExe != null ? EdgesPreflight(essentiaExe) : null;   // S2 C3/C4: the run rows' producer version; the --edges gate
             Console.WriteLine();
 
             if (essentiaExe == null)
@@ -5032,6 +5043,13 @@ namespace Truedat
                 Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found in any search directory.");
                 Console.Error.WriteLine("Download from: https://essentia.upf.edu/extractors/");
                 Environment.ExitCode = 2;
+                tee?.Dispose();
+                return;
+            }
+            if (edgesRefusal != null)
+            {
+                Console.Error.WriteLine(edgesRefusal);
+                Environment.ExitCode = 1;
                 tee?.Dispose();
                 return;
             }
@@ -10150,13 +10168,37 @@ namespace Truedat
 
         /// <summary>S2 C3: after the catalog is saved, write what this run analysed into the store (when one is in
         /// force). A store failure is reported and counted, never thrown — it cannot cost a catalog entry.</summary>
+        /// <summary>S2 C4: what <c>--edges</c> needs before a scan starts, checked once the extractor is resolved, in every scan
+        /// mode. Returns a plain refusal (the caller exits 1) or null; prints the enabled line. Also stamps the run rows'
+        /// extractor build for the per-file modes, which only the library scan did before.</summary>
+        static string? EdgesPreflight(string essentiaExe, bool hasCatalogTarget = true)
+        {
+            global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);
+            if (!_stageOpts.Edges) return null;
+            if (_storePath == null)
+                return "Error: --edges writes the edge rows to the store and nowhere else — add --store (bare --store = the default location).";
+            if (!hasCatalogTarget)
+                return "Error: --edges in --analyze-file / --file-list needs --moods <mbxmoods.json>: the store is written after the catalog entry, and without a catalog target nothing is recorded (measured: the run completes and writes no edge row).";
+            var build = global::Truedat.Store.ScanSink.ExtractorBuild;
+            var required = global::Truedat.Edges.EdgeProducer.RequiredBuild;
+            if (!string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
+                return $"Error: --edges needs extractor build {required} (binary frames via --frames-bin); the resolved extractor is {build} ({essentiaExe}). Update essentia_streaming_extractor_music.exe from truedat-deps.";
+            var ffmpeg = _ffmpegPath.Value;
+            Console.WriteLine($"  Edges:      enabled ({_edgeSettings.ProducerVersion}; {_edgeSettings.EdgeSeconds} s per edge, series at {_edgeSettings.PoolHz}/s, frames in {_stageOpts.StageDir})");
+            if (ffmpeg == null) Console.WriteLine("  WARNING:    ffmpeg.exe not found — edge rms (crest, transition) will be null and silence falls back to the EBU series");
+            return null;
+        }
+
         static void FlushStoreSink(IEnumerable<string> catalogKeys)
         {
             if (_storePath == null) return;
             // The whole catalog's keys are the root hint: a root is never inferred from the analysed subset alone.
             var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys);
             if (r.Ok)
+            {
                 Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
+                if (_stageOpts.Edges) Console.WriteLine($"  edges: {r.Edges} edge rows written, {r.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
+            }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
         }
@@ -10767,6 +10809,9 @@ namespace Truedat
             // --strip-smfm durable. Without it the next cache MISS on any file still
             // carrying the Sony block puts the data straight back.
             public bool NoSmfm { get; set; }
+            /// <summary>S2 C4 — <c>--edges</c>: ask the .5 extractor for a binary frames file and fold it into the ruled edge
+            /// row in the store. Requires <c>--store</c> and the output-x64.5 build; nothing is written to mbxmoods.json.</summary>
+            public bool Edges { get; set; }
         }
 
         /// <summary>
@@ -10958,6 +11003,11 @@ namespace Truedat
             try
             {
                 var stageDir = _stageOpts?.StageDir;
+                // The ASCII check is LOAD-BEARING, not tidiness (measured 2026-10-12 on the .5 build): the extractor
+                // reads INPUT paths as UTF-8, but its writers open OUTPUT paths with a narrow ofstream, so a non-ASCII
+                // output path lands under a mojibake filename with exit 0 and the correct name logged — a silent
+                // file-not-found for the caller. The main JSON and the edges frames file (which is a sibling of this
+                // path) both depend on this fallback. Do not relax it.
                 if (!string.IsNullOrEmpty(stageDir) && IsAsciiPrintable(stageDir!))
                 {
                     Directory.CreateDirectory(stageDir!);
@@ -11103,6 +11153,12 @@ namespace Truedat
                 long copyStart = Stopwatch.GetTimestamp();
                 File.Copy(sourcePath, dest, overwrite: false);
                 long copyEnd = Stopwatch.GetTimestamp();
+                // FILE_ATTRIBUTE_TEMPORARY on the staged copy (truedat:backenddev, 2026-10-12): a cache-manager hint that
+                // the file is deleted seconds later and never re-read, so the NVMe need not write it back. Endurance only —
+                // the read-back is served from the page cache either way, so no wall-clock claim; how much write-back it
+                // actually suppresses is unmeasured. Best-effort: nothing reads the attribute back and nothing about
+                // correctness depends on it, so a filesystem that refuses must never cost the track its analysis.
+                try { File.SetAttributes(dest, File.GetAttributes(dest) | FileAttributes.Temporary); } catch { }
                 // Gate on the staged copy actually being openable. On exhaustion, throw
                 // into this method's own catch, which deletes the copy and returns a
                 // direct-read handle — a locked temp file then costs one slower read
@@ -21989,13 +22045,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine($"  DEBUG path: {pathMethod} -> {toolPath}");
 
             var tempJson = CreateExtractorOutputPath();
+            // S2 C4 (--edges): the profile asking the .5 build for the curated binary frames file, and that file's path — both
+            // siblings of the temp JSON (same ASCII-only directory), both deleted in the finally; the startup sweep covers a
+            // killed scan. A profile that cannot be written is a failed fold for this track, never a failed track.
+            string? edgesProfile = null, edgesFrames = null, edgesPrepError = null;
+            if (_stageOpts.Edges)
+            {
+                try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson); }
+                catch (Exception ex) { edgesPrepError = $"could not write the edges profile beside the extractor output: {ex.Message}"; }
+            }
             RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = essentiaExe,
-                    Arguments = $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)}",
+                    Arguments = edgesProfile != null
+                        ? $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)} {PathHelper.QuoteArg(edgesProfile)} --frames-bin {PathHelper.QuoteArg(edgesFrames!)}"
+                        : $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)}",
                     // Redirect (and drain) Essentia's stdout — without this, essentia's own
                     // progress prints inherit truedat's stdout and pollute the JSON channel
                     // in --analyze-file --json-output mode (Shell parses stdout as a single
@@ -22095,6 +22162,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // S2 C-A: with a store in force, the aggregate output is kept (compressed, content-addressed at the
                     // flush) instead of deleted — the end of rescanning for anything that is a fold of this file.
                     if (global::Truedat.Store.ScanSink.StoreDirectory != null) global::Truedat.Store.ScanSink.StashMainJson(audioPath, json);
+                    // S2 C4: fold the frames file + the PCM pass on the path the extractor read (the staged copy: one network
+                    // read stays one), stashed under that same path so Record ties it exactly as the main-JSON stash.
+                    if (_stageOpts.Edges)
+                    {
+                        var edges = edgesPrepError != null
+                            ? global::Truedat.Edges.EdgeProducer.Produce("", audioPath, features.AnalyzedLengthSec, null, _edgeSettings)   // no frames file: a failed fold naming the cause below
+                            : global::Truedat.Edges.EdgeProducer.Produce(edgesFrames!, audioPath, features.AnalyzedLengthSec, _ffmpegPath.Value, _edgeSettings);
+                        if (edgesPrepError != null) edges.Head.Error = edges.Tail.Error = edgesPrepError;
+                        global::Truedat.Store.ScanSink.StashEdges(audioPath, edges);
+                    }
                     return (features, null);
                 }
 
@@ -22114,6 +22191,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 Interlocked.Decrement(ref _essentiaActive);
                 try { File.Delete(tempJson); } catch { }
+                if (edgesProfile != null) try { File.Delete(edgesProfile); } catch { }
+                if (edgesFrames != null) try { File.Delete(edgesFrames); } catch { }
                 if (tempLink != null)
                 {
                     try { RetryDelete(tempLink); }

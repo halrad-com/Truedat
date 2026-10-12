@@ -43,6 +43,8 @@ namespace Truedat.Store
         public int ContentReplaced;
         /// <summary>Entries whose media gained a new content hash (a key move): the description is re-keyed and rewritten from the arrival.</summary>
         public int ContentRekeyed;
+        /// <summary>S2 C4: edge rows written (an 'edges' run row + the packed rows) / folds that failed (a failed run row, no rows).</summary>
+        public int Edges, EdgesFailed;
         /// <summary>Entries where a stored NULL content column gained a value under the same producer — written as a fill, never a conflict (review #4).</summary>
         public int Filled;
         /// <summary>Aggregate artifacts filed this call (new content-addressed files), ones already present for their content, and the bytes of the new ones (S2 C-A).</summary>
@@ -94,7 +96,7 @@ namespace Truedat.Store
         /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
         internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
             string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, global::Truedat.Edges.EdgeFoldResult>? pendingEdges = null)
         {
             var sw = Stopwatch.StartNew();
             var r = new ImportReport { Entries = entries.Count, Catalog = source };
@@ -156,7 +158,7 @@ namespace Truedat.Store
             try
             {
                 ImportEntriesCore(dal, db, 5000, 0, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
-                    pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".");
+                    pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".", pendingEdges);
                 if (failures != null && failures.Count > 0)
                     using (var tx = db.BeginTransaction())
                     {
@@ -193,7 +195,7 @@ namespace Truedat.Store
         /// <summary>The batched entry loop shared by the file import and the in-memory entry.</summary>
         static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
             IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null, IReadOnlyDictionary<string, global::Truedat.Edges.EdgeFoldResult>? pendingEdges = null)
         {
             var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
             int processed = 0;
@@ -204,7 +206,9 @@ namespace Truedat.Store
                 {
                     string? pendingArtifact = null;
                     if (pendingArtifacts != null) pendingArtifacts.TryGetValue(keys[i], out pendingArtifact);
-                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir);
+                    global::Truedat.Edges.EdgeFoldResult? edges = null;
+                    if (pendingEdges != null) pendingEdges.TryGetValue(keys[i], out edges);
+                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
                     processed++;
                     if (failAfterEntries > 0 && processed == failAfterEntries)
                         throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
@@ -314,7 +318,8 @@ namespace Truedat.Store
         }
 
         static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
-            string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r, string? pendingArtifact = null, string? storeDir = null)
+            string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r, string? pendingArtifact = null, string? storeDir = null,
+            global::Truedat.Edges.EdgeFoldResult? edges = null)
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
@@ -384,6 +389,19 @@ namespace Truedat.Store
                 var a = ArtifactStore.Commit(storeDir, pendingArtifact, contentKey, producerVersion);
                 dal.InsertArtifact(contentKey, sha != null ? kind : "entity", runPerEntry ? runId : (long?)null, ArtifactStore.MainKind, producerVersion, a.RelPath, a.Bytes, a.Sha256, now);
                 if (a.Created) { r.Artifacts++; r.ArtifactBytes += a.Bytes; } else r.ArtifactsShared++;
+            }
+
+            // S2 C4: the edges producer's result for this entry — its own run row (who folded, how long: fold + PCM), and the
+            // packed rows under the entry's content key when it folded. A failed fold is a failed run naming the reason and
+            // nothing else (constraint 2: no partial row); the catalog entry above is unaffected either way.
+            if (edges != null)
+            {
+                bool failed = edges.Status == "failed";
+                dal.EnsureProducer(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, "analysis", needsAudio: true);   // the run row references it, even for a failed fold
+                long edgesRun = dal.InsertRun(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
+                    edges.FoldMs + edges.PcmMs, Environment.MachineName, VersionInfo.Display, failed ? "failed" : "ok", failed ? "edges" : null, null, failed ? edges.Head.Error : null, source);
+                if (failed) { r.EdgesFailed++; StoreLog.Warn($"edges: fold failed for {key}: {edges.Head.Error}"); }
+                else { global::Truedat.Edges.EdgeStore.Write(dal, contentKey, sha != null ? kind : "entity", edgesRun, edges); r.Edges++; }
             }
         }
 

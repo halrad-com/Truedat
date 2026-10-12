@@ -28,6 +28,8 @@ namespace Truedat.Store
         public long LocationsOnSharedKeys;
         public long SupersededHashes;             // non-primary content-hash facets (key moves)
         public long NoShaFeatures;                // feature rows keyed entity:<uuid>
+        // S2 C4: the edges producer — media with an edge row, bytes of packed rows, ok/failed 'edges' runs, median fold+PCM ms.
+        public long EdgeTracks, EdgeBytes, EdgeRunsOk, EdgeRunsFailed; public double? EdgeMedianMs;
     }
 
     /// <summary>--store-info: the measurements S1 owes, all derived from the store by query — bytes per
@@ -74,6 +76,8 @@ namespace Truedat.Store
                 Console.WriteLine(i.ConflictsByKind.Count > 0
                     ? "  open conflicts: " + string.Join(", ", i.ConflictsByKind.Select(kv => $"{kv.Key} {kv.Value:N0}"))
                     : "  open conflicts: none");
+                if (i.EdgeRunsOk + i.EdgeRunsFailed > 0)
+                    Console.WriteLine($"  edges: {i.EdgeTracks:N0} media with an edge row, {i.EdgeBytes:N0} bytes of packed rows ({(i.EdgeTracks > 0 ? i.EdgeBytes / (double)i.EdgeTracks : 0):N0}/track); runs {i.EdgeRunsOk:N0} ok, {i.EdgeRunsFailed:N0} failed" + (i.EdgeMedianMs.HasValue ? $"; median fold+PCM {i.EdgeMedianMs:F0} ms" : ""));
                 Console.WriteLine(i.ArtifactCount > 0
                     ? $"  aggregate artifacts: {i.ArtifactCount:N0} files, {i.ArtifactBytes:N0} bytes beside the store ({i.ArtifactBytes / (double)i.ArtifactCount:N0} bytes each; {(i.Tracks > 0 ? i.ArtifactCount * 100.0 / i.Tracks : 0):F1}% of descriptions)"
                     : "  aggregate artifacts: none (kept by scans run with --store)");
@@ -144,6 +148,15 @@ namespace Truedat.Store
             i.ArtifactCount = i.Counts["artifact"];
             i.ArtifactBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(bytes), 0) FROM artifact;") ?? "0");
             i.ConflictsByKind = dal.OpenConflictsByKind();
+            // S2 C4: edges coverage and cost, from the value and run tables.
+            i.EdgeTracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT content_hash) FROM value WHERE producer_key = 'edges' AND field = 'edges.status' AND txt = 'ok';") ?? "0");
+            i.EdgeBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(length(vec)), 0) FROM value WHERE producer_key = 'edges';") ?? "0");
+            i.EdgeRunsOk = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'ok';") ?? "0");
+            i.EdgeRunsFailed = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed';") ?? "0");
+            var edgeMs = new List<long>();
+            using (var st = db.Prepare("SELECT duration_ms FROM run WHERE producer_key = 'edges' AND outcome = 'ok' AND duration_ms IS NOT NULL;"))
+                while (st.Step()) edgeMs.Add(st.GetInt64(0));
+            if (edgeMs.Count > 0) { edgeMs.Sort(); i.EdgeMedianMs = edgeMs.Count % 2 == 1 ? edgeMs[edgeMs.Count / 2] : (edgeMs[edgeMs.Count / 2 - 1] + edgeMs[edgeMs.Count / 2]) / 2.0; }
             return i;
         }
 
@@ -165,6 +178,7 @@ namespace Truedat.Store
                 ["artifactCount"] = i.ArtifactCount, ["artifactBytes"] = i.ArtifactBytes,
                 ["openConflicts"] = new JsonObject(i.ConflictsByKind.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, JsonValue.Create(kv.Value)))),
                 ["supersededHashes"] = i.SupersededHashes, ["noShaFeatures"] = i.NoShaFeatures,
+                ["edges"] = new JsonObject { ["tracks"] = i.EdgeTracks, ["bytes"] = i.EdgeBytes, ["runsOk"] = i.EdgeRunsOk, ["runsFailed"] = i.EdgeRunsFailed, ["medianMs"] = i.EdgeMedianMs },
             };
         }
     }
