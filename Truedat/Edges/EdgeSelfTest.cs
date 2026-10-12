@@ -32,6 +32,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C5: --work — enqueue the gap, lease one at a time, retry then park, budget, leases expire)");
             try { TestWork(assert); }
             catch (Exception ex) { assert(false, $"Work: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (S2 C7: mbxedges.v1.json from the store — the agreed hub shape, scalars only, keyed by sha)");
+            try { TestCompanion(assert); }
+            catch (Exception ex) { assert(false, $"Companion: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -172,6 +175,78 @@ namespace Truedat.Edges
             using (var st = db.Prepare("PRAGMA page_count;")) { st.Step(); pages = st.GetInt64(0); }
             using (var st = db.Prepare("PRAGMA page_size;")) { st.Step(); size = st.GetInt64(0); }
             return pages * size;
+        }
+
+        // ---------------------------------------------------------------- the companion file
+        static void TestCompanion(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "companion-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                var now = DateTime.UtcNow.ToString("o");
+                const string ShaB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ShaC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+                var version = new EdgeSettings().ProducerVersion;
+                string path = System.IO.Path.Combine(dir, EdgeCompanion.FileName);
+                EdgeCompanionReport rep;
+                using (var os = Truedat.Store.OpenStore.Open(System.IO.Path.Combine(dir, "truedat.db"), true, VersionInfo.Display, now))
+                {
+                    var full = SyntheticFold(dir);                               // ok, with PCM
+                    var noPcm = SyntheticFold(dir, withPcm: false);              // ok, EBU silence, rms null
+                    var shortR = SyntheticFold(dir, 15);                         // unavailable
+                    using (var tx = os.Db.BeginTransaction())
+                    {
+                        EdgeStore.Write(os.Dal, Sha1, ShaKind, null, full);
+                        EdgeStore.Write(os.Dal, ShaB, ShaKind, null, noPcm);
+                        EdgeStore.Write(os.Dal, ShaC, ShaKind, null, shortR);
+                        EdgeStore.Write(os.Dal, "entity:01a12e52-bf89-705c-9cf8-4c0133113724", "entity", null, full);   // no sha: no key in the contract
+                        tx.Complete();
+                    }
+                    System.IO.File.WriteAllText(path, "{\"stale\": true}");       // an older file is replaced atomically
+                    rep = EdgeCompanion.WriteFromStore(os.Dal, path, version, "essentia_streaming_extractor_music output-x64.5");
+                }
+                assert(rep.Tracks == 3 && rep.OmittedNoSha == 1 && rep.Bytes > 1000 && System.IO.File.Exists(path) && !System.IO.File.Exists(path + ".tmp"),
+                    $"three sha-keyed media written, the entity-keyed one counted and omitted, no .tmp left ({rep.Tracks}, {rep.OmittedNoSha}, {rep.Bytes} B)");
+                using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllBytes(path));
+                var root = doc.RootElement;
+                assert(root.GetProperty("contract").GetString() == "mbxedges.v1" && root.GetProperty("producerVersion").GetString() == version && root.GetProperty("extractor").GetString()!.Contains("output-x64.5")
+                    && root.GetProperty("trackCount").GetInt32() == 3 && root.TryGetProperty("generatedUtc", out _), "header: contract, producerVersion, extractor, generatedUtc, trackCount");
+                var order = root.GetProperty("spectralOrder");
+                assert(order.GetArrayLength() == 11 && order[0].GetString() == "spectralCentroid" && order[10].GetString() == "spectralStrongPeak", "header: the fixed 11-name spectralOrder");
+                var words = root.GetProperty("statusWords");
+                assert(words.GetArrayLength() == 4 && words[0].GetString() == "ok" && words[3].GetString() == "failed", "header: the four status words");
+                assert(root.GetProperty("rmsDefinitions").GetProperty("silenceMs").GetString()!.Contains("-60 dBFS"), "trailer: the rmsDefinitions text the hub reads");
+                var tracks = root.GetProperty("tracks");
+                var t1 = tracks.GetProperty(Sha1); var head = t1.GetProperty("head"); var tail = t1.GetProperty("tail");
+                assert(t1.GetProperty("durationMs").GetInt32() == 240000 && head.GetProperty("status").GetString() == "ok" && head.GetProperty("startMs").GetInt32() == 0 && head.GetProperty("endMs").GetInt32() == 30000
+                    && tail.GetProperty("startMs").GetInt32() == 210000, "a full track: duration and the two windows");
+                var key = head.GetProperty("key");
+                assert(key.GetProperty("name").GetString() == "C" && key.GetProperty("code").GetString() == "8B" && key.GetProperty("scale").GetString() == "major" && key.GetProperty("strength").GetDouble() > 0
+                    && key.GetProperty("agreement").GetInt32() >= 1 && key.GetProperty("votesPresent").GetInt32() == 3, "key: name, code, scale, strength, agreement, votesPresent");
+                var bpm = head.GetProperty("bpm");
+                assert(Math.Abs(bpm.GetProperty("value").GetDouble() - 120) < 0.05 && bpm.GetProperty("beats").GetInt32() == 60 && bpm.GetProperty("regularity").GetDouble() > 0.99, "bpm: value, beats, regularity");
+                var loud = tail.GetProperty("loudness");
+                assert(Math.Abs(loud.GetProperty("startLufs").GetDouble() - (-14)) < 0.1 && loud.GetProperty("endLufs").GetDouble() < -80 && loud.GetProperty("fadeMs").GetInt32() > 3000
+                    && loud.GetProperty("silenceMs").GetInt32() == 1100 && loud.GetProperty("silenceSource").GetString() == "pcm", "loudness: start, end, mean, fade, silence, source");
+                var tex = head.GetProperty("texture");
+                assert(tex.GetProperty("mfccMean").GetArrayLength() == 13 && Math.Abs(tex.GetProperty("mfccMean")[0].GetDouble() - (-500)) < 0.1 && tex.GetProperty("mfccSpread").GetArrayLength() == 13
+                    && tex.GetProperty("spectralMean").GetArrayLength() == 11 && Math.Abs(tex.GetProperty("spectralMean")[10].GetDouble() - 1100) < 0.1 && tex.GetProperty("spectralSpread").GetArrayLength() == 11,
+                    "texture: mfccMean[13], mfccSpread[13], spectralMean[11], spectralSpread[11]");
+                assert(tail.GetProperty("rms").GetProperty("crestDb").GetDouble() == 3.61 && tail.GetProperty("rms").GetProperty("transitionMs").GetInt32() == 0, "rms: crestDb, transitionMs");
+                assert(head.GetProperty("divergence").GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Number && t1.GetProperty("divergence").GetProperty("harmony").GetDouble() > 0.3,
+                    "divergence: per edge (vs the whole) and per track (head vs tail)");
+                var tB = tracks.GetProperty(ShaB);
+                assert(tB.GetProperty("tail").GetProperty("rms").ValueKind == System.Text.Json.JsonValueKind.Null && tB.GetProperty("tail").GetProperty("loudness").GetProperty("silenceSource").GetString() == "ebu",
+                    "no PCM pass: rms null, silenceSource ebu");
+                var tC = tracks.GetProperty(ShaC); var hC = tC.GetProperty("head");
+                assert(tC.GetProperty("durationMs").GetInt32() == 15000 && hC.GetProperty("status").GetString() == "unavailable" && hC.GetProperty("endMs").GetInt32() == 7500
+                    && hC.GetProperty("key").ValueKind == System.Text.Json.JsonValueKind.Null && hC.GetProperty("bpm").ValueKind == System.Text.Json.JsonValueKind.Null
+                    && hC.GetProperty("loudness").ValueKind == System.Text.Json.JsonValueKind.Null && hC.GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Null
+                    && hC.GetProperty("rms").ValueKind == System.Text.Json.JsonValueKind.Null && tC.GetProperty("divergence").ValueKind == System.Text.Json.JsonValueKind.Null,
+                    "unavailable: status and windows present, every other field null, track divergence null");
+                assert(!tracks.TryGetProperty("entity:01a12e52-bf89-705c-9cf8-4c0133113724", out _), "the entity-keyed media is not in the file");
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- the work queue

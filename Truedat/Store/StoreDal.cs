@@ -444,6 +444,16 @@ namespace Truedat.Store
         internal void SetWorkLeaseForTest(string entityId, string producerKey, string leaseUntilUtc)
             => Exec("UPDATE work_item SET state = 'leased', lease_until_utc = ? WHERE entity_id = ? AND producer_key = ?;", leaseUntilUtc, entityId, producerKey);
 
+        /// <summary>Every content key holding an edge row (the whole-track status word) at this producer version, in key order.</summary>
+        internal List<string> ContentKeysWithEdges(string producerVersion)
+        {
+            var list = new List<string>();
+            using var st = Db.Prepare("SELECT content_hash FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.status' ORDER BY content_hash;");
+            st.Bind(1, producerVersion);
+            while (st.Step()) list.Add(st.GetString(0)!);
+            return list;
+        }
+
         internal long CountRuns(string producerKey, string outcome) => Row("SELECT count(*) FROM run WHERE producer_key = ? AND outcome = ?;", s => s.GetInt64(0), 0L, producerKey, outcome);
         internal string? RunErrorText(string producerKey, string outcome) => Row("SELECT error_text FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.GetString(0), null, producerKey, outcome);
         internal long? RunDurationMs(string producerKey, string outcome) => Row("SELECT duration_ms FROM run WHERE producer_key = ? AND outcome = ? ORDER BY id DESC LIMIT 1;", s => s.IsNull(0) ? (long?)null : s.GetInt64(0), null, producerKey, outcome);
