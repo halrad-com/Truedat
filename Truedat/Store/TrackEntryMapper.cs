@@ -218,6 +218,12 @@ namespace Truedat.Store
         internal const double NoiseAbsolute = 1e-6;
         internal static int ContentColumnCount => ContentIdx.Length;
         internal static string ContentColumnName(int k) => Cols[ContentIdx[k]].Name;
+        /// <summary>Position of a content column in <see cref="ContentColumnNames"/>, or -1.</summary>
+        internal static int ContentIndexOf(string name)
+        {
+            for (int k = 0; k < ContentIdx.Length; k++) if (Cols[ContentIdx[k]].Name == name) return k;
+            return -1;
+        }
 
         /// <summary>Reads the content columns (in <see cref="ContentColumnNames"/> order) starting at <paramref name="firstColumn"/>.</summary>
         internal static object?[] ReadContentValues(SqliteStmt st, int firstColumn) => ReadIdx(st, firstColumn, ContentIdx);
@@ -270,7 +276,7 @@ namespace Truedat.Store
             if (a == null || b == null) return a == null && b == null;
             switch (kind)
             {
-                case Kind.Real: return exact ? (double)a == (double)b : Near((double)a, (double)b);
+                case Kind.Real: return exact ? ((double)a == (double)b || (double.IsNaN((double)a) && double.IsNaN((double)b))) : Near((double)a, (double)b);
                 case Kind.Int: return (long)a == (long)b;
                 case Kind.Text: return string.Equals((string)a, (string)b, StringComparison.Ordinal);
                 case Kind.VecF64:
@@ -289,7 +295,18 @@ namespace Truedat.Store
                 }
             }
         }
-        static bool Near(double a, double b) => Math.Abs(a - b) <= Math.Max(NoiseAbsolute, NoiseRelative * Math.Max(Math.Abs(a), Math.Abs(b)));
+        // NaN equals NaN here on purpose: a stored NaN re-arriving as NaN must not be a perpetual conflict (none can reach the
+        // store from JSON today; the rule is pinned so a future producer cannot create one by accident).
+        static bool Near(double a, double b) => (double.IsNaN(a) && double.IsNaN(b)) || Math.Abs(a - b) <= Math.Max(NoiseAbsolute, NoiseRelative * Math.Max(Math.Abs(a), Math.Abs(b)));
+
+        /// <summary>A ToRow() row whose content columns are the STORED values except the given fills, which keep the arriving
+        /// value — the row an UpsertContent writes when a null is filled under the same producer (review #4).</summary>
+        internal static object?[] WithStoredContentExcept(object?[] row, object?[] storedContent, ICollection<int> fills)
+        {
+            var merged = (object?[])row.Clone();
+            for (int k = 0; k < ContentIdx.Length; k++) if (!fills.Contains(k)) merged[ContentIdx[k]] = storedContent[k];
+            return merged;
+        }
 
         /// <summary>A content value as conflict text: numbers round-trip exactly, vectors as hex of their blob.</summary>
         internal static string? FormatContent(int k, object? v)

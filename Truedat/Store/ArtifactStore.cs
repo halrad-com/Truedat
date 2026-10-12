@@ -36,20 +36,28 @@ namespace Truedat.Store
             return path;
         }
 
-        /// <summary>Relative path (under the store dir) of the committed artifact for a content key.</summary>
-        internal static string RelativePathFor(string contentKey)
+        static readonly System.Text.RegularExpressions.Regex KeyShape = new System.Text.RegularExpressions.Regex("^([0-9a-f]{64}|entity:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$");
+        static readonly System.Text.RegularExpressions.Regex BuildShape = new System.Text.RegularExpressions.Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$");
+
+        /// <summary>Relative path (under the store dir) of the committed artifact for a content key under an extractor build:
+        /// <c>artifacts\&lt;build&gt;\&lt;2&gt;\&lt;key&gt;.main.json.z</c>. The build is in the path because the artifact IS the
+        /// build's output (review #1: one file per content key would have labelled .4 bytes as .5). Both components are
+        /// validated to the shapes the store itself mints, so no key can escape <c>artifacts\</c>.</summary>
+        internal static string RelativePathFor(string contentKey, string build)
         {
+            if (!KeyShape.IsMatch(contentKey)) throw new StoreException($"artifact key is not a content hash or entity id: '{contentKey}'");
+            if (!BuildShape.IsMatch(build) || build.Contains("..")) throw new StoreException($"artifact build token is not a plain name: '{build}'");
             var safe = contentKey.Replace(':', '_');
-            var bucket = safe.Length >= 2 ? safe.Substring(0, 2) : safe;
-            return Path.Combine("artifacts", bucket, safe + Extension);
+            var bucket = safe.Substring(0, 2);
+            return Path.Combine("artifacts", build.Replace(':', '_'), bucket, safe + Extension);
         }
 
         /// <summary>Moves a pending file to its content-addressed place. When one already exists for the key the pending
         /// copy is discarded (same audio, same build: the artifact is stored once). Returns the relative path, bytes, sha256
         /// and whether this call created the file.</summary>
-        internal static (string RelPath, long Bytes, string Sha256, bool Created) Commit(string storeDir, string pendingPath, string contentKey)
+        internal static (string RelPath, long Bytes, string Sha256, bool Created) Commit(string storeDir, string pendingPath, string contentKey, string build)
         {
-            var rel = RelativePathFor(contentKey);
+            var rel = RelativePathFor(contentKey, build);
             var full = Path.Combine(storeDir, rel);
             bool created = false;
             if (File.Exists(full)) { try { File.Delete(pendingPath); } catch { } }

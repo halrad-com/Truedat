@@ -4830,6 +4830,7 @@ namespace Truedat
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
+                    if (_storePath != null) global::Truedat.Store.ScanSink.DropUntied();   // S2: analysed-and-discarded leaves no artifact stash behind
                     // Without --moods this mode analyzes and DISCARDS. That is legitimate for a
                     // one-off inspection run, but it is indistinguishable on the console from a
                     // successful incremental scan — the per-file lines look identical — so an
@@ -5966,6 +5967,7 @@ namespace Truedat
                                 Console.WriteLine($"  FAILED: {comps}");
                                 Interlocked.Increment(ref failed);
                                 trackClass = "skip·failed";
+                                if (_storePath != null) global::Truedat.Store.ScanSink.Discard(msStagedSrc!.Path);   // S2: no entry, so no aggregate artifact either
                                 return;
                             }
                         }
@@ -13189,7 +13191,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                             var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length, ct);
                             if (retry.Features?.AnalyzedLengthSec is double got
                                 && got > features!.AnalyzedLengthSec)
+                            {
                                 (features, error) = retry;
+                                global::Truedat.Store.ScanSink.Rekey(wavPath, readPath);   // S2: the kept retry's stash replaces the first attempt's
+                            }
+                            else global::Truedat.Store.ScanSink.Discard(wavPath);          // S2: a retry not kept leaves no stash behind
                         }
                         finally { try { File.Delete(wavPath); } catch { } }
                     }
@@ -21899,6 +21905,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         Console.WriteLine($"  Downmixing to stereo (multi-channel detected)");
                         var stereoSize = new FileInfo(stereoPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, stereoPath, stereoSize, ct);
+                        if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(stereoPath, audioPath);   // S2: the stash follows the source the scan records
                     }
                     finally
                     {
@@ -21933,6 +21940,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         Console.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)");
                         var wavSize = new FileInfo(wavPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, wavPath, wavSize, ct);
+                        if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(wavPath, audioPath);   // S2: the stash follows the source the scan records
                     }
                     finally
                     {

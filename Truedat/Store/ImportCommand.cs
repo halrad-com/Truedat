@@ -43,6 +43,8 @@ namespace Truedat.Store
         public int ContentReplaced;
         /// <summary>Entries whose media gained a new content hash (a key move): the description is re-keyed and rewritten from the arrival.</summary>
         public int ContentRekeyed;
+        /// <summary>Entries where a stored NULL content column gained a value under the same producer — written as a fill, never a conflict (review #4).</summary>
+        public int Filled;
         /// <summary>Aggregate artifacts filed this call (new content-addressed files), ones already present for their content, and the bytes of the new ones (S2 C-A).</summary>
         public int Artifacts, ArtifactsShared;
         public long ArtifactBytes;
@@ -379,7 +381,7 @@ namespace Truedat.Store
             // S2 C-A: the extractor's aggregate output, kept once per content key as a compressed file beside the store.
             if (pendingArtifact != null && storeDir != null)
             {
-                var a = ArtifactStore.Commit(storeDir, pendingArtifact, contentKey);
+                var a = ArtifactStore.Commit(storeDir, pendingArtifact, contentKey, producerVersion);
                 dal.InsertArtifact(contentKey, sha != null ? kind : "entity", runPerEntry ? runId : (long?)null, ArtifactStore.MainKind, producerVersion, a.RelPath, a.Bytes, a.Sha256, now);
                 if (a.Created) { r.Artifacts++; r.ArtifactBytes += a.Bytes; } else r.ArtifactsShared++;
             }
@@ -408,32 +410,50 @@ namespace Truedat.Store
                 // so the arriving entry IS the fresher observation of it — the description is re-keyed and rewritten, no drift.
                 dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
                 contentWritten = true; r.ContentRekeyed++;
-                StoreLog.Debug($"description re-keyed: {displayPath} ({existing.ContentKey} -> {contentKey})");
+                StoreLog.Info($"description re-keyed: {displayPath} ({existing.ContentKey} -> {contentKey})");
             }
             else
             {
-                var drift = new List<int>();
+                // Three classes per content column (review #4): a stored NULL gaining a value is a FILL (the signal was not
+                // measured before — ffmpeg absent, --no-bitusage — and is now); a value arriving as NULL is NOT OBSERVED and
+                // changes nothing; two values differing beyond noise are DRIFT.
+                var drift = new List<int>(); var fills = new List<int>();
                 for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
-                    if (!TrackEntryMapper.ContentEqualWithinNoise(k, existing.Values[k], TrackEntryMapper.ContentValue(row, k))) drift.Add(k);
+                {
+                    var a = existing.Values[k]; var b = TrackEntryMapper.ContentValue(row, k);
+                    if (a == null && b != null) fills.Add(k);
+                    else if (b == null) continue;
+                    else if (!TrackEntryMapper.ContentEqualWithinNoise(k, a, b)) drift.Add(k);
+                }
                 if (drift.Count > 0)
                 {
                     bool sameProducer = string.Equals(existing.ProducerKey, producerKey, StringComparison.Ordinal)
                                      && string.Equals(existing.ProducerVersion, producerVersion, StringComparison.Ordinal);
-                    if (sameProducer)
+                    // Review #5: a replacement has a direction. An arrival from an OLDER build of the same producer is drift
+                    // (the newer description stays); a newer or unorderable one replaces, and leaves a resolved trace.
+                    bool olderArrival = !sameProducer && ArrivalIsOlder(existing.ProducerKey, existing.ProducerVersion, producerKey, producerVersion);
+                    if (sameProducer || olderArrival)
                     {
                         foreach (var k in drift)
                             dal.InsertDriftConflict(entityId, TrackEntryMapper.ContentColumnName(k),
                                 TrackEntryMapper.FormatContent(k, existing.Values[k]), TrackEntryMapper.FormatContent(k, TrackEntryMapper.ContentValue(row, k)),
                                 existing.RunId, runId, displayPath, now);
                         drifted = true; r.Drift++;
-                        StoreLog.Warn($"value drift under {producerKey}@{producerVersion} on {displayPath}: {drift.Count} field(s) differ beyond noise ({TrackEntryMapper.ContentColumnName(drift[0])}{(drift.Count > 1 ? ", …" : "")}); stored description kept, conflict recorded");
+                        StoreLog.Warn($"value drift on {displayPath} ({producerKey}@{producerVersion} vs stored {existing.ProducerKey}@{existing.ProducerVersion}): {drift.Count} field(s) differ beyond noise ({TrackEntryMapper.ContentColumnName(drift[0])}{(drift.Count > 1 ? ", …" : "")}); stored description kept, conflict recorded");
                     }
                     else
                     {
                         dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
+                        dal.InsertReplacedConflict(entityId, $"{existing.ProducerKey}@{existing.ProducerVersion}", $"{producerKey}@{producerVersion}", existing.RunId, runId, displayPath, now);
                         contentWritten = true; r.ContentReplaced++;
-                        StoreLog.Debug($"description replaced: {displayPath} ({existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion})");
+                        StoreLog.Warn($"description replaced on {displayPath}: {existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion} ({drift.Count} field(s) changed; the pair is recorded as a resolved content-replaced conflict)");
                     }
+                }
+                if (!contentWritten && fills.Count > 0)
+                {
+                    dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentExcept(row, existing.Values, fills), now);
+                    contentWritten = true; r.Filled++;
+                    StoreLog.Info($"description filled on {displayPath}: {fills.Count} column(s) that were null now have values ({TrackEntryMapper.ContentColumnName(fills[0])}{(fills.Count > 1 ? ", …" : "")})");
                 }
             }
 
@@ -447,6 +467,21 @@ namespace Truedat.Store
             }
 
             if (!contentWritten && !copyWritten && !drifted) r.Unchanged++;
+        }
+
+        /// <summary>True when both are the same producer and both versions are known extractor builds (<c>output-x64.N</c>) with
+        /// the arrival's N lower. Anything unorderable (different producer keys, an import, an md5:/unknown build) is false:
+        /// the arrival then replaces, with its trace, rather than the code guessing an order.</summary>
+        internal static bool ArrivalIsOlder(string? storedKey, string? storedVersion, string arrivingKey, string arrivingVersion)
+        {
+            if (!string.Equals(storedKey, arrivingKey, StringComparison.Ordinal)) return false;
+            return BuildNumber(storedVersion) is int s && BuildNumber(arrivingVersion) is int a && a < s;
+        }
+        static int? BuildNumber(string? version)
+        {
+            const string prefix = "output-x64.";
+            if (version == null || !version.StartsWith(prefix, StringComparison.Ordinal)) return null;
+            return int.TryParse(version.Substring(prefix.Length), out var n) ? n : (int?)null;
         }
 
         static void ImportLedgers(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string dir, string now, ImportReport r)

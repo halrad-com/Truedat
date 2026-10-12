@@ -15,6 +15,9 @@ namespace Truedat.Store
     {
         internal const string ConflictKind = "content-disagree-at-split";
 
+        /// <summary>Test seam: throw after the rows have moved, to prove the migration's transaction rolls back whole.</summary>
+        internal static bool FailAfterMoveForTest;
+
         internal static void RunDataStep(SqliteDb db, int version)
         {
             if (version != 2) return;
@@ -73,6 +76,7 @@ namespace Truedat.Store
                     "SELECT f.location_id, f.imported_run_id, f.updated_utc, " + TrackEntryMapper.CopyColumnList("f") + " FROM track_feature f;");
             long copies = long.Parse(db.ExecScalar("SELECT count(*) FROM track_copy;") ?? "0");
             if (copies != rows) throw new StoreException($"v2 migration: {rows} feature rows but {copies} copy rows after the split; nothing was committed.");
+            if (FailAfterMoveForTest) throw new InvalidOperationException("v2 migration test seam: failing after the rows moved");
 
             // 4. The wide row is gone.
             db.Exec("DROP INDEX IF EXISTS ix_feature_content;");
@@ -80,7 +84,8 @@ namespace Truedat.Store
 
             StoreLog.Info($"v2 split: {rows:N0} feature rows -> {content:N0} descriptions (track_content) + {copies:N0} copies (track_copy); " +
                           $"{copies - content:N0} copies now carry their media's description: {copiesWithinNoise:N0} differed only within run-to-run noise ({noiseDiffs:N0} column values), " +
-                          $"{copiesInConflict:N0} differed beyond it -> {conflicts:N0} '{ConflictKind}' conflict rows");
+                          $"{copiesInConflict:N0} differed beyond it -> {conflicts:N0} '{ConflictKind}' conflict rows. " +
+                          "The dropped table's pages are free until --store-vacuum repacks the file (advised).");
         }
     }
 }

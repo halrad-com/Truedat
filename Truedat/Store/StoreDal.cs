@@ -313,6 +313,20 @@ namespace Truedat.Store
                     "attempts = max(attempts, excluded.attempts), review_state = excluded.review_state, review_note = excluded.review_note;",
                     entityId, producerKey, targetVersion, state, (long)attempts, reviewState, reviewNote);
 
+        /// <summary>A description replaced by a newer (or unorderable) producer: the trace of the pair, already resolved (review #5).</summary>
+        internal void InsertReplacedConflict(string entityId, string oldProducer, string newProducer, long? runA, long? runB, string detail, string nowUtc)
+            => Exec("INSERT INTO conflict(entity_a, kind, value_a, value_b, run_a, run_b, detail, state, created_utc) VALUES (?, 'content-replaced', ?, ?, ?, ?, ?, 'resolved', ?);",
+                    entityId, oldProducer, newProducer, runA, runB, detail, nowUtc);
+
+        /// <summary>Open conflicts per kind (review #6: the surface review focus 2 names).</summary>
+        internal Dictionary<string, long> OpenConflictsByKind()
+        {
+            var d = new Dictionary<string, long>(StringComparer.Ordinal);
+            using var st = Db.Prepare("SELECT kind, count(*) FROM conflict WHERE state = 'open' GROUP BY kind ORDER BY kind;");
+            while (st.Step()) d[st.GetString(0) ?? ""] = st.GetInt64(1);
+            return d;
+        }
+
         // ---------------------------------------------------------------- artifacts (S2 C-A)
         /// <summary>Records a content-addressed artifact file; the same (content, kind, format) is recorded once.</summary>
         internal bool InsertArtifact(string contentHash, string contentHashKind, long? runId, string kind, string formatVersion, string relPath, long bytes, string sha256, string nowUtc)

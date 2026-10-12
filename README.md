@@ -95,11 +95,17 @@ producer is recorded as a `value-drift` conflict and the stored description is k
 the newer value. **A scan run with `--store` writes the store too**, as a second sink after the catalog is
 saved exactly as today: the entries it analysed this run (never cache hits) go in through the same
 rules as an import, as producer `essentia@<build>` with one run row per entry carrying the analysis
-time, and every failure becomes a failed run with its components. A store problem is reported and
-counted; it never costs a catalog entry. `store-result.json` beside the store records each write. The
-scan also keeps the extractor's aggregate output — the main JSON with every descriptor's statistics that
-was deleted at parse until now — compressed and filed once per content hash under `artifacts\` beside
-the store, so a future field that is a fold of it is a re-fold of the file, never a rescan. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+time, and every failure becomes a failed run with its components. Only the flag activates this: a
+`truedat.db` sitting beside the catalog does **not** make a bare scan write it. A store problem is
+reported and counted; it never costs a catalog entry. `store-result.json` beside the store records
+each write. A scan killed before its final save leaves the already-saved entries in the catalog but
+not in the store; the next `--store-import` reconciles them. The scan also keeps the extractor's
+aggregate output — the main JSON with every descriptor's statistics that was deleted at parse until
+now — compressed and filed once per content hash **and extractor build** under `artifacts\` beside the
+store, so a future field that is a fold of it is a re-fold of the file, never a rescan. A stored value
+that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
+scan measures it; an older extractor build never overwrites a newer build's description, and a newer
+one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
 exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in

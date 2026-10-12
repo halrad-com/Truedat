@@ -54,6 +54,34 @@ namespace Truedat.Store
             catch (Exception ex) { StoreLog.Warn($"could not stash the extractor output for {analysedPath}: {ex.Message}"); }
         }
 
+        /// <summary>A retry handed the core a different path (a downmixed or transcoded WAV): move its stash to the path the
+        /// scan will Record with (review #2). A stash already under <paramref name="toPath"/> (the first attempt's) is
+        /// replaced by the retry's. No-op when nothing is stashed under <paramref name="fromPath"/>.</summary>
+        internal static void Rekey(string fromPath, string toPath)
+        {
+            if (!_stashed.TryRemove(fromPath, out var pending)) return;
+            if (_stashed.TryRemove(toPath, out var previous)) TryDelete(previous);
+            _stashed[toPath] = pending;
+        }
+
+        /// <summary>The scan will never Record this analysed path (the health gate failed it, or a retry's result was not kept):
+        /// delete its stash now (review #3).</summary>
+        internal static void Discard(string analysedPath)
+        {
+            if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
+        }
+
+        /// <summary>Every stash nothing tied to an entry: once a scan's entries are flushed (or a mode ends without recording
+        /// anything) they are garbage. Returns how many were dropped.</summary>
+        internal static int DropUntied()
+        {
+            int n = 0;
+            foreach (var kv in _stashed) { if (_stashed.TryRemove(kv.Key, out var p)) { TryDelete(p); n++; } }
+            return n;
+        }
+
+        static void TryDelete(string path) { try { System.IO.File.Delete(path); } catch { } }
+
         /// <summary><paramref name="analysedPath"/> is the path the extractor was given (staged copy or original); it ties the
         /// stashed main JSON to this catalog entry so the flush can file it under the entry's content key.</summary>
         internal static void Record(string path, TrackEntry entry, string? analysedPath = null)
@@ -77,6 +105,11 @@ namespace Truedat.Store
             while (_failures.TryDequeue(out var f)) failures.Add(f);
             var artifacts = new Dictionary<string, string>(PathComparer.Instance);
             foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; }
+            // Review #3: nothing will tie a stash after the entries are flushed; and a killed earlier scan may have left
+            // pending files behind — both are swept here, so artifacts\pending cannot grow without bound.
+            int untied = DropUntied();
+            int stale = StoreDirectory != null ? ArtifactStore.SweepPending(StoreDirectory, TimeSpan.FromDays(1)) : 0;
+            if (untied > 0 || stale > 0) StoreLog.Info($"artifact stashes dropped: {untied} untied (never recorded), {stale} stale (older than a day)");
             if (entries.Count == 0 && failures.Count == 0) { report.Ok = true; return report; }
             try
             {

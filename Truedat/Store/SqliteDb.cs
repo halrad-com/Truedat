@@ -47,7 +47,10 @@ namespace Truedat.Store
                 // A network store (explicit --store on a share) cannot use WAL's shared-memory file;
                 // exclusive locking keeps WAL working for the one process truedat is by design.
                 if (exclusiveLocking) db.Exec("PRAGMA locking_mode=EXCLUSIVE;");
-                db.Exec("PRAGMA journal_mode=WAL;");
+                // The pragma does not throw when a filesystem refuses WAL; it answers with the mode in force. Say so.
+                var mode = db.ExecScalar("PRAGMA journal_mode=WAL;");
+                if (!string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase))
+                    StoreLog.Warn($"{path}: WAL journal mode was refused; running with journal_mode={mode} (slower, still safe)");
                 db.Exec("PRAGMA foreign_keys=ON;");
                 StoreLog.Debug($"opened {path} (create={create}, wal, fk on" + (empty ? $", new file at page_size {pageSize ?? DefaultPageSize}" : "") + ")");
                 return db;

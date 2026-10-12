@@ -37,12 +37,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   the stored description: equal (within the extractor's run-to-run noise) writes nothing, so a repeat import
   leaves every row's `updated_utc` alone; a difference beyond noise under the same producer becomes a
   `value-drift` conflict (field, both values, both runs) and the description is kept; a different producer
-  replaces it with the old run kept as history; a key move re-keys it. Copy facts (tags, `fingerprint.v1`,
-  SMFM) take the newer value, exactly. Identical drifts are recorded once. On the real catalog a re-import
+  replaces it with the old run kept as history and a resolved `content-replaced` conflict naming both
+  producers — but an OLDER extractor build never replaces a newer one's description (that is drift); a key
+  move re-keys it; a stored null gaining a value is filled, never a conflict. Copy facts (tags,
+  `fingerprint.v1`, SMFM) take the newer value, exactly. Identical drifts are recorded once. `--store-info`
+  lists open conflicts by kind. On the real catalog a re-import
   is 22 s, 72,445 unchanged, 32 drifted, the store unchanged in size.
 - **The extractor's aggregate output is kept.** With `--store`, the main JSON the extractor writes per
   track (every descriptor's statistics, covariances, full HPCP, histograms — deleted at parse until now) is
-  compressed and filed once per content hash as `artifacts\<2>\<hash>.main.json.z` beside the store, with
+  compressed and filed once per content hash and extractor build as `artifacts\<build>\<2>\<hash>.main.json.z` beside the store, with
   an `artifact` row (kind `main`, format = the extractor build, bytes, sha256, run). Any future field that
   is a fold of that output is a re-fold of the file, not a rescan. `--store-info` reports count and bytes.
 - **The scan writes the store.** With `--store`, every scan mode writes the entries it analysed this run

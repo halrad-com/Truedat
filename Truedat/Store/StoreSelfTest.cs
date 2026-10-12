@@ -61,15 +61,28 @@ namespace Truedat.Store
                 var pending = ArtifactStore.Stash(dir, json);
                 assert(File.Exists(pending) && pending.StartsWith(ArtifactStore.PendingDir(dir), StringComparison.OrdinalIgnoreCase), "Stash writes a compressed pending file under artifacts\\pending");
                 var key = "ab".PadRight(64, 'c');
-                var c1 = ArtifactStore.Commit(dir, pending, key);
-                assert(c1.Created && File.Exists(Path.Combine(dir, c1.RelPath)) && c1.RelPath == Path.Combine("artifacts", "ab", key + ArtifactStore.Extension) && c1.Bytes > 0 && c1.Sha256.Length == 64,
-                    $"Commit files it under artifacts\\<2>\\<key>.main.json.z with bytes and sha ({c1.RelPath}, {c1.Bytes} B)");
+                var c1 = ArtifactStore.Commit(dir, pending, key, "output-x64.4");
+                assert(c1.Created && File.Exists(Path.Combine(dir, c1.RelPath)) && c1.RelPath == Path.Combine("artifacts", "output-x64.4", "ab", key + ArtifactStore.Extension) && c1.Bytes > 0 && c1.Sha256.Length == 64,
+                    $"Commit files it under artifacts\\<build>\\<2>\\<key>.main.json.z with bytes and sha ({c1.RelPath}, {c1.Bytes} B)");
                 assert(ArtifactStore.ReadMainJson(dir, c1.RelPath) == json, "the committed artifact inflates back to the exact extractor JSON (the re-fold entry point)");
                 assert(c1.Bytes < json.Length, $"it is smaller than the JSON it holds ({c1.Bytes} < {json.Length})");
                 var pending2 = ArtifactStore.Stash(dir, json);
-                var c2 = ArtifactStore.Commit(dir, pending2, key);
-                assert(!c2.Created && !File.Exists(pending2) && c2.Sha256 == c1.Sha256, "a second copy of the same content is discarded: one artifact per content key");
-                assert(ArtifactStore.RelativePathFor("entity:0123").StartsWith(Path.Combine("artifacts", "en")), "a no-sha media's artifact is keyed by its entity id, ':' made path-safe");
+                var c2 = ArtifactStore.Commit(dir, pending2, key, "output-x64.4");
+                assert(!c2.Created && !File.Exists(pending2) && c2.Sha256 == c1.Sha256, "a second copy of the same content under the same build is discarded: one artifact per (content key, build)");
+                // Review #1: a different extractor build is a different artifact — its own file, never the old file's bytes under a new label.
+                var pending5 = ArtifactStore.Stash(dir, json.Replace("1793.406", "1793.5"));
+                var c5 = ArtifactStore.Commit(dir, pending5, key, "output-x64.5");
+                assert(c5.Created && c5.RelPath != c1.RelPath && c5.Sha256 != c1.Sha256 && File.Exists(Path.Combine(dir, c1.RelPath)) && File.Exists(Path.Combine(dir, c5.RelPath)),
+                    $"the same content under a second build gets its own file with its own sha; the first stays ({c5.RelPath})");
+                assert(ArtifactStore.RelativePathFor("entity:01a12a6b-5d68-7002-829d-3df22ece2565", "output-x64.4") == Path.Combine("artifacts", "output-x64.4", "en", "entity_01a12a6b-5d68-7002-829d-3df22ece2565" + ArtifactStore.Extension),
+                    "a no-sha media's artifact is keyed by its entity id, ':' made path-safe");
+                // The key and the build are path components built from store data: anything that is not a sha, an entity id or a plain build token is refused.
+                bool refused = false;
+                try { ArtifactStore.RelativePathFor(@"..\..\evil", "output-x64.4"); } catch (StoreException) { refused = true; }
+                assert(refused, "a content key that is not a sha or entity id is refused (cannot escape artifacts\\)");
+                refused = false;
+                try { ArtifactStore.RelativePathFor(key, @"..\x"); } catch (StoreException) { refused = true; }
+                assert(refused, "a build token with path characters is refused");
 
                 // Through the scan sink: the core stashes by the analysed (staged) path, Record ties it to the catalog key, the flush files it.
                 ScanSink.Reset();
@@ -104,10 +117,37 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(r2.Ok && r2.Artifacts == 0 && r2.ArtifactsShared == 1 && os.Dal.Count("artifact") == 2, $"re-analysing the same audio under the same build adds no artifact ({r2.Artifacts} new, {r2.ArtifactsShared} shared, rows {os.Dal.Count("artifact")})");
 
-                // A stale pending file from a killed scan is swept.
+                // Review #1 end to end: the same audio analysed by a newer build gets a second artifact file and row.
+                ScanSink.StashMainJson(@"C:\stage\abc3.flac", json.Replace("1793.406", "1793.5"));
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"], @"C:\stage\abc3.flac");
+                var r5 = ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var sha = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;
+                    assert(r5.Ok && r5.Artifacts == 1 && os.Dal.Count("artifact") == 3
+                        && os.Db.ExecScalar($"SELECT count(DISTINCT path) FROM artifact WHERE content_hash = '{sha}';") == "2"
+                        && os.Db.ExecScalar($"SELECT count(DISTINCT sha256) FROM artifact WHERE content_hash = '{sha}';") == "2",
+                        $"a newer build files its own artifact: two paths, two shas for one content hash ({os.Dal.Count("artifact")} rows)");
+                }
+
+                // Review #2: a retry hands the core a different path (the downmixed WAV); the caller re-keys the stash to the source it will Record.
+                ScanSink.StashMainJson(@"C:\stage\tmp-downmix.wav", json);
+                ScanSink.Rekey(@"C:\stage\tmp-downmix.wav", @"C:\stage\multichannel.flac");
+                ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"], @"C:\stage\multichannel.flac");
+                assert(ScanSink.PendingArtifacts == 1, "Rekey moves a stash from the retry's path to the source path Record will use");
+                ScanSink.Rekey(@"C:\stage\never-stashed", @"C:\stage\x");   // a no-op, never a throw
+                // Review #3: a stash the scan never ties (health-gate failure) is discarded explicitly, and anything still untied at the flush is dropped.
+                ScanSink.StashMainJson(@"C:\stage\failed-gate.flac", json);
+                var failedPending = Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length;
+                ScanSink.Discard(@"C:\stage\failed-gate.flac");
+                assert(Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length == failedPending - 1, "Discard deletes the stash of a track the health gate failed");
+                ScanSink.StashMainJson(@"C:\stage\untied.flac", json);
                 var stale = ArtifactStore.Stash(dir, "{}");
                 File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-3));
-                assert(ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1)) == 1 && !File.Exists(stale), "pending files older than a day are swept");
+                var r6 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
+                assert(r6.Ok && Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length == 0 && !File.Exists(stale),
+                    $"the flush drops every untied stash and sweeps stale pending files from a killed scan ({Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length} left)");
+                assert(ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1)) == 0, "nothing stale remains to sweep");
             }
             finally { ScanSink.Reset(); ScanSink.StoreDirectory = null; try { Directory.Delete(dir, true); } catch { } }
         }
@@ -174,12 +214,31 @@ namespace Truedat.Store
                 ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"]);
                 var r2 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
                 assert(r2.Ok && r2.Unchanged == 2 && r2.Drift == 0, $"re-flushing equal entries writes nothing ({r2.Unchanged} unchanged, {r2.Drift} drift, {r2.ContentReplaced} replaced, {r2.ContentRekeyed} rekeyed, {r2.Stale} stale, {r2.Entries} entries, {r2.EntitiesCreated} created, ok {r2.Ok} {r2.Error})");
-                // A newer extractor build with a changed value replaces the description (different producer version), no drift.
+                // A NEWER extractor build with a changed value replaces the description, with a resolved 'content-replaced' conflict as the trace (review #5).
                 var newer = FixtureEntries(@"D:\Music");
-                newer[@"D:\Music\Tool\a.flac"].Features!.Bpm = newer[@"D:\Music\Tool\a.flac"].Features!.Bpm * 1.5;
+                var bpm5 = newer[@"D:\Music\Tool\a.flac"].Features!.Bpm * 1.5;
+                newer[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpm5;
                 ScanSink.Record(@"D:\Music\Tool\a.flac", newer[@"D:\Music\Tool\a.flac"]);
-                var r3 = ScanSink.Flush(store, "output-x64.5");
+                var r3 = ScanSink.Flush(store, "output-x64.5", entries.Keys);
                 assert(r3.Ok && r3.ContentReplaced == 1 && r3.Drift == 0, $"a newer extractor build replaces the description without a drift conflict ({r3.ContentReplaced} replaced, {r3.Drift} drift)");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'content-replaced' AND state = 'resolved' AND value_a = 'essentia@output-x64.4' AND value_b = 'essentia@output-x64.5' AND run_a IS NOT NULL AND run_b IS NOT NULL;") == "1",
+                        "the replacement leaves a resolved content-replaced conflict naming both producers and both runs");
+                // An OLDER build arriving over a newer description is drift, not a replacement: the newer description is kept.
+                var older = FixtureEntries(@"D:\Music");
+                older[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpm5 * 2;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", older[@"D:\Music\Tool\a.flac"]);
+                var r3b = ScanSink.Flush(store, "output-x64.3", entries.Keys);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r3b.Ok && r3b.ContentReplaced == 0 && r3b.Drift == 1
+                        && os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpm5.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                        $"an older build (.3 over .5) is drift, never a replacement; the .5 description stays ({r3b.ContentReplaced} replaced, {r3b.Drift} drift)");
+                // An unknown build string cannot be ordered: it replaces, with the trace.
+                var unk = FixtureEntries(@"D:\Music");
+                unk[@"D:\Music\Tool\a.flac"].Features!.Bpm = 77;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", unk[@"D:\Music\Tool\a.flac"]);
+                var r3c = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                assert(r3c.Ok && r3c.ContentReplaced == 1, $"a build that cannot be ordered replaces (with its trace) rather than guessing ({r3c.ContentReplaced} replaced, {r3c.Drift} drift)");
 
                 // A store that cannot be opened: reported, never thrown.
                 ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
@@ -248,6 +307,25 @@ namespace Truedat.Store
                 var r4 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(r4.Drift == 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1", $"re-importing the same drifted catalog records no duplicate conflict (drift {r4.Drift}, rows {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")})");
+
+                // 3b. Review #4: a stored NULL gaining a value under the same producer is a FILL, not drift; a value going to NULL is "not observed".
+                var filled = FixtureEntries(@"D:\Music");
+                filled[@"D:\Music\Tool\a.flac"].Features!.Bpm = origBpmA * 1.25;   // keep the known drift in place
+                filled[@"D:\Music\Tool\b.mp3"].Features!.BitUsage = new BitUsageSummary { LowestNonZeroBit = 8, BottomBitActivity = 0.5, EffectiveBits = 24, SamplesAnalyzed = 1000, Method = "test" };
+                WriteCatalog(catalog, filled);
+                var rf = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(rf.Filled == 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1",
+                        $"a null bitUsage gaining values is filled (1 filled), no new conflict ({rf.Filled} filled, conflicts {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")})");
+                    assert(os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == "8", "the filled value is stored");
+                }
+                WriteCatalog(catalog, changed);   // back to bitUsage null for b.mp3
+                var rn = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(rn.Filled == 0 && os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == "8"
+                        && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1",
+                        $"a value arriving as null is 'not observed': kept, no conflict ({rn.Filled} filled, {rn.Drift} drift)");
 
                 // 4. A key move (the media gains a new content hash) re-keys and rewrites the description — not drift.
                 var moved = FixtureEntries(@"D:\Music");
@@ -400,6 +478,7 @@ namespace Truedat.Store
                 assert(info.BytesPerTrack == (double)info.FileBytes / 5 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track (per distinct track) and the 156k projection derive from the file size");
                 assert(info.RtfSamples == 3 && info.MedianRtf.HasValue && Math.Abs(info.MedianRtf.Value - 10.0) < 1e-9, $"median RTF over the 3 rows with both durations = 10 (got {info.MedianRtf}, n={info.RtfSamples})");
                 assert(info.FailedComponents.TryGetValue("sha", out var fsha) && fsha == 1 && info.FailedComponents.TryGetValue("fingerprint", out var ffp) && ffp == 1, "failed components split on ';' and counted per component");
+                assert(info.ConflictsByKind.TryGetValue("sha-collision-props-differ", out var cc) && cc == 1 && info.ConflictsByKind.Count == 1, $"--store-info counts open conflicts by kind (review #6) ({string.Join(",", info.ConflictsByKind.Keys)})");
                 assert(info.Coverage["loudnessMomentary"] == 1 && info.Coverage["dynamicComplexity"] == 1 && info.Coverage["fingerprint.v1"] == 6 && info.Coverage["smfmScores"] == 1,
                     $"coverage by wave: extended {info.Coverage["loudnessMomentary"]}, capture-once {info.Coverage["dynamicComplexity"]}, fingerprint {info.Coverage["fingerprint.v1"]}, smfm {info.Coverage["smfmScores"]} (only the fully populated entry has the waves)");
                 assert(info.ContentKeysShared == 1 && info.LocationsOnSharedKeys == 2, $"one content key shared by 2 locations (d1/d2) ({info.ContentKeysShared}/{info.LocationsOnSharedKeys})");
@@ -1095,6 +1174,17 @@ namespace Truedat.Store
                     assert(mapperContent.Contains("bpm") && mapperContent.Contains("mfcc") && mapperContent.Contains("audioStreamSha256") && mapperContent.Contains("bitUsage_effectiveBits") && mapperContent.Contains("hfEnergyRatio"),
                         "content = every Essentia descriptor, bitUsage, HF, the content hash itself");
 
+                    // Noise rule edge cases (review minor): zero, negatives, NaN, vectors.
+                    int kb = TrackEntryMapper.ContentIndexOf("bpm"), km = TrackEntryMapper.ContentIndexOf("mfcc"), kk = TrackEntryMapper.ContentIndexOf("key");
+                    assert(kb >= 0 && km >= 0 && kk >= 0, "ContentIndexOf finds content columns");
+                    assert(TrackEntryMapper.ContentEqualWithinNoise(kb, 0.0, -0.0) && TrackEntryMapper.ContentEqualWithinNoise(kb, 0.0, 1e-9), "noise: 0 vs -0 and 0 vs 1e-9 are equal (absolute floor)");
+                    assert(TrackEntryMapper.ContentEqualWithinNoise(kb, -100.0, -100.5) && !TrackEntryMapper.ContentEqualWithinNoise(kb, -100.0, -102.0), "noise: negatives compare by magnitude (0.5% equal, 2% not)");
+                    assert(TrackEntryMapper.ContentEqualWithinNoise(kb, double.NaN, double.NaN) && !TrackEntryMapper.ContentEqualWithinNoise(kb, double.NaN, 1.0), "noise: NaN equals NaN (no perpetual conflict), NaN never equals a number");
+                    assert(!TrackEntryMapper.ContentEqualWithinNoise(km, new[] { 1.0, 2.0, 3.0 }, new[] { 1.0, 2.0 }) && TrackEntryMapper.ContentEqualWithinNoise(km, new[] { 1.0, 2.0, 3.0 }, new[] { 1.0, 2.004, 3.0 }) && !TrackEntryMapper.ContentEqualWithinNoise(km, new[] { 1.0, 2.0, 3.0 }, new[] { 1.0, 2.1, 3.0 }),
+                        "noise: vectors of different length differ; element-wise 0.2% equal, 5% not");
+                    assert(!TrackEntryMapper.ContentEqualWithinNoise(kk, "A", "a") && TrackEntryMapper.ContentEqualWithinNoise(kk, "A", "A") && !TrackEntryMapper.ContentEqualWithinNoise(kk, null, "A"),
+                        "noise: text is exact and case-sensitive; null only equals null");
+
                     // Refuses a store newer than the exe.
                     db.Exec("INSERT INTO schema_version(version, applied_utc, truedat_version) VALUES (999, '2099-01-01T00:00:00Z', 'future');");
                     bool refused = false; string? msg = null;
@@ -1124,6 +1214,17 @@ namespace Truedat.Store
                     db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, analysisDuration, audioStreamSha256) VALUES (12, 'sha2', '{FacetKinds.ShaFrames}', '{now}', 'Zep', 90.0, 3.0, 'sha2');");
                 }
                 var v1Now = DateTime.ParseExact("2026-10-12T10:00:00.0000000Z", "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+                // A failure mid-migration leaves the v1 store exactly as it was (one transaction).
+                using (var db = SqliteDb.Open(v1Path, create: false))
+                {
+                    SchemaV2Migration.FailAfterMoveForTest = true;
+                    bool threw = false;
+                    try { SchemaMigrator.Apply(db, "selftest-v2"); } catch (Exception) { threw = true; }
+                    finally { SchemaV2Migration.FailAfterMoveForTest = false; }
+                    assert(threw && SchemaMigrator.ReadVersion(db) == 1 && db.ExecScalar("SELECT count(*) FROM track_feature;") == "3"
+                        && db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_content';") == "0",
+                        $"a migration that fails after moving rows rolls back whole: still v1, 3 feature rows, no v2 tables (v{SchemaMigrator.ReadVersion(db)})");
+                }
                 using (var db = SqliteDb.Open(v1Path, create: false))
                 {
                     SchemaMigrator.Apply(db, "selftest-v2");
