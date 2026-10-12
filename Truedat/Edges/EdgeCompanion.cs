@@ -93,14 +93,14 @@ namespace Truedat.Edges
                 var k = e.Whole.Key;
                 w.WriteStartObject();
                 w.WriteString("name", k.Name); w.WriteString("code", k.Code); w.WriteString("scale", k.Scale);
-                w.WriteNumber("strength", Math.Round(k.Strength, 2)); w.WriteNumber("agreement", k.Agreement); w.WriteNumber("votesPresent", k.VotesPresent);
+                w.WriteNumber("strength", Dec(k.Strength, 2)); w.WriteNumber("agreement", k.Agreement); w.WriteNumber("votesPresent", k.VotesPresent);
                 w.WriteEndObject();
             }
             else w.WriteNullValue();
             w.WritePropertyName("bpm");
             if (folded && e.Bpm != null)
             {
-                w.WriteStartObject(); w.WriteNumber("value", Math.Round(e.Bpm.Value, 1)); w.WriteNumber("beats", e.Bpm.Beats); w.WriteNumber("regularity", Math.Round(e.Bpm.Regularity, 2)); w.WriteEndObject();
+                w.WriteStartObject(); w.WriteNumber("value", Dec(e.Bpm.Value, 1)); w.WriteNumber("beats", e.Bpm.Beats); w.WriteNumber("regularity", Dec(e.Bpm.Regularity, 2)); w.WriteEndObject();
             }
             else w.WriteNullValue();
             w.WritePropertyName("loudness");
@@ -139,17 +139,26 @@ namespace Truedat.Edges
             w.WriteStartObject(); Num(w, "loudness", d.Loudness, 2); Num(w, "texture", d.Texture, 2); Num(w, "harmony", d.Harmony, 2); w.WriteEndObject();
         }
 
+        // net48 formats a double with round-trip noise ("0.77000000000000002"); a decimal of the rounded value prints exactly
+        // "0.77". The companion is read by machines but sized by humans: the noise doubled the bytes per track.
         static void Num(Utf8JsonWriter w, string name, double? v, int dp)
         {
             w.WritePropertyName(name);
-            if (v.HasValue && !double.IsNaN(v.Value) && !double.IsInfinity(v.Value)) w.WriteNumberValue(Math.Round(v.Value, dp)); else w.WriteNullValue();
+            if (v.HasValue && !double.IsNaN(v.Value) && !double.IsInfinity(v.Value)) w.WriteNumberValue(Dec(v.Value, dp)); else w.WriteNullValue();
         }
 
         static void Arr(Utf8JsonWriter w, string name, double[] v, int dp)
         {
             w.WritePropertyName(name); w.WriteStartArray();
-            foreach (var x in v) { if (double.IsNaN(x) || double.IsInfinity(x)) w.WriteNullValue(); else w.WriteNumberValue(Math.Round(x, dp)); }
+            foreach (var x in v) { if (double.IsNaN(x) || double.IsInfinity(x)) w.WriteNullValue(); else w.WriteNumberValue(Dec(x, dp)); }
             w.WriteEndArray();
+        }
+
+        static decimal Dec(double v, int dp)
+        {
+            double r = Math.Round(v, dp);
+            if (r > 7.9e28 || r < -7.9e28) return (decimal)Math.Sign(r) * 79000000000000000000000000000m;
+            return decimal.Round((decimal)r, dp);
         }
     }
 }

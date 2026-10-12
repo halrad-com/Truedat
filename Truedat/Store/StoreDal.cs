@@ -347,6 +347,8 @@ namespace Truedat.Store
         internal void EnsureProducer(string key, string version, string kind, bool needsAudio)
             => Exec("INSERT INTO producer(key, version, kind, needs_audio) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET version = excluded.version;", key, version, kind, needsAudio ? 1L : 0L);
         internal string? ProducerVersion(string key) => Row("SELECT version FROM producer WHERE key = ?;", s => s.GetString(0), null, key);
+        /// <summary>The producer version of the newest run row for a producer — for essentia, the extractor build that made the descriptions.</summary>
+        internal string? LatestRunVersion(string producerKey) => Row("SELECT producer_version FROM run WHERE producer_key = ? ORDER BY id DESC LIMIT 1;", s => s.GetString(0), null, producerKey);
 
         internal long UpsertSegment(string contentHash, string contentHashKind, string setKey, string kind, int ordinal, int startMs, int endMs)
         {

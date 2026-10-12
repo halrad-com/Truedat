@@ -54,6 +54,14 @@ namespace Truedat.Store
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.</summary>
         internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges) => _stashedEdges[analysedPath] = edges;
 
+        /// <summary>S2 C5: the --work drain takes the fold the core stashed for the path it analysed (and drops the main-JSON stash,
+        /// which the drain does not file: the description already exists). Null when the core produced none.</summary>
+        internal static global::Truedat.Edges.EdgeFoldResult? TakeEdges(string analysedPath)
+        {
+            if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
+            return _stashedEdges.TryRemove(analysedPath, out var edges) ? edges : null;
+        }
+
         /// <summary>Called by the extractor core right after a successful parse, with the JSON text it is about to delete.</summary>
         internal static void StashMainJson(string analysedPath, string json)
         {

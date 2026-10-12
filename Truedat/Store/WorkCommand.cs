@@ -65,7 +65,7 @@ namespace Truedat.Store
                     r.Enqueued = dal.EnqueueMissingEdges(o.Producer, producerVersion, machineId);
                     tx.Complete();
                 }
-                StoreLog.Info($"work: {r.Enqueued} item(s) enqueued for {o.Producer}@{producerVersion} on this machine");
+                StoreLog.Info($"work: {r.Enqueued} item(s) enqueued for {producerVersion} on this machine");
 
                 // One attempt per item per run: the lease query's cutoff is the run start, so a failure (or lease) recorded during
                 // this run is not eligible again until the next run, whatever the retry delay.
@@ -156,7 +156,7 @@ namespace Truedat.Store
                 ["budgetMs"] = r.BudgetMs, ["elapsedMs"] = r.ElapsedMs, ["stopped"] = r.Stopped,
                 ["enqueued"] = r.Enqueued, ["leased"] = r.Leased, ["done"] = r.Done, ["failed"] = r.Failed, ["unreachable"] = r.Unreachable, ["parked"] = r.Parked,
                 ["remaining"] = r.Remaining, ["queue"] = new JsonObject { ["queued"] = r.QueueQueued, ["failed"] = r.QueueFailed, ["parked"] = r.QueueParked, ["done"] = r.QueueDone },
-                ["nextEligibleUtc"] = r.NextEligibleUtc, ["itemsPerHour"] = Math.Round(r.ItemsPerHour, 1), ["bytesWritten"] = r.BytesWritten,
+                ["nextEligibleUtc"] = r.NextEligibleUtc, ["itemsPerHour"] = (decimal)Math.Round(r.ItemsPerHour, 1), ["bytesWritten"] = r.BytesWritten,   // decimal: net48 prints a double with round-trip noise
                 ["bytesPerItem"] = r.Done > 0 ? r.BytesWritten / r.Done : 0,
             };
             if (r.ResultPath == null) return;

@@ -207,6 +207,9 @@ namespace Truedat.Edges
                 }
                 assert(rep.Tracks == 3 && rep.OmittedNoSha == 1 && rep.Bytes > 1000 && System.IO.File.Exists(path) && !System.IO.File.Exists(path + ".tmp"),
                     $"three sha-keyed media written, the entity-keyed one counted and omitted, no .tmp left ({rep.Tracks}, {rep.OmittedNoSha}, {rep.Bytes} B)");
+                var text = System.IO.File.ReadAllText(path);
+                assert(!text.Contains("00000000") && !text.Contains("99999999"), "numbers are written exactly as rounded (no net48 double round-trip noise like 0.77000000000000002)");
+                assert(!text.Contains("\n"), "compact: one line, like mbxmoods.json");
                 using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllBytes(path));
                 var root = doc.RootElement;
                 assert(root.GetProperty("contract").GetString() == "mbxedges.v1" && root.GetProperty("producerVersion").GetString() == version && root.GetProperty("extractor").GetString()!.Contains("output-x64.5")

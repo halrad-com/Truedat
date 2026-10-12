@@ -769,7 +769,15 @@ namespace Truedat
             Console.WriteLine("  --edges             With --store: on every analysed track, also fold the first and last 30 s");
             Console.WriteLine("                      (loudness series, beats, key, texture, fades, PCM crest/transition) into");
             Console.WriteLine("                      the store's edge row for the hub's splicing. Needs extractor build");
-            Console.WriteLine("                      output-x64.5 (binary frames). Writes nothing to mbxmoods.json.");
+            Console.WriteLine("                      output-x64.5 (binary frames). Writes nothing to mbxmoods.json; rewrites");
+            Console.WriteLine("                      mbxedges.v1.json beside the catalog when edge rows were added.");
+            Console.WriteLine("  --work [--producer edges] [--budget <time>]");
+            Console.WriteLine("                      With --store: fold edges for every media that has a description but no");
+            Console.WriteLine("                      edge row and a copy on this machine, one at a time, until the queue is");
+            Console.WriteLine("                      empty or the budget (90s, 30m, 2h, 1h30m) is spent. 3 attempts then parked.");
+            Console.WriteLine("                      Writes work-result.json beside the store; --store-info shows coverage.");
+            Console.WriteLine("  --edges-export [path]");
+            Console.WriteLine("                      With --store: write mbxedges.v1.json from the store (default: beside the catalog).");
             Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
@@ -848,8 +856,8 @@ namespace Truedat
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
             "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size", "store-dir",
-            // v2 S2: the edges producer rides on a scan; opt-in, store-only output.
-            "edges",
+            // v2 S2: the edges producer rides on a scan; opt-in, store-only output. --work drains the gap; --edges-export writes the companion file.
+            "edges", "work", "producer", "budget", "edges-export",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -867,6 +875,7 @@ namespace Truedat
             "restore", "keep-backups", "prune-entry",
             // "store" is deliberately absent: its value is optional (bare --store = the default location, S2 C0).
             "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size", "store-dir",
+            "producer", "budget",   // "edges-export" is deliberately absent: its value is optional (bare = beside the catalog).
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -2274,6 +2283,12 @@ namespace Truedat
             bool storeInfoMode = false;           // --store-info: measurements (bytes/track, RTF, coverage, dupes, key moves)
             bool storeVacuumMode = false;         // --store-vacuum: repack the store (page size tuning; 4 KB pages held one ~2 KB row each)
             string? storePageSizeText = null;     // --page-size N: page size for --store-vacuum (default SqliteDb.DefaultPageSize)
+            // v2 S2 (C5/C7): the drain and the companion export.
+            bool workMode = false;                // --work: drain the edges gap on this machine's roots, one item at a time
+            string workProducer = global::Truedat.Edges.EdgeStore.ProducerKey;   // --producer <key> (edges is the only one in S2)
+            string? workBudgetText = null;        // --budget <time>: 90s | 30m | 2h | 1h30m; absent = until the queue is empty
+            bool edgesExportMode = false;         // --edges-export [path]: mbxedges.v1.json from the store (default: beside the catalog)
+            string? edgesExportPath = null;
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2430,6 +2445,10 @@ namespace Truedat
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
                 else if (canonical == "store-info") storeInfoMode = true;
                 else if (canonical == "store-vacuum") storeVacuumMode = true;
+                else if (canonical == "work") workMode = true;
+                else if (canonical == "producer" && i + 1 < args.Length) workProducer = args[++i];
+                else if (canonical == "budget" && i + 1 < args.Length) workBudgetText = args[++i];
+                else if (canonical == "edges-export") { edgesExportMode = true; edgesExportPath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : null; }
                 else if (canonical == "page-size" && i + 1 < args.Length) storePageSizeText = args[++i];
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
@@ -2653,7 +2672,7 @@ namespace Truedat
             // store-only verbs always, --stats/--duplicates only when --store was given (they stay JSON-backed
             // otherwise). Default = beside the catalog when local, a local per-library path when the catalog
             // folder is a share, --store-dir relocating that layout; explicit --store <path> always wins.
-            bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode;
+            bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || workMode || edgesExportMode;
             if (storeVerb || storePath != null)
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
@@ -2661,6 +2680,9 @@ namespace Truedat
                 storePath = global::Truedat.Store.StoreLocation.Resolve(string.IsNullOrEmpty(storePath) ? null : storePath, storeDir, storeCatalog!, out var storeWhy);
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
                 global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
+                // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
+                // added edge rows, after --work, and by --edges-export (its explicit path wins).
+                if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -3095,6 +3117,39 @@ namespace Truedat
             if (storeVacuumMode)
             {
                 Environment.ExitCode = global::Truedat.Store.VacuumCommand.Run(storePath, storePageSizeText, auditLog);
+                return;
+            }
+            if (edgesExportMode)
+            {
+                Environment.ExitCode = WriteEdgesCompanion(edgesExportPath, announce: true) ? 0 : 1;
+                return;
+            }
+            if (workMode)
+            {
+                // S2 C5: the drain. Same gate as --edges on a scan (store, .5 build, ffmpeg warning); the produce step is the
+                // C4 path over a staged copy of each reachable file.
+                TimeSpan? budget = null;
+                if (workBudgetText != null)
+                {
+                    budget = ParseBudget(workBudgetText);
+                    if (budget == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
+                }
+                var workBaseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var workEssentia = FindTool("essentia_streaming_extractor_music.exe", workBaseDir, Environment.CurrentDirectory);
+                if (workEssentia == null) { Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found (app dir, cwd)."); Environment.ExitCode = 2; return; }
+                _stageOpts.Edges = true;
+                if (EdgesPreflight(workEssentia) is string workRefusal) { Console.Error.WriteLine(workRefusal); Environment.ExitCode = 1; return; }
+                var workBuild = global::Truedat.Store.ScanSink.ExtractorBuild;
+                Console.WriteLine($"  Work:       producer {workProducer}, budget {(budget.HasValue ? budget.Value.ToString() : "until the queue is empty")}, extractor {workBuild}");
+                var wr = global::Truedat.Store.WorkCommand.Run(
+                    new global::Truedat.Store.WorkOptions { StorePath = storePath, Producer = workProducer, Budget = budget, Audit = auditLog },
+                    RealProduceEdges(workEssentia), _edgeSettings.ProducerVersion);
+                if (wr.Error != null) { Console.Error.WriteLine($"Error: {wr.Error}"); Environment.ExitCode = 1; return; }
+                Console.WriteLine($"  work: {wr.Enqueued} enqueued, {wr.Leased} leased, {wr.Done} done, {wr.Failed} failed ({wr.Unreachable} unreachable), {wr.Parked} parked, {wr.Remaining} remaining; stopped: {wr.Stopped}; {wr.ElapsedMs / 1000.0:F1} s" +
+                                  (wr.Leased > 0 ? $" ({wr.ItemsPerHour:F0} items/h, {(wr.Done > 0 ? wr.BytesWritten / wr.Done : 0):N0} B/item)" : "") + (wr.NextEligibleUtc != null ? $"; next retry eligible {wr.NextEligibleUtc}" : ""));
+                Console.WriteLine($"  result:     {wr.ResultPath}");
+                if (wr.Done > 0) WriteEdgesCompanion(null, announce: true);
+                Environment.ExitCode = 0;
                 return;
             }
 
@@ -10187,6 +10242,64 @@ namespace Truedat
 
         /// <summary>S2 C3: after the catalog is saved, write what this run analysed into the store (when one is in
         /// force). A store failure is reported and counted, never thrown — it cannot cost a catalog entry.</summary>
+        /// <summary>S2 C7: where the companion file goes for this run (beside the catalog the store was resolved against); null
+        /// when no store is in force.</summary>
+        static string? _edgesCompanionPath;
+
+        /// <summary>S2 C7: write mbxedges.v1.json from the store — to <paramref name="explicitPath"/>, else beside the catalog.
+        /// Returns false (and says why) when there is no store or no target; never throws into a scan.</summary>
+        static bool WriteEdgesCompanion(string? explicitPath, bool announce)
+        {
+            var target = explicitPath ?? _edgesCompanionPath;
+            if (_storePath == null) { Console.Error.WriteLine("Error: --edges-export reads the store; add --store."); return false; }
+            if (target == null) { Console.Error.WriteLine("Error: no catalog beside which to write mbxedges.v1.json; pass --edges-export <path> or --moods."); return false; }
+            try
+            {
+                var now = DateTime.UtcNow.ToString("o");
+                using var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, now);
+                // The header names the extractor the frames came from. A scan or --work resolved it; a bare --edges-export has not,
+                // so it reads the build the store's newest essentia run recorded (the frames depend on the build).
+                var build = global::Truedat.Store.ScanSink.ExtractorBuild;
+                if (build == "unknown") build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
+                var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, _edgeSettings.ProducerVersion, "essentia_streaming_extractor_music " + build);
+                if (announce) Console.WriteLine($"  edges file: {rep.Tracks:N0} tracks, {rep.Bytes:N0} bytes{(rep.OmittedNoSha > 0 ? $", {rep.OmittedNoSha:N0} no-sha media omitted" : "")} -> {rep.Path}");
+                return true;
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"  WARNING: mbxedges.v1.json not written ({ex.Message})"); return false; }
+        }
+
+        /// <summary>--budget: 90s, 30m, 2h, 1h30m, or a bare number of seconds. Null when it does not parse.</summary>
+        internal static TimeSpan? ParseBudget(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            if (double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var secs)) return secs > 0 ? TimeSpan.FromSeconds(secs) : (TimeSpan?)null;
+            double total = 0; int i = 0; bool any = false;
+            while (i < text.Length)
+            {
+                int j = i; while (j < text.Length && (char.IsDigit(text[j]) || text[j] == '.')) j++;
+                if (j == i || j >= text.Length) return null;
+                if (!double.TryParse(text.Substring(i, j - i), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n)) return null;
+                switch (char.ToLowerInvariant(text[j])) { case 'h': total += n * 3600; break; case 'm': total += n * 60; break; case 's': total += n; break; default: return null; }
+                any = true; i = j + 1;
+            }
+            return any && total > 0 ? TimeSpan.FromSeconds(total) : (TimeSpan?)null;
+        }
+
+        /// <summary>S2 C5: the C4 path as the drain's produce step — stage the copy as a scan would, run the extractor with the frames
+        /// profile (the core stashes the fold under the path it read), take the fold, drop the main-JSON stash (the description
+        /// already exists). A core failure is a failed fold naming it.</summary>
+        static global::Truedat.Store.ProduceEdges RealProduceEdges(string essentiaExe) => (path, size) =>
+        {
+            using var src = OpenStagedSource(path, _stageOpts, size);
+            var res = AnalyzeWithEssentia(essentiaExe, src.Path, size);
+            var edges = global::Truedat.Store.ScanSink.TakeEdges(src.Path);
+            if (edges != null) return edges;
+            var failed = new global::Truedat.Edges.EdgeFoldResult { ProducerVersion = _edgeSettings.ProducerVersion };
+            failed.Head.Status = failed.Tail.Status = "failed";
+            failed.Head.Error = failed.Tail.Error = res.Error ?? "the extractor produced no frames file";
+            return failed;
+        };
+
         /// <summary>S2 C4: what <c>--edges</c> needs before a scan starts, checked once the extractor is resolved, in every scan
         /// mode. Returns a plain refusal (the caller exits 1) or null; prints the enabled line. Also stamps the run rows'
         /// extractor build for the per-file modes, which only the library scan did before.</summary>
@@ -10217,6 +10330,7 @@ namespace Truedat
             {
                 Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
                 if (_stageOpts.Edges) Console.WriteLine($"  edges: {r.Edges} edge rows written, {r.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
+                if (_stageOpts.Edges && r.Edges > 0) WriteEdgesCompanion(null, announce: true);   // S2 C7: the companion file reflects the store after every run that added edges
             }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
