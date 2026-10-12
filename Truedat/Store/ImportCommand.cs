@@ -34,6 +34,15 @@ namespace Truedat.Store
         public int LedgerUnrooted;
         /// <summary>Entries whose lastModified is older than the store's for the same content key — skipped, never regress a row.</summary>
         public int Stale;
+        /// <summary>Entries that arrived with a content value differing beyond noise from the stored description under the SAME
+        /// producer — recorded as value-drift conflicts, the stored description untouched (S2 C2).</summary>
+        public int Drift;
+        /// <summary>Entries that wrote nothing: description and copy facts already equal (within noise) — no row churn (S2 C2).</summary>
+        public int Unchanged;
+        /// <summary>Entries whose description was replaced because it arrived from a DIFFERENT producer/version (the old run stays as history).</summary>
+        public int ContentReplaced;
+        /// <summary>Entries whose media gained a new content hash (a key move): the description is re-keyed and rewritten from the arrival.</summary>
+        public int ContentRekeyed;
         public long StoreBytesBefore, StoreBytesAfter, ElapsedMs;
         public string ResultPath = "";
     }
@@ -55,6 +64,7 @@ namespace Truedat.Store
                 Console.WriteLine($"  roots: {string.Join(", ", r.Roots)}");
                 Console.WriteLine($"  entities: {r.EntitiesCreated} created, {r.MatchedHash} matched by sha, {r.MatchedPath} matched by path, {r.CreatedNoSha} created without a sha");
                 Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); conflicts: {r.Conflicts}; legacy FLAC sha: {r.LegacySha} kept, {r.LegacyShaUnrecoverable} unrecoverable");
+                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Drift} drifted (conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
                 Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts" +
                                   (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
@@ -242,7 +252,69 @@ namespace Truedat.Store
 
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            dal.UpsertFeature(loc, res.EntityId, contentKey, sha != null ? kind : "entity", importRun, entry, now);
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", importRun, "import", "1", entry, key, now, r);
+        }
+
+        /// <summary>S2 C2 — observation integrity. The media's description is written once; afterwards an arriving value that
+        /// differs BEYOND run-to-run noise under the SAME producer/version is a <c>value-drift</c> conflict (field, both values,
+        /// both runs) and the stored description is left alone — that disagreement is the only part of an observation history
+        /// that ever carried information. A different producer/version replaces the description (the old run stays as history).
+        /// Copy facts describe the file, so the newer observation wins, exactly. Equal arrivals write nothing at all.</summary>
+        internal static void WriteDescriptionAndCopy(StoreDal dal, long locationId, string entityId, string contentKey, string contentKeyKind,
+            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r)
+        {
+            var row = TrackEntryMapper.ToRow(entry);
+            bool contentWritten = false, copyWritten = false, drifted = false;
+
+            var existing = dal.ReadContent(entityId);
+            if (existing == null)
+            {
+                dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
+                contentWritten = true;
+            }
+            else if (!string.Equals(existing.ContentKey, contentKey, StringComparison.Ordinal))
+            {
+                // A key move (the resolver already superseded the old hash facet): the same media now has a new content hash,
+                // so the arriving entry IS the fresher observation of it — the description is re-keyed and rewritten, no drift.
+                dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
+                contentWritten = true; r.ContentRekeyed++;
+                StoreLog.Debug($"description re-keyed: {displayPath} ({existing.ContentKey} -> {contentKey})");
+            }
+            else
+            {
+                var drift = new List<int>();
+                for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
+                    if (!TrackEntryMapper.ContentEqualWithinNoise(k, existing.Values[k], TrackEntryMapper.ContentValue(row, k))) drift.Add(k);
+                if (drift.Count > 0)
+                {
+                    bool sameProducer = string.Equals(existing.ProducerKey, producerKey, StringComparison.Ordinal)
+                                     && string.Equals(existing.ProducerVersion, producerVersion, StringComparison.Ordinal);
+                    if (sameProducer)
+                    {
+                        foreach (var k in drift)
+                            dal.InsertDriftConflict(entityId, TrackEntryMapper.ContentColumnName(k),
+                                TrackEntryMapper.FormatContent(k, existing.Values[k]), TrackEntryMapper.FormatContent(k, TrackEntryMapper.ContentValue(row, k)),
+                                existing.RunId, runId, displayPath, now);
+                        drifted = true; r.Drift++;
+                        StoreLog.Warn($"value drift under {producerKey}@{producerVersion} on {displayPath}: {drift.Count} field(s) differ beyond noise ({TrackEntryMapper.ContentColumnName(drift[0])}{(drift.Count > 1 ? ", …" : "")}); stored description kept, conflict recorded");
+                    }
+                    else
+                    {
+                        dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
+                        contentWritten = true; r.ContentReplaced++;
+                        StoreLog.Debug($"description replaced: {displayPath} ({existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion})");
+                    }
+                }
+            }
+
+            var existingCopy = dal.ReadCopyValues(locationId);
+            if (existingCopy == null || !TrackEntryMapper.CopyEqualExact(existingCopy, row))
+            {
+                dal.UpsertCopy(locationId, runId, row, now);
+                copyWritten = true;
+            }
+
+            if (!contentWritten && !copyWritten && !drifted) r.Unchanged++;
         }
 
         static void ImportLedgers(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string dir, string now, ImportReport r)
@@ -377,6 +449,7 @@ namespace Truedat.Store
                 ["entries"] = r.Entries, ["unrooted"] = r.Unrooted,
                 ["entitiesCreated"] = r.EntitiesCreated, ["matchedBySha"] = r.MatchedHash, ["matchedByPath"] = r.MatchedPath, ["createdWithoutSha"] = r.CreatedNoSha,
                 ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew, ["conflicts"] = r.Conflicts,
+                ["unchanged"] = r.Unchanged, ["drift"] = r.Drift, ["contentReplaced"] = r.ContentReplaced, ["contentRekeyed"] = r.ContentRekeyed, ["stale"] = r.Stale,
                 ["legacySha"] = r.LegacySha, ["legacyShaUnrecoverable"] = r.LegacyShaUnrecoverable,
                 ["ledgers"] = new JsonObject { ["errors"] = r.ErrorsRows, ["skipped"] = r.SkippedRows, ["review"] = r.ReviewRows, ["verify"] = r.VerifyRows, ["receipts"] = r.ReceiptRows, ["unrooted"] = r.LedgerUnrooted },
                 ["storeBytesBefore"] = r.StoreBytesBefore, ["storeBytesAfter"] = r.StoreBytesAfter, ["elapsedMs"] = r.ElapsedMs,

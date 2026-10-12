@@ -220,14 +220,35 @@ namespace Truedat.Store
         internal static string ContentColumnName(int k) => Cols[ContentIdx[k]].Name;
 
         /// <summary>Reads the content columns (in <see cref="ContentColumnNames"/> order) starting at <paramref name="firstColumn"/>.</summary>
-        internal static object?[] ReadContentValues(SqliteStmt st, int firstColumn)
+        internal static object?[] ReadContentValues(SqliteStmt st, int firstColumn) => ReadIdx(st, firstColumn, ContentIdx);
+
+        /// <summary>True when two values of content column k agree within noise: reals and float vectors within
+        /// 1% relative or 1e-6 absolute (element-wise); ints, text and int vectors exactly; null only equals null.</summary>
+        internal static bool ContentEqualWithinNoise(int k, object? a, object? b) => ValueEqual(Cols[ContentIdx[k]].Kind, a, b, exact: false);
+
+        /// <summary>The content column k of a ToRow() row.</summary>
+        internal static object? ContentValue(object?[] row, int k) => row[ContentIdx[k]];
+
+        /// <summary>Reads the copy columns (in <see cref="CopyColumnNames"/> order) starting at <paramref name="firstColumn"/>.</summary>
+        internal static object?[] ReadCopyValues(SqliteStmt st, int firstColumn) => ReadIdx(st, firstColumn, CopyIdx);
+
+        /// <summary>True when a stored copy row (as read by <see cref="ReadCopyValues"/>) equals the copy columns of a
+        /// ToRow() row exactly — copy facts are file facts, so there is no noise to allow for.</summary>
+        internal static bool CopyEqualExact(object?[] storedCopy, object?[] row)
         {
-            var values = new object?[ContentIdx.Length];
-            for (int k = 0; k < ContentIdx.Length; k++)
+            for (int k = 0; k < CopyIdx.Length; k++)
+                if (!ValueEqual(Cols[CopyIdx[k]].Kind, storedCopy[k], row[CopyIdx[k]], exact: true)) return false;
+            return true;
+        }
+
+        static object?[] ReadIdx(SqliteStmt st, int firstColumn, int[] idx)
+        {
+            var values = new object?[idx.Length];
+            for (int k = 0; k < idx.Length; k++)
             {
                 int c = firstColumn + k;
                 if (st.IsNull(c)) continue;
-                values[k] = Cols[ContentIdx[k]].Kind switch
+                values[k] = Cols[idx[k]].Kind switch
                 {
                     Kind.Real => st.GetDouble(c),
                     Kind.Int => st.GetInt64(c),
@@ -239,21 +260,19 @@ namespace Truedat.Store
             return values;
         }
 
-        /// <summary>True when two values of content column k agree within noise: reals and float vectors within
-        /// 1% relative or 1e-6 absolute (element-wise); ints, text and int vectors exactly; null only equals null.</summary>
-        internal static bool ContentEqualWithinNoise(int k, object? a, object? b)
+        static bool ValueEqual(Kind kind, object? a, object? b, bool exact)
         {
             if (a == null || b == null) return a == null && b == null;
-            switch (Cols[ContentIdx[k]].Kind)
+            switch (kind)
             {
-                case Kind.Real: return Near((double)a, (double)b);
+                case Kind.Real: return exact ? (double)a == (double)b : Near((double)a, (double)b);
                 case Kind.Int: return (long)a == (long)b;
                 case Kind.Text: return string.Equals((string)a, (string)b, StringComparison.Ordinal);
                 case Kind.VecF64:
                 {
                     var x = (double[])a; var y = (double[])b;
                     if (x.Length != y.Length) return false;
-                    for (int i = 0; i < x.Length; i++) if (!Near(x[i], y[i])) return false;
+                    for (int i = 0; i < x.Length; i++) if (exact ? x[i] != y[i] : !Near(x[i], y[i])) return false;
                     return true;
                 }
                 default:

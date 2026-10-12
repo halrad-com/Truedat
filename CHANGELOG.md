@@ -33,6 +33,13 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   within noise, 32 beyond (128 conflicts, led by one genuine sha collision). `--store-roundtrip` reports
   merged copies apart from unexplained differences and stays EQUAL for every single-copy entry.
   `value` gains `segment_id`; `conflict` gains `field`, `run_a`/`run_b`, `value_a`/`value_b`.
+- **A differing value is a conflict, never an overwrite.** Re-importing a catalog compares each entry with
+  the stored description: equal (within the extractor's run-to-run noise) writes nothing, so a repeat import
+  leaves every row's `updated_utc` alone; a difference beyond noise under the same producer becomes a
+  `value-drift` conflict (field, both values, both runs) and the description is kept; a different producer
+  replaces it with the old run kept as history; a key move re-keys it. Copy facts (tags, `fingerprint.v1`,
+  SMFM) take the newer value, exactly. Identical drifts are recorded once. On the real catalog a re-import
+  is 22 s, 72,445 unchanged, 32 drifted, the store unchanged in size.
 - **The store has a home.** `truedat.db` beside `mbxmoods.json`, found by the same resolver as the
   catalog, so the store verbs need no `--store`; bare `--store` on `--stats` / `--duplicates` means that
   default. The file is always local: a catalog on a network share gets a local per-library store under

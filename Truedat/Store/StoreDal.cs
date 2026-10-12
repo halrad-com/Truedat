@@ -200,19 +200,59 @@ namespace Truedat.Store
         internal void UpsertFeature(long locationId, string entityId, string contentKey, string contentKeyKind, long? runId, TrackEntry entry, string nowUtc)
         {
             var row = TrackEntryMapper.ToRow(entry);
+            UpsertContent(entityId, contentKey, contentKeyKind, runId, row, nowUtc);
+            UpsertCopy(locationId, runId, row, nowUtc);
+        }
+
+        internal void UpsertContent(string entityId, string contentKey, string contentKeyKind, long? runId, object?[] row, string nowUtc)
+        {
             var sc = Stmt(TrackEntryMapper.UpsertContentSql);
             sc.Bind(1, entityId).Bind(2, contentKey).Bind(3, contentKeyKind);
             if (runId.HasValue) sc.Bind(4, runId.Value); else sc.BindNull(4);
             sc.Bind(5, nowUtc);
             TrackEntryMapper.BindContent(sc, TrackEntryMapper.UpsertContentFirstParam, row);
             try { while (sc.Step()) { } } finally { sc.Reset(); }
+        }
 
+        internal void UpsertCopy(long locationId, long? runId, object?[] row, string nowUtc)
+        {
             var sp = Stmt(TrackEntryMapper.UpsertCopySql);
             sp.Bind(1, locationId);
             if (runId.HasValue) sp.Bind(2, runId.Value); else sp.BindNull(2);
             sp.Bind(3, nowUtc);
             TrackEntryMapper.BindCopy(sp, TrackEntryMapper.UpsertCopyFirstParam, row);
             try { while (sp.Step()) { } } finally { sp.Reset(); }
+        }
+
+        internal sealed class ContentRow
+        {
+            public object?[] Values = Array.Empty<object?>();
+            public string ContentKey = "";
+            public long? RunId; public string? ProducerKey; public string? ProducerVersion;
+        }
+
+        /// <summary>The stored description of a media with its content key and the producer that wrote it, or null when none (S2 C2).</summary>
+        internal ContentRow? ReadContent(string entityId)
+            => Row("SELECT c.run_id, r.producer_key, r.producer_version, c.content_key, " + TrackEntryMapper.ContentColumnList("c") +
+                   " FROM track_content c LEFT JOIN run r ON r.id = c.run_id WHERE c.entity_id = ?;",
+                   s => (ContentRow?)new ContentRow { RunId = s.IsNull(0) ? (long?)null : s.GetInt64(0), ProducerKey = s.GetString(1), ProducerVersion = s.GetString(2), ContentKey = s.GetString(3) ?? "", Values = TrackEntryMapper.ReadContentValues(s, 4) },
+                   null, entityId);
+
+        /// <summary>The stored copy facts of a location (copy-column order), or null when none (S2 C2).</summary>
+        internal object?[]? ReadCopyValues(long locationId)
+            => Row("SELECT " + TrackEntryMapper.CopyColumnList("p") + " FROM track_copy p WHERE p.location_id = ?;",
+                   s => (object?[]?)TrackEntryMapper.ReadCopyValues(s, 0), null, locationId);
+
+        /// <summary>A content value that differs beyond noise under the same producer: recorded, never written over (S2 C2).</summary>
+        /// <summary>Idempotent: the same open drift (entity, field, both values) is recorded once, however many times the same
+        /// catalog is re-imported — the 32 known drifts on the real store must not grow by 128 rows per pass.</summary>
+        internal bool InsertDriftConflict(string entityId, string field, string? valueA, string? valueB, long? runA, long? runB, string detail, string nowUtc)
+        {
+            Exec("INSERT INTO conflict(entity_a, kind, field, value_a, value_b, run_a, run_b, detail, state, created_utc) " +
+                 "SELECT ?, 'value-drift', ?, ?, ?, ?, ?, ?, 'open', ? " +
+                 "WHERE NOT EXISTS (SELECT 1 FROM conflict WHERE entity_a = ? AND kind = 'value-drift' AND state = 'open' AND field = ? AND value_a IS ? AND value_b IS ?);",
+                 entityId, field, valueA, valueB, runA, runB, detail, nowUtc, entityId, field, valueA, valueB);
+            return Db.Changes > 0;
         }
 
         /// <summary>Every entry under a root, with the display path the catalog keys it by: the copy's facts joined

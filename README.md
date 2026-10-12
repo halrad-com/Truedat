@@ -89,7 +89,10 @@ once on `track_content`; tags as found in the copy, `fingerprint.v1`, `fileMd5`,
 build opens it: the first-imported copy's description wins, differences within the extractor's
 run-to-run noise (1%) are counted, and differences beyond it become `conflict` rows you can query by
 field. An exported copy of duplicate audio therefore carries its media's one description, and
-`--store-roundtrip` reports those copies separately from unexplained differences. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+`--store-roundtrip` reports those copies separately from unexplained differences. Re-importing writes
+only what changed: an equal entry touches nothing, a value that differs beyond noise under the same
+producer is recorded as a `value-drift` conflict and the stored description is kept, and copy facts take
+the newer value. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
 exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in

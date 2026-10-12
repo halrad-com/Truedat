@@ -40,6 +40,80 @@ namespace Truedat.Store
             Block(assert, "Vacuum", () => TestVacuum(assert));
             Console.WriteLine("Store self-test (S2 C0: default store location is local; network opens exclusive)");
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
+            Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
+            Block(assert, "Drift", () => TestDrift(assert));
+        }
+
+        // ---------------------------------------------------------------- S2 C2: observation integrity
+        static void TestDrift(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "drift-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var catDir = Path.Combine(dir, "lib"); Directory.CreateDirectory(catDir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(catDir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                var r1 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                string stamps = "", copyStamps = ""; long conflictsBefore = 0;
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    stamps = os.Db.ExecScalar("SELECT group_concat(updated_utc) FROM (SELECT updated_utc FROM track_content ORDER BY entity_id);") ?? "";
+                    copyStamps = os.Db.ExecScalar("SELECT group_concat(updated_utc) FROM (SELECT updated_utc FROM track_copy ORDER BY location_id);") ?? "";
+                    conflictsBefore = os.Dal.Count("conflict");
+                }
+                System.Threading.Thread.Sleep(20);   // so an unwanted rewrite would show as a different updated_utc
+
+                // 1. The same catalog again: nothing is written.
+                var r2 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                assert(r2.Unchanged == 6 && r2.Drift == 0 && r2.ContentReplaced == 0, $"identical re-import: 6 unchanged, 0 drift, 0 replaced ({r2.Unchanged}/{r2.Drift}/{r2.ContentReplaced})");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Db.ExecScalar("SELECT group_concat(updated_utc) FROM (SELECT updated_utc FROM track_content ORDER BY entity_id);") == stamps, "identical re-import leaves every description's updated_utc alone (no row churn)");
+                    assert(os.Db.ExecScalar("SELECT group_concat(updated_utc) FROM (SELECT updated_utc FROM track_copy ORDER BY location_id);") == copyStamps, "identical re-import leaves every copy row's updated_utc alone");
+                    assert(os.Dal.Count("conflict") == conflictsBefore, "identical re-import adds no conflict");
+                }
+
+                // 2. A changed catalog, same lastModified: one real content change, one noise-level change, one copy-fact change.
+                var changed = FixtureEntries(@"D:\Music");
+                var origBpmA = changed[@"D:\Music\Tool\a.flac"].Features!.Bpm;
+                changed[@"D:\Music\Tool\a.flac"].Features!.Bpm = origBpmA * 1.25;          // beyond noise -> drift conflict, description kept
+                changed[@"D:\Music\Tool\b.mp3"].Features!.Bpm = 120.4;                    // 0.33 % -> noise, nothing written
+                changed[@"D:\Music\old\legacy.flac"].Features!.Artist = "Renamed";         // a copy fact -> newer wins, no conflict
+                WriteCatalog(catalog, changed);
+                var r3 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                assert(r3.Drift == 1 && r3.Unchanged == 4 && r3.ContentReplaced == 0, $"changed catalog: 1 drift (a.flac bpm), 4 unchanged (b noise, nosha, d1, d2), 0 replaced ({r3.Drift}/{r3.Unchanged}/{r3.ContentReplaced})");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("conflict") == conflictsBefore + 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1", $"exactly one value-drift conflict ({os.Dal.Count("conflict") - conflictsBefore} new)");
+                    assert(os.Db.ExecScalar("SELECT field FROM conflict WHERE kind = 'value-drift';") == "bpm"
+                        && os.Db.ExecScalar("SELECT value_a FROM conflict WHERE kind = 'value-drift';") == origBpmA.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                        && os.Db.ExecScalar("SELECT value_b FROM conflict WHERE kind = 'value-drift';") == (origBpmA * 1.25).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                        && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND run_a IS NOT NULL AND run_b IS NOT NULL AND run_a <> run_b;") == "1",
+                        $"the drift conflict names the field, both values and both runs ({os.Db.ExecScalar("SELECT field || ' ' || value_a || ' ' || value_b || ' ' || run_a || '/' || run_b FROM conflict WHERE kind = 'value-drift';")})");
+                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == origBpmA.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + (origBpmA == Math.Floor(origBpmA) ? ".0" : ""),
+                        $"the stored description is NOT overwritten by the drifted value ({os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {origBpmA})");
+                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == "120.0", "a noise-level difference writes nothing (b.mp3 bpm stays 120)");
+                    assert(os.Db.ExecScalar("SELECT p.artist FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';") == "Renamed", "a copy fact (artist) is updated: newer wins, no conflict");
+                }
+
+                // 3. The same drifted catalog again: the drift is still a drift, but the conflict is not recorded twice.
+                var r4 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r4.Drift == 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1", $"re-importing the same drifted catalog records no duplicate conflict (drift {r4.Drift}, rows {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")})");
+
+                // 4. A key move (the media gains a new content hash) re-keys and rewrites the description — not drift.
+                var moved = FixtureEntries(@"D:\Music");
+                moved[@"D:\Music\old\legacy.flac"].AudioStreamSha256 = "2222222222222222222222222222222222222222222222222222222222222222";
+                moved[@"D:\Music\old\legacy.flac"].AudioStreamSha256Source = "flac-frames";
+                WriteCatalog(catalog, moved);
+                var r5 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r5.ContentRekeyed == 1 && os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';") == "2222222222222222222222222222222222222222222222222222222222222222",
+                        $"a key move re-keys the description to the new hash without a drift conflict (rekeyed {r5.ContentRekeyed}, drift {r5.Drift})");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- S2 C0: store location
