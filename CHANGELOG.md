@@ -12,6 +12,17 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **`STORE.md`** — the store, its tables, verbs, the edges layer, and how to open the file (DB Browser for
+  SQLite, `sqlite3 -readonly`). The store verbs are in `--help` too.
+- **Store precision: six significant figures.** Every float enters the store and leaves it on
+  `--store-export` at 6 sf, written exactly (`0.022454`, never `0.022454000000000002`); the round-trip
+  gate compares both sides at that precision. The scan's catalog writer and its bytes are unchanged.
+- **`--work` fixes after review.** The drain now applies the scan's decode-coverage gate (an under-decoded
+  file is a failed fold, never a tail inside the track), refuses a copy whose mtime no longer matches its
+  description, writes `work-result.json` on every exit, retakes an expired lease only while attempts
+  remain, and `--store-info`'s edges coverage is the same gap the drain works from. Folds are spilled to
+  disk during a scan instead of held in memory until the flush.
+
 - **Extractor build `output-x64.5` recognised as current.** `.4` is still accepted but the startup
   report now says what `.5` adds (a binary frames file behind `--frames-bin`, the `framesInclude`
   profile key, `metadata.version.extractor_build` in the main output) and that `--edges` will need
