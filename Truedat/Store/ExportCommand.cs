@@ -110,6 +110,16 @@ namespace Truedat.Store
             catch (Exception ex) { Console.Error.WriteLine("Error: round-trip failed: " + ex.Message); return 1; }
         }
 
+        /// <summary>Where two renderings first part, with 60 characters of each around it — a NOT EQUAL that names only the path
+        /// sends the reader to diff two catalogs by hand (C6a, 2026-10-12).</summary>
+        internal static string FirstDifference(string a, string b)
+        {
+            int i = 0; while (i < a.Length && i < b.Length && a[i] == b[i]) i++;
+            int from = Math.Max(0, i - 60);
+            string Win(string s) => s.Substring(from, Math.Min(120, Math.Max(0, s.Length - from)));
+            return $"at char {i} (lengths {a.Length} vs {b.Length}): catalog '{Win(a)}' | store '{Win(b)}'";
+        }
+
         /// <summary>Per-entry byte equality, writer-vs-writer: for every catalog key, the bytes the catalog
         /// writer produces for the loaded entry equal the bytes it produces for the store's entry. Order
         /// independent — whole-file equality is unsound because SaveResults writes dictionary order and a
@@ -130,9 +140,10 @@ namespace Truedat.Store
                 r.StoreEntries++;
                 seen.Add(display);
                 if (!catalog.TryGetValue(display, out var orig)) { r.OnlyInStore++; continue; }
-                if (EntryJson(display, orig) == EntryJson(display, entry)) r.Same++;
+                string a = EntryJson(display, orig), b = EntryJson(display, entry);
+                if (a == b) r.Same++;
                 else if (merged.Contains(display)) { r.DifferentMerged++; StoreLog.Debug($"differs (merged copy, expected): {display}"); }
-                else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"differs: {display}"); }
+                else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"differs: {display}: {FirstDifference(a, b)}"); }
             }
             foreach (var key in catalog.Keys) if (!seen.Contains(key)) r.OnlyInCatalog++;
             return r;
