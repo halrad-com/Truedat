@@ -13,8 +13,11 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- The store is always explicit: `--store` (bare = the default location) or `--store <path>`. A
-  `truedat.db` sitting beside the catalog does not make a bare scan write it.
+- The store is explicit per run (`--store`, bare = the default location, or `--store <path>`) or the
+  default for an instance (`truedat --config store true`; likewise `edges true`). A `truedat.db` sitting
+  beside the catalog does not by itself make a bare scan write it. `--no-store` / `--no-edges` override the
+  config for one run; a config default never makes a plain command refuse (read verbs answer from the
+  catalog until a scan has created the store; a per-file mode without `--moods` skips edges with a note).
 - Beside the store: `artifacts\<build>\<2>\<key>.main.json.z` (the extractor's compressed main output,
   one per content key), `artifacts\pending\` (in-flight stashes, swept), `store-result.json`,
   `store-import-result.json`, `work-result.json`, `store-info.json`.
@@ -76,7 +79,9 @@ attributable.
 
 - `--edges` on any scan with `--store`: fold every analysed track. Refuses plainly without `--store`,
   on an extractor older than `.5`, and in `--analyze-file` / `--file-list` without `--moods`.
-- `--work [--producer edges] [--budget 90s|30m|2h|1h30m]`: the drain. Queues every media with a
+- `--refresh` with the store and edges on: after its feature pass, runs the edge backfill below for
+  every track that has no edge row; `--budget` caps the session. This is the verb to type.
+- `--work [--producer edges] [--budget 90s|30m|2h|1h30m]`: the backfill on its own. Queues every media with a
   description, no edge row at the current version and a present copy on this machine whose mtime still
   matches its description; leases one at a time; runs the same extractor-with-frames path a scan does
   over a staged copy, with the scan's decode-coverage gate (an under-decoded file is a failed fold, never
