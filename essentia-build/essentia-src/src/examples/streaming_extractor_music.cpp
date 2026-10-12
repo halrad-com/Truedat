@@ -36,8 +36,14 @@ using namespace essentia::standard;
 
 void usage(char *progname) {
     cout << "Error: wrong number of arguments" << endl;
-    cout << "Usage: " << progname << " input_audiofile output_textfile [profile]" << endl;
-    cout << endl << "Music extractor version '" << MUSIC_EXTRACTOR_VERSION << "'" << endl 
+    cout << "Usage: " << progname << " input_audiofile output_textfile [profile] [--frames-bin <path>]" << endl;
+    cout << endl
+         << "  --frames-bin <path>  when the profile sets outputFrames, write the frame-level pool" << endl
+         << "                       as an ESPB binary file at <path> instead of the '_frames'" << endl
+         << "                       YAML/JSON file; the main output is unaffected. Optional" << endl
+         << "                       profile key framesInclude: [prefix, ...] filters the descriptors." << endl;
+    cout << endl << "Music extractor version '" << MUSIC_EXTRACTOR_VERSION << "'" << endl
+         << "build '" << MUSIC_EXTRACTOR_BUILD_ID << "'" << endl
          << "built with Essentia version " << essentia::version_git_sha << endl;
     creditLibAV();
 
@@ -45,7 +51,28 @@ void usage(char *progname) {
 }
 
 
-int essentia_main(string audioFilename, string outputFilename, string profileFilename) {
+// Parses argv after the program name: input output [profile] [--frames-bin <path>].
+// Returns false on any shape it does not recognise (caller prints usage).
+bool parseArgs(int argc, char** argv, string& audioFilename, string& outputFilename,
+               string& profileFilename, string& framesBinFilename) {
+  if (argc < 3) return false;
+  audioFilename = argv[1];
+  outputFilename = argv[2];
+  int i = 3;
+  if (i < argc && string(argv[i]) != "--frames-bin") {
+    profileFilename = argv[i];
+    ++i;
+  }
+  if (i < argc) {
+    if (string(argv[i]) != "--frames-bin" || i + 1 >= argc) return false;
+    framesBinFilename = argv[i + 1];
+    i += 2;
+  }
+  return i == argc;
+}
+
+
+int essentia_main(string audioFilename, string outputFilename, string profileFilename, string framesBinFilename) {
   // Returns: 1 on essentia error
 
   try {
@@ -71,9 +98,20 @@ int essentia_main(string audioFilename, string outputFilename, string profileFil
 
     mergeValues(results, options);
 
-    outputToFile(results, outputFilename, options);    
+    // Identity of this binary, additive to the main output only.
+    results.set("metadata.version.extractor_build", MUSIC_EXTRACTOR_BUILD_ID);
+
+    outputToFile(results, outputFilename, options);
     if (options.value<Real>("outputFrames")) {
-      outputToFile(resultsFrames, outputFilename+"_frames", options);
+      if (framesBinFilename.empty()) {
+        outputToFile(resultsFrames, outputFilename+"_frames", options);
+      }
+      else {
+        outputToBinaryFile(resultsFrames, framesBinFilename, options, MUSIC_EXTRACTOR_BUILD_ID);
+      }
+    }
+    else if (!framesBinFilename.empty()) {
+      cerr << "Warning: --frames-bin given but the profile does not set outputFrames; no frames file written" << endl;
     }
     delete extractor;
     essentia::shutdown();
@@ -116,44 +154,24 @@ int main(int win32_argc, char **win32_argv)
 
   LocalFree(argv);
 
-  string audioFilename, outputFilename, profileFilename;
+  string audioFilename, outputFilename, profileFilename, framesBinFilename;
 
-  switch (argc) {
-    case 3:
-      audioFilename =  utf8_argv[1];
-      outputFilename = utf8_argv[2];
-      break;
-    case 4: // profile supplied
-      audioFilename =  utf8_argv[1];
-      outputFilename = utf8_argv[2];
-      profileFilename = utf8_argv[3];
-      break;
-    default:
-      usage(utf8_argv[0]);
+  if (!parseArgs(argc, utf8_argv, audioFilename, outputFilename, profileFilename, framesBinFilename)) {
+    usage(utf8_argv[0]);
   }
 
-  return essentia_main(audioFilename, outputFilename, profileFilename);
+  return essentia_main(audioFilename, outputFilename, profileFilename, framesBinFilename);
 }
 
 #else
 int main(int argc, char* argv[]) {
 
-  string audioFilename, outputFilename, profileFilename;
+  string audioFilename, outputFilename, profileFilename, framesBinFilename;
 
-  switch (argc) {
-    case 3:
-      audioFilename =  argv[1];
-      outputFilename = argv[2];
-      break;
-    case 4: // profile supplied
-      audioFilename =  argv[1];
-      outputFilename = argv[2];
-      profileFilename = argv[3];
-      break;
-    default:
-      usage(argv[0]);
+  if (!parseArgs(argc, argv, audioFilename, outputFilename, profileFilename, framesBinFilename)) {
+    usage(argv[0]);
   }
 
-  return essentia_main(audioFilename, outputFilename, profileFilename);
+  return essentia_main(audioFilename, outputFilename, profileFilename, framesBinFilename);
 }
 #endif

@@ -60,3 +60,26 @@ void outputToFile(Pool& pool, const string& outputFilename, Pool& options) {
   output->compute();
   delete output;
 }
+
+
+void outputToBinaryFile(Pool& pool, const string& outputFilename, Pool& options, const string& tag) {
+
+  cerr << "Writing binary frames to file " << outputFilename << endl;
+
+  vector<string> include;
+  if (options.contains<vector<string> >("framesInclude")) {
+    include = options.value<vector<string> >("framesInclude");
+  }
+  else if (options.contains<string>("framesInclude")) {
+    // a one-element YAML list parses as a single string
+    include.push_back(options.value<string>("framesInclude"));
+  }
+
+  Algorithm* output = AlgorithmFactory::create("BinaryPoolOutput",
+                                               "filename", outputFilename,
+                                               "include", include,
+                                               "tag", tag);
+  output->input("pool").set(pool);
+  output->compute();
+  delete output;
+}
