@@ -13754,6 +13754,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // v2 store (Truedat/Store/*): its own file, same Assert, so the single exe stays self-contained.
             global::Truedat.Store.StoreSelfTest.Run(Assert);
+            global::Truedat.Edges.EdgeSelfTest.Run(Assert);
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);
