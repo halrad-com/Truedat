@@ -14,6 +14,23 @@ namespace Truedat.Store
 
         internal static void SetVerbose(bool audit) => Threshold = audit ? StoreLogLevel.Trace : StoreLogLevel.Info;
 
+        /// <summary>Scope for a read-only summary (<c>--stats</c>) that opens the store incidentally: lifts the
+        /// threshold to Warn so the "store open" line does not print inside someone else's report, and restores
+        /// it on dispose. Under <c>--audit</c> it suppresses nothing: the operator asked for detail.</summary>
+        internal static IDisposable Quiet()
+        {
+            var scope = new Restore(Threshold);
+            if (Threshold == StoreLogLevel.Info) Threshold = StoreLogLevel.Warn;
+            return scope;
+        }
+
+        sealed class Restore : IDisposable
+        {
+            readonly StoreLogLevel _saved;
+            public Restore(StoreLogLevel saved) { _saved = saved; }
+            public void Dispose() => Threshold = _saved;
+        }
+
         internal static void Trace(string message) => Write(StoreLogLevel.Trace, message);
         internal static void Debug(string message) => Write(StoreLogLevel.Debug, message);
         internal static void Info(string message) => Write(StoreLogLevel.Info, message);

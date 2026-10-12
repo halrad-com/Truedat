@@ -12218,7 +12218,11 @@ namespace Truedat
             global::Truedat.Store.StoreInfo? storeInfo = null;
             if (_storePath != null && File.Exists(_storePath))
             {
-                try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath); } catch { /* the store block is best-effort */ }
+                // Quiet: the "store open" INFO line belongs to the store verbs, not inside this summary (operator, 2026-10-12).
+                using (global::Truedat.Store.StoreLog.Quiet())
+                {
+                    try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath); } catch { /* the store block is best-effort */ }
+                }
                 if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
                     rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh --budget 2h  (repeat until --store-info says missing 0)");
             }

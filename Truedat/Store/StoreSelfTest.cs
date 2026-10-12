@@ -1416,6 +1416,19 @@ namespace Truedat.Store
                 StoreLog.SetVerbose(true);
                 StoreLog.Debug("d"); StoreLog.Trace("t");
                 assert(lines.Count == 2, "--audit (verbose) lets Debug and Trace through");
+                lines.Clear();
+                StoreLog.SetVerbose(false);
+                using (StoreLog.Quiet())
+                {
+                    StoreLog.Info("open-line-hidden"); StoreLog.Warn("warn-still-shown");
+                }
+                StoreLog.Info("info-after");
+                assert(lines.Count == 2 && lines[0].EndsWith("warn-still-shown") && lines[1].EndsWith("info-after"),
+                    $"Quiet() lifts the threshold to Warn for a read-only summary and restores it on dispose (got {lines.Count}: {string.Join(" | ", lines)})");
+                lines.Clear();
+                StoreLog.SetVerbose(true);
+                using (StoreLog.Quiet()) { StoreLog.Info("audit-keeps-info"); }
+                assert(lines.Count == 1, "under --audit Quiet() suppresses nothing: the operator asked for detail");
             }
             finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThreshold; }
         }
