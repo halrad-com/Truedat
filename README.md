@@ -157,9 +157,29 @@ and PCM time, and a fold that fails is a failed run naming the reason and no row
 the profile live beside the extractor's temp output in the stage directory and are deleted with it;
 nothing is written to `mbxmoods.json`, and a cache hit folds nothing, so `--edges` populates the tracks
 a scan actually analyses. Measured on a local library: about 6.3 KB per track in the store and
-roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage,
-bytes per track and median time. In `--analyze-file` and `--file-list` the flag needs `--moods`, because
-the store is written after the catalog entry.
+roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage
+(eligible, captured, missing), bytes per track, median time and the work queue by state. In
+`--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
+catalog entry.
+
+**The drain (`--work`).** A library imported into the store has descriptions but no edge rows, and a
+cache hit never folds; `--work [--producer edges] [--budget <time>]` closes that gap. It queues every
+media with a description, no edge row at the current producer version and a copy on one of this
+machine's roots, then leases one item at a time, runs the same extractor-with-frames path a scan uses
+over a staged copy, writes the rows and an `edges` run row, and moves the item to done, failed (retried
+after an hour) or parked after three attempts; leases expire, nothing is force-killed. `--budget` takes
+`90s`, `30m`, `2h`, `1h30m` or bare seconds and stops the run from leasing more once spent. The run
+writes `work-result.json` beside the store (counts, items per hour, bytes per item, next retry time) and
+rewrites the companion file. Measured on a local library: about 440 items per hour on one box, almost
+all of it the extractor run. Single instance by design: run one drain per store.
+
+**The companion file (`mbxedges.v1.json`).** The hub reads edges from a small JSON file beside
+`mbxmoods.json`, keyed by `audioStreamSha256`, carrying per edge the status word, window, key vote,
+bpm, loudness scalars, texture means and spreads, divergences and the PCM `rms` block, and per track the
+head-vs-tail divergence; the 10/s series, beats, HPCP and sub-window summaries stay in the store. It is
+written from the store, compactly (about 1.8 KB per track), after any `--edges` scan or `--work` run
+that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
+Absent means not yet. The hub never reads the store.
 
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
@@ -408,7 +428,14 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
   --edges                 With --store: fold the first and last 30 s of every analysed track into the
                           store's edge row (loudness series, beats, key, texture, fades, PCM crest/
-                          transition). Needs extractor build output-x64.5. Writes nothing to mbxmoods.json.
+                          transition). Needs extractor build output-x64.5. Writes nothing to mbxmoods.json;
+                          rewrites mbxedges.v1.json beside the catalog when edge rows were added.
+  --work [--producer edges] [--budget <time>]
+                          With --store: fold edges for every media with a description but no edge row
+                          and a copy on this machine, one at a time, until the queue is empty or the
+                          budget (90s, 30m, 2h, 1h30m) is spent; 3 attempts then parked. Writes
+                          work-result.json beside the store; --store-info reports eligible/captured/missing.
+  --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
   --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
                           and the --refresh-smfm backfill alike (omits the smfm* fields).
                           Unlike its two siblings above this saves no meaningful time: SMFM

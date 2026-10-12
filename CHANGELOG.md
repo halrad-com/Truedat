@@ -26,6 +26,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `--store`, on an extractor older than `.5`, and in the per-file modes without `--moods`. Writes
   nothing to `mbxmoods.json`; without the flag a scan runs exactly as before. `--store-info` reports
   edge coverage, bytes per track and median fold time.
+- **`--work` (preview, v2 S2).** With `--store`, drains the edges gap: every media with a description,
+  no edge row at the current producer version and a copy on this machine is queued, then leased one at
+  a time and run through the same extractor-with-frames path a scan uses; three attempts then parked,
+  leases expire, `--budget 90s|30m|2h|1h30m` caps a run. Writes `work-result.json` beside the store and
+  rewrites the companion file. `--store-info` shows eligible / captured / missing and the queue by state.
+- **`mbxedges.v1.json`.** The hub's edge companion file beside `mbxmoods.json`: per track (keyed by
+  `audioStreamSha256`) the two edges' status, window, key, bpm, loudness, texture, divergence and `rms`,
+  plus the head-vs-tail divergence; compact, about 1.8 KB per track; written after any `--edges` scan or
+  `--work` run that added rows, and by `--edges-export [path]` on demand. Media without a sha are omitted.
 
 - **A SQLite store (preview, v2 S1).** `--store-import` loads a catalog and the ledgers beside it
   into a store keyed by identity — a UUID per file entity, content-hash facets that name their
