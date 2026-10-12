@@ -77,7 +77,10 @@ namespace Truedat.Store
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
             StoreLog.Info($"export: {dict.Count} entries of root {root.Path} -> {outFull}");
-            Program.SaveResultsForStore(outFull, dict);
+            // The store's canonical precision (six significant figures, exact text) on the way out; the writer itself is unchanged.
+            Program.StoreCanonicalNumbers = true;
+            try { Program.SaveResultsForStore(outFull, dict); }
+            finally { Program.StoreCanonicalNumbers = false; }
 
             var moves = ReadKeyMoves(os.Dal);
             string? movesPath = null;
@@ -149,16 +152,25 @@ namespace Truedat.Store
             return r;
         }
 
-        /// <summary>The catalog writer's bytes for one entry — the unit of the round-trip gate.</summary>
+        /// <summary>The catalog writer's bytes for one entry at the store's canonical precision — the unit of the round-trip
+        /// gate. Both sides (the loaded catalog entry and the store's) render through the same six-figure rule, so a one-bit
+        /// difference between a parsed double and a computed one (C6a: "0.022454" vs "0.022454000000000002") is not a difference;
+        /// a changed measurement still is.</summary>
         internal static string EntryJson(string path, TrackEntry entry)
         {
             using var ms = new MemoryStream();
-            using (var jw = new Utf8JsonWriter(ms))
+            bool prior = Program.StoreCanonicalNumbers;
+            Program.StoreCanonicalNumbers = true;
+            try
             {
-                jw.WriteStartObject();
-                Program.WriteTrackEntryForStore(jw, path, entry);
-                jw.WriteEndObject();
+                using (var jw = new Utf8JsonWriter(ms))
+                {
+                    jw.WriteStartObject();
+                    Program.WriteTrackEntryForStore(jw, path, entry);
+                    jw.WriteEndObject();
+                }
             }
+            finally { Program.StoreCanonicalNumbers = prior; }
             return Encoding.UTF8.GetString(ms.ToArray());
         }
 

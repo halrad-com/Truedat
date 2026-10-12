@@ -38,6 +38,8 @@ namespace Truedat.Store
             Block(assert, "StoreInfo", () => TestStoreInfo(assert));
             Console.WriteLine("Store self-test (page size: 16 KB pages by default, --store-vacuum repacks)");
             Block(assert, "Vacuum", () => TestVacuum(assert));
+            Console.WriteLine("Store self-test (precision: six significant figures on the store path, the catalog writer untouched)");
+            Block(assert, "CanonicalPrecision", () => TestCanonicalPrecision(assert));
             Console.WriteLine("Store self-test (S2 C0: default store location is local; network opens exclusive)");
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
             Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
@@ -865,12 +867,13 @@ namespace Truedat.Store
                 && minBack.Features.HfSpectralStructure == null && minBack.Features.Mfcc == null && minBack.Features.SmfmScores == null,
                 "absent blocks come back null, not as empty objects");
 
-            // Full double precision survives: mfcc is written by WriteShortestNumber, not rounded.
+            // Vectors round-trip at the store's canonical precision (six significant figures, operator 2026-10-12): the float64
+            // blob is exact, the values in it are the canonical ones.
             var prec = new TrackEntry { Features = new TrackFeatures { Mfcc = new[] { -821.3456789012345, 1e-9, 0.1, 12345678.9 } }, LastModified = DateTime.UtcNow };
             var precBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(prec), prec.LastModified);
             assert(precBack.Features.Mfcc != null && precBack.Features.Mfcc.Length == 4
-                && precBack.Features.Mfcc[0] == -821.3456789012345 && precBack.Features.Mfcc[1] == 1e-9 && precBack.Features.Mfcc[3] == 12345678.9,
-                "vectors round-trip bit-exact (float64 blobs)");
+                && precBack.Features.Mfcc[0] == -821.346 && precBack.Features.Mfcc[1] == 1e-9 && precBack.Features.Mfcc[2] == 0.1 && precBack.Features.Mfcc[3] == 12345700,
+                $"vectors round-trip exactly at six significant figures (float64 blobs) ({precBack.Features.Mfcc?[0]}, {precBack.Features.Mfcc?[3]})");
             var smfm = new TrackEntry { Features = new TrackFeatures { SmfmScores = new[] { 0, 255, 17 } }, LastModified = DateTime.UtcNow };
             var smfmBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(smfm), smfm.LastModified);
             assert(smfmBack.Features.SmfmScores != null && smfmBack.Features.SmfmScores.Length == 3 && smfmBack.Features.SmfmScores[1] == 255, "int vectors round-trip (int32 blobs)");
@@ -1344,6 +1347,49 @@ namespace Truedat.Store
                 return child;
             }
             return null;
+        }
+
+        // ---------------------------------------------------------------- canonical precision (operator, 2026-10-12)
+        static void TestCanonicalPrecision(Action<bool, string> assert)
+        {
+            // Six significant figures, exact text, no trailing zeros, no exponent; 0 / NaN pass through.
+            string T(double v) => CanonicalPrecision.Text(v);
+            assert(T(0.022454000000000002) == "0.022454", $"the parsed double of 0.022454 renders as 0.022454 ({T(0.022454000000000002)})");
+            assert(T(3600111.25) == "3600110", $"3600111.25 -> 3600110 (6 sf; the 7th+ figures are float32 noise) ({T(3600111.25)})");
+            assert(T(-0.000000005555) == "-0.000000005555", $"spectralDecrease-sized values keep their figures by magnitude, no exponent ({T(-0.000000005555)})");
+            assert(T(1293.3) == "1293.3" && T(-18.09) == "-18.09" && T(135.9) == "135.9", $"values already under 6 sf are unchanged ({T(1293.3)}, {T(-18.09)})");
+            assert(T(123456.789) == "123457" && T(0.1234567) == "0.123457" && T(0.1) == "0.1" && T(100) == "100", $"rounding at the 6th figure ({T(123456.789)}, {T(0.1234567)}, {T(0.1)}, {T(100)})");
+            assert(T(1e20) == "100000000000000000000" && T(-7.5e-12) == "-0.0000000000075", $"large and tiny magnitudes stay exact decimal text ({T(1e20)}, {T(-7.5e-12)})");
+            assert(CanonicalPrecision.Sig6(0) == 0 && double.IsNaN(CanonicalPrecision.Sig6(double.NaN)) && double.IsPositiveInfinity(CanonicalPrecision.Sig6(double.PositiveInfinity)), "0, NaN and infinity pass through");
+            assert(CanonicalPrecision.Sig6(0.022454000000000002) == CanonicalPrecision.Sig6(BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.022454000000000002) - 1)),
+                "two doubles one bit apart canonicalise to the same double");
+
+            // The mapper canonicalises every REAL and every f64 vector element on the way into the store; ints and text untouched.
+            var e = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
+            e.Features!.SpectralEnergyStdev = 0.022454000000000002; e.Features.SpectralSpread = 3600111.25; e.Features.Mfcc = new[] { -825.70000000000005, 227.5, 1.0 / 3.0 };
+            var row = TrackEntryMapper.ToRow(e);
+            double Col(string name) => (double)TrackEntryMapper.ContentValue(row, TrackEntryMapper.ContentIndexOf(name))!;
+            assert(Col("spectralEnergyStdev") == CanonicalPrecision.Sig6(0.022454) && Col("spectralSpread") == 3600110.0, $"ToRow: REAL columns are canonical ({Col("spectralEnergyStdev")}, {Col("spectralSpread")})");
+            var mf = (double[])TrackEntryMapper.ContentValue(row, TrackEntryMapper.ContentIndexOf("mfcc"))!;
+            assert(mf.Length == 3 && mf[0] == -825.7 && mf[2] == 0.333333, $"ToRow: f64 vector elements are canonical ({mf[0]}, {mf[2]})");
+
+            // The writer: in store mode two entries whose doubles differ by a bit write the same bytes, at 6 sf; in default
+            // mode (the scan's catalog) the writer is untouched and still tells them apart - the hub's bytes do not move.
+            var a = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; var b = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
+            a.Features!.SpectralEnergyStdev = 0.022454000000000002; b.Features!.SpectralEnergyStdev = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.022454000000000002) - 1);
+            a.Features.SpectralSpread = 3600111.25; b.Features.SpectralSpread = 3600111.25;
+            // EntryJson is the store's unit (canonical); the default writer is reached through the shim with the flag off.
+            string DefaultJson(TrackEntry t) { using var ms = new MemoryStream(); using (var jw = new System.Text.Json.Utf8JsonWriter(ms)) { jw.WriteStartObject(); Program.WriteTrackEntryForStore(jw, @"D:\Music\Tool\a.flac", t); jw.WriteEndObject(); } return System.Text.Encoding.UTF8.GetString(ms.ToArray()); }
+            assert(DefaultJson(a).Contains("\"spectralSpread\":3600111.25,"), "default writer (the catalog): untouched - still writes the 7th and 8th figures the scan computed");
+            Program.StoreCanonicalNumbers = true;
+            try
+            {
+                string ca = EntryJson(@"D:\Music\Tool\a.flac", a), cb = EntryJson(@"D:\Music\Tool\a.flac", b);
+                assert(ca == cb, "store mode: the two render identically");
+                assert(ca.Contains("\"spectralEnergyStdev\":0.022454,") && ca.Contains("\"spectralSpread\":3600110,"), $"store mode: six significant figures, exact text ({(ca.IndexOf("spectralEnergyStdev", StringComparison.Ordinal) is int i && i >= 0 ? ca.Substring(i, Math.Min(60, ca.Length - i)) : "?")})");
+                assert(!ca.Contains("00000000"), "store mode: no round-trip noise anywhere in the entry");
+            }
+            finally { Program.StoreCanonicalNumbers = false; }
         }
 
         static void Block(Action<bool, string> assert, string name, Action body)

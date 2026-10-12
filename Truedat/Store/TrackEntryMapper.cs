@@ -332,10 +332,22 @@ namespace Truedat.Store
             return sb.ToString();
         }
 
+        /// <summary>The entry as a row — every REAL and every f64 vector element at the store's canonical precision (six
+        /// significant figures, <see cref="CanonicalPrecision"/>), so two renderings of one measurement can never disagree in
+        /// the store and the drift/unchanged tests compare like with like. Ints and text pass through.</summary>
         internal static object?[] ToRow(TrackEntry entry)
         {
             var row = new object?[Cols.Length];
-            for (int i = 0; i < Cols.Length; i++) row[i] = Cols[i].Get(entry);
+            for (int i = 0; i < Cols.Length; i++)
+            {
+                var v = Cols[i].Get(entry);
+                switch (Cols[i].Kind)
+                {
+                    case Kind.Real when v is double d: row[i] = CanonicalPrecision.Sig6(d); break;
+                    case Kind.VecF64 when v is double[] a: { var c = new double[a.Length]; for (int k = 0; k < a.Length; k++) c[k] = CanonicalPrecision.Sig6(a[k]); row[i] = c; break; }
+                    default: row[i] = v; break;
+                }
+            }
             return row;
         }
 

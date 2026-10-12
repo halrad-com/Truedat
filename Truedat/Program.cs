@@ -778,6 +778,23 @@ namespace Truedat
             Console.WriteLine("                      Writes work-result.json beside the store; --store-info shows coverage.");
             Console.WriteLine("  --edges-export [path]");
             Console.WriteLine("                      With --store: write mbxedges.v1.json from the store (default: beside the catalog).");
+            Console.WriteLine();
+            Console.WriteLine("Store (preview, v2) — a SQLite store beside the catalog; mbxmoods.json stays what the hub reads. See STORE.md.");
+            Console.WriteLine("  --store [db]        Use the store: bare = the default location (beside a local catalog, else a local");
+            Console.WriteLine("                      per-library path); a path names it. A scan with --store also writes its analysed");
+            Console.WriteLine("                      entries into the store after the catalog is saved.");
+            Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
+            Console.WriteLine("  --store-import      Load the catalog (and the ledgers beside it) into the store, idempotently.");
+            Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
+            Console.WriteLine("  --machine-adopt     Let this machine take over a store minted on another host.");
+            Console.WriteLine("  --store-export <out.json> [--export-root <root>]");
+            Console.WriteLine("                      Write a catalog from the store through the unchanged writer; numbers at 6 significant");
+            Console.WriteLine("                      figures (the store's canonical precision); key-moves.json beside it when hashes moved.");
+            Console.WriteLine("  --store-roundtrip <catalog>");
+            Console.WriteLine("                      Per-entry equality of store vs catalog at the store's precision; exit 1 on any difference.");
+            Console.WriteLine("  --store-info        Measurements: bytes/track, projection, speed, coverage, conflicts, edges, work queue.");
+            Console.WriteLine("  --store-vacuum [--page-size N]");
+            Console.WriteLine("                      Repack the store; --page-size sets the page size (default 16384).");
             Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
@@ -21476,6 +21493,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// excluded on purpose: (double)((decimal)(-0.0)) == -0.0 compares TRUE under ==,
         /// so the decimal path would silently launder the sign bit of a negative zero —
         /// both zeros take the plain double writer instead (same bytes as today).</summary>
+        /// <summary>v2 store (operator, 2026-10-12): when true, the catalog writer renders every floating-point feature at the
+        /// store's canonical precision (six significant figures, exact text). Set ONLY by the store's export and round-trip,
+        /// never by a scan — the scan's catalog bytes are the hub's contract and do not move.</summary>
+        internal static bool StoreCanonicalNumbers;
+
         static bool TryShortestDecimal(double v, out decimal m)
         {
             if (!double.IsNaN(v) && !double.IsInfinity(v) && v != 0.0 && Math.Abs(v) < 7.9e28)
@@ -21497,6 +21519,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// (same bytes as today).</summary>
         static void WriteShortestNumber(Utf8JsonWriter jw, double v)
         {
+            if (StoreCanonicalNumbers && !double.IsNaN(v) && !double.IsInfinity(v)) { jw.WriteNumberValue(global::Truedat.Store.CanonicalPrecision.Exact(v)); return; }
             if (TryShortestDecimal(v, out var m)) jw.WriteNumberValue(m);
             else jw.WriteNumberValue(v);
         }
@@ -21504,6 +21527,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Property-name overload of WriteShortestNumber.</summary>
         static void WriteShortestNumber(Utf8JsonWriter jw, string name, double v)
         {
+            if (StoreCanonicalNumbers && !double.IsNaN(v) && !double.IsInfinity(v)) { jw.WriteNumber(name, global::Truedat.Store.CanonicalPrecision.Exact(v)); return; }
             if (TryShortestDecimal(v, out var m)) jw.WriteNumber(name, m);
             else jw.WriteNumber(name, v);
         }
