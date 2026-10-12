@@ -37,6 +37,41 @@ while `rhythm.beats_loudness` does **not** select `rhythm.beats_loudness_band_ra
 one-element list parses as a single string and is handled. `framesInclude` only affects the
 binary writer; the `_frames` JSON path ignores it (that path is byte-for-byte `.4`).
 
+## Writer limitation — the output path must be ASCII
+
+**`--frames-bin` paths must be ASCII. A non-ASCII path silently writes to the wrong
+filename.** Measured on the `.5` exe, 2026-10-12:
+
+| path | result |
+|---|---|
+| input audio (CJK filename) | **works** — read and fully analyzed |
+| `<output_json>` (CJK filename) | **mojibake filename** |
+| `--frames-bin` (CJK filename) | **mojibake filename** |
+
+Cause: argv is fine — `streaming_extractor_music.cpp:131` is `#ifdef _WIN32` and our MinGW
+build compiles it, so `CommandLineToArgvW` + `WideCharToMultiByte(CP_UTF8)` delivers proper
+UTF-8, and ffmpeg converts UTF-8 to wide internally before opening the *input*. The gap is
+the **output** side: `BinaryPoolOutput` opens with a narrow `ofstream`, like
+`yamloutput.cpp:394`, so the UTF-8 bytes get reinterpreted through the active ANSI codepage
+(CP1252 here) and land as a garbled name.
+
+**The failure mode is the dangerous kind, so readers must not rely on the log line:** the
+process **exits 0** and prints `Writing binary frames to file <the correct name>`, then the
+bytes appear under a different name. The content is intact (a 3,433,814-byte ESPB file with
+correct contents, just misnamed). A caller that opens its expected path gets file-not-found
+with no diagnosis anywhere in the output.
+
+Mitigation, and it is load-bearing rather than incidental: **callers keep frames paths
+ASCII by construction.** truedat's C4 producer does this already — `CreateExtractorOutputPath`
+uses `--stage-dir` only when `IsAsciiPrintable(stageDir)` and otherwise falls back to
+`Path.GetTempFileName()`, and the profile file goes the same way — so a non-ASCII
+`--frames-bin` never reaches the extractor from truedat. Do not relax that guard without
+fixing the writer.
+
+Fixing it properly means a wide-char open in `BinaryPoolOutput` (and `YamlOutput`), which is
+an extractor source change plus a rebuild. Not done; recorded here so the constraint is
+visible to anyone writing a producer.
+
 ## Build identity
 
 Both outputs carry the build id, so a reader never needs an MD5 table:
