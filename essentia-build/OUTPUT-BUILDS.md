@@ -104,6 +104,96 @@ corrects it and populates `bpmFirstPeakSpread`.
 Incremental build (reused `.3`'s object cache; recompiled only the one file + relinked): 417
 steps, 7m13s. `essentia_streaming_extractor_music.exe`: MD5 `c6a436d0fe9a33a4c8eac120d9e6243f`.
 
-Capabilities: optimized (`-O2`), accurate bpm, 13-hour file support. **This is the current
-build.** truedat's startup detector (`ReportExtractorBuild`) hashes the resolved extractor
-against these MD5s and warns when an older one is in use.
+Capabilities: optimized (`-O2`), accurate bpm, 13-hour file support. truedat's startup detector
+(`ReportExtractorBuild`) hashes the resolved extractor against these MD5s and warns when an
+older one is in use. **Shipped in `dist/` as of 2026-10-12** (`.5` below is built and verified
+but not yet wired into truedat).
+
+## output-x64.5 — additive binary frames writer, descriptor filter, build id (2026-10-12)
+
+Identical analysis code to `.4` — no algorithm, beat-tracking, key or optimisation-flag change;
+`-O2 -ffp-contract=off` and the 13-hour `forLargeAudioStream` cap carry forward — plus three
+**additive** changes (operator ruling 2026-10-11/12: do not modify the existing writers; select
+the binary writer by a new argument path):
+
+- **`BinaryPoolOutput`** — a new standard algorithm beside `YamlOutput`
+  (`essentia-src/src/algorithms/io/binarypooloutput.{h,cpp}`), picked up by the build's
+  algorithm scan (the registration file is generated; nothing hand-edited). Writes a Pool as
+  the **ESPB v1** flat binary: header, descriptor table (name, dtype, flags, count, dims,
+  absolute payload offset + length), raw little-endian float32 payloads. Parameters `filename`,
+  `include` (descriptor-name prefixes, Pool namespace rule) and `tag`. Full layout, a worked
+  example and the C# read recipe: **`FRAMES-BINARY-FORMAT.md`**.
+- **`streaming_extractor_music.cpp`** — new optional argument
+  `input output [profile] [--frames-bin <path>]`. When present *and* the profile sets
+  `outputFrames`, the frames pool goes to the binary file **instead of** `<output>_frames`.
+  New profile key `framesInclude: [prefix, ...]` filters the binary (absent = all). The 2-arg
+  and 3-arg calls take exactly the `.4` code path; a wrong shape prints usage and exits 1 as
+  before; `--frames-bin` without `outputFrames` writes no frames file and warns on stderr.
+- **`metadata.version.extractor_build`** = `"output-x64.5"` in the **main** output
+  (`MUSIC_EXTRACTOR_BUILD_ID` in `src/essentia/utils/extractor_music/extractor_version.h`;
+  also the ESPB header `tag`). This is the only new key; truedat ignores unknown keys and can
+  read the build from the output instead of an MD5 table.
+
+Incremental build on `.4`'s object cache (`run-x5-build.sh`, one-shot scheduled task, `-j6`):
+418 steps (+1 source), **8m19s** (20:22:53 → 20:31:12 PDT 2026-10-11), log `build-x5.log`.
+`essentia_streaming_extractor_music.exe`: MD5 **`6f47bdfcaadfd4f510c5e1621c07945d`**.
+
+**Verification (2026-10-11 PDT, this box, solo process, no CPU cap; scripts in `spike-x5/`,
+run with `python -I`):**
+
+- (i) 60 s 44.1 kHz stereo sine WAV, 2-arg call, `.4` vs `.5` main JSON: 4499 vs 4500 keys,
+  the one extra key is `metadata.version.extractor_build`, **0 numeric values differ**
+  (`diff_json.py`).
+- (ii) 3-arg call with `outputFrames: 1`: `<out>_frames` JSON written exactly as `.4` writes it
+  (15.3 MB for the 60 s WAV).
+- (iii) `--frames-bin`: 3.43 MB ESPB file, 105 descriptors; all 856,759 values match the JSON
+  frames of a separate run to max rel diff 5e-12; names, counts and dims identical
+  (`check_espb.py`).
+- (iv) `framesInclude` with `lowlevel.mfcc, lowlevel.spectral_centroid, tonal.hpcp,
+  lowlevel.loudness_ebu128, rhythm.beats_position, rhythm.beats_loudness`: 9 descriptors,
+  337 KB, nothing outside the six prefixes (`rhythm.beats_loudness_band_ratio` correctly
+  excluded by the prefix-plus-dot rule).
+- (v) **Real audio, five files from the local library** (MP3 "I Ran" 5:00, M4A Tiny Desk
+  concert, WMA "Get Born Again", a 78-rpm HD FLAC transfer, and a 25.7-minute live FLAC),
+  `.4` vs `.5` with the identical 2-arg call: **key sets identical on all five except the one
+  allowed key; zero non-numeric (string) differences.** Numeric differences were judged
+  against run-to-run noise the way the `.3` section describes: three `.4` runs of the MP3 differ
+  from each other in 701–730 of 5131 values (max rel 1.53, in `.min`/`.max` statistics of
+  spectral-shape descriptors); `.4` vs `.5` on the same file differs in 658–732 values
+  (max rel 1.93) in the same statistic families. Pooled over the five files, per statistic
+  family (mean/var/stdev/median/min/max/dmean/dmean2/dvar/dvar2), **13 of 14 cross-build pairs
+  have 0 values beyond 2× the same-binary noise; the 14th has one** —
+  `lowlevel.spectral_spread.dmean2` on the long FLAC at rel 0.0023 vs a same-binary family
+  max of 0.0011 (2.06×, with 6 same-binary pairs bounding 14 cross pairs). `means` differ by
+  ≤ 3.7e-4 relative everywhere. `noise_table.py mp3 m4a wma flac long <two extra .4 outputs>`
+  reproduces the table.
+- (vi) `.5` main JSON with and without `--frames-bin` on the same five files: **not
+  byte-identical** — the extractor is not run-to-run deterministic on real audio (`.3`
+  finding) — but key sets identical and the differences sit in the same-binary rows of the
+  table above (they *are* the `.5`-vs-`.5` noise sample). The frames path does not touch the
+  main output: it runs after `outputToFile(results, …)` on a different pool.
+- **Frame-level noise is pre-existing.** Two `.4` runs of the 78-rpm FLAC with `outputFrames`
+  differ in 16,955 of 2,664,376 frame values (max rel 1.82), concentrated in frame 0, the
+  first ~55 frames of the quiet lead-in and the last frame, in the spectral-shape descriptors
+  (`spectral_centroid/contrast/entropy/kurtosis/skewness/spread/rolloff`,
+  `*bands_crest/flatness_db/kurtosis/skewness/spread`, `dissonance`, `pitch_salience`,
+  `zerocrossingrate`). `.5`'s binary vs a separate `.5` JSON-frames run shows the same
+  pattern (26–27 descriptors, 1–131 frames each); `mfcc`, `hpcp`, the band matrices,
+  `loudness_ebu128.*` and `rhythm.beats_*` were identical across runs on every file.
+
+**Timing** (wall clock, one process, this box):
+
+| file | `.4` 2-arg | `.5` 2-arg | `.5` + JSON frames | `.5` + `--frames-bin` (all) |
+|---|---|---|---|---|
+| sine 60 s | 1.68 s | 1.61 s | 3.17 s (+97%) | 1.70 s (+5%) |
+| MP3 5:00 | 9.24 s | 9.02 s | 16.93 s (+88%) | 9.05 s (+0.3%) |
+| FLAC 25.7 min | 44.8 s | 47.3 s | — | 48.8 s (+3%) |
+
+Binary frames cost ~3.4 MB/min of audio (88.0 MB for 25.7 min; 17.4 MB vs 76.2 MB JSON for
+the MP3) and essentially no wall time; the curated `framesInclude` list is ~10× smaller again.
+A sine is not music — the real measurement is the 20-track slice on max (architect).
+
+**Additive guarantee:** with two or three arguments `.5` executes the `.4` code paths; the only
+difference in any output is the `metadata.version.extractor_build` key, plus the run-to-run noise
+that `.4` already has. Truedat pairing unchanged (`--max-duration 48000`); the truedat side —
+`ReportExtractorBuild`'s MD5 table, `truedat-deps`, the C# ESPB reader — is separate work.
