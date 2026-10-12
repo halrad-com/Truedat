@@ -12,6 +12,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **Config keys `store` and `edges`** make the store (and edge folding) the default for an instance:
+  `truedat --config store true`. `--no-store` / `--no-edges` override for one run; a file-set default never
+  makes a plain command refuse (read verbs use the catalog until a scan creates the store).
 - **`STORE.md`** — the store, its tables, verbs, the edges layer, and how to open the file (DB Browser for
   SQLite, `sqlite3 -readonly`). The store verbs are in `--help` too. The README's store section carries the
   measured numbers (200-track slice: 2.8 s/track with edges, 6.4 KB/track of edge rows, 19.7 KB/track

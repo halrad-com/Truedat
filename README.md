@@ -207,7 +207,14 @@ descriptor whole, so a multi-hour file costs several hundred MB of transient mem
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
 file-list scans; `dist/` still ships extractor build `.4`, and `--edges` / `--work` need `.5`.
 
-Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
+**Make it the default for an instance.** `truedat --config store true` (and `truedat --config edges true`)
+writes the keys into `truedat.config.json` beside the exe; from then on every scan on that instance also
+writes the store (and folds edges), and `--stats` / `--duplicates` answer from the store once a scan has
+created it. `--no-store` and `--no-edges` override the file for one run. A file-set default never makes a
+plain command refuse: before the first scan the read verbs still answer from the catalog, and a per-file
+mode without `--moods` skips the edges with a note.
+
+Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
 store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`

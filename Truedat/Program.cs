@@ -783,7 +783,9 @@ namespace Truedat
             Console.WriteLine("Store (preview, v2) — a SQLite store beside the catalog; mbxmoods.json stays what the hub reads. See STORE.md.");
             Console.WriteLine("  --store [db]        Use the store: bare = the default location (beside a local catalog, else a local");
             Console.WriteLine("                      per-library path); a path names it. A scan with --store also writes its analysed");
-            Console.WriteLine("                      entries into the store after the catalog is saved.");
+            Console.WriteLine("                      entries into the store after the catalog is saved. Config keys `store` and `edges`");
+            Console.WriteLine("                      make both the default for this instance (truedat --config store true);");
+            Console.WriteLine("                      --no-store / --no-edges override them for one run.");
             Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
             Console.WriteLine("  --store-import      Load the catalog (and the ledgers beside it) into the store, idempotently.");
             Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
@@ -874,7 +876,8 @@ namespace Truedat
             "store", "store-import", "library-root", "root-role", "machine-adopt",
             "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size", "store-dir",
             // v2 S2: the edges producer rides on a scan; opt-in, store-only output. --work drains the gap; --edges-export writes the companion file.
-            "edges", "work", "producer", "budget", "edges-export",
+            // --no-store / --no-edges are the one-run overrides of the config keys `store` / `edges`.
+            "edges", "work", "producer", "budget", "edges-export", "no-store", "no-edges",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -2280,7 +2283,12 @@ namespace Truedat
                 {
                     if (cfg.FileRead != null) _configFilesRead.Add(cfg.FileRead);
                     foreach (var kv in cfg.Values) _configValues[kv.Key] = kv.Value;
-                    args = TruedatConfig.BuildArgs(cfg.Values).Concat(args).ToArray();
+                    var configArgs = TruedatConfig.BuildArgs(cfg.Values);
+                    // A store or edges default that came from the FILE is softened where a command-line flag would refuse: a
+                    // read verb before the first scan answers from the catalog, and a per-file mode without --moods skips edges.
+                    _storeFromConfig = configArgs.Contains("--store", StringComparer.OrdinalIgnoreCase) && !args.Contains("--store", StringComparer.OrdinalIgnoreCase);
+                    _edgesFromConfig = configArgs.Contains("--edges", StringComparer.OrdinalIgnoreCase) && !args.Contains("--edges", StringComparer.OrdinalIgnoreCase);
+                    args = configArgs.Concat(args).ToArray();
                 }
             }
 
@@ -2312,6 +2320,7 @@ namespace Truedat
             string? workBudgetText = null;        // --budget <time>: 90s | 30m | 2h | 1h30m; absent = until the queue is empty
             bool edgesExportMode = false;         // --edges-export [path]: mbxedges.v1.json from the store (default: beside the catalog)
             string? edgesExportPath = null;
+            bool noStore = false, noEdges = false; // --no-store / --no-edges: one-run overrides of the config keys `store` / `edges`
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2601,6 +2610,8 @@ namespace Truedat
                 else if (canonical == "self-test") selfTest = true;
                 else if (canonical == "no-stage") _stageOpts.NoStage = true;
                 else if (canonical == "edges") _stageOpts.Edges = true;
+                else if (canonical == "no-edges") noEdges = true;
+                else if (canonical == "no-store") noStore = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "no-dir-batch") DirStatCache.Disabled = true;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
@@ -2695,17 +2706,31 @@ namespace Truedat
             // store-only verbs always, --stats/--duplicates only when --store was given (they stay JSON-backed
             // otherwise). Default = beside the catalog when local, a local per-library path when the catalog
             // folder is a share, --store-dir relocating that layout; explicit --store <path> always wins.
+            // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
+            if (noStore) { storePath = null; _storeFromConfig = false; }
+            if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || workMode || edgesExportMode;
             if (storeVerb || storePath != null)
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
                 if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
                 storePath = global::Truedat.Store.StoreLocation.Resolve(string.IsNullOrEmpty(storePath) ? null : storePath, storeDir, storeCatalog!, out var storeWhy);
+                // A config default on an instance that has not scanned yet: the read verbs have no store to answer from, so they
+                // answer from the catalog exactly as without the key (a scan creates the store; a verb never does).
+                if (_storeFromConfig && !storeVerb && !File.Exists(storePath) && (statsMode || duplicatesMode))
+                {
+                    Console.WriteLine($"  store: config says store = true but none exists yet at {storePath}; answering from the catalog (a scan creates it)");
+                    storePath = null;
+                }
+                else
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
-                global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
-                // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
-                // added edge rows, after --work, and by --edges-export (its explicit path wins).
-                if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
+                if (storePath != null)
+                {
+                    global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
+                    // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
+                    // added edge rows, after --work, and by --edges-export (its explicit path wins).
+                    if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
+                }
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -10270,6 +10295,12 @@ namespace Truedat
         /// when no store is in force.</summary>
         static string? _edgesCompanionPath;
 
+        /// <summary>True when --store / --edges came from truedat.config.json rather than the command line (the config keys
+        /// `store` and `edges`, operator 2026-10-12). A file-set default must never make a plain command refuse, so these soften
+        /// two gates: a read verb on an instance whose store does not exist yet answers from the catalog, and a per-file mode
+        /// without --moods skips the edges with a warning instead of refusing.</summary>
+        static bool _storeFromConfig, _edgesFromConfig;
+
         /// <summary>S2 C7: write mbxedges.v1.json from the store — to <paramref name="explicitPath"/>, else beside the catalog.
         /// Returns false (and says why) when there is no store or no target; never throws into a scan.</summary>
         static bool WriteEdgesCompanion(string? explicitPath, bool announce)
@@ -10363,6 +10394,15 @@ namespace Truedat
             // autoscan plugin's frequent per-file calls run without either (review M9).
             if (_storePath != null || _stageOpts.Edges) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);
             if (!_stageOpts.Edges) return null;
+            // From the config file, edges are a standing preference, not an order: where the command line would refuse, skip them.
+            if (_edgesFromConfig && (_storePath == null || !hasCatalogTarget))
+            {
+                Console.WriteLine(_storePath == null
+                    ? "  edges: config says edges = true but no store is in force (store = false or --no-store); edges skipped this run"
+                    : "  edges: config says edges = true but this mode has no --moods catalog target; edges skipped this run");
+                _stageOpts.Edges = false;
+                return null;
+            }
             if (_storePath == null)
                 return "Error: --edges writes the edge rows to the store and nowhere else — add --store (bare --store = the default location).";
             if (!hasCatalogTarget)
@@ -14982,6 +15022,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var pi = Array.IndexOf(built, "--parallel");
                     Assert(pi >= 0 && pi + 1 < built.Length && built[pi + 1] == "12",
                         "config: a value follows its own flag immediately");
+
+                    // The instance defaults (operator, 2026-10-12): `store` and `edges` are standing policies, emitted as the
+                    // bare flags (bare --store = the default location, derived from the catalog, never a target).
+                    File.WriteAllText(cfgFile, "{ \"store\": true, \"edges\": true }");
+                    var policy = TruedatConfig.BuildArgs(TruedatConfig.Load(cfgDir).Values);
+                    Assert(policy.Contains("--store") && policy.Contains("--edges") && policy.Length == 2,
+                        $"config: store = true / edges = true emit the bare --store and --edges flags ({string.Join(" ", policy)})");
+                    File.WriteAllText(cfgFile, "{ \"store\": false, \"edges\": false }");
+                    Assert(TruedatConfig.BuildArgs(TruedatConfig.Load(cfgDir).Values).Length == 0, "config: store = false / edges = false emit nothing");
+                    Assert(KnownFlags.Contains("no-store") && KnownFlags.Contains("no-edges"), "config: --no-store and --no-edges exist as the one-run overrides");
 
                     // Refuse, never fall back to defaults and never rewrite the file.
                     File.WriteAllText(cfgFile, "{ oops,, }");

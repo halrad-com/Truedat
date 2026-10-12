@@ -86,6 +86,11 @@ namespace Truedat
             // A directory, not a target: it says WHERE store files live (<dir>\<library-id>\truedat.db),
             // never WHICH store a run uses — that is still derived from the catalog the run is pointed at.
             new Setting { Key = "store-dir",       Kind = Kind.Text, Default = "beside the catalog (local per-library path when the catalog is on a share)", Help = "directory holding store files instead of the library folder" },
+            // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
+            // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
+            // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
+            new Setting { Key = "store",           Kind = Kind.Bool, Default = "false", Help = "every scan also writes the store (default location); read-only verbs answer from it once it exists" },
+            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "false", Help = "every scan also folds edge rows (needs store = true and extractor output-x64.5)" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes
