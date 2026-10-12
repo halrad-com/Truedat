@@ -383,73 +383,6 @@ namespace Truedat.Store
             return d;
         }
 
-        // ---------------------------------------------------------------- the work queue (S2 C5)
-        /// <summary>Queue the gap: entities with a description, no edges.status value at <paramref name="version"/> for their content
-        /// key, and a present copy on one of this machine's roots. A done item for an older version is re-queued; parked stays parked.</summary>
-        internal int EnqueueMissingEdges(string producerKey, string version, string machineId)
-        {
-            Exec("INSERT INTO work_item(entity_id, producer_key, target_version, state) " +
-                 "SELECT c.entity_id, ?, ?, 'queued' FROM track_content c " +
-                 "WHERE NOT EXISTS (SELECT 1 FROM value v WHERE v.content_hash = c.content_key AND v.producer_key = ? AND v.producer_version = ? AND v.segment_id = 0 AND v.field = 'edges.status') " +
-                 "AND EXISTS (SELECT 1 FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE l.entity_id = c.entity_id AND r.machine_id = ? AND l.state = 'present') " +
-                 // Only a DONE item for an older version is touched (re-queued for the new one); queued, failed and parked rows are
-                 // left exactly as they are, so the change count is the number of items this call actually put in the queue.
-                 "ON CONFLICT(entity_id, producer_key) DO UPDATE SET target_version = excluded.target_version, state = 'queued', attempts = 0 " +
-                 "WHERE work_item.state = 'done' AND work_item.target_version <> excluded.target_version;",
-                 producerKey, version, producerKey, version, machineId);
-            return Db.Changes;
-        }
-
-        /// <summary>The next item this machine may take: queued, or failed with attempts left whose retry time passed BEFORE this run
-        /// started, or a lease that expired before this run started. The run-start cutoff is what makes one run try an item at most
-        /// once: a failure recorded during the run carries a retry time at or after the start, so even a zero retry delay cannot
-        /// hammer one item three times in a row. Leases it (state leased, attempts + 1, lease_until) and returns it, or null.</summary>
-        internal (long Id, string EntityId, int Attempts)? LeaseNextWork(string producerKey, string runStartUtc, string leaseUntilUtc, int maxAttempts, string targetVersion)
-        {
-            // An expired lease is retaken only while attempts remain (review M1: a produce that crashed the process must park, not
-            // loop); the lease stamps the version being produced so a retried item finishes 'done' at the right version (M2).
-            var next = Row("SELECT id, entity_id, attempts FROM work_item WHERE producer_key = ? AND (state = 'queued' " +
-                           "OR (state = 'failed' AND attempts < ? AND (next_eligible_utc IS NULL OR next_eligible_utc < ?)) " +
-                           "OR (state = 'leased' AND attempts < ? AND lease_until_utc IS NOT NULL AND lease_until_utc < ?)) ORDER BY priority DESC, id LIMIT 1;",
-                           s => ((long?)s.GetInt64(0), s.GetString(1)!, (int)s.GetInt64(2)), (null, "", 0), producerKey, (long)maxAttempts, runStartUtc, (long)maxAttempts, runStartUtc);
-            if (next.Item1 == null) return null;
-            Exec("UPDATE work_item SET state = 'leased', attempts = attempts + 1, lease_until_utc = ?, target_version = ? WHERE id = ?;", leaseUntilUtc, targetVersion, next.Item1.Value);
-            return (next.Item1.Value, next.Item2, next.Item3 + 1);
-        }
-
-        internal string? WorkTargetVersion(string entityId, string producerKey)
-            => Row("SELECT target_version FROM work_item WHERE entity_id = ? AND producer_key = ?;", s => s.GetString(0), null, entityId, producerKey);
-
-        internal void FinishWork(long id, string state, string? reviewNote, string? nextEligibleUtc)
-            => Exec("UPDATE work_item SET state = ?, review_note = ?, next_eligible_utc = ?, lease_until_utc = NULL WHERE id = ?;", state, reviewNote, nextEligibleUtc, id);
-
-        internal Dictionary<string, long> WorkCounts(string producerKey)
-        {
-            var d = new Dictionary<string, long>(StringComparer.Ordinal);
-            using var st = Db.Prepare("SELECT state, count(*) FROM work_item WHERE producer_key = ? GROUP BY state;");
-            st.Bind(1, producerKey);
-            while (st.Step()) d[st.GetString(0)!] = st.GetInt64(1);
-            return d;
-        }
-
-        internal string? NextEligibleWork(string producerKey)
-            => Row("SELECT min(next_eligible_utc) FROM work_item WHERE producer_key = ? AND state = 'failed';", s => s.GetString(0), null, producerKey);
-
-        /// <summary>Present copies of an entity on this machine's roots: location id, display path, the catalog's lastModified
-        /// (the scan's tier-1 identity for "same bytes") and the copy's claimed duration in ms.</summary>
-        internal List<(long LocationId, string DisplayPath, string? LastModifiedUtc, long? DurationMs)> CopiesOnMachine(string entityId, string machineId)
-        {
-            var list = new List<(long, string, string?, long?)>();
-            using var st = Db.Prepare("SELECT l.id, l.display_path, l.last_modified_utc, p.fingerprint_v1_durationMs FROM track_location l JOIN library_root r ON r.id = l.root_id " +
-                                      "LEFT JOIN track_copy p ON p.location_id = l.id WHERE l.entity_id = ? AND r.machine_id = ? AND l.state = 'present' ORDER BY l.id;");
-            st.Bind(1, entityId); st.Bind(2, machineId);
-            while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1)!, st.GetString(2), st.IsNull(3) ? (long?)null : st.GetInt64(3)));
-            return list;
-        }
-
-        internal void SetWorkAttemptsForTest(string entityId, string producerKey, int attempts)
-            => Exec("UPDATE work_item SET attempts = ? WHERE entity_id = ? AND producer_key = ?;", (long)attempts, entityId, producerKey);
-
         /// <summary>The refresh gate's list (operator 2026-10-12: the edge backfill is the scan, not a second pipeline): sha-keyed content
         /// with a description and no edge row at <paramref name="version"/>. A failed fold at that version is a recorded failure and is
         /// left out unless <paramref name="includeFailed"/> (--retry-errors), the scan's errors-ledger rule: nothing is retried
@@ -469,16 +402,6 @@ namespace Truedat.Store
         /// <summary>The extractor build most of this version's edge rows record (review M4) — the companion header's source.</summary>
         internal string? EdgesExtractorBuild(string producerVersion)
             => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);
-
-        /// <summary>Artist and title as the copy row holds them — the drain's progress line names tracks the way the scan does.</summary>
-        internal (string? Artist, string? Title) CopyArtistTitle(long locationId)
-            => Row("SELECT artist, title FROM track_copy WHERE location_id = ?;", s => (s.GetString(0), s.GetString(1)), ((string?)null, (string?)null), locationId);
-
-        internal (string ContentKey, string Kind)? ContentKeyOf(string entityId)
-            => Row("SELECT content_key, content_key_kind FROM track_content WHERE entity_id = ?;", s => ((string?)s.GetString(0), s.GetString(1)!), (null, ""), entityId) is var t && t.Item1 != null ? (t.Item1, t.Item2) : null;
-
-        internal void SetWorkLeaseForTest(string entityId, string producerKey, string leaseUntilUtc)
-            => Exec("UPDATE work_item SET state = 'leased', lease_until_utc = ? WHERE entity_id = ? AND producer_key = ?;", leaseUntilUtc, entityId, producerKey);
 
         /// <summary>Every content key holding an edge row (the whole-track status word) at this producer version, in key order.</summary>
         internal List<string> ContentKeysWithEdges(string producerVersion)

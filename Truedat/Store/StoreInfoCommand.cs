@@ -30,7 +30,6 @@ namespace Truedat.Store
         public long NoShaFeatures;                // feature rows keyed entity:<uuid>
         // S2 C4: the edges producer — media with an edge row, bytes of packed rows, ok/failed 'edges' runs, median fold+PCM ms.
         public long EdgeTracks, EdgeUnavailable, EdgeBytes, EdgeRunsOk, EdgeRunsFailed; public double? EdgeMedianMs; public string EdgesVersion = "";
-        public Dictionary<string, long> WorkQueue = new Dictionary<string, long>(StringComparer.Ordinal);   // C5: work_item states for the edges producer
     }
 
     /// <summary>--store-info: the measurements S1 owes, all derived from the store by query — bytes per
@@ -81,8 +80,7 @@ namespace Truedat.Store
                 Console.WriteLine($"  edges ({i.EdgesVersion}): eligible {i.Tracks:N0}, captured {i.EdgeTracks:N0} ({i.EdgeUnavailable:N0} unavailable: under the floor), missing {Math.Max(0, i.Tracks - i.EdgeTracks):N0}" +
                     (i.EdgeRunsOk + i.EdgeRunsFailed > 0
                         ? $"; {i.EdgeBytes:N0} bytes of packed rows ({(i.EdgeTracks > 0 ? i.EdgeBytes / (double)i.EdgeTracks : 0):N0}/track); runs {i.EdgeRunsOk:N0} ok, {i.EdgeRunsFailed:N0} failed" + (i.EdgeMedianMs.HasValue ? $"; median fold+PCM {i.EdgeMedianMs:F0} ms" : "")
-                        : "") +
-                    (i.WorkQueue.Count > 0 ? "; work queue: " + string.Join(", ", i.WorkQueue.Select(kv => $"{kv.Key} {kv.Value:N0}")) : ""));
+                        : ""));
                 Console.WriteLine(i.ArtifactCount > 0
                     ? $"  aggregate artifacts: {i.ArtifactCount:N0} files, {i.ArtifactBytes:N0} bytes beside the store ({i.ArtifactBytes / (double)i.ArtifactCount:N0} bytes each; {(i.Tracks > 0 ? i.ArtifactCount * 100.0 / i.Tracks : 0):F1}% of descriptions)"
                     : "  aggregate artifacts: none (kept by scans run with --store)");
@@ -168,7 +166,6 @@ namespace Truedat.Store
             using (var st = db.Prepare("SELECT duration_ms FROM run WHERE producer_key = 'edges' AND outcome = 'ok' AND duration_ms IS NOT NULL;"))
                 while (st.Step()) edgeMs.Add(st.GetInt64(0));
             if (edgeMs.Count > 0) { edgeMs.Sort(); i.EdgeMedianMs = edgeMs.Count % 2 == 1 ? edgeMs[edgeMs.Count / 2] : (edgeMs[edgeMs.Count / 2 - 1] + edgeMs[edgeMs.Count / 2]) / 2.0; }
-            i.WorkQueue = dal.WorkCounts(global::Truedat.Edges.EdgeStore.ProducerKey);
             return i;
         }
 
@@ -194,7 +191,6 @@ namespace Truedat.Store
                 {
                     ["producerVersion"] = i.EdgesVersion, ["eligible"] = i.Tracks, ["captured"] = i.EdgeTracks, ["unavailable"] = i.EdgeUnavailable, ["missing"] = Math.Max(0, i.Tracks - i.EdgeTracks),
                     ["bytes"] = i.EdgeBytes, ["runsOk"] = i.EdgeRunsOk, ["runsFailed"] = i.EdgeRunsFailed, ["medianMs"] = i.EdgeMedianMs,
-                    ["workQueue"] = new JsonObject(i.WorkQueue.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, JsonValue.Create(kv.Value)))),
                 },
             };
         }

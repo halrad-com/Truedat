@@ -32,9 +32,6 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (the scan's periodic checkpoint flush files tied folds and leaves in-flight ones alone)");
             try { TestSinkCheckpoint(assert); }
             catch (Exception ex) { assert(false, $"SinkCheckpoint: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Edges self-test (S2 C5: --work — enqueue the gap, lease one at a time, retry then park, budget, leases expire)");
-            try { TestWork(assert); }
-            catch (Exception ex) { assert(false, $"Work: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C7: mbxedges.v1.json from the store — the agreed hub shape, scalars only, keyed by sha)");
             try { TestCompanion(assert); }
             catch (Exception ex) { assert(false, $"Companion: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -257,127 +254,6 @@ namespace Truedat.Edges
             }
             finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
-
-        // ---------------------------------------------------------------- the work queue
-        /// <summary>A store built by importing three fixture entries whose files exist under a temp root registered to THIS machine;
-        /// the produce step is injected (no extractor): ok for two, a failed fold for one.</summary>
-        static void TestWork(Action<bool, string> assert)
-        {
-            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "work-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "Tool")); System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "odd"));
-            var store = System.IO.Path.Combine(root, "truedat.db");
-            try
-            {
-                var entries = Truedat.Store.StoreSelfTest.FixtureEntries(root);
-                // Real files whose mtime is the entry's lastModified: the drain's changed-file guard (review I1) compares the two.
-                foreach (var kv in entries) { System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(kv.Key)!); System.IO.File.WriteAllBytes(kv.Key, new byte[1024]); System.IO.File.SetLastWriteTimeUtc(kv.Key, kv.Value.LastModified.ToUniversalTime()); }
-                var imp = Truedat.Store.ImportCommand.ExecuteEntries(store, entries, root, "primary", true, "import", "1", "fixture", null, null);
-                // Six entries, five media: d1/d2 share one sha and resolve to one entity (a props-differ conflict, as the import test pins).
-                assert(imp.Entries == 6 && imp.EntitiesCreated + imp.CreatedNoSha == 5, $"six entries over five media imported onto a root of this machine ({imp.Entries}, {imp.EntitiesCreated} + {imp.CreatedNoSha} no-sha)");
-
-                var okFold = SyntheticFold(root);
-                EdgeFoldResult failedFold;
-                using (var f = EspbFile.Open(BuildSyntheticFrames(root, 240, withHpcp: false))) failedFold = EdgeFold.Fold(f, 240, new EdgeSettings());
-                var produced = new List<string>();
-                var claimed = new List<double?>();
-                EdgeFoldResult Produce(string path, long size, double? claimedSec) { produced.Add(path); claimed.Add(claimedSec); return path.EndsWith("b.mp3", StringComparison.OrdinalIgnoreCase) ? failedFold : okFold; }
-                var opts = new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero };
-                var version = new EdgeSettings().ProducerVersion;
-
-                // Pass 1: the whole gap (one item per media) is queued; four fold, b.mp3 fails (attempt 1 of 3).
-                var r1 = Truedat.Store.WorkCommand.Run(opts, Produce, version);
-                assert(r1.Enqueued == 5 && r1.Leased == 5 && r1.Done == 4 && r1.Failed == 1 && r1.Parked == 0 && r1.Stopped == "empty",
-                    $"pass 1: 5 enqueued (one per media), 5 leased, 4 done, 1 failed, stopped on an empty queue ({r1.Enqueued}, {r1.Leased}, {r1.Done}, {r1.Failed}, {r1.Parked}, {r1.Stopped}{(r1.Error != null ? ": " + r1.Error : "")})");
-                assert(produced.Count == 5 && produced.TrueForAll(System.IO.File.Exists), $"the produce step was handed five real file paths, one per media ({produced.Count})");
-                assert(claimed.Count == 5 && claimed.Contains(300.0) && claimed.Contains(180.0), $"the produce step is handed each copy's claimed duration for the decode-coverage gate ({string.Join(",", claimed)})");
-                assert(r1.ResultPath != null && System.IO.File.Exists(r1.ResultPath) && System.IO.File.ReadAllText(r1.ResultPath).Contains("\"kind\": \"work-result\""), $"work-result.json beside the store ({r1.ResultPath})");
-                assert(r1.Remaining == 1 && r1.QueueDone == 4 && r1.QueueFailed == 1, $"the queue after pass 1: 4 done, 1 failed, 1 remaining ({r1.QueueDone}, {r1.QueueFailed}, {r1.Remaining})");
-                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
-                {
-                    var sha = entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!;
-                    assert(os.Dal.CountSegments(sha, version) == 2 && EdgeStore.Read(os.Dal, sha, version)?.Head.Whole?.Key?.Name == "C", "a.flac's edge rows are in the store under its sha");
-                    assert(os.Dal.CountRuns(EdgeStore.ProducerKey, "ok") == 4 && os.Dal.CountRuns(EdgeStore.ProducerKey, "failed") == 1, $"four ok and one failed 'edges' run rows ({os.Dal.CountRuns(EdgeStore.ProducerKey, "ok")}, {os.Dal.CountRuns(EdgeStore.ProducerKey, "failed")})");
-                    assert(os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("tonal.hpcp") == true, "the failed run names the missing descriptor");
-                }
-
-                // Pass 2 and 3: the failed item retries (retry delay zero), then parks on its third attempt. Nothing new is enqueued.
-                var r2 = Truedat.Store.WorkCommand.Run(opts, Produce, version);
-                assert(r2.Enqueued == 0 && r2.Leased == 1 && r2.Failed == 1 && r2.Parked == 0, $"pass 2: the failed item is retried once ({r2.Enqueued}, {r2.Leased}, {r2.Failed}, {r2.Parked})");
-                var r3 = Truedat.Store.WorkCommand.Run(opts, Produce, version);
-                assert(r3.Leased == 1 && r3.Parked == 1 && r3.QueueParked == 1 && r3.Remaining == 0, $"pass 3: third failure parks it ({r3.Leased}, {r3.Parked}, {r3.QueueParked}, remaining {r3.Remaining})");
-                var r4 = Truedat.Store.WorkCommand.Run(opts, Produce, version);
-                assert(r4.Enqueued == 0 && r4.Leased == 0 && r4.Stopped == "empty", $"pass 4: nothing eligible, parked stays parked ({r4.Enqueued}, {r4.Leased}, {r4.Stopped})");
-
-                // A new producer version re-queues the done items; the old version's rows stay.
-                var r5 = Truedat.Store.WorkCommand.Run(opts, Produce, "edges@v1;e20;p10");
-                assert(r5.Enqueued == 4 && r5.Leased == 4 && r5.Done == 4 && r5.QueueParked == 1, $"a new producer version re-queues the four done items (the parked one stays parked, uncounted) and folds them again ({r5.Enqueued}, {r5.Leased}, {r5.Done}, parked {r5.QueueParked})");
-                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
-                {
-                    var sha = entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!;
-                    assert(os.Dal.CountSegments(sha, version) == 2 && os.Dal.CountSegments(sha, "edges@v1;e20;p10") == 2, "both versions' rows coexist");
-                }
-
-                // Budget: a fresh gap of 4 (new version; the parked item is not re-queued), a produce slower than the budget -> the
-                // budget is checked before each lease, so exactly one item runs, then the run stops on the budget.
-                EdgeFoldResult Slow(string path, long size, double? claimedSec) { System.Threading.Thread.Sleep(150); return okFold; }
-                var r6 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, Budget = TimeSpan.FromMilliseconds(60), RetryDelay = TimeSpan.Zero }, Slow, "edges@v1;e10;p10");
-                assert(r6.Enqueued == 4 && r6.Leased == 1 && r6.Done == 1 && r6.Remaining == 3 && r6.Stopped == "budget", $"budget: one item then stop, three still eligible (the parked one is not) ({r6.Enqueued}, {r6.Leased}, {r6.Done}, remaining {r6.Remaining}, {r6.Stopped})");
-
-                // Leases expire: an item left 'leased' with a lease in the past is taken again.
-                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
-                {
-                    var eid = os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaFrames, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!)
-                              ?? os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaTaglibRegion, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!);
-                    using var tx = os.Db.BeginTransaction(); os.Dal.SetWorkLeaseForTest(eid!, EdgeStore.ProducerKey, "2000-01-01T00:00:00.0000000Z"); tx.Complete();
-                }
-                var r7 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e10;p10");
-                assert(r7.Leased == 3 && r7.Done == 3, $"an expired lease is taken again along with the two still queued ({r7.Leased}, {r7.Done})");
-
-                // A copy that is gone: failed with the reason, retried later, never parked silently.
-                System.IO.File.Delete(System.IO.Path.Combine(root, "odd", "nosha.mp3"));
-                var r8 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e5;p10");
-                assert(r8.Enqueued == 4 && r8.Done == 3 && r8.Unreachable == 1 && r8.Failed == 1, $"a missing copy is a failed attempt naming it unreachable ({r8.Enqueued}, {r8.Done}, unreachable {r8.Unreachable}, failed {r8.Failed})");
-
-                // Review I1: a copy whose mtime no longer matches the description's lastModified is not folded under the old sha.
-                var legacyPath = System.IO.Path.Combine(root, "old", "legacy.flac");
-                System.IO.File.SetLastWriteTimeUtc(legacyPath, DateTime.UtcNow.AddDays(1));
-                var r9 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e4;p10");
-                assert(r9.Enqueued == 3 && r9.Done == 2 && r9.Changed == 1 && r9.Unreachable == 1 && r9.Failed == 2,
-                    $"a copy changed since its description is a failed attempt marked changed, never folded under the old sha ({r9.Enqueued}, done {r9.Done}, changed {r9.Changed}, unreachable {r9.Unreachable}, failed {r9.Failed})");
-                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
-                {
-                    assert(os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("changed since its description") == true || os.Dal.RunErrorText(EdgeStore.ProducerKey, "failed")?.Contains("no reachable copy") == true,
-                        "the failed run names the reason");
-                    // Review M2: an item folded under the new version carries that version as its target.
-                    var dupSha = "5555555555555555555555555555555555555555555555555555555555555555";
-                    var dupEntity = os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaFrames, dupSha);
-                    assert(dupEntity != null && os.Dal.WorkTargetVersion(dupEntity, EdgeStore.ProducerKey) == "edges@v1;e4;p10", $"a done item records the version it was folded at ({os.Dal.WorkTargetVersion(dupEntity ?? "", EdgeStore.ProducerKey)})");
-                    // Review M1: an expired lease with the attempts exhausted is not retaken.
-                    var aEntity = os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaFrames, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!)
-                                  ?? os.Dal.FindEntityByFacet(Truedat.Store.FacetKinds.ShaTaglibRegion, entries[System.IO.Path.Combine(root, "Tool", "a.flac")].AudioStreamSha256!);
-                    using var tx = os.Db.BeginTransaction();
-                    os.Dal.SetWorkLeaseForTest(aEntity!, EdgeStore.ProducerKey, "2000-01-01T00:00:00.0000000Z");
-                    os.Dal.SetWorkAttemptsForTest(aEntity!, EdgeStore.ProducerKey, 3);
-                    tx.Complete();
-                }
-                var r10 = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, Produce, "edges@v1;e4;p10");
-                assert(r10.Leased == 2 && r10.Done == 0, $"an expired lease whose attempts are exhausted is left alone; only the two failed items retry ({r10.Leased} leased, {r10.Done} done)");
-
-                // Ctrl+C: cancellation finishes the item in hand, stops leasing, says 'cancelled'; the rest stay queued for the next run.
-                var cts = new System.Threading.CancellationTokenSource();
-                EdgeFoldResult CancelAfterOne(string path, long size, double? claimedSec) { cts.Cancel(); return okFold; }
-                var rc = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = store, RetryDelay = TimeSpan.Zero }, CancelAfterOne, "edges@v1;e3;p10", cts.Token);
-                assert(rc.Stopped == "cancelled" && rc.Leased == 1 && rc.Done == 1 && rc.Remaining >= 2 && rc.ResultPath != null && System.IO.File.ReadAllText(rc.ResultPath).Contains("\"stopped\": \"cancelled\""),
-                    $"cancellation: the item in hand completes, nothing more is leased, the result says cancelled ({rc.Stopped}, leased {rc.Leased}, done {rc.Done}, remaining {rc.Remaining})");
-
-                // Review I4: a run that cannot open the store still writes work-result.json, saying error.
-                var bad = Truedat.Store.WorkCommand.Run(new Truedat.Store.WorkOptions { StorePath = System.IO.Path.Combine(root, "nowhere", "truedat.db") }, Produce, version);
-                assert(bad.Stopped == "error" && bad.Error != null && bad.ResultPath != null && System.IO.File.Exists(bad.ResultPath) && System.IO.File.ReadAllText(bad.ResultPath).Contains("\"stopped\": \"error\""),
-                    $"a failed run writes work-result.json with stopped=error ({bad.Stopped}: {bad.Error}; {bad.ResultPath})");
-            }
-            finally { try { System.IO.Directory.Delete(root, true); } catch { } }
-        }
-
         // ---------------------------------------------------------------- through the sink
         /// <summary>The same shape as the artifact stash: the extractor core stashes the fold under the path it analysed (the staged
         /// copy), Record ties it to the catalog key, the flush writes it under the entry's content key with an 'edges' run row.

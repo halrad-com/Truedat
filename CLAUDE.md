@@ -9,7 +9,7 @@ Truedat is a Windows .NET command-line tool that analyses a music library's audi
 - Build: `build-truedat.cmd` (requires .NET SDK 8.0+). Single-file output at `dist/truedat/truedat.exe` (~1 MB, ILRepack-merged).
 - Runtime deps: `essentia_streaming_extractor_music.exe` (required for default scan), plus optional `ffmpeg.exe` (multi-channel downmix, `Unsupported codec` retry — e.g. `.opus`, since this essentia build lacks libopus — the bitUsage/HF authenticity signals, and the standalone `--transcode` utility) and `ffprobe.exe` (matching source rate/depth in `--transcode`). The legacy fingerprint pipeline (`--fingerprint` / `--md5-only` / `--quick-fingerprint` / `--details` and the `essentia_streaming_md5.exe` / `fpcalc.exe` binaries) was removed 2026-07-11 (v5.4.0) — identity is pure-managed.
 - Framework: **.NET Framework 4.8**. No .NET 6/8 APIs, no `ValueTask`, no `init` setters on public types. Use `System.Text.Json` (merged via ILRepack).
-- The v2 SQLite store (preview; `--store`, `--edges`, `--work`, `--edges-export`) is documented in `STORE.md` — tables, location rules, the six-significant-figure precision rule on the store path, and how to open the file. The scan's catalog writer and `mbxmoods.json` bytes are untouched by it.
+- The v2 SQLite store (preview; `--store`, `--edges`, `--edges-export`; `--refresh` fills missing edges) is documented in `STORE.md` — tables, location rules, the six-significant-figure precision rule on the store path, and how to open the file. The scan's catalog writer and `mbxmoods.json` bytes are untouched by it.
 
 ## mbxmoods.json schema (current)
 

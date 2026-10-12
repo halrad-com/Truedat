@@ -45,16 +45,13 @@ namespace Truedat.Store
         // ~800 MB at 72k tracks; the dictionaries hold paths. Same pending directory as the main-JSON stash, extension .edges.
         static readonly ConcurrentDictionary<string, string> _stashedEdges = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly ConcurrentDictionary<string, string> _edges = new ConcurrentDictionary<string, string>(PathComparer.Instance);
-        /// <summary>S2 C5 (review M7): the --work drain does not file the main-JSON artifact (the description already exists), so it
-        /// asks the core not to compress one per item only to delete it.</summary>
-        internal static bool SuppressMainStash;
 
         internal static int Pending => _entries.Count;
         internal static int PendingFailures => _failures.Count;
         internal static int PendingArtifacts => _artifacts.Count;
         internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); SuppressMainStash = false; while (_failures.TryDequeue(out _)) { } }
+        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } }
 
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
         /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
@@ -74,14 +71,6 @@ namespace Truedat.Store
             catch (Exception ex) { StoreLog.Warn($"could not stash the edge fold for {analysedPath}: {ex.Message}"); }
         }
 
-        /// <summary>S2 C5: the --work drain takes the fold the core stashed for the path it analysed (and drops the main-JSON stash,
-        /// which the drain does not file: the description already exists). Null when the core produced none.</summary>
-        internal static global::Truedat.Edges.EdgeFoldResult? TakeEdges(string analysedPath)
-        {
-            if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
-            if (!_stashedEdges.TryRemove(analysedPath, out var file)) return null;
-            return ReadEdges(file);
-        }
 
         /// <summary>Reads a spilled fold and deletes its file; null (logged) when the file is gone or unreadable.</summary>
         internal static global::Truedat.Edges.EdgeFoldResult? ReadEdges(string file)

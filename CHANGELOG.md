@@ -23,7 +23,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   lists as lacking edge rows counts as stale, so the scan's own parallel workers, progress line, ETA and
   saves handle it like any other re-analysis. The store now saves at the scan's five-minute checkpoint
   as well as at the end, so closing the window mid-run keeps what was done. A track whose edges failed
-  is not retried until `--retry-errors`. `--work` remains as the old one-track-at-a-time drain. The
+  is not retried until `--retry-errors`. `--budget 90s|30m|2h|1h30m` stops the library scan cleanly (save
+  and exit) once that long has passed. The old one-track-at-a-time `--work` drain is gone. The
   import's "legacy FLAC sha: N unrecoverable" line now says what it counts (FLAC entries with only the
   current hash; normal).
 - **Config keys `store` and `edges`** make the store (and edge folding) the default for an instance:
@@ -36,11 +37,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - **Store precision: six significant figures.** Every float enters the store and leaves it on
   `--store-export` at 6 sf, written exactly (`0.022454`, never `0.022454000000000002`); the round-trip
   gate compares both sides at that precision. The scan's catalog writer and its bytes are unchanged.
-- **`--work` fixes after review.** The drain now applies the scan's decode-coverage gate (an under-decoded
-  file is a failed fold, never a tail inside the track), refuses a copy whose mtime no longer matches its
-  description, writes `work-result.json` on every exit, retakes an expired lease only while attempts
-  remain, and `--store-info`'s edges coverage is the same gap the drain works from. Folds are spilled to
-  disk during a scan instead of held in memory until the flush.
+- **Edge folds are spilled to disk during a scan** instead of held in memory until the store write.
 
 - **Extractor build `output-x64.5` recognised as current.** `.4` is still accepted but the startup
   report now says what `.5` adds (a binary frames file behind `--frames-bin`, the `framesInclude`
@@ -56,15 +53,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `--store`, on an extractor older than `.5`, and in the per-file modes without `--moods`. Writes
   nothing to `mbxmoods.json`; without the flag a scan runs exactly as before. `--store-info` reports
   edge coverage, bytes per track and median fold time.
-- **`--work` (preview, v2 S2).** With `--store`, drains the edges gap: every media with a description,
-  no edge row at the current producer version and a copy on this machine is queued, then leased one at
-  a time and run through the same extractor-with-frames path a scan uses; three attempts then parked,
-  leases expire, `--budget 90s|30m|2h|1h30m` caps a run. Writes `work-result.json` beside the store and
-  rewrites the companion file. `--store-info` shows eligible / captured / missing and the queue by state.
 - **`mbxedges.v1.json`.** The hub's edge companion file beside `mbxmoods.json`: per track (keyed by
   `audioStreamSha256`) the two edges' status, window, key, bpm, loudness, texture, divergence and `rms`,
-  plus the head-vs-tail divergence; compact, about 1.8 KB per track; written after any `--edges` scan or
-  `--work` run that added rows, and by `--edges-export [path]` on demand. Media without a sha are omitted.
+  plus the head-vs-tail divergence; compact, about 1.8 KB per track; written after any `--edges` scan that
+  added rows, and by `--edges-export [path]` on demand. Media without a sha are omitted.
 
 - **A SQLite store (preview, v2 S1).** `--store-import` loads a catalog and the ledgers beside it
   into a store keyed by identity — a UUID per file entity, content-hash facets that name their
