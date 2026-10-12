@@ -17,6 +17,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   profile key, `metadata.version.extractor_build` in the main output) and that `--edges` will need
   it. The main output is otherwise unchanged against `.4`: verified on five real files across
   MP3/M4A/WMA/FLAC, every difference within the extractor's own run-to-run noise.
+- **`--edges` (preview, v2 S2).** With `--store`, every track a scan analyses also gets an *edge row*
+  in the store: the first and last 30 s folded from a binary frames file the `.5` extractor writes
+  (EBU loudness series at 10/s, beats and tempo, a key vote per edge and per 10 s sub-window, MFCC
+  and spectral texture, fade and silence) plus RMS crest and transition from a short ffmpeg PCM pass
+  (null without ffmpeg). One packed row per edge, about 6.3 KB per track, with an `edges` run row
+  carrying the fold and PCM time; a failed fold is a failed run and no rows. Refuses plainly without
+  `--store`, on an extractor older than `.5`, and in the per-file modes without `--moods`. Writes
+  nothing to `mbxmoods.json`; without the flag a scan runs exactly as before. `--store-info` reports
+  edge coverage, bytes per track and median fold time.
 
 - **A SQLite store (preview, v2 S1).** `--store-import` loads a catalog and the ledgers beside it
   into a store keyed by identity — a UUID per file entity, content-hash facets that name their

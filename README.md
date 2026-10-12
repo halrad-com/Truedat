@@ -145,7 +145,23 @@ truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.d
 truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\truedat\truedat.db"
 ```
 
-Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--store-import`, `--library-root <path>` (else inferred per volume and
+**Edges (`--edges`, preview, v2 S2).** On a scan run with `--store`, `--edges` asks the extractor for a
+small binary frames file per analysed track (build `output-x64.5` is required; the run refuses on an
+older one and names what it found) and folds the first and last 30 s into one packed *edge row* per
+edge in the store: the EBU momentary and short-term loudness series at 10/s, the beats inside the
+window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
+Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
+from a short ffmpeg PCM pass over the two windows the RMS crest and the transition into silence
+(null without ffmpeg, never approximated). Each track also gets an `edges` run row carrying the fold
+and PCM time, and a fold that fails is a failed run naming the reason and no rows. The frames file and
+the profile live beside the extractor's temp output in the stage directory and are deleted with it;
+nothing is written to `mbxmoods.json`, and a cache hit folds nothing, so `--edges` populates the tracks
+a scan actually analyses. Measured on a local library: about 6.3 KB per track in the store and
+roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage,
+bytes per track and median time. In `--analyze-file` and `--file-list` the flag needs `--moods`, because
+the store is written after the catalog entry.
+
+Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
 store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`
@@ -390,6 +406,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           mtime-drifted files always take the full audio-hash check.
   --no-bitusage           Suppress ComputeBitUsage (omits the bitUsage JSON block).
   --no-hf-analysis        Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure).
+  --edges                 With --store: fold the first and last 30 s of every analysed track into the
+                          store's edge row (loudness series, beats, key, texture, fades, PCM crest/
+                          transition). Needs extractor build output-x64.5. Writes nothing to mbxmoods.json.
   --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
                           and the --refresh-smfm backfill alike (omits the smfm* fields).
                           Unlike its two siblings above this saves no meaningful time: SMFM
