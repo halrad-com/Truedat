@@ -450,6 +450,22 @@ namespace Truedat.Store
         internal void SetWorkAttemptsForTest(string entityId, string producerKey, int attempts)
             => Exec("UPDATE work_item SET attempts = ? WHERE entity_id = ? AND producer_key = ?;", (long)attempts, entityId, producerKey);
 
+        /// <summary>The refresh gate's list (operator 2026-10-12: the edge backfill is the scan, not a second pipeline): sha-keyed content
+        /// with a description and no edge row at <paramref name="version"/>. A failed fold at that version is a recorded failure and is
+        /// left out unless <paramref name="includeFailed"/> (--retry-errors), the scan's errors-ledger rule: nothing is retried
+        /// implicitly, so a file whose fold fails is not re-analysed on every --refresh. Entity-keyed content has no sha for a
+        /// catalog entry to match, so it is never listed.</summary>
+        internal HashSet<string> ContentKeysLackingEdges(string producerKey, string version, bool includeFailed)
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var st = Db.Prepare("SELECT c.content_key FROM track_content c WHERE c.content_key_kind <> 'entity' " +
+                "AND NOT EXISTS (SELECT 1 FROM value v WHERE v.content_hash = c.content_key AND v.producer_key = ?1 AND v.producer_version = ?2 AND v.segment_id = 0 AND v.field = 'edges.status') " +
+                "AND (?3 = 1 OR NOT EXISTS (SELECT 1 FROM run r WHERE r.entity_id = c.entity_id AND r.producer_key = ?1 AND r.producer_version = ?2 AND r.outcome = 'failed'));");
+            st.Bind(1, producerKey); st.Bind(2, version); st.Bind(3, includeFailed ? 1L : 0L);
+            while (st.Step()) { var k = st.GetString(0); if (!string.IsNullOrEmpty(k)) set.Add(k!); }
+            return set;
+        }
+
         /// <summary>The extractor build most of this version's edge rows record (review M4) — the companion header's source.</summary>
         internal string? EdgesExtractorBuild(string producerVersion)
             => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);

@@ -221,16 +221,16 @@ folder with the rebuilt exe and the `.5` extractor beside it:
 truedat --config store true
 truedat --config edges true
 truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
-truedat --refresh --budget 2h          (repeat until --store-info says missing 0)
+truedat --refresh                      (one scan; Ctrl+C and re-run resumes)
 truedat                                (ongoing, unchanged)
 ```
 
 `--store-import` gives the store every track you have already scanned, with no re-analysis. `--refresh`
 then does what it always did (re-analyse entries missing the newest feature fields) and, with the store
-and edges on, backfills edge rows for every track that has none — one extractor run per track, resumable,
-`--budget` capping each session. A normal scan keeps everything current from then on; a cached track is
-never re-analysed, which is why the backfill exists. `--work` is the backfill on its own, for an edges-only
-session.
+and edges on, also re-analyses every track the store lists as lacking edge rows. It is one ordinary scan:
+the scan's parallel workers, progress line and ETA, the catalog and the store saved every five minutes, so
+Ctrl+C and a re-run picks up where it stopped. A normal scan keeps everything current from then on; a
+cached track is never re-analysed, which is why `--refresh` is the step that fills the gap.
 
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than

@@ -29,6 +29,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: through the scan sink — stash by analysed path, tie at Record, write at the flush)");
             try { TestSink(assert); }
             catch (Exception ex) { assert(false, $"Sink: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (the scan's periodic checkpoint flush files tied folds and leaves in-flight ones alone)");
+            try { TestSinkCheckpoint(assert); }
+            catch (Exception ex) { assert(false, $"SinkCheckpoint: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C5: --work — enqueue the gap, lease one at a time, retry then park, budget, leases expire)");
             try { TestWork(assert); }
             catch (Exception ex) { assert(false, $"Work: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -424,6 +427,64 @@ namespace Truedat.Edges
                     assert(ms == ok.FoldMs + ok.PcmMs, $"the ok run row carries fold + PCM milliseconds ({ms} vs {ok.FoldMs + ok.PcmMs})");
                 }
                 assert(Truedat.Store.ScanSink.PendingEdges == 0, "the flush cleared the tied folds");
+                // The refresh gate's list (operator 2026-10-12: the backfill is the scan): sha-keyed media with a description and no edge
+                // row at the version. a.flac folded (not listed); b.mp3's fold failed (not listed: a recorded failure is not retried
+                // implicitly, the scan's errors-ledger rule; listed again under --retry-errors); the entity-keyed media never (no sha).
+                // legacy.flac is described by a second flush with no fold: the one track the list must name.
+                Truedat.Store.ScanSink.Record(@"D:\Music\old\legacy.flac", entries[@"D:\Music\old\legacy.flac"], @"C:\stage\legacy.flac");
+                var rL = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                assert(rL.Ok && rL.Edges == 0, $"legacy.flac described without a fold ({rL.Ok} {rL.Error})");
+                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var shaA = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;
+                    var shaB = entries[@"D:\Music\Tool\b.mp3"].AudioStreamSha256!;
+                    var shaL = entries[@"D:\Music\old\legacy.flac"].AudioStreamSha256!;
+                    var expect = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { shaL };
+                    var stale = os.Dal.ContentKeysLackingEdges(EdgeStore.ProducerKey, ok.ProducerVersion, includeFailed: false);
+                    assert(stale.SetEquals(expect) && expect.Count > 0, $"lacking edges: exactly the described track with no fold; not the folded one, not the failed one, not the undescribed ones ({stale.Count} listed, {expect.Count} expected: {string.Join(",", stale)})");
+                    var retry = os.Dal.ContentKeysLackingEdges(EdgeStore.ProducerKey, ok.ProducerVersion, includeFailed: true);
+                    assert(retry.Contains(shaB) && !retry.Contains(shaA) && retry.Count == expect.Count + 1, $"with --retry-errors the failed fold is listed again ({retry.Count})");
+                    var newer = os.Dal.ContentKeysLackingEdges(EdgeStore.ProducerKey, "edges@v9;e30;p10", includeFailed: false);
+                    assert(newer.Contains(shaA) && newer.Contains(shaB), "a newer producer version lists everything again, the old version's rows and failures included");
+                    bool anyEntity = false; foreach (var k in retry) if (k.StartsWith("entity:", StringComparison.Ordinal)) anyEntity = true;
+                    assert(!anyEntity, "no entity-keyed content is ever listed");
+                }
+            }
+            finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>The scan's periodic checkpoint flush (beside its 5-minute catalog save, workers still running): files what is tied,
+        /// leaves an in-flight track's untied fold alone, and the end-of-scan flush files that one once it is tied.</summary>
+        static void TestSinkCheckpoint(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "edgeckpt-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                var store = System.IO.Path.Combine(dir, "truedat.db");
+                Truedat.Store.ScanSink.Reset();
+                Truedat.Store.ScanSink.StoreDirectory = dir;
+                var entries = Truedat.Store.StoreSelfTest.FixtureEntries(@"D:\Music");
+                var ok = SyntheticFold(dir);
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\a.flac", ok);
+                Truedat.Store.ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"], @"C:\stage\a.flac");
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\inflight.mp3", ok);   // folded, its entry not recorded yet: a track still in flight
+                var pendingDir = Truedat.Store.ArtifactStore.PendingDir(dir);
+                var c = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys, final: false);
+                int left = System.IO.Directory.GetFiles(pendingDir, "*.edges").Length;
+                assert(c.Ok && c.Edges == 1 && left == 1, $"checkpoint: the tied fold is filed, the in-flight fold's file is left in pending ({c.Edges} filed, {left} left, ok {c.Ok} {c.Error})");
+                Truedat.Store.ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"], @"C:\stage\inflight.mp3");
+                var f = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                left = System.IO.Directory.GetFiles(pendingDir, "*.edges").Length;
+                assert(f.Ok && f.Edges == 1 && left == 0, $"end of scan: the once-in-flight fold is filed, nothing left in pending ({f.Edges} filed, {left} left)");
+                using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var shaB = entries[@"D:\Music\Tool\b.mp3"].AudioStreamSha256!;
+                    assert(os.Dal.CountSegments(shaB, ok.ProducerVersion) == 2, "and its edge rows are in the store under b.mp3's sha");
+                }
+                Truedat.Store.ScanSink.StashEdges(@"C:\stage\orphan.mp3", ok);   // a fold whose entry never came (failed health gate, killed worker)
+                Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                assert(System.IO.Directory.GetFiles(pendingDir, "*.edges").Length == 0, "the end-of-scan flush drops an untied fold even when it has nothing to write");
             }
             finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
         }

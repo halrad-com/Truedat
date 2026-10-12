@@ -12,9 +12,6 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
-- **The edge backfill shows progress and stops cleanly.** One line per track in the scan's shape
-  (`[n/total pct · rate · ETA · s/trk · edges] Artist - Title`, failures with their reason), and Ctrl+C
-  finishes the track in hand, writes `work-result.json` and exits (a second Ctrl+C terminates at once).
 - **`--stats` no longer prints the store's `store open` line inside its summary** (`--audit` still shows it).
 - **Console lines name their file.** `FAILED:` lines in the library scan carry artist, title and file name;
   the ffmpeg transcode and downmix announcements and the under-decode retry name the source file. In a
@@ -22,10 +19,13 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - **`--stats` shows the store.** With a store in force: a `Store:` line (size, descriptions, bytes per
   track, edge coverage) beside Catalog/Sidecar/Backups, and a Recommended entry pointing at `--refresh`
   while edge rows are missing. Detail stays in `--store-info`.
-- **`--refresh` backfills edges.** With the store and edges on, `--refresh` follows its feature pass with
-  the edge backfill (one extractor run per track lacking an edge row, resumable, `--budget` caps the
-  session). `--work` is that backfill on its own. The import's "legacy FLAC sha: N unrecoverable" line now
-  says what it counts (FLAC entries with only the current hash; normal).
+- **`--refresh` fills in missing edges in the same scan.** With the store and edges on, a track the store
+  lists as lacking edge rows counts as stale, so the scan's own parallel workers, progress line, ETA and
+  saves handle it like any other re-analysis. The store now saves at the scan's five-minute checkpoint
+  as well as at the end, so closing the window mid-run keeps what was done. A track whose edges failed
+  is not retried until `--retry-errors`. `--work` remains as the old one-track-at-a-time drain. The
+  import's "legacy FLAC sha: N unrecoverable" line now says what it counts (FLAC entries with only the
+  current hash; normal).
 - **Config keys `store` and `edges`** make the store (and edge folding) the default for an instance:
   `truedat --config store true`. `--no-store` / `--no-edges` override for one run; a file-set default never
   makes a plain command refuse (read verbs use the catalog until a scan creates the store).

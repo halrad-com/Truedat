@@ -561,7 +561,7 @@ namespace Truedat
             Console.WriteLine("Everyday:");
             Console.WriteLine("  (zero-arg)            scan the library");
             Console.WriteLine("  --refresh             re-analyze entries missing the newest feature fields; with the store and");
-            Console.WriteLine("                        edges on, then backfill edge rows for tracks that lack them (--budget 2h caps it)");
+            Console.WriteLine("                        edges on, also re-analyze tracks the store lists as lacking edge rows");
             Console.WriteLine("                        (resumable; run in sessions until coverage completes)");
             Console.WriteLine("  --stats [path]        read-only catalog summary + recommended next commands");
             Console.WriteLine("  --verify --backfill   integrity check + fill missing fields (no re-analysis)");
@@ -774,7 +774,7 @@ namespace Truedat
             Console.WriteLine("                      output-x64.5 (binary frames). Writes nothing to mbxmoods.json; rewrites");
             Console.WriteLine("                      mbxedges.v1.json beside the catalog when edge rows were added.");
             Console.WriteLine("  --work [--producer edges] [--budget <time>]");
-            Console.WriteLine("                      The edge backfill on its own (what --refresh runs after its feature pass):");
+            Console.WriteLine("                      The old one-at-a-time edge drain (--refresh does this in the scan now):");
             Console.WriteLine("                      fold edges for every media with a description but no edge row and a copy");
             Console.WriteLine("                      on this machine, one at a time, until the queue is empty or the budget is");
             Console.WriteLine("                      spent; 3 attempts then parked. work-result.json beside the store.");
@@ -804,8 +804,8 @@ namespace Truedat
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
             Console.WriteLine("  --refresh           Re-analyze entries missing the newest feature fields; with the store and");
-            Console.WriteLine("                      edges on (config or flags), then backfill edge rows for every track that has");
-            Console.WriteLine("                      none, one extractor run each, resumable; --budget 90s|30m|2h caps the session.");
+            Console.WriteLine("                      edges on (config or flags), also tracks the store lists as lacking edge rows:");
+            Console.WriteLine("                      one scan, the scan's workers and progress, edges written as each track lands.");
             Console.WriteLine("                      (keyVotes, bpm peaks, chords, tuning, averageLoudness) during a");
             Console.WriteLine("                      normal scan. Resumable (saves every 25 tracks); everything else");
             Console.WriteLine("                      stays cached. Run in sessions until coverage is complete.");
@@ -2094,6 +2094,15 @@ namespace Truedat
             => f != null && f.DynamicRange.HasValue && f.LoudnessMomentary.HasValue
                && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue && f.SpectralContrastCoeffs != null));
 
+        /// <summary>Content the store lists as lacking edge rows at the current producer version (loaded before a --refresh scan when a
+        /// store and edges are in force; null otherwise). <see cref="HasCurrentEntry"/> treats those entries as stale.</summary>
+        internal static HashSet<string>? _edgesStale;
+
+        /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges.</summary>
+        static bool HasCurrentEntry(TrackEntry? e)
+            => HasCurrentFeatures(e?.Features)
+               && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!));
+
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
         /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
         /// for over-length paths only — never for identity, cache keys, or display.</summary>
@@ -2712,8 +2721,8 @@ namespace Truedat
             // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
             if (noStore) { storePath = null; _storeFromConfig = false; }
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
-            if (workBudgetText != null && !workMode && !_refreshFeatures)
-                Console.Error.WriteLine("  WARNING: --budget caps the edge backfill, which runs under --refresh or --work; it does nothing on this command");
+            if (workBudgetText != null && !workMode)
+                Console.Error.WriteLine("  WARNING: --budget caps --work only; it does nothing on this command (a --refresh scan stops with Ctrl+C and resumes from the cache)");
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || workMode || edgesExportMode;
             if (storeVerb || storePath != null)
             {
@@ -3691,7 +3700,7 @@ namespace Truedat
                     // the same way the pre-flight and the scan do (I1): a legacy entry with
                     // features but not the re-extract canary re-analyzes, so it is NOT
                     // "already analyzed" — Features != null would have hidden it.
-                    IsAnalyzed = e => HasCurrentFeatures(e?.Features),
+                    IsAnalyzed = e => HasCurrentEntry(e),
                     SniffMarkers = p =>
                     {
                         var m = SpeechTagSniffer.TryDetectAll(p);
@@ -3954,7 +3963,7 @@ namespace Truedat
                     var afMoodShaIndex = BuildHashIndex(afMoodsTracks, e => e.AudioStreamSha256);
 
                     if (afMoodsTracks.TryGetValue(afKey, out var afEx)
-                        && HasCurrentFeatures(afEx.Features))
+                        && HasCurrentEntry(afEx))
                     {
                         // Tier 1: path-mtime. No body read — staging not opened.
                         if (TruncateToSeconds(afCurrentLastMod) == TruncateToSeconds(afEx.LastModified))
@@ -4035,7 +4044,7 @@ namespace Truedat
                         bool afXLegacyHit = !afXHit && !string.IsNullOrEmpty(afXHashes.leg)
                             && afMoodShaIndex.TryGetValue(afXHashes.leg!, out xs);
                         if ((afXHit || afXLegacyHit)
-                            && HasCurrentFeatures(xs.Entry!.Features))
+                            && xs.Entry != null && HasCurrentEntry(xs.Entry))
                         {
                             var refreshedMd5 = afXHashes.md5;
                             var refreshedFp = ComputeFingerprintV1(afStagedPath, afFileSize, analyzeFilePath!, out _);
@@ -4529,6 +4538,7 @@ namespace Truedat
                     : Directory.GetCurrentDirectory();
                 var flLedgerPath = ResolveReviewLedgerPath(flLedgerDir);
                 _retryErrorsRun = retryErrors;
+                LoadEdgesStale(retryErrors);   // --refresh: tracks lacking edges are stale to the scan's own gate (no second pipeline)
                 _runLedger = ReviewLedger.Load(flLedgerPath, out var flLedgerErr);
                 if (flLedgerErr != null)
                 {
@@ -4694,7 +4704,7 @@ namespace Truedat
                         {
                             // Tier 1: path-mtime hit — no body read, staging not opened.
                             if (flMoodsTracks.TryGetValue(fullPath, out var fEx)
-                                && HasCurrentFeatures(fEx.Features))
+                                && HasCurrentEntry(fEx))
                             {
                                 if (TruncateToSeconds(currentLastMod) == TruncateToSeconds(fEx.LastModified))
                                 {
@@ -4788,7 +4798,7 @@ namespace Truedat
                                 bool flXLegacyHit = !flXHit && !string.IsNullOrEmpty(flXHashes.leg)
                                     && flMoodShaIndex.TryGetValue(flXHashes.leg!, out xs);
                                 if ((flXHit || flXLegacyHit)
-                                    && HasCurrentFeatures(xs.Entry!.Features))
+                                    && xs.Entry != null && HasCurrentEntry(xs.Entry))
                                 {
                                     var refreshedMd5 = flXHashes.md5;
                                     var refreshedFp = ComputeFingerprintV1(flStagedPath, flFileSize, filePath, out _);
@@ -4941,7 +4951,7 @@ namespace Truedat
                     try
                     {
                         flHint = flMoodsTracks.TryGetValue(Path.GetFullPath(filePath), out var flHintEntry)
-                                 && HasCurrentFeatures(flHintEntry.Features);
+                                 && HasCurrentEntry(flHintEntry);
                     }
                     catch { flHint = false; }
                     if (flHint) flLikelyCached.Add(filePath);
@@ -4966,7 +4976,6 @@ namespace Truedat
                     SaveResults(analyzeFileMoods!, flMoodsTracks);
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                     FlushStoreSink(flMoodsTracks.Keys);   // S2 C3
-                    RunEdgeDrainAfterRefresh(flEssentiaExe, workBudgetText, chunkTotal, auditLog);   // S2 C5: --refresh also backfills edges (folder / file-list)
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
@@ -5281,6 +5290,7 @@ namespace Truedat
             // by diffing the ledger against the CSV it is meant to replace, which is the
             // whole reason that diff runs before anything is cut.
             _retryErrorsRun = retryErrors;
+            LoadEdgesStale(retryErrors);   // --refresh: tracks lacking edges are stale to the scan's own gate (no second pipeline); before the ETA pre-flight, which counts them as work
             var runLedgerPath = ResolveReviewLedgerPath(outputDir);
             if (chunkHostSuffix != null)
             {
@@ -5387,7 +5397,7 @@ namespace Truedat
                     // entries (see HasCurrentFeatures) DO re-analyze, so they stay in the pool.
                     // Still an upper bound — the sha/head cache tiers catch more hits at scan
                     // time, which needs IO this pre-flight avoids (hence "up to" in the print).
-                    bool current = allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentFeatures(etaEntry.Features);
+                    bool current = allTracks.TryGetValue(tt.Location, out var etaEntry) && HasCurrentEntry(etaEntry);
                     if (!IsAnalysisCandidate(current, StructuralSkipReason(tt.Location), OverLengthSkipReason(tt.TotalTimeMs / 1000, _maxEssentiaDurationSecs) ?? ShortFileSkipReason(tt.TotalTimeMs / 1000, _enableShortFiles, ShortFileMaxSecs)))
                         continue;
                     etaNew++; etaNewBytes += tt.SizeBytes; etaNewAudioMs += tt.TotalTimeMs;
@@ -5598,7 +5608,7 @@ namespace Truedat
                     var trackClass = "failed";
                     // "Known" for ETA purposes = present AND feature-complete; a
                     // refresh-stale entry analyzes, so it lives in the new-work pool.
-                    bool wasKnown = allTracks.TryGetValue(t.Location, out var wkEntry) && HasCurrentFeatures(wkEntry.Features);
+                    bool wasKnown = allTracks.TryGetValue(t.Location, out var wkEntry) && HasCurrentEntry(wkEntry);
 
                     // Long-path fallback: over-MAX_PATH paths fail normal Win32 IO
                     // ("file not found" even though the file exists). Managed IO on
@@ -5780,7 +5790,7 @@ namespace Truedat
                                     // Re-extract when the canary says the entry is stale (pre-LRA /
                                     // pre-extended builds; with --refresh-features also entries
                                     // missing the 2026-07-22 tonal/rhythm wave).
-                                    if (!HasCurrentFeatures(existing.Features))
+                                    if (!HasCurrentEntry(existing))
                                     {
                                         if (_audit) Console.WriteLine($"  DEBUG cache: re-extracting (DR / extended missing)");
                                     }
@@ -5838,7 +5848,7 @@ namespace Truedat
                                     FingerprintV1? msQuickFp = null;
                                     if (_quickCache
                                         && existing.FingerprintV1 != null
-                                        && HasCurrentFeatures(existing.Features))
+                                        && HasCurrentEntry(existing))
                                     {
                                         if (msSourceSize == 0)
                                             try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
@@ -5868,7 +5878,7 @@ namespace Truedat
                                     // identity fields the tag edit invalidated. Body reads
                                     // go through the staged copy (FIX 4).
                                     if (!string.IsNullOrEmpty(existing.AudioStreamSha256)
-                                        && HasCurrentFeatures(existing.Features))
+                                        && HasCurrentEntry(existing))
                                     {
                                         try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
                                         if (msSourceSize > 0)
@@ -5973,7 +5983,7 @@ namespace Truedat
                                 if (crossHit || crossLegacyHit)
                                 {
                                     var xsf = xs.Entry!.Features;
-                                    if (!HasCurrentFeatures(xsf))
+                                    if (!HasCurrentEntry(xs.Entry))
                                     {
                                         if (_audit) Console.WriteLine($"  DEBUG cache-sha: re-extracting (DR / extended missing)");
                                     }
@@ -6198,6 +6208,9 @@ namespace Truedat
                                     {
                                         var saveSw = Stopwatch.StartNew();
                                         SaveResults(moodsPath, allTracks);
+                                        // The store rides the same checkpoint: without it, every description and edge row of a
+                                        // multi-day --refresh sat in memory until the end, and a closed window cost them all.
+                                        FlushStoreSink(allTracks.Keys, final: false);
                                         saveSw.Stop();
                                         Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
                                         Interlocked.Increment(ref _saveCount);
@@ -6242,7 +6255,7 @@ namespace Truedat
                 var msLikelyWork = new List<ITunesTrack>();
                 foreach (var t in tracks)
                 {
-                    if (allTracks.TryGetValue(t.Location, out var msHintEntry) && HasCurrentFeatures(msHintEntry.Features))
+                    if (allTracks.TryGetValue(t.Location, out var msHintEntry) && HasCurrentEntry(msHintEntry))
                         msLikelyCached.Add(t);
                     else
                         msLikelyWork.Add(t);
@@ -6269,7 +6282,6 @@ namespace Truedat
             SaveResults(moodsPath, allTracks);
             finalSaveSw.Stop();
             FlushStoreSink(allTracks.Keys);     // S2 C3: the store is a second sink, written after the catalog, never instead of it
-            if (!wasCancelled) RunEdgeDrainAfterRefresh(essentiaExe, workBudgetText, chunkTotal, auditLog, cts.Token);   // S2 C5: --refresh also backfills edges; the scan's Ctrl+C stops it cleanly
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -10355,16 +10367,23 @@ namespace Truedat
             finally { global::Truedat.Store.ScanSink.SuppressMainStash = false; }
         }
 
-        /// <summary>--refresh's second half: once the feature pass has saved and flushed, backfill edges for the tracks the catalog
-        /// already had (a cache hit never folds). Only when a store and edges are in force; under --chunk the shards would each
-        /// drain, so it is skipped with a note (single writer by design).</summary>
-        static void RunEdgeDrainAfterRefresh(string essentiaExe, string? budgetText, int chunkTotal, bool audit, CancellationToken ct = default)
+        /// <summary>--refresh with a store and edges in force: read which tracks the store lists as lacking edge rows at the current
+        /// producer version, so the scan's own cache gate (<see cref="HasCurrentEntry"/>) treats them as stale and its workers
+        /// re-analyse them; the store hand-off then writes their edges (operator 2026-10-12: the backfill is the scan — same workers,
+        /// same progress, same saves — not a second pipeline). A recorded failed fold is left out unless --retry-errors.</summary>
+        static void LoadEdgesStale(bool retryErrors)
         {
-            if (!_refreshFeatures || _storePath == null || !_stageOpts.Edges) return;
-            if (chunkTotal > 0) { Console.WriteLine("  edges backfill: skipped under --chunk (one drain per store; run --refresh without --chunk, or --work, on one machine)"); return; }
-            Console.WriteLine();
-            Console.WriteLine("=== --refresh: edge backfill ===");
-            RunEdgeDrain(essentiaExe, budgetText, global::Truedat.Edges.EdgeStore.ProducerKey, audit, ct);
+            _edgesStale = null;
+            if (!_refreshFeatures || _storePath == null || !_stageOpts.Edges || !File.Exists(_storePath)) return;
+            try
+            {
+                using (global::Truedat.Store.StoreLog.Quiet())
+                using (var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    _edgesStale = os.Dal.ContentKeysLackingEdges(global::Truedat.Edges.EdgeStore.ProducerKey, _edgeSettings.ProducerVersion, retryErrors);
+                Console.WriteLine($"  Edges:      {_edgesStale.Count:N0} tracks in the store lack edge rows at {_edgeSettings.ProducerVersion}; --refresh re-analyses them in this scan" +
+                                  (retryErrors ? " (failed folds included: --retry-errors)" : ""));
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"  WARNING: edge coverage not read from the store ({ex.Message}); this --refresh re-analyses no track for edges"); }
         }
 
         /// <summary>--budget: 90s, 30m, 2h, 1h30m, or a bare number of seconds. Null when it does not parse.</summary>
@@ -10461,11 +10480,19 @@ namespace Truedat
             return null;
         }
 
-        static void FlushStoreSink(IEnumerable<string> catalogKeys)
+        /// <summary><paramref name="final"/> false = the periodic checkpoint beside the scan's catalog save (workers still running): files what is
+        /// tied, one short line, no companion rewrite (that reads the whole store; it runs once, at the end).</summary>
+        static void FlushStoreSink(IEnumerable<string> catalogKeys, bool final = true)
         {
             if (_storePath == null) return;
             // The whole catalog's keys are the root hint: a root is never inferred from the analysed subset alone.
-            var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys);
+            var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys, final);
+            if (!final)
+            {
+                if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} edge rows" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
+                else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
+                return;
+            }
             if (r.Ok)
             {
                 Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
@@ -12224,7 +12251,7 @@ namespace Truedat
                     try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath); } catch { /* the store block is best-effort */ }
                 }
                 if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
-                    rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh --budget 2h  (repeat until --store-info says missing 0)");
+                    rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
             }
 
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
@@ -18517,6 +18544,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!HasCurrentFeatures(preHarmonic), "gate: --refresh-features marks a pre-harmonic entry STALE");
                 Assert(!HasCurrentFeatures(batch2Missing), "gate: --refresh-features marks a batch-2-missing entry (no spectralContrastCoeffs) STALE");
                 Assert(HasCurrentFeatures(complete), "gate: --refresh-features leaves a batch-2-complete entry current (no re-analysis loop)");
+                // Edges ride the same gate (operator 2026-10-12: the backfill is the scan, not a second pipeline): under --refresh a
+                // track whose content the store lists as lacking edge rows is stale, so the scan's own workers re-analyse it and the
+                // store hand-off writes its edges. Never without --refresh; never for a sha the store does not list.
+                var savedStale = _edgesStale;
+                const string StaleSha = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+                _edgesStale = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { StaleSha };
+                var lacking = new TrackEntry { Features = complete, AudioStreamSha256 = StaleSha };
+                var holding = new TrackEntry { Features = complete, AudioStreamSha256 = "6b" + StaleSha.Substring(2) };
+                var noSha = new TrackEntry { Features = complete };
+                _refreshFeatures = true;
+                Assert(!HasCurrentEntry(lacking), "gate: --refresh marks an entry STALE when the store lists its content as lacking edge rows");
+                Assert(HasCurrentEntry(holding), "gate: --refresh leaves an entry current when its content is not on the store's lacking-edges list");
+                Assert(HasCurrentEntry(noSha), "gate: an entry with no sha is never edge-stale (nothing to key the store by; no re-analysis loop)");
+                _refreshFeatures = false;
+                Assert(HasCurrentEntry(lacking), "gate: a normal scan never re-analyses for edges");
+                _refreshFeatures = true;
+                Assert(!HasCurrentEntry(new TrackEntry { Features = batch2Missing, AudioStreamSha256 = "6b" + StaleSha.Substring(2) }), "gate: HasCurrentEntry still applies the feature-wave markers");
+                _edgesStale = savedStale;
                 _refreshFeatures = savedRf;
             }
 

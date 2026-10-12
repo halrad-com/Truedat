@@ -139,10 +139,16 @@ namespace Truedat.Store
         /// stashed main JSON to this catalog entry so the flush can file it under the entry's content key.</summary>
         internal static void Record(string path, TrackEntry entry, string? analysedPath = null)
         {
-            _entries[path] = entry;
-            if (analysedPath != null && _stashed.TryRemove(analysedPath, out var pending)) _artifacts[path] = pending;
-            if (analysedPath != null && _stashedEdges.TryRemove(analysedPath, out var edges)) _edges[path] = edges;
+            // Under the tie lock: a checkpoint flush running beside the workers takes an entry together with its fold, never one without the other.
+            lock (_tieLock)
+            {
+                _entries[path] = entry;
+                if (analysedPath != null && _stashed.TryRemove(analysedPath, out var pending)) _artifacts[path] = pending;
+                if (analysedPath != null && _stashedEdges.TryRemove(analysedPath, out var edges)) _edges[path] = edges;
+            }
         }
+
+        static readonly object _tieLock = new object();
 
         internal static void RecordFailure(string path, string components, string error, double durationSec)
             => _failures.Enqueue(new ScanFailure { Path = path, Components = components, Error = error, DurationSec = durationSec });
@@ -151,22 +157,25 @@ namespace Truedat.Store
 
         /// <summary>Writes everything recorded since the last flush, then clears it. The catalog already holds the ENTRIES, so a
         /// failed store write loses no description — the next import recovers them; the edge folds are not in the catalog, so a
-        /// failed flush drops them (counted and logged) and --work re-folds them later, one extractor run each. Never throws.</summary>
-        internal static ScanSinkReport Flush(string? storePath, string extractorBuild, IEnumerable<string>? rootHints = null)
+        /// failed flush drops them (counted and logged) and the next --refresh re-analyses those tracks. Never throws.
+        /// <paramref name="final"/> false is the scan's periodic checkpoint (beside its catalog save, workers still running): it
+        /// writes what is tied and leaves the untied stashes alone, because mid-scan those belong to tracks still in flight.
+        /// The end-of-scan flush (final) also drops untied stashes and sweeps stale pending files — after the write, so a scan
+        /// longer than the stale age never sweeps its own folds before they are filed.</summary>
+        internal static ScanSinkReport Flush(string? storePath, string extractorBuild, IEnumerable<string>? rootHints = null, bool final = true)
         {
             var report = new ScanSinkReport { StorePath = storePath };
-            var entries = new Dictionary<string, TrackEntry>(_entries, PathComparer.Instance);
+            var entries = new Dictionary<string, TrackEntry>(PathComparer.Instance);
             var failures = new List<ScanFailure>();
-            while (_failures.TryDequeue(out var f)) failures.Add(f);
             var artifacts = new Dictionary<string, string>(PathComparer.Instance);
             var edges = new Dictionary<string, string>(PathComparer.Instance);
-            foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
-            // Review #3: nothing will tie a stash after the entries are flushed; and a killed earlier scan may have left
-            // pending files behind — both are swept here, so artifacts\pending cannot grow without bound.
-            int untied = DropUntied();
-            int stale = StoreDirectory != null ? ArtifactStore.SweepPending(StoreDirectory, TimeSpan.FromDays(1)) : 0;
-            if (untied > 0 || stale > 0) StoreLog.Info($"artifact stashes dropped: {untied} untied (never recorded), {stale} stale (older than a day)");
-            if (entries.Count == 0 && failures.Count == 0) { report.Ok = true; return report; }
+            lock (_tieLock)
+            {
+                foreach (var kv in _entries) entries[kv.Key] = kv.Value;
+                foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
+            }
+            while (_failures.TryDequeue(out var f)) failures.Add(f);
+            if (entries.Count == 0 && failures.Count == 0) { if (final) SweepLeftovers(); report.Ok = true; return report; }
             try
             {
                 var resultPath = storePath == null ? null : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(storePath)) ?? ".", ResultFileName);
@@ -185,9 +194,19 @@ namespace Truedat.Store
                 foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
                 foreach (var p in edges.Values) TryDelete(p);
                 StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them" +
-                               (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — --work re-folds them" : "") + ")");
+                               (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — the next --refresh re-analyses those tracks" : "") + ")");
             }
+            if (final) SweepLeftovers();
             return report;
+        }
+
+        /// <summary>End of scan only (review #3): nothing will tie a stash once the scan is over, and a killed earlier scan may have
+        /// left pending files behind — both are swept, so artifacts\pending cannot grow without bound.</summary>
+        static void SweepLeftovers()
+        {
+            int untied = DropUntied();
+            int stale = StoreDirectory != null ? ArtifactStore.SweepPending(StoreDirectory, TimeSpan.FromDays(1)) : 0;
+            if (untied > 0 || stale > 0) StoreLog.Info($"artifact stashes dropped: {untied} untied (never recorded), {stale} stale (older than a day)");
         }
     }
 }

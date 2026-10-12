@@ -90,6 +90,15 @@ for any decodable track; `hpcp12` is deliberately **not** a marker (null on sile
 re-analyze that track every pass). A normal scan never re-analyzes for these — only
 `--refresh-features` does — which is why one refresh pass populates the whole capture-once set.
 
+The cache tiers ask **`HasCurrentEntry`** (per entry), not `HasCurrentFeatures` (per feature set):
+under `--refresh` with a store and edges in force, an entry whose `audioStreamSha256` is on the store's
+lacking-edges list (`StoreDal.ContentKeysLackingEdges`, loaded once per scan by `LoadEdgesStale`) is
+stale too, so edge backfill is the scan's own cache-miss path — same workers, progress, ETA and saves —
+never a second pipeline (operator, 2026-10-12, after a serial drain showed 8 days at 15% CPU). A
+recorded failed fold is off the list unless `--retry-errors` (no re-analysis loop), and an entry with no
+sha is never edge-stale. The store flushes at the periodic catalog save (`final: false`, which leaves
+in-flight folds alone) as well as at the end.
+
 When adding a new always-extracted field, decide whether to add it to the canary. Avoid canary conditions that depend on optional external tools — those caused infinite re-extraction loops on installs without the tool, which is why the old `audioMd5`-presence canary was removed when the binary left the default codepath.
 
 ## Scan health (pass/fail, 2026-07-30)
