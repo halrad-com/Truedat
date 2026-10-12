@@ -2722,6 +2722,13 @@ namespace Truedat
                     Console.WriteLine($"  store: config says store = true but none exists yet at {storePath}; answering from the catalog (a scan creates it)");
                     storePath = null;
                 }
+                // A per-file mode without --moods records no entry, so there is nothing a store could receive — and the catalog
+                // it was resolved against is a GUESS (the cwd fallback), which is where a stash directory would otherwise land.
+                else if (_storeFromConfig && !storeVerb && (analyzeFileMode || fileListMode) && analyzeFileMoods == null)
+                {
+                    Console.WriteLine("  store: config says store = true but this mode has no --moods catalog target, so nothing would be written; store skipped this run");
+                    storePath = null;
+                }
                 else
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
                 if (storePath != null)
@@ -4189,6 +4196,7 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
+                if (_storePath != null) global::Truedat.Store.ScanSink.DropUntied();   // S2: an analysed file that recorded no entry (no --moods) leaves no stash behind
                 Environment.ExitCode = 0;
                 }
                 finally { afStagedSrc?.Dispose(); KeepAwakeRelease(); }
