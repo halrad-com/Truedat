@@ -83,6 +83,127 @@ namespace Truedat.Store
             }
         }
 
+        /// <summary>S2 C3 — the in-memory entry: the same resolution, upsert, drift and run rules as a catalog import, over
+        /// entries the caller already holds (the scan's analysed set), so a scan never re-reads the catalog it just wrote.
+        /// <paramref name="producerKey"/>/<paramref name="producerVersion"/> name the observer (essentia@&lt;build&gt; for a scan,
+        /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
+        internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
+            string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null)
+        {
+            var sw = Stopwatch.StartNew();
+            var r = new ImportReport { Entries = entries.Count, Catalog = source };
+            role = (role ?? "primary").ToLowerInvariant();
+            if (role != "primary" && role != "mirror" && role != "endpoint")
+                throw new StoreException($"root role must be primary, mirror or endpoint (got '{role}').");
+            var now = DateTime.UtcNow.ToString("o");
+            using var os = OpenStore.Open(storePath, create: true, VersionInfo.Display, now);
+            var dal = os.Dal; var db = os.Db;
+            string writerMachine;
+            using (var tx = db.BeginTransaction()) { writerMachine = os.Machine.ForWrites(dal, machineAdopt, now); tx.Complete(); }
+            r.StoreBytesBefore = new FileInfo(os.Path).Length;
+
+            // Roots. Given -> that one. Else the store's EXISTING roots cover what they cover, and only paths under none
+            // of them get a root inferred — from the root hints (the whole catalog the scan is saving) when there are
+            // any, never from the analysed subset alone: two files under D:\Music\Tool must not mint D:\Music\Tool.
+            var allPaths = new List<string>(entries.Keys);
+            if (failures != null) foreach (var f in failures) allPaths.Add(f.Path);
+            var rootIds = new List<(string Path, long Id)>();
+            var roots = new List<string>();
+            using (var tx = db.BeginTransaction())
+            {
+                if (libraryRoot != null)
+                {
+                    roots.Add(libraryRoot);
+                    rootIds.Add((libraryRoot, dal.EnsureRoot(writerMachine, libraryRoot, role, now)));
+                }
+                else
+                {
+                    foreach (var ex in dal.ListRoots()) rootIds.Add((ex.Path, ex.Id));
+                    var uncovered = allPaths.Where(p => RootFor(rootIds, p) == null).ToList();
+                    if (uncovered.Count > 0)
+                    {
+                        var basis = new List<string>(uncovered);
+                        if (rootHints != null) basis.AddRange(rootHints.Where(p => RootFor(rootIds, p) == null));
+                        foreach (var root in CanonicalPath.InferRoots(basis))
+                        {
+                            roots.Add(root);
+                            rootIds.Add((root, dal.EnsureRoot(writerMachine, root, role, now)));
+                            StoreLog.Info($"root registered: {root} ({role}) [inferred from {basis.Count} paths]");
+                        }
+                    }
+                    if (rootIds.Count == 0 && allPaths.Count > 0) throw new StoreException("No library root could be inferred from the paths; pass --library-root.");
+                }
+                tx.Complete();
+            }
+            r.Roots.AddRange(rootIds.Select(x => x.Path));
+            bool mirror = role == "mirror";
+            bool runPerEntry = producerKey != "import";
+
+            // A non-import producer (the scan) records one run per entry; an import records one for the batch.
+            long sharedRun = 0;
+            if (!runPerEntry)
+                using (var tx = db.BeginTransaction())
+                {
+                    sharedRun = dal.InsertRun(producerKey, producerVersion, null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", null, null, "in progress", source);
+                    tx.Complete();
+                }
+            try
+            {
+                ImportEntriesCore(dal, db, 5000, 0, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r);
+                if (failures != null && failures.Count > 0)
+                    using (var tx = db.BeginTransaction())
+                    {
+                        foreach (var f in failures)
+                        {
+                            var e = EntityForPath(dal, rootIds, mirror, f.Path, source, now, r);
+                            if (e == null) continue;
+                            if (dal.RunExistsContent(producerKey, e, "failed", source, f.Error, f.Components)) continue;
+                            dal.InsertRun(producerKey, producerVersion, e, null, null, null, now, (long)(f.DurationSec * 1000), Environment.MachineName, VersionInfo.Display, "failed", f.Components, null, f.Error, source);
+                            r.ErrorsRows++;
+                        }
+                        tx.Complete();
+                    }
+                sw.Stop();
+                if (!runPerEntry)
+                    using (var tx = db.BeginTransaction()) { dal.UpdateRunOutcome(sharedRun, "ok", sw.ElapsedMilliseconds, null); tx.Complete(); }
+            }
+            catch (Exception ex)
+            {
+                if (!runPerEntry) try { using var tx = db.BeginTransaction(); dal.UpdateRunOutcome(sharedRun, "failed", sw.ElapsedMilliseconds, ex.Message); tx.Complete(); } catch { }
+                StoreLog.Error($"{producerKey} write failed after {r.Locations} entries: {ex.Message}");
+                throw;
+            }
+            r.ElapsedMs = sw.ElapsedMilliseconds;
+            dal.ResetAll();
+            try { db.Exec("PRAGMA wal_checkpoint(TRUNCATE);"); }
+            catch (SqliteException ex) { StoreLog.Warn($"WAL checkpoint did not complete ({ex.Message}); the -wal file will fold on the next open"); }
+            r.StoreBytesAfter = new FileInfo(os.Path).Length;
+            if (resultPath != null) { r.ResultPath = resultPath; WriteResult(r, os.Path, role, producerKey + "@" + producerVersion); }
+            StoreLog.Info($"{producerKey}@{producerVersion} wrote {r.Entries} entries: {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced, {r.ErrorsRows} failures, {r.ElapsedMs} ms");
+            return r;
+        }
+
+        /// <summary>The batched entry loop shared by the file import and the in-memory entry.</summary>
+        static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
+            IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r)
+        {
+            var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            int processed = 0;
+            for (int b = 0; b < keys.Count; b += Math.Max(1, batchSize))
+            {
+                using var tx = db.BeginTransaction();
+                for (int i = b; i < Math.Min(keys.Count, b + Math.Max(1, batchSize)); i++)
+                {
+                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r);
+                    processed++;
+                    if (failAfterEntries > 0 && processed == failAfterEntries)
+                        throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
+                }
+                tx.Complete();
+                StoreLog.Debug($"batch committed: {processed}/{keys.Count}");
+            }
+        }
+
         internal static ImportReport Execute(ImportOptions o)
         {
             var sw = Stopwatch.StartNew();
@@ -138,23 +259,9 @@ namespace Truedat.Store
 
             try
             {
-                // 4. Entries, in batches.
+                // 4. Entries, in batches (the same core the scan's in-memory entry uses).
                 bool mirror = role == "mirror";
-                var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
-                int processed = 0;
-                for (int b = 0; b < keys.Count; b += Math.Max(1, o.BatchSize))
-                {
-                    using var tx = db.BeginTransaction();
-                    for (int i = b; i < Math.Min(keys.Count, b + Math.Max(1, o.BatchSize)); i++)
-                    {
-                        ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], importRun, source, now, r);
-                        processed++;
-                        if (o.FailAfterEntries > 0 && processed == o.FailAfterEntries)
-                            throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
-                    }
-                    tx.Complete();
-                    StoreLog.Debug($"batch committed: {processed}/{keys.Count}");
-                }
+                ImportEntriesCore(dal, db, o.BatchSize, o.FailAfterEntries, rootIds, mirror, tracks, importRun, "import", "1", runPerEntry: false, source, now, r);
 
                 // 5. Ledgers beside the catalog.
                 var dir = Path.GetDirectoryName(catalog) ?? ".";
@@ -191,12 +298,13 @@ namespace Truedat.Store
             var wal = os.Path + "-wal";
             if (File.Exists(wal)) r.StoreBytesAfter += new FileInfo(wal).Length;
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
-            WriteResult(r, o);
+            WriteResult(r, os.Path, o.RootRole, "import@1");
             StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
             return r;
         }
 
-        static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long importRun, string source, string now, ImportReport r)
+        static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
+            string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r)
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
@@ -252,7 +360,13 @@ namespace Truedat.Store
 
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", importRun, "import", "1", entry, key, now, r);
+            // A scan records one run per analysed entry (the observation: who measured, how long, on which copy);
+            // an import shares one run for the whole catalog.
+            long runId = runPerEntry
+                ? dal.InsertRun(producerKey, producerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
+                    entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
+                : sharedRun;
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r);
         }
 
         /// <summary>S2 C2 — observation integrity. The media's description is written once; afterwards an arriving value that
@@ -308,8 +422,10 @@ namespace Truedat.Store
             }
 
             var existingCopy = dal.ReadCopyValues(locationId);
-            if (existingCopy == null || !TrackEntryMapper.CopyEqualExact(existingCopy, row))
+            var copyDiff = existingCopy == null ? "no copy row yet" : TrackEntryMapper.FirstCopyDifference(existingCopy, row);
+            if (copyDiff != null)
             {
+                StoreLog.Debug($"copy facts written for {displayPath}: {copyDiff}");
                 dal.UpsertCopy(locationId, runId, row, now);
                 copyWritten = true;
             }
@@ -439,13 +555,14 @@ namespace Truedat.Store
             return (BitConverter.ToString(sha.Hash!).Replace("-", "").ToLowerInvariant(), bytes);
         }
 
-        static void WriteResult(ImportReport r, ImportOptions o)
+        static void WriteResult(ImportReport r, string storePath, string rootRole, string producer)
         {
             var j = new JsonObject
             {
                 ["kind"] = "store-import-result", ["schemaVersion"] = 1, ["generatedAt"] = DateTime.UtcNow.ToString("o"),
-                ["store"] = o.StorePath, ["catalog"] = r.Catalog, ["catalogSha256"] = r.CatalogSha256, ["catalogBytes"] = r.CatalogBytes,
-                ["roots"] = new JsonArray(r.Roots.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()), ["rootRole"] = o.RootRole,
+                ["store"] = storePath, ["producer"] = producer.Split('@')[0], ["producerVersion"] = producer.Contains("@") ? producer.Substring(producer.IndexOf('@') + 1) : "",
+                ["catalog"] = r.Catalog, ["catalogSha256"] = r.CatalogSha256, ["catalogBytes"] = r.CatalogBytes,
+                ["roots"] = new JsonArray(r.Roots.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()), ["rootRole"] = rootRole,
                 ["entries"] = r.Entries, ["unrooted"] = r.Unrooted,
                 ["entitiesCreated"] = r.EntitiesCreated, ["matchedBySha"] = r.MatchedHash, ["matchedByPath"] = r.MatchedPath, ["createdWithoutSha"] = r.CreatedNoSha,
                 ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew, ["conflicts"] = r.Conflicts,

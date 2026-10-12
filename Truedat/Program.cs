@@ -4042,6 +4042,7 @@ namespace Truedat
                     afMoodsTracks ??= new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
+                    if (_storePath != null) { global::Truedat.Store.ScanSink.Record(afKey, trackEntry); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                     // --analyze-file never consults the ledger, but its success still makes a
                     // review record for this file stale — clear it beside the catalog it wrote.
@@ -4768,6 +4769,7 @@ namespace Truedat
                         {
                             var flKey = Path.GetFullPath(filePath);
                             flMoodsTracks[flKey] = trackEntry;
+                            if (_storePath != null) global::Truedat.Store.ScanSink.Record(flKey, trackEntry);   // S2 C3
                             ClearReviewRecord(filePath);
                         }
 
@@ -4823,6 +4825,7 @@ namespace Truedat
                 {
                     SaveResults(analyzeFileMoods!, flMoodsTracks);
                     Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
+                    FlushStoreSink(flMoodsTracks.Keys);   // S2 C3
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
@@ -5011,6 +5014,7 @@ namespace Truedat
             }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
             if (essentiaExe != null) ReportExtractorBuild(essentiaExe);
+            if (essentiaExe != null) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);   // S2 C3: the run rows' producer version
             Console.WriteLine();
 
             if (essentiaExe == null)
@@ -6006,6 +6010,7 @@ namespace Truedat
                             AudioStreamSha256Source = audioStreamSha256Source,
                             FingerprintV1 = fingerprintV1,
                         };
+                        if (_storePath != null) global::Truedat.Store.ScanSink.Record(t.Location, allTracks[t.Location]);   // S2 C3: analysed this run
                         // Duration throughput: numerator is what was ACTUALLY decoded
                         // (Essentia's reported length), falling back to the claimed
                         // duration when the extractor didn't emit it.
@@ -6107,6 +6112,7 @@ namespace Truedat
             var finalSaveSw = Stopwatch.StartNew();
             SaveResults(moodsPath, allTracks);
             finalSaveSw.Stop();
+            FlushStoreSink(allTracks.Keys);     // S2 C3: the store is a second sink, written after the catalog, never instead of it
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -10109,6 +10115,39 @@ namespace Truedat
 
         /// <summary>Hash the resolved extractor, name its build, and warn if it isn't the
         /// current .4. Best-effort — never blocks a scan.</summary>
+        /// <summary>The extractor build as a short producer version for the store's run rows: the known build name
+        /// (<c>output-x64.4</c>) when the MD5 is in the table, else <c>md5:&lt;12 hex&gt;</c>, else <c>unknown</c>. S2 C3.</summary>
+        internal static string ExtractorBuildId(string exePath)
+        {
+            try
+            {
+                string md5;
+                using (var m = System.Security.Cryptography.MD5.Create())
+                using (var fs = File.OpenRead(exePath))
+                    md5 = BitConverter.ToString(m.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+                if (KnownExtractors.TryGetValue(md5, out var desc))
+                {
+                    int dash = desc.IndexOf(" —", StringComparison.Ordinal);
+                    return dash > 0 ? desc.Substring(0, dash) : desc;
+                }
+                return "md5:" + md5.Substring(0, Math.Min(12, md5.Length));
+            }
+            catch { return "unknown"; }
+        }
+
+        /// <summary>S2 C3: after the catalog is saved, write what this run analysed into the store (when one is in
+        /// force). A store failure is reported and counted, never thrown — it cannot cost a catalog entry.</summary>
+        static void FlushStoreSink(IEnumerable<string> catalogKeys)
+        {
+            if (_storePath == null) return;
+            // The whole catalog's keys are the root hint: a root is never inferred from the analysed subset alone.
+            var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys);
+            if (r.Ok)
+                Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
+            else
+                Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
+        }
+
         static void ReportExtractorBuild(string exePath)
         {
             try
@@ -20349,6 +20388,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             string error, double sizeMb, double durationSecs, string failedComponents, object lockObj)
         {
             RecordReviewFailure(filePath, error, sizeMb, durationSecs, failedComponents, "scan");
+            if (_storePath != null) global::Truedat.Store.ScanSink.RecordFailure(filePath, failedComponents, error, durationSecs);   // S2 C3: every mode's failures, one hook
             lock (lockObj)
             {
                 for (int attempt = 0; attempt < 5; attempt++)

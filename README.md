@@ -92,7 +92,11 @@ field. An exported copy of duplicate audio therefore carries its media's one des
 `--store-roundtrip` reports those copies separately from unexplained differences. Re-importing writes
 only what changed: an equal entry touches nothing, a value that differs beyond noise under the same
 producer is recorded as a `value-drift` conflict and the stored description is kept, and copy facts take
-the newer value. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
+the newer value. **A scan run with `--store` writes the store too**, as a second sink after the catalog is
+saved exactly as today: the entries it analysed this run (never cache hits) go in through the same
+rules as an import, as producer `essentia@<build>` with one run row per entry carrying the analysis
+time, and every failure becomes a failed run with its components. A store problem is reported and
+counted; it never costs a catalog entry. `store-result.json` beside the store records each write. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
 exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in
@@ -122,6 +126,10 @@ truedat.exe --store-info --store "D:\truedat\truedat.db"
 
 REM Repack a store (a store created before 16 KB pages were the default shrinks ~29%; add --page-size N to re-tune)
 truedat.exe --store-vacuum --store "D:\truedat\truedat.db"
+
+REM A scan with --store (bare = the default location) also writes what it analysed into the store, after the catalog
+truedat.exe --store
+truedat.exe --file-list new.txt --moods "D:\MusicBee\Library\mbxmoods.json" --store
 
 REM The read-only verbs answer from the store instead of the JSON
 truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"

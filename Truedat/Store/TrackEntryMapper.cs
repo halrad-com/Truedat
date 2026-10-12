@@ -234,12 +234,17 @@ namespace Truedat.Store
 
         /// <summary>True when a stored copy row (as read by <see cref="ReadCopyValues"/>) equals the copy columns of a
         /// ToRow() row exactly — copy facts are file facts, so there is no noise to allow for.</summary>
-        internal static bool CopyEqualExact(object?[] storedCopy, object?[] row)
+        internal static bool CopyEqualExact(object?[] storedCopy, object?[] row) => FirstCopyDifference(storedCopy, row) == null;
+
+        /// <summary>Name of the first copy column that differs, with both values, or null when all agree (for the log).</summary>
+        internal static string? FirstCopyDifference(object?[] storedCopy, object?[] row)
         {
             for (int k = 0; k < CopyIdx.Length; k++)
-                if (!ValueEqual(Cols[CopyIdx[k]].Kind, storedCopy[k], row[CopyIdx[k]], exact: true)) return false;
-            return true;
+                if (!ValueEqual(Cols[CopyIdx[k]].Kind, storedCopy[k], row[CopyIdx[k]], exact: true))
+                    return $"{Cols[CopyIdx[k]].Name}: stored {Describe(storedCopy[k])} vs arriving {Describe(row[CopyIdx[k]])}";
+            return null;
         }
+        static string Describe(object? v) => v == null ? "null" : v is double[] d ? "f64[" + d.Length + "]" : v is int[] i ? "i32[" + i.Length + "]" : v.ToString() + " (" + v.GetType().Name + ")";
 
         static object?[] ReadIdx(SqliteStmt st, int firstColumn, int[] idx)
         {

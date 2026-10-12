@@ -42,6 +42,86 @@ namespace Truedat.Store
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
             Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
             Block(assert, "Drift", () => TestDrift(assert));
+            Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
+            Block(assert, "ScanSink", () => TestScanSink(assert));
+        }
+
+        // ---------------------------------------------------------------- S2 C3: the scan writes the store
+        static void TestScanSink(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "sink-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            try
+            {
+                // Parity: the in-memory entry and the file import produce the same store.
+                var entries = FixtureEntries(@"D:\Music");
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(catalog, entries);
+                var viaFile = Path.Combine(dir, "via-file.db");
+                ImportCommand.Execute(new ImportOptions { StorePath = viaFile, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                var viaMem = Path.Combine(dir, "via-mem.db");
+                var rm = ImportCommand.ExecuteEntries(viaMem, entries, @"D:\Music", "primary", false, "import", "1", "selftest:entries", null, null);
+                assert(rm.Entries == 6 && rm.EntitiesCreated == 4 && rm.CreatedNoSha == 1 && rm.Locations == 6, $"ExecuteEntries over the fixture: 6 entries, 4 entities + 1 no-sha, 6 locations ({rm.Entries}/{rm.EntitiesCreated}+{rm.CreatedNoSha}/{rm.Locations})");
+                using (var a = OpenStore.Open(viaFile, false, "selftest", DateTime.UtcNow.ToString("o")))
+                using (var b = OpenStore.Open(viaMem, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    long ra = a.Dal.EnsureRoot(a.Machine.Id, @"D:\Music", "primary", DateTime.UtcNow.ToString("o"));
+                    long rb = b.Dal.EnsureRoot(b.Machine.Id, @"D:\Music", "primary", DateTime.UtcNow.ToString("o"));
+                    var ea = new Dictionary<string, string>(PathComparer.Instance); foreach (var (d, e) in a.Dal.ReadEntries(ra)) ea[d] = EntryJson(d, e);
+                    int same = 0; foreach (var (d, e) in b.Dal.ReadEntries(rb)) if (ea.TryGetValue(d, out var j) && j == EntryJson(d, e)) same++;
+                    assert(same == 6 && ea.Count == 6, $"file import and in-memory import read back byte-identical entries ({same}/6)");
+                    assert(a.Dal.Count("conflict") == b.Dal.Count("conflict") && a.Dal.Count("track_content") == b.Dal.Count("track_content"), "same conflicts and descriptions either way");
+                }
+
+                // The sink: two analysed entries and one failure from a scan, flushed as essentia@<build>.
+                ScanSink.Reset();
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
+                ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"]);
+                ScanSink.RecordFailure(@"D:\Music\bad\x.flac", "essentia", "essentia exit 1: decode error", 12.3);
+                assert(ScanSink.Pending == 2 && ScanSink.PendingFailures == 1, "the sink collects analysed entries and failures");
+                var r = ScanSink.Flush(store, "output-x64.4", entries.Keys);   // the whole catalog's keys are the root hint
+                assert(r.Ok && r.Entries == 2 && r.Failures == 1 && r.Error == null, $"flush writes 2 entries and 1 failure ({r.Ok}, {r.Entries}/{r.Failures}, {r.Error})");
+                assert(ScanSink.Pending == 0 && ScanSink.PendingFailures == 0, "flush consumes what it wrote");
+                assert(r.ResultPath != null && File.Exists(r.ResultPath) && File.ReadAllText(r.ResultPath).Contains("\"producer\": \"essentia\""), $"store-result.json is written beside the store and names the producer ({r.ResultPath})");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Dal.Count("track_content") == 2 && os.Dal.Count("track_copy") == 2, $"2 descriptions, 2 copies ({os.Dal.Count("track_content")}/{os.Dal.Count("track_copy")})");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'essentia' AND producer_version = 'output-x64.4' AND outcome = 'ok';") == "2", "one ok run per analysed entry, producer essentia@<build>");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'essentia' AND outcome = 'failed' AND failed_components = 'essentia' AND error_text LIKE '%decode error%';") == "1", "the failure is a failed essentia run with its components and error");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_content c JOIN run r ON r.id = c.run_id WHERE r.producer_key = 'essentia' AND r.location_id IS NOT NULL;") == "2"
+                        && os.Db.ExecScalar("SELECT count(*) FROM track_content c JOIN run r ON r.id = c.run_id WHERE r.duration_ms IS NOT NULL;") == "1",
+                        $"each description points at its own run on its location; the run carries the analysis duration when the entry has one (a.flac) ({os.Db.ExecScalar("SELECT count(*) FROM track_content c JOIN run r ON r.id = c.run_id WHERE r.duration_ms IS NOT NULL;")} with duration)");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_location l WHERE l.display_path = 'D:\\Music\\bad\\x.flac';") == "1", "the failed file gets an entity and a location (it is a real file), no description");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM library_root;") == "1" && os.Db.ExecScalar("SELECT path FROM library_root;") == @"D:\Music", "the root is inferred from the whole catalog's keys when none is given");
+                }
+                // A partial re-scan whose two files share a deeper folder must NOT mint a narrower root.
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
+                ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"]);
+                var rp = ScanSink.Flush(store, "output-x64.4", null);   // no hints at all: the existing root must still cover them
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(rp.Ok && rp.Unchanged == 2 && os.Db.ExecScalar("SELECT count(*) FROM library_root;") == "1" && os.Dal.Count("track_location") == 3,
+                        $"a partial re-scan under an existing root adds no root and no location ({os.Db.ExecScalar("SELECT count(*) FROM library_root;")} roots, {os.Dal.Count("track_location")} locations, {rp.Unchanged} unchanged)");
+
+                // Same entries again (a re-scan that re-analysed the same two files): nothing written, drift rule applies.
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
+                ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"]);
+                var r2 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
+                assert(r2.Ok && r2.Unchanged == 2 && r2.Drift == 0, $"re-flushing equal entries writes nothing ({r2.Unchanged} unchanged, {r2.Drift} drift, {r2.ContentReplaced} replaced, {r2.ContentRekeyed} rekeyed, {r2.Stale} stale, {r2.Entries} entries, {r2.EntitiesCreated} created, ok {r2.Ok} {r2.Error})");
+                // A newer extractor build with a changed value replaces the description (different producer version), no drift.
+                var newer = FixtureEntries(@"D:\Music");
+                newer[@"D:\Music\Tool\a.flac"].Features!.Bpm = newer[@"D:\Music\Tool\a.flac"].Features!.Bpm * 1.5;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", newer[@"D:\Music\Tool\a.flac"]);
+                var r3 = ScanSink.Flush(store, "output-x64.5");
+                assert(r3.Ok && r3.ContentReplaced == 1 && r3.Drift == 0, $"a newer extractor build replaces the description without a drift conflict ({r3.ContentReplaced} replaced, {r3.Drift} drift)");
+
+                // A store that cannot be opened: reported, never thrown.
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
+                var bad = ScanSink.Flush(dir, "output-x64.4");   // a directory is not a database
+                assert(!bad.Ok && bad.Error != null, $"an unopenable store is a reported failure, not an exception ({bad.Error})");
+                ScanSink.Reset();
+            }
+            finally { ScanSink.Reset(); try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- S2 C2: observation integrity

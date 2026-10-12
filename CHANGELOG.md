@@ -40,6 +40,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   replaces it with the old run kept as history; a key move re-keys it. Copy facts (tags, `fingerprint.v1`,
   SMFM) take the newer value, exactly. Identical drifts are recorded once. On the real catalog a re-import
   is 22 s, 72,445 unchanged, 32 drifted, the store unchanged in size.
+- **The scan writes the store.** With `--store`, every scan mode writes the entries it analysed this run
+  into the store after the catalog is saved, through the import's new in-memory entry (no re-read of the
+  catalog): producer `essentia@<build>`, one run row per entry with its analysis time, a failed run per
+  failure with its components, the same drift and no-churn rules as an import. Roots come from the
+  store's existing roots, else from the whole catalog, never from the analysed subset. A store problem
+  is reported and never costs a catalog entry; `store-result.json` beside the store records each write.
 - **The store has a home.** `truedat.db` beside `mbxmoods.json`, found by the same resolver as the
   catalog, so the store verbs need no `--store`; bare `--store` on `--stats` / `--duplicates` means that
   default. The file is always local: a catalog on a network share gets a local per-library store under
