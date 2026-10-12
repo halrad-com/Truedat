@@ -11,7 +11,10 @@ namespace Truedat.Edges
         public int PoolHz = 10;
         /// <summary>Tracks shorter than this (seconds) get no edge rows at all: whole-track only (RS02).</summary>
         public int MinTrackSeconds = 20;
-        public string ProducerVersion => $"edges@v1;e{EdgeSeconds};p{PoolHz}";
+        /// <summary>The algorithm generation precedes the settings: v1 = the first fold; v2 (2026-10-12) = texture divergence over
+        /// MFCC 1..12 and tempo from the interquartile mean interval. A fold-rule change is a new version so stored rows are never
+        /// mistaken for current ones, and --work re-queues the done items for it.</summary>
+        public string ProducerVersion => $"edges@v2;e{EdgeSeconds};p{PoolHz}";
     }
 
     internal sealed class EdgeWindowSummary
@@ -220,18 +223,24 @@ namespace Truedat.Edges
             return outp;
         }
 
+        /// <summary>Tempo from the in-window beat intervals. The beat tracker places beats on a 512-sample hop (11.6 ms at 44.1 kHz),
+        /// so a MEDIAN interval is quantised to a hop multiple and unrelated tracks collide on one value (restfulbee, 2026-10-12:
+        /// 101.4 bpm = 51 hops on four edges of three tracks). The interquartile mean (intervals between the 25th and 75th
+        /// percentile) keeps the median's outlier resistance and averages the quantisation away.</summary>
         static EdgeBpm? BpmFrom(int[] beatsMs)
         {
             if (beatsMs.Length < 5) return null;          // under 4 intervals: sparse, say so with null (constraint 6)
             var iv = new double[beatsMs.Length - 1];
             for (int i = 1; i < beatsMs.Length; i++) iv[i - 1] = (beatsMs[i] - beatsMs[i - 1]) / 1000.0;
             var sorted = (double[])iv.Clone(); Array.Sort(sorted);
-            double median = sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]) / 2;
-            if (median <= 0) return null;
+            int lo = sorted.Length / 4, hi = sorted.Length - sorted.Length / 4;          // [25%, 75%)
+            if (hi <= lo) { lo = 0; hi = sorted.Length; }
+            double iqm = 0; for (int i = lo; i < hi; i++) iqm += sorted[i]; iqm /= (hi - lo);
+            if (iqm <= 0) return null;
             double mean = 0; foreach (var x in iv) mean += x; mean /= iv.Length;
             double var = 0; foreach (var x in iv) var += (x - mean) * (x - mean); var /= iv.Length;
             double regularity = mean > 0 ? Math.Max(0, Math.Min(1, 1 - Math.Sqrt(var) / mean)) : 0;
-            return new EdgeBpm { Value = 60.0 / median, Beats = beatsMs.Length, Regularity = regularity };
+            return new EdgeBpm { Value = 60.0 / iqm, Beats = beatsMs.Length, Regularity = regularity };
         }
 
         static EdgeWindowSummary Summarise(double start, double end, Inputs inp)
@@ -328,21 +337,24 @@ namespace Truedat.Edges
             return m > 0 ? 10 * Math.Log10(m) : -300;
         }
 
-        /// <summary>Loudness: |Δ| over 20 LU clamped to 0..1. Texture and harmony: cosine distance of the mean vectors.</summary>
+        /// <summary>Loudness: |Δ| over 20 LU clamped to 0..1. Harmony: cosine distance of the HPCP means. Texture: cosine distance
+        /// of MFCC coefficients 1..12 — coefficient 0 is the frame energy (about -800 on real audio) and swamps the rest, so a
+        /// cosine over all 13 read 0.00 on every real edge (restfulbee, 2026-10-12); the spectral-shape coefficients are what
+        /// "texture" means.</summary>
         static EdgeDivergence Diverge(double[] mfccA, double[] mfccB, double[] hpcpA, double[] hpcpB, double? lufsA, double? lufsB)
         {
             var d = new EdgeDivergence();
             if (lufsA.HasValue && lufsB.HasValue && !double.IsNaN(lufsA.Value) && !double.IsNaN(lufsB.Value)) d.Loudness = Math.Max(0, Math.Min(1, Math.Abs(lufsA.Value - lufsB.Value) / 20.0));
-            d.Texture = CosineDistance(mfccA, mfccB);
+            d.Texture = CosineDistance(mfccA, mfccB, from: 1);
             d.Harmony = CosineDistance(hpcpA, hpcpB);
             return d;
         }
 
-        static double? CosineDistance(double[] a, double[] b)
+        static double? CosineDistance(double[] a, double[] b, int from = 0)
         {
-            if (a.Length != b.Length) return null;
+            if (a.Length != b.Length || from >= a.Length) return null;
             double dot = 0, na = 0, nb = 0;
-            for (int i = 0; i < a.Length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+            for (int i = from; i < a.Length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
             if (na == 0 || nb == 0) return null;
             return Math.Max(0, Math.Min(1, 1 - dot / Math.Sqrt(na * nb)));
         }

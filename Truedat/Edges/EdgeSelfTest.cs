@@ -560,7 +560,7 @@ namespace Truedat.Edges
             try
             {
                 var settings = new EdgeSettings();
-                assert(settings.ProducerVersion == "edges@v1;e30;p10", $"the producer version carries the settings ({settings.ProducerVersion})");
+                assert(settings.ProducerVersion == "edges@v2;e30;p10", $"the producer version carries the algorithm generation and the settings ({settings.ProducerVersion})");
 
                 EdgeFoldResult r;
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir))) r = EdgeFold.Fold(f, 240, settings);
@@ -591,7 +591,7 @@ namespace Truedat.Edges
                 assert(h.Divergence != null && h.Divergence.Loudness.HasValue && h.Divergence.Texture.HasValue && h.Divergence.Harmony.HasValue
                     && r.HeadTail != null && r.HeadTail.Harmony > 0.3 && r.HeadTail.Texture > 0 && r.HeadTail.Loudness < 0.5,
                     $"divergence per edge vs the whole and head vs tail (head-tail harmony {r.HeadTail?.Harmony:F2}, texture {r.HeadTail?.Texture:F2}, loudness {r.HeadTail?.Loudness:F2})");
-                assert(r.DurationMs == 240000 && r.ProducerVersion == "edges@v1;e30;p10", "the result names the duration and the producer version");
+                assert(r.DurationMs == 240000 && r.ProducerVersion == "edges@v2;e30;p10", $"the result names the duration and the producer version ({r.ProducerVersion})");
 
                 // Short tracks: clipped to half each -> short-context; under the floor -> unavailable.
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 40))) r = EdgeFold.Fold(f, 40, settings);
