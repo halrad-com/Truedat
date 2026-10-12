@@ -83,6 +83,9 @@ namespace Truedat
             new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Default = "30", Help = "duration that tags a track as long" },
             new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Default = "48000", Help = "skip tracks longer than this (seconds)" },
             new Setting { Key = "stage-dir",       Kind = Kind.Text, Default = "%TEMP%\\.truedat-stage", Help = "where staged copies are written" },
+            // A directory, not a target: it says WHERE store files live (<dir>\<library-id>\truedat.db),
+            // never WHICH store a run uses — that is still derived from the catalog the run is pointed at.
+            new Setting { Key = "store-dir",       Kind = Kind.Text, Default = "beside the catalog (local per-library path when the catalog is on a share)", Help = "directory holding store files instead of the library folder" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes

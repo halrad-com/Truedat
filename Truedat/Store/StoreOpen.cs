@@ -20,7 +20,7 @@ namespace Truedat.Store
         internal static OpenStore Open(string? storePath, bool create, string truedatVersion, string nowUtc)
         {
             if (string.IsNullOrWhiteSpace(storePath))
-                throw new StoreException("No store given. Pass --store <path\\truedat.db>. The store path is never guessed: a default beside a mirrored catalog would put SQLite on a network share.");
+                throw new StoreException("No store resolved. Pass --store <path\\truedat.db>, or run from a library so the default (truedat.db beside mbxmoods.json, or a local per-library path when the catalog is on a share) can be found.");
             var full = System.IO.Path.GetFullPath(storePath!);
 
             var probe = SqliteProbe.Probe();
@@ -38,10 +38,14 @@ namespace Truedat.Store
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
             }
 
+            bool network = StoreLocation.IsNetworkPath(full);
+            if (network)
+                StoreLog.Warn($"store on a network path: {full} — not recommended (every page read and write is a round trip); opening with exclusive locking, one process only");
+
             SqliteDb? db = null;
             try
             {
-                db = SqliteDb.Open(full, create);
+                db = SqliteDb.Open(full, create, exclusiveLocking: network);
                 SchemaMigrator.Apply(db, truedatVersion);
                 var dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);

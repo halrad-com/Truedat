@@ -38,6 +38,64 @@ namespace Truedat.Store
             Block(assert, "StoreInfo", () => TestStoreInfo(assert));
             Console.WriteLine("Store self-test (page size: 16 KB pages by default, --store-vacuum repacks)");
             Block(assert, "Vacuum", () => TestVacuum(assert));
+            Console.WriteLine("Store self-test (S2 C0: default store location is local; network opens exclusive)");
+            Block(assert, "StoreLocation", () => TestStoreLocation(assert));
+        }
+
+        // ---------------------------------------------------------------- S2 C0: store location
+        static void TestStoreLocation(Action<bool, string> assert)
+        {
+            var tmp = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "loc-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(tmp);
+            try
+            {
+                var localCatalog = Path.Combine(tmp, "Library", "mbxmoods.json");
+                var uncCatalog = @"\\server\share\Library\mbxmoods.json";
+                var localApp = Path.Combine(tmp, "LocalAppData");
+
+                // library id: derived, 16 lowercase hex, case- and trailing-separator-insensitive
+                var id = StoreLocation.LibraryId(Path.GetDirectoryName(uncCatalog)!);
+                assert(System.Text.RegularExpressions.Regex.IsMatch(id, "^[0-9a-f]{16}$"), $"library id is 16 lowercase hex ({id})");
+                assert(id == StoreLocation.LibraryId(@"\\SERVER\Share\LIBRARY\"), "library id ignores case and a trailing separator");
+                assert(id != StoreLocation.LibraryId(@"\\server\other\Library"), "a different share gives a different library id");
+
+                // explicit wins, network or not
+                var explicitPath = Path.Combine(tmp, "elsewhere", "mine.db");
+                var r1 = StoreLocation.Resolve(explicitPath, null, uncCatalog, out var why1, localApp);
+                assert(r1 == Path.GetFullPath(explicitPath) && why1.Contains("explicit"), $"explicit --store wins ({r1}; {why1})");
+
+                // local catalog folder -> beside the catalog
+                var r2 = StoreLocation.Resolve(null, null, localCatalog, out var why2, localApp);
+                assert(r2 == Path.Combine(tmp, "Library", StoreLocation.FileName) && why2.Contains("beside"), $"local catalog -> truedat.db beside it ({r2}; {why2})");
+
+                // network catalog folder -> local per-library path, never the share
+                var r3 = StoreLocation.Resolve(null, null, uncCatalog, out var why3, localApp);
+                assert(r3 == Path.Combine(localApp, "truedat", id, StoreLocation.FileName) && why3.Contains("network"), $"network catalog -> %LOCALAPPDATA%\\truedat\\<id>\\truedat.db ({r3}; {why3})");
+                assert(!r3.StartsWith(@"\\"), "the default never resolves onto a share");
+
+                // --store-dir relocates the per-library layout, for a local catalog too
+                var storeDir = Path.Combine(tmp, "stores");
+                var r4 = StoreLocation.Resolve(null, storeDir, localCatalog, out var why4, localApp);
+                var localId = StoreLocation.LibraryId(Path.Combine(tmp, "Library"));
+                assert(r4 == Path.Combine(storeDir, localId, StoreLocation.FileName) && why4.Contains("store-dir"), $"--store-dir -> <dir>\\<id>\\truedat.db ({r4}; {why4})");
+
+                // network detection: UNC is network; a temp path on a fixed drive is not
+                assert(StoreLocation.IsNetworkPath(@"\\server\share\x\y.db"), "a UNC path is a network path");
+                assert(!StoreLocation.IsNetworkPath(tmp), "a local temp path is not a network path");
+
+                // the open: exclusive locking on request (what a network store gets), normal otherwise
+                var dbPath = Path.Combine(tmp, "excl.db");
+                using (var db = SqliteDb.Open(dbPath, create: true, exclusiveLocking: true))
+                    assert(string.Equals(db.ExecScalar("PRAGMA locking_mode;"), "exclusive", StringComparison.OrdinalIgnoreCase), "exclusiveLocking: true opens with locking_mode=exclusive");
+                var dbPath2 = Path.Combine(tmp, "normal.db");
+                using (var db = SqliteDb.Open(dbPath2, create: true))
+                {
+                    assert(string.Equals(db.ExecScalar("PRAGMA locking_mode;"), "normal", StringComparison.OrdinalIgnoreCase), "default open keeps locking_mode=normal");
+                    db.Exec("CREATE TABLE t(x);"); db.Exec("INSERT INTO t VALUES (1);");
+                }
+                assert(!File.Exists(dbPath2 + "-wal") || new FileInfo(dbPath2 + "-wal").Length == 0, "closing a store leaves no WAL behind (the .db is self-contained for file sync)");
+            }
+            finally { try { Directory.Delete(tmp, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- page size / vacuum

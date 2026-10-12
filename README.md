@@ -85,7 +85,14 @@ entity, content-hash facets that name their algorithm, one location row per copy
 with provenance for every run. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
 is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
-exactly as before. The store path is always explicit (`--store <file.db>`); it is never guessed.**
+exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in
+the library folder — and is found the same way the catalog is, so the store verbs need no `--store`
+at all and `--stats --store` / `--duplicates --store` (bare) use that default. **The store file is
+always local:** when the catalog folder is itself a network share, the default is a local per-library
+path under `%LOCALAPPDATA%\truedat\` instead, and `--store-dir <dir>` (also settable in
+`truedat.config.json`) moves that per-library layout elsewhere. `--store <file.db>` names a store
+explicitly, anywhere; a store on a network path is opened with exclusive locking and a warning, and is
+not recommended. `--paths` shows which store a run would use and why.
 
 ```cmd
 REM Load a catalog and the ledgers beside it (errors, skipped, review, verify) into a store; idempotent
@@ -111,7 +118,7 @@ truedat.exe --stats --moods "D:\out\mbxmoods.json" --store "D:\truedat\truedat.d
 truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\truedat\truedat.db"
 ```
 
-Flags: `--store <db>`, `--store-import`, `--library-root <path>` (else inferred per volume and
+Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
 store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`

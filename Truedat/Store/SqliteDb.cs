@@ -26,7 +26,7 @@ namespace Truedat.Store
         /// points while doubling the bytes moved per point read and per small write — not worth it.</summary>
         internal const int DefaultPageSize = 16384;
 
-        internal static SqliteDb Open(string path, bool create, int? pageSize = null)
+        internal static SqliteDb Open(string path, bool create, int? pageSize = null, bool exclusiveLocking = false)
         {
             int flags = SqliteNative.SQLITE_OPEN_READWRITE | (create ? SqliteNative.SQLITE_OPEN_CREATE : 0);
             int rc = SqliteNative.sqlite3_open_v2(SqliteNative.Z(path), out var handle, flags, IntPtr.Zero);
@@ -44,6 +44,9 @@ namespace Truedat.Store
                 // store keeps whatever it was built with (re-tune it with --store-vacuum --page-size).
                 bool empty = db.ExecScalar("PRAGMA page_count;") == "0";
                 if (empty) db.Exec($"PRAGMA page_size={pageSize ?? DefaultPageSize};");
+                // A network store (explicit --store on a share) cannot use WAL's shared-memory file;
+                // exclusive locking keeps WAL working for the one process truedat is by design.
+                if (exclusiveLocking) db.Exec("PRAGMA locking_mode=EXCLUSIVE;");
                 db.Exec("PRAGMA journal_mode=WAL;");
                 db.Exec("PRAGMA foreign_keys=ON;");
                 StoreLog.Debug($"opened {path} (create={create}, wal, fk on" + (empty ? $", new file at page_size {pageSize ?? DefaultPageSize}" : "") + ")");
@@ -96,6 +99,10 @@ namespace Truedat.Store
         public void Dispose()
         {
             if (_db == IntPtr.Zero) return;
+            // Leave the .db self-contained: a store travels to mirror boxes as a file by the same sync
+            // that carries the catalog, so no -wal may be left holding pages (S2 C0).
+            try { Exec("PRAGMA wal_checkpoint(TRUNCATE);"); }
+            catch (SqliteException ex) { StoreLog.Debug($"checkpoint on close skipped: {ex.Message}"); }
             int rc = SqliteNative.sqlite3_close_v2(_db);
             if (rc != SqliteNative.SQLITE_OK) StoreLog.Warn($"close of {_path} returned rc {rc} (unfinalized statements?)");
             _db = IntPtr.Zero;

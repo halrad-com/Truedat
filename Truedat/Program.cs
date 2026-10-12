@@ -841,7 +841,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
-            "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size",
+            "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size", "store-dir",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -857,7 +857,8 @@ namespace Truedat
             "output", "chunk", "apply-exclusions", "long-track-mins",
             "exclusions", "exclude-playlist", "stage-dir", "max-duration", "cpu-limit",
             "restore", "keep-backups", "prune-entry",
-            "store", "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size",
+            // "store" is deliberately absent: its value is optional (bare --store = the default location, S2 C0).
+            "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size", "store-dir",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -2238,7 +2239,8 @@ namespace Truedat
             bool statsMode = false;   // --stats: read-only catalog summary over mbxmoods.json
             // v2 store (S1). --store <db> names the store explicitly; --store-import loads the catalog
             // resolved like --stats (positional / --moods / discovery) plus its ledgers into it.
-            string? storePath = null;
+            string? storePath = null;             // --store [path]: null = not asked; "" = asked, use the default location (S2 C0)
+            string? storeDir = null;              // --store-dir <dir>: relocates the per-library default (<dir>\<library-id>\truedat.db)
             bool storeImportMode = false;
             string? storeLibraryRoot = null;
             string storeRootRole = "primary";
@@ -2394,7 +2396,8 @@ namespace Truedat
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
-                else if (canonical == "store" && i + 1 < args.Length) storePath = args[++i];
+                else if (canonical == "store") storePath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : "";
+                else if (canonical == "store-dir" && i + 1 < args.Length) storeDir = args[++i];
                 else if (canonical == "store-import") storeImportMode = true;
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
                 else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
@@ -2621,6 +2624,18 @@ namespace Truedat
             }
 
             _audit = auditLog;
+            // S2 C0: the store location is resolved ONCE, here, for every verb that touches a store — the
+            // store-only verbs always, --stats/--duplicates only when --store was given (they stay JSON-backed
+            // otherwise). Default = beside the catalog when local, a local per-library path when the catalog
+            // folder is a share, --store-dir relocating that layout; explicit --store <path> always wins.
+            bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode;
+            if (storeVerb || storePath != null)
+            {
+                string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
+                if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
+                storePath = global::Truedat.Store.StoreLocation.Resolve(string.IsNullOrEmpty(storePath) ? null : storePath, storeDir, storeCatalog!, out var storeWhy);
+                global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
+            }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
 
@@ -2974,7 +2989,7 @@ namespace Truedat
                 }
 
                 var discoveredXml = ResolveITunesXml(xmlPath);
-                var pathEntries = CollectPaths(pathsCatalog!, File.Exists(discoveredXml) ? discoveredXml : null);
+                var pathEntries = CollectPaths(pathsCatalog!, File.Exists(discoveredXml) ? discoveredXml : null, string.IsNullOrEmpty(storePath) ? null : storePath, storeDir);
 
                 if (jsonOutput)
                 {
@@ -10801,7 +10816,7 @@ namespace Truedat
         /// spelling would drift and this report would confidently name a file nothing writes to,
         /// which is worse than no report at all.
         /// </summary>
-        internal static List<PathEntry> CollectPaths(string catalogPath, string? libraryXml)
+        internal static List<PathEntry> CollectPaths(string catalogPath, string? libraryXml, string? explicitStore = null, string? storeDir = null)
         {
             var entries = new List<PathEntry>();
             var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
@@ -10821,6 +10836,8 @@ namespace Truedat
 
             Add("catalog", "catalog", catalogPath);
             Add("sidecar", "sidecar", Path.ChangeExtension(catalogPath, ".mbxs"));
+            // Derived by the same resolver the store verbs use (S2 C0), never re-spelled here.
+            Add("store", "store", global::Truedat.Store.StoreLocation.Resolve(explicitStore, storeDir, catalogPath, out var storeWhy), storeWhy);
             Add("exclusions", "exclusions", ExclusionStore.Resolve(catalogPath));
 
             // The playlist has no fixed name until one exists — Discover returns null when the
