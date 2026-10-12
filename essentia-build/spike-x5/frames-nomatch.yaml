@@ -1,0 +1,3 @@
+outputFrames: 1
+outputFormat: json
+framesInclude: [nothing.here, lowlevel.mfc]
