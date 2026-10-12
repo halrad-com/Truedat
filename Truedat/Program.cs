@@ -447,6 +447,79 @@ namespace Truedat
     {
         static int _analyzeCount;
         static long _analyzeTicksTotal;
+
+        // Fixed, in-memory diagnostics. Locks protect only scalar updates/snapshots, never work or output.
+        // Each row has its own population: retries add native attempts, and overlapping rows are not additive.
+        internal sealed class AnalysisStageTiming
+        {
+            internal readonly string Name;
+            internal readonly string Unit;
+            readonly object _gate = new object();
+            long _count;
+            double _totalSeconds, _maxSeconds;
+
+            internal AnalysisStageTiming(string name, string unit) { Name = name; Unit = unit; }
+            internal void RecordSeconds(double seconds)
+            {
+                if (seconds < 0 || double.IsNaN(seconds) || double.IsInfinity(seconds)) return;
+                lock (_gate)
+                {
+                    _count++;
+                    _totalSeconds += seconds;
+                    if (seconds > _maxSeconds) _maxSeconds = seconds;
+                }
+            }
+            internal void RecordTicks(long ticks) => RecordSeconds((double)ticks / Stopwatch.Frequency);
+            internal void RecordSince(long start) => RecordTicks(Stopwatch.GetTimestamp() - start);
+            internal (long Count, double TotalSeconds, double MaxSeconds) Snapshot()
+            {
+                lock (_gate) return (_count, _totalSeconds, _maxSeconds);
+            }
+        }
+
+        static readonly AnalysisStageTiming _stageSource = new AnalysisStageTiming("source workers", "tracks");
+        static readonly AnalysisStageTiming _stageQueue = new AnalysisStageTiming("Essentia queue", "tasks");
+        static readonly AnalysisStageTiming _stageEssentiaTask = new AnalysisStageTiming("Essentia task", "tasks");
+        static readonly AnalysisStageTiming _stageCompanionWait = new AnalysisStageTiming("after Essentia", "tracks");
+        static readonly AnalysisStageTiming _stageNativeWall = new AnalysisStageTiming("extractor elapsed", "processes");
+        static readonly AnalysisStageTiming _stageNativeCpu = new AnalysisStageTiming("extractor CPU", "processes");
+        static readonly AnalysisStageTiming _stageOutputDrain = new AnalysisStageTiming("output drain", "processes");
+        static readonly AnalysisStageTiming _stageParse = new AnalysisStageTiming("aggregate read/parse", "calls");
+        static readonly AnalysisStageTiming _stageMainStash = new AnalysisStageTiming("aggregate write", "calls");
+        static readonly AnalysisStageTiming _stageEdges = new AnalysisStageTiming("edge fold/PCM", "calls");
+        static readonly AnalysisStageTiming _stageEdgeStash = new AnalysisStageTiming("edge write", "calls");
+        static readonly AnalysisStageTiming _stageCleanup = new AnalysisStageTiming("extractor cleanup", "calls");
+        static readonly AnalysisStageTiming[] _analysisStages =
+        {
+            _stageSource, _stageQueue, _stageEssentiaTask, _stageCompanionWait,
+            _stageNativeWall, _stageNativeCpu, _stageOutputDrain, _stageParse,
+            _stageMainStash, _stageEdges, _stageEdgeStash, _stageCleanup,
+        };
+        static long _nativeCpuUnavailable;
+
+        internal static string BuildAnalysisTimingReport(IEnumerable<AnalysisStageTiming> stages, long cpuUnavailable)
+        {
+            var rows = new StringBuilder();
+            foreach (var stage in stages)
+            {
+                var sample = stage.Snapshot();
+                if (sample.Count == 0) continue;
+                string mean = (sample.TotalSeconds / sample.Count).ToString("F3", CultureInfo.InvariantCulture);
+                string max = sample.MaxSeconds.ToString("F3", CultureInfo.InvariantCulture);
+                rows.AppendLine($"    {stage.Name,-22} {mean,9}s avg {max,9}s max  ({sample.Count} {stage.Unit})");
+            }
+            if (cpuUnavailable > 0)
+                rows.AppendLine($"    CPU time unavailable for {cpuUnavailable} process attempts");
+            if (rows.Length == 0) return "";
+            return "  Analysis stages (cumulative completed samples):" + Environment.NewLine
+                + rows.ToString()
+                + "    Rows overlap; retries add attempts. Do not sum these averages." + Environment.NewLine
+                + "    after Essentia = remaining companion work / worker wake-up." + Environment.NewLine;
+        }
+
+        static void PrintAnalysisTimings()
+            => Console.Write(BuildAnalysisTimingReport(_analysisStages, Interlocked.Read(ref _nativeCpuUnavailable)));
+
         // Phantom-key detector: every extractor path NavDbl/OptN looks up is recorded as queried,
         // and (when it resolves to a number) as resolved. A path queried but NEVER resolved across a
         // scan is a wrong/absent key read as a default — how spectralFlatness stayed 0 for six months.
@@ -6228,6 +6301,7 @@ namespace Truedat
                                         // must not eat its own next interval.
                                         Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
                                         Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
+                                        PrintAnalysisTimings();
                                     }
                                 }
                                 finally { Monitor.Exit(saveLock); }
@@ -6412,6 +6486,7 @@ namespace Truedat
                     Console.WriteLine($"    {kv.Key,-14} {avgTag,8} avg  ({n} track{(n == 1 ? "" : "s")})");
                 }
             }
+            PrintAnalysisTimings();
             if (_analyzedBytesTotal > 0)
             {
                 var mb = _analyzedBytesTotal / (1024.0 * 1024.0);
@@ -13463,7 +13538,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             string auditName = Path.GetFileName(auditDisplayPath);
             var analyzeStart = Stopwatch.GetTimestamp();
 
-            var essentiaTask = Task.Run(() => AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct, src.SourcePath));
+            long essentiaFinishedAt = 0;
+            var essentiaTask = Task.Run(() =>
+            {
+                long taskStartedAt = Stopwatch.GetTimestamp();
+                _stageQueue.RecordTicks(taskStartedAt - analyzeStart);
+                try { return AnalyzeWithEssentia(essentiaExe, readPath, fileSize, ct, src.SourcePath); }
+                finally
+                {
+                    long endedAt = Stopwatch.GetTimestamp();
+                    _stageEssentiaTask.RecordTicks(endedAt - taskStartedAt);
+                    Interlocked.Exchange(ref essentiaFinishedAt, endedAt);
+                }
+            });
             var fileMd5Task = precomputedHashes != null
                 ? Task.FromResult(precomputedHashes.Value.md5)   // computed with wantMd5=_fileMd5Enabled — null when the flag is off
                 : Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
@@ -13526,6 +13613,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var smfmTask = ConditionalTask<SmfmReader.SmfmResult?>(stageOpts.NoSmfm, () => SmfmReader.TryRead(readPath), null);
 
             Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
+            // Only the tail after Essentia completes; companion tasks overlap the extractor before this.
+            // Includes the waiting worker's wake-up, not a sum of the companion runtimes.
+            _stageCompanionWait.RecordSince(Interlocked.Read(ref essentiaFinishedAt));
 
             var (features, error) = essentiaTask.Result;
 
@@ -13566,6 +13656,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             long ticks = Stopwatch.GetTimestamp() - analyzeStart;
+            _stageSource.RecordTicks(ticks);
             var (sha, shaSource) = audioStreamSha256Task.Result;
             var (hfRatio, hfMethod, hfStructure, hfNotApplicable) = hfEnergyTask.Result;
             return new WorkerResults
@@ -18207,6 +18298,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!IsAnalysisCandidate(false, null, "over max duration: 60 min > 20 min ceiling"), "preflight-work: an over-length skip is not new work (I1)");
             }
 
+            // --- Analysis stage diagnostics: count real samples, not missing data; preserve concurrent updates. ---
+            {
+                var stage = new AnalysisStageTiming("sample", "calls");
+                Assert(BuildAnalysisTimingReport(new[] { stage }, 0) == "",
+                    "analysis-timing: no completed samples -> no empty report on a cached scan");
+                stage.RecordTicks(Stopwatch.Frequency * 2);
+                stage.RecordSeconds(4);
+                stage.RecordSeconds(-1);
+                stage.RecordSeconds(double.NaN);
+                stage.RecordSeconds(double.PositiveInfinity);
+                var sample = stage.Snapshot();
+                Assert(sample.Count == 2 && sample.TotalSeconds == 6 && sample.MaxSeconds == 4,
+                    "analysis-timing: invalid measurements do not dilute the average or poison the maximum");
+                var parallel = new AnalysisStageTiming("parallel", "calls");
+                Parallel.For(0, 256, _ => parallel.RecordSeconds(0.25));
+                var concurrent = parallel.Snapshot();
+                Assert(concurrent.Count == 256 && concurrent.TotalSeconds == 64 && concurrent.MaxSeconds == 0.25,
+                    "analysis-timing: concurrent workers do not lose or tear samples");
+                var report = BuildAnalysisTimingReport(new[] { stage }, 3);
+                Assert(report.Contains("3.000") && report.Contains("4.000") && report.Contains("2 calls"),
+                    "analysis-timing: report shows mean, maximum, and the measured population");
+                Assert(report.Contains("CPU time unavailable for 3 process attempts"),
+                    "analysis-timing: unavailable CPU reads remain explicit, never samples of zero CPU");
+            }
+
             // --- ETA charges the measured periodic-save cost (2026-07-28) ---
             {
                 // 2 measured saves totalling 60s -> 30s avg; 1500s of work ahead at a
@@ -22551,10 +22667,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     catch { break; }
                 }
 
-                // Flush async stderr read buffer before reading the result.
+                // A normally exited process attempt (including nonzero exits and retries).
+                // Canceled/watchdog-aborted attempts return above and are not completed samples.
                 proc.WaitForExit();
+                _stageNativeWall.RecordTicks(timer.ElapsedTicks);
+                try
+                {
+                    proc.Refresh();   // discard the watchdog's cached process information before the final CPU read
+                    _stageNativeCpu.RecordSeconds(proc.TotalProcessorTime.TotalSeconds);
+                }
+                catch { Interlocked.Increment(ref _nativeCpuUnavailable); } // diagnostics must never fail a track
 
+                long drainStartedAt = Stopwatch.GetTimestamp();
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+                _stageOutputDrain.RecordSince(drainStartedAt);
                 timer.Stop();
                 var exitCode = proc.ExitCode;
 
@@ -22575,23 +22701,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return (null, $"Empty output from Essentia ({ExtractEssentiaError(stderr, 0)})");
                 }
 
-                var json = File.ReadAllText(tempJson);
-                var features = ParseEssentiaOutput(json);
+                long parseStartedAt = Stopwatch.GetTimestamp();
+                string json;
+                TrackFeatures? features;
+                try
+                {
+                    json = File.ReadAllText(tempJson);
+                    features = ParseEssentiaOutput(json);
+                }
+                finally { _stageParse.RecordSince(parseStartedAt); }
                 if (features != null)
                 {
                     // S2 C-A: with a store in force, the aggregate output is kept (compressed, content-addressed at the
                     // flush) instead of deleted — the end of rescanning for anything that is a fold of this file.
-                    if (global::Truedat.Store.ScanSink.StoreDirectory != null) global::Truedat.Store.ScanSink.StashMainJson(audioPath, json);
+                    if (global::Truedat.Store.ScanSink.StoreDirectory != null)
+                    {
+                        long stashStartedAt = Stopwatch.GetTimestamp();
+                        try { global::Truedat.Store.ScanSink.StashMainJson(audioPath, json); }
+                        finally { _stageMainStash.RecordSince(stashStartedAt); }
+                    }
                     // S2 C4: fold the frames file + the PCM pass on the path the extractor read (the staged copy: one network
                     // read stays one), stashed under that same path so Record ties it exactly as the main-JSON stash.
                     if (_stageOpts.Edges)
                     {
+                        long edgesStartedAt = Stopwatch.GetTimestamp();
                         var edges = edgesPrepError != null
                             ? global::Truedat.Edges.EdgeProducer.Produce("", audioPath, features.AnalyzedLengthSec, null, _edgeSettings)   // no frames file: a failed fold naming the cause below
                             : global::Truedat.Edges.EdgeProducer.Produce(edgesFrames!, audioPath, features.AnalyzedLengthSec, _ffmpegPath.Value, _edgeSettings);
+                        _stageEdges.RecordSince(edgesStartedAt);
                         if (edgesPrepError != null) edges.Head.Error = edges.Tail.Error = edgesPrepError;
                         edges.Extractor = global::Truedat.Store.ScanSink.ExtractorBuild;   // the frames depend on the build (review M4)
-                        global::Truedat.Store.ScanSink.StashEdges(audioPath, edges);
+                        long edgeStashStartedAt = Stopwatch.GetTimestamp();
+                        try { global::Truedat.Store.ScanSink.StashEdges(audioPath, edges); }
+                        finally { _stageEdgeStash.RecordSince(edgeStashStartedAt); }
                     }
                     return (features, null);
                 }
@@ -22610,6 +22752,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             finally
             {
+                long cleanupStartedAt = Stopwatch.GetTimestamp();
                 Interlocked.Decrement(ref _essentiaActive);
                 try { File.Delete(tempJson); } catch { }
                 if (edgesProfile != null) try { File.Delete(edgesProfile); } catch { }
@@ -22619,6 +22762,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     try { RetryDelete(tempLink); }
                     catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
+                _stageCleanup.RecordSince(cleanupStartedAt);
             }
         }
 
