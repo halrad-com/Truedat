@@ -103,10 +103,7 @@ time, and every failure becomes a failed run with its components. Only the flag 
 `truedat.db` sitting beside the catalog does **not** make a bare scan write it. A store problem is
 reported and counted; it never costs a catalog entry. `store-result.json` beside the store records
 each write. A scan killed before its final save leaves the already-saved entries in the catalog but
-not in the store; the next `--store-import` reconciles them. The scan also keeps the extractor's
-aggregate output — the main JSON with every descriptor's statistics that was deleted at parse until
-now — compressed and filed once per content hash **and extractor build** under `artifacts\` beside the
-store, so a future field that is a fold of it is a re-fold of the file, never a rescan. A stored value
+not in the store; the next `--store-import` reconciles them. A stored value
 that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
 scan measures it; an older extractor build never overwrites a newer build's description, and a newer
 one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
@@ -202,10 +199,10 @@ descriptor whole, so a multi-hour file costs several hundred MB of transient mem
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
 file-list scans; `--edges` needs extractor build `.5`.
 
-**On by default for a new library.** With nothing set, the store and edges are on when the library has no
-catalog yet (a fresh install) or a store already sits beside the catalog. An existing catalog without a
-store stays off until `--store-import` creates one, so a scan never builds a store holding only the tracks
-it happened to analyse. `truedat --config store true|false` (and `edges`) pins the choice for an instance;
+**Off by default.** The store and edges run only when `--store` / `--edges` or `truedat --config store true`
+(and `edges`) turns them on. An existing catalog needs `--store-import` first, so a scan never builds a store
+holding only the tracks it happened to analyse. `truedat --config store true|false` (and `edges`) pins the
+choice for an instance;
 `--no-store` and `--no-edges` override for one run. A default never makes a plain command refuse: a
 per-file mode without `--moods` skips the store, and an extractor older than `.5` skips edges, each with a
 note.

@@ -3,7 +3,7 @@
 A SQLite database, `truedat.db`, that holds everything `mbxmoods.json` holds and more, keyed by
 identity rather than by path. `mbxmoods.json` stays exactly what MBXHub reads; the store is a second
 sink beside it and the source for everything that is not in the catalog: provenance, the edge rows,
-the work queue, the aggregate artifacts. Nothing in the store changes how a scan without `--store`
+the identity history. Nothing in the store changes how a scan without `--store`
 behaves, and nothing is installed: truedat uses the SQLite that ships with Windows (`winsqlite3.dll`,
 3.40 or newer, checked at open with a plain refusal when missing).
 
@@ -13,15 +13,12 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- With nothing set, the store and edges are on when the library has no catalog yet (a fresh install) or a
-  store already sits beside the catalog; an existing catalog without a store stays off until
-  `--store-import` creates one, so a scan never builds a store holding only the tracks it analysed.
-  `--store` / `--store <path>` per run, or `truedat --config store true|false` (likewise `edges`) per
-  instance, overrides that; `--no-store` / `--no-edges` override for one run. A default never makes a
-  plain command refuse (a per-file mode without `--moods` skips the store, an extractor older than `.5`
-  skips edges, each with a note).
-- Beside the store: `artifacts\<build>\<2>\<key>.main.json.z` (the extractor's compressed main output,
-  one per content key), `artifacts\pending\` (in-flight stashes, swept), `store-result.json`,
+- The store and edges are off unless `--store` / `--edges` or the `store` / `edges` config keys turn them
+  on. An existing catalog needs `--store-import` first, so a scan never builds a store holding only the
+  tracks it analysed. `--no-store` / `--no-edges` override a config key for one run. A config key never
+  makes a plain command refuse (a per-file mode without `--moods` skips the store, an extractor older
+  than `.5` skips edges, each with a note).
+- Beside the store: `artifacts\pending\` (in-flight edge stashes, swept), `store-result.json`,
   `store-import-result.json`, `store-info.json`.
 
 ## What is in it
