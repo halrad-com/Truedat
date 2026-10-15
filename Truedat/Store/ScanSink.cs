@@ -167,9 +167,10 @@ namespace Truedat.Store
             if (entries.Count == 0 && failures.Count == 0) { if (final) SweepLeftovers(); report.Ok = true; return report; }
             try
             {
-                var resultPath = storePath == null ? null : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(storePath)) ?? ".", ResultFileName);
+                // store-v3 T11: the scan's record (store-result.json, the hub:H03d shape) is written by the scan itself at the
+                // end of the run (Program.WriteScanStoreResult), after the companion step — not the import-shaped file here.
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
-                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints, artifacts, edges);
+                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, null, rootHints, artifacts, edges);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Remeasured = r.Remeasured; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
@@ -186,6 +187,8 @@ namespace Truedat.Store
                                (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — the next --refresh re-analyses those tracks" : "") + ")");
             }
             if (final) SweepLeftovers();
+            // store-v3 T11: the end-of-run record, on both outcomes (the scan re-writes it after the companion step).
+            if (final) StoreResult.WriteScan(storePath, report, edges.Count > 0 || report.Edges > 0, null);
             return report;
         }
 

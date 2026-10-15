@@ -24,6 +24,8 @@ namespace Truedat.Store
         /// <summary>Store-v3 T07: the generation the triple carries; Published = the ruled publication ran (false = split
         /// fallback, v1 header); Companion = mbxedges.v1.json was part of it (the store had edge rows).</summary>
         public long Generation; public bool Published; public bool Companion;
+        /// <summary>For the store-result record (T11): the store opened, its schema, and where the sidecar/companion landed.</summary>
+        public string StorePath = ""; public int StoreSchema; public string SidecarPath = ""; public string CompanionPath = "";
     }
 
     internal sealed class RoundtripReport
@@ -58,16 +60,48 @@ namespace Truedat.Store
 
         internal static int Run(ExportOptions o)
         {
+            // store-v3 T11: store-result.json on EVERY exit path — the hub reads it, never stdout.
+            var result = StoreResult.Begin("store-export");
             try
             {
                 var r = Execute(o);
                 Console.WriteLine($"Exported {r.Entries} entries of root {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s"
                     + (r.Published ? $" (generation {r.Generation}: catalog + sidecar{(r.Companion ? " + mbxedges.v1.json" : "")} published together)" : ""));
                 if (r.KeyMovesPath != null) Console.WriteLine($"  {r.KeyMoves} content-hash key move(s) recorded in {r.KeyMovesPath}");
+                result.Store = new StoreResultStore { Path = r.StorePath, SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+                result.Export = new StoreResultExport
+                {
+                    Performed = r.Published, Generation = r.Published ? r.Generation : (long?)null,
+                    Catalog = r.Published ? StoreResult.Describe(r.OutPath) : null,
+                    Sidecar = r.Published ? StoreResult.Describe(r.SidecarPath) : null,
+                    Companion = r.Published && r.Companion ? StoreResult.Describe(r.CompanionPath) : null,
+                };
+                result.Detail = new System.Collections.Generic.Dictionary<string, long> { ["entries"] = r.Entries, ["keyMoves"] = r.KeyMoves, ["elapsedMs"] = r.ElapsedMs };
+                StoreResult.Write(r.StorePath, result, 0, StoreResult.OutcomeCompleted);
                 return 0;
             }
-            catch (StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); return ex.ExitCode; }
-            catch (Exception ex) { Console.Error.WriteLine("Error: export failed: " + ex.Message); return 1; }
+            catch (StoreException ex)
+            {
+                Console.Error.WriteLine("Error: " + ex.Message);
+                WriteFailed(o, result, ex.ExitCode, ex.Message);
+                return ex.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Error: export failed: " + ex.Message);
+                WriteFailed(o, result, 1, "export failed: " + ex.Message);
+                return 1;
+            }
+        }
+
+        /// <summary>The failure record: the store block names the store when a path was given, even if it could not be opened.</summary>
+        static void WriteFailed(ExportOptions o, StoreResultFile result, int exitCode, string reason)
+        {
+            string? storePath = null;
+            try { if (!string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
+            result.Store = new StoreResultStore { Path = storePath ?? "", TruedatVersion = VersionInfo.Display };
+            result.Export = new StoreResultExport { Performed = false };
+            StoreResult.Write(storePath, result, exitCode, StoreResult.OutcomeFailed, reason);
         }
 
         internal static ExportReport Execute(ExportOptions o)
@@ -127,6 +161,9 @@ namespace Truedat.Store
             {
                 Root = root.Path, OutPath = outFull, Entries = dict.Count, KeyMoves = moves.Count, KeyMovesPath = movesPath, ElapsedMs = sw.ElapsedMilliseconds,
                 Generation = origin.Generation, Published = published != null, Companion = hasEdges && published != null,
+                StorePath = os.Path, StoreSchema = origin.StoreSchema,
+                SidecarPath = Path.ChangeExtension(outFull, ".mbxs"),
+                CompanionPath = Path.Combine(outDir ?? ".", global::Truedat.Edges.EdgeCompanion.FileName),
             };
         }
 

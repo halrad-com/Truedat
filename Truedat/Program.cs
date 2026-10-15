@@ -3264,7 +3264,29 @@ namespace Truedat
             }
             if (edgesExportMode)
             {
-                Environment.ExitCode = WriteEdgesCompanion(edgesExportPath, announce: true) ? 0 : 1;
+                // store-v3 T11: the verb's store-result.json — export.performed with the companion alone (catalog/sidecar null);
+                // an upgraded hub pairs it with its catalog by origin.generation or labels it behind.
+                var edgesResult = global::Truedat.Store.StoreResult.Begin("edges-export");
+                bool edgesOk = WriteEdgesCompanion(edgesExportPath, announce: true);
+                var companionOut = edgesExportPath ?? _edgesCompanionPath;
+                edgesResult.Store = new global::Truedat.Store.StoreResultStore { Path = _storePath == null ? "" : Path.GetFullPath(_storePath), TruedatVersion = VersionInfo.Display };
+                try
+                {
+                    if (edgesOk && _storePath != null)
+                        using (global::Truedat.Store.StoreLog.Quiet())
+                        using (var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        { edgesResult.Store.SchemaVersion = global::Truedat.Store.SchemaMigrator.ReadVersion(os.Db); edgesResult.Store.Generation = os.Dal.Generation(); }
+                }
+                catch { }
+                edgesResult.Export = new global::Truedat.Store.StoreResultExport
+                {
+                    Performed = edgesOk, Generation = edgesOk ? edgesResult.Store.Generation : (long?)null,
+                    Companion = edgesOk ? global::Truedat.Store.StoreResult.Describe(companionOut) : null,
+                };
+                global::Truedat.Store.StoreResult.Write(_storePath, edgesResult, edgesOk ? 0 : 1,
+                    edgesOk ? global::Truedat.Store.StoreResult.OutcomeCompleted : global::Truedat.Store.StoreResult.OutcomeFailed,
+                    edgesOk ? null : "mbxedges.v1.json not written (see the console line above)");
+                Environment.ExitCode = edgesOk ? 0 : 1;
                 return;
             }
 
@@ -10518,15 +10540,22 @@ namespace Truedat
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
                 return;
             }
+            bool companionWritten = false;
             if (r.Ok)
             {
                 Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Remeasured} remeasured, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
                 if (_stageOpts.Edges) Console.WriteLine($"  edges: {r.Edges} edge rows written, {r.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
-                if (_stageOpts.Edges && r.Edges > 0) WriteEdgesCompanion(null, announce: true);   // S2 C7: the companion file reflects the store after every run that added edges
+                if (_stageOpts.Edges && r.Edges > 0) companionWritten = WriteEdgesCompanion(null, announce: true);   // S2 C7: the companion file reflects the store after every run that added edges
             }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
+            // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
+            // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
+            global::Truedat.Store.StoreResult.WriteScan(_storePath, r, _stageOpts.Edges, companionWritten ? _edgesCompanionPath : null, _scanStartedUtc);
         }
+
+        /// <summary>When this process's scan began (ISO-8601 UTC) — the record's startedUtc.</summary>
+        static readonly string _scanStartedUtc = DateTime.UtcNow.ToString("o");
 
         static void ReportExtractorBuild(string exePath)
         {
@@ -14214,6 +14243,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.StoreSelfTest.Run(Assert);
             global::Truedat.Edges.EdgeSelfTest.Run(Assert);
             global::Truedat.Store.PublicationSelfTest.Run(Assert);   // T07/T08 slice (architect-2, a98ded7)
+            global::Truedat.Store.StoreResultSelfTest.Run(Assert);   // T11 store-result.json (architect-2)
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);
