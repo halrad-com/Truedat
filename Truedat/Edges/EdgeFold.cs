@@ -83,8 +83,12 @@ namespace Truedat.Edges
         internal const double TonalHop = 2048.0 / 44100.0;
         internal const double EbuHop = 0.1;
         internal const double SilenceLufs = -60;       // the EBU fallback floor for silenceMs (the PCM pass uses -60 dBFS slice peaks)
-        internal const double NoLevelLufs = -70;       // BS.1770 / EBU R128 absolute gate: below it there is no measurable level (T02) — a
-                                                       // -62..-69 LUFS pianissimo tail is "quiet but measurable" (silenceMs > 0, finite LUFS)
+        internal const double ExtractorSilenceLufs = -200;   // T02: "no level" is the extractor's OWN silence floor, not a gate. The momentary and
+                                                             // short-term series are NOT gated (loudnessebur128.cpp description); a digitally silent
+                                                             // window has its power clipped to 1e-30 before log10 (unaryoperator.cpp:83-84) and is
+                                                             // shifted by -0.691 -> -300.691 LUFS. Real audio cannot read below ~-144 dBFS, so any
+                                                             // window under -200 is that floor. The -70 absolute gate applies to INTEGRATED loudness
+                                                             // only and must not erase a genuine -75 momentary reading (keeper P2 on 24020d1).
         internal const double FadeMinLu = 10;          // a fade is a departure from the edge's plateau of at least this much ...
         internal const int FadeMinMs = 1000;           // ... lasting at least this long; anything else is a cut (fadeMs null)
         internal const double FadePlateauLu = 1;       // "on the plateau" = within this of the median non-silent level
@@ -341,18 +345,18 @@ namespace Truedat.Edges
             return m > 0 ? 10 * Math.Log10(m) : -300;
         }
 
-        /// <summary>The loudness SCALAR of a range (T02, F6.4): NULL when its energy mean is below <see cref="NoLevelLufs"/>, the
-        /// standard's absolute gate — below it there is no measurable level, and a sentinel (-90 from the extractor for digital
-        /// silence, -300 from the energy mean) stored as if it were LUFS put a +276 LU head-to-tail step and a 1.00 loudness
-        /// divergence on 23.5 % of one library's tracks. A window at -65 is quiet but measurable and stays finite (review: the
-        /// -60 silenceMs floor would have nulled a pianissimo tail). The mean, not a window count, decides: one sounding window
-        /// among silent ones lifts the mean only as far as the energy says. The int16 series keep their raw centi-dB readings — a
-        /// silent bin there is a reading, not a level claim.</summary>
+        /// <summary>The loudness SCALAR of a range (T02, F6.4): NULL when every window in it sits at the extractor's silence floor
+        /// (<see cref="ExtractorSilenceLufs"/>) — digital silence has no measurable level, and the -300.691 sentinel stored as if it
+        /// were LUFS put a +276 LU head-to-tail step and a 1.00 loudness divergence on 23.5 % of one library's tracks. Otherwise the
+        /// ungated energy mean: a -75 LUFS tail is a genuine finite reading (momentary is not gated — the -70 absolute gate belongs
+        /// to integrated loudness; keeper P2), a -65 one is "quiet but measurable", and one sounding window among silent ones lifts
+        /// the mean only as far as the energy says. The int16 series keep their raw centi-dB readings — a silent bin there is a
+        /// reading, not a level claim.</summary>
         static double? LevelOrNull(float[] v, int from, int to)
         {
             if (to - from <= 0) return null;
-            double m = EnergyMean(v, from, to);
-            return double.IsNaN(m) || m < NoLevelLufs ? (double?)null : m;
+            for (int i = from; i < to; i++) if (v[i] > ExtractorSilenceLufs) return EnergyMean(v, from, to);
+            return null;
         }
 
         /// <summary>Loudness: |Δ| over 20 LU clamped to 0..1. Harmony: cosine distance of the HPCP means. Texture: cosine distance

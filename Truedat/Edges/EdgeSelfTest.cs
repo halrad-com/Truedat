@@ -97,7 +97,7 @@ namespace Truedat.Edges
                 var back = EdgeStore.Read(dal, Sha1, r.ProducerVersion);
                 assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.ProducerVersion == r.ProducerVersion, $"read back: status, duration, version ({back?.Status}, {back?.DurationMs})");
                 assert(back != null && back.Head.StartMs == 0 && back.Head.EndMs == 30000 && back.Tail.StartMs == 210000 && back.Tail.EndMs == 240000 && back.Head.Status == "ok", "read back: the edge windows");
-                assert(back != null && back.Head.MomentaryCentiDb.Length == 300 && back.Head.MomentaryCentiDb[3] == -3827 && back.Head.MomentaryCentiDb[0] == short.MinValue && back.Tail.ShortTermCentiDb[299] == -9000,
+                assert(back != null && back.Head.MomentaryCentiDb.Length == 300 && back.Head.MomentaryCentiDb[3] == -3827 && back.Head.MomentaryCentiDb[0] == short.MinValue && back.Tail.ShortTermCentiDb[299] == -30069,
                     $"read back: the EBU pair as int16 centi-dB, undefined bins intact ([3]={back?.Head.MomentaryCentiDb[3]}, [0]={back?.Head.MomentaryCentiDb[0]})");
                 assert(back != null && back.Head.BeatsMs.Length == 60 && back.Head.BeatsMs[0] == 250 && back.Head.BeatsLoudness.Length == 60 && Math.Abs(back.Head.BeatsLoudness[0] - 0.3) < 1e-6, "read back: beats ms and loudness");
                 assert(back != null && back.Head.Bpm != null && Math.Abs(back.Head.Bpm.Value - 120) < 0.01 && back.Head.Bpm.Beats == 60, "read back: bpm");
@@ -499,7 +499,10 @@ namespace Truedat.Edges
         /// <summary>A synthetic 240 s track: a 6 s fade-in from silence then steady -14 LUFS; a 4 s fade-out to silence at the end
         /// with 1 s of digital silence after it; beats every 0.5 s (120 bpm) throughout; C-major chroma in the head, A-minor in
         /// the tail; MFCC and spectral scalars constant per half so spreads are 0 and means are known.</summary>
-        static string BuildSyntheticFrames(string dir, double durationSec = 240, bool withBeats = true, bool withHpcp = true, double silentTailSec = 1, double silentLevel = -90)
+        // Digital silence as the extractor actually emits it: the momentary operator clips power to 1e-30 before log10
+        // (unaryoperator.cpp:83-84) and shifts by -0.691 (loudnessebur128.cpp:157-162) -> -300.691 LUFS. Momentary is NOT gated.
+        internal const double ExtractorSilence = 10 * -30 - 0.691;
+        static string BuildSyntheticFrames(string dir, double durationSec = 240, bool withBeats = true, bool withHpcp = true, double silentTailSec = 1, double silentLevel = ExtractorSilence)
         {
             int ll = (int)Math.Round(durationSec / EdgeFold.LowLevelHop), tn = (int)Math.Round(durationSec / EdgeFold.TonalHop), eb = (int)Math.Round(durationSec / EdgeFold.EbuHop);
             // EBU series as the extractor emits them: trailing windows every 0.1 s, so momentary has eb-3 frames (400 ms window) and
@@ -566,8 +569,8 @@ namespace Truedat.Edges
                 assert(h.MomentaryCentiDb.Length == 300 && h.ShortTermCentiDb.Length == 300 && h.MomentaryCentiDb[299] == -1400 && h.MomentaryCentiDb[3] == -3827
                     && h.MomentaryCentiDb[0] == short.MinValue && h.MomentaryCentiDb[2] == short.MinValue && h.ShortTermCentiDb[28] == short.MinValue && h.ShortTermCentiDb[29] != short.MinValue,
                     $"the EBU pair is stored at 10/s as int16 centi-dB: 300 values; bins before the first full window are undefined (3 momentary, 29 short-term), then -3827 at 0.4 s, -1400 at 30 s ({h.MomentaryCentiDb.Length}, [0]={h.MomentaryCentiDb[0]}, [3]={h.MomentaryCentiDb[3]}, [299]={h.MomentaryCentiDb[299]}, st[28]={h.ShortTermCentiDb[28]}, st[29]={h.ShortTermCentiDb[29]})");
-                assert(t.MomentaryCentiDb.Length == 300 && t.MomentaryCentiDb[299] == -9000 && t.ShortTermCentiDb[299] == -9000 && t.MomentaryCentiDb[0] == -1400 && CountUndefined(t.MomentaryCentiDb) == 0 && CountUndefined(t.ShortTermCentiDb) == 0,
-                    $"the tail's series are fully defined and end on the window that ends at the track end: -1400 first, -9000 last ([0]={t.MomentaryCentiDb[0]}, [299]={t.MomentaryCentiDb[299]}, undefined {CountUndefined(t.MomentaryCentiDb)}/{CountUndefined(t.ShortTermCentiDb)})");
+                assert(t.MomentaryCentiDb.Length == 300 && t.MomentaryCentiDb[299] == -30069 && t.ShortTermCentiDb[299] == -30069 && t.MomentaryCentiDb[0] == -1400 && CountUndefined(t.MomentaryCentiDb) == 0 && CountUndefined(t.ShortTermCentiDb) == 0,
+                    $"the tail's series are fully defined and end on the window that ends at the track end: -1400 first, -30069 last (the extractor's -300.691 silence floor, kept raw in the series) ([0]={t.MomentaryCentiDb[0]}, [299]={t.MomentaryCentiDb[299]}, undefined {CountUndefined(t.MomentaryCentiDb)}/{CountUndefined(t.ShortTermCentiDb)})");
                 assert(h.BeatsMs.Length == 60 && h.BeatsMs[0] == 250 && h.BeatsMs[59] == 29750 && h.BeatsLoudness.Length == 60 && t.BeatsMs.Length == 60 && t.BeatsMs[0] == 210250,
                     $"beats inside each window, as ms from the track start ({h.BeatsMs.Length} head, first {(h.BeatsMs.Length > 0 ? h.BeatsMs[0] : -1)}; {t.BeatsMs.Length} tail)");
                 assert(h.Bpm != null && Math.Abs(h.Bpm.Value - 120) < 0.01 && h.Bpm.Beats == 60 && h.Bpm.Regularity > 0.99, $"bpm from in-window intervals: 120, 60 beats, regularity ~1 ({h.Bpm?.Value:F2}, {h.Bpm?.Beats}, {h.Bpm?.Regularity:F3})");
@@ -616,6 +619,20 @@ namespace Truedat.Edges
                         $"a quiet-but-measurable tail keeps finite LUFS (mean {(tq.Loudness?.MeanLufs.HasValue == true ? tq.Loudness.MeanLufs.Value.ToString("F1") : "null")}) with silence {tq.Loudness?.SilenceMs} ms — the gate is -70, not the -60 silence floor");
                     assert(r.HeadTail?.Loudness != null && r.HeadTail.Loudness == 1.0, $"its head-tail loudness divergence is a real 1.00 (-14 vs -65 clamps), not a null ({r.HeadTail?.Loudness:F2})");
                 }
+
+                // Keeper P2 on 24020d1: momentary loudness is NOT gated (loudnessebur128.cpp description), so a genuine -75 LUFS tail —
+                // below the -70 INTEGRATED-loudness gate — is a finite reading that must survive. Only the extractor's own silence floor
+                // (-300.691, power clipped to 1e-30) means "no level".
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: -75))) r = EdgeFold.Fold(f, 240, settings);
+                {
+                    var t75 = r!.Tail;
+                    assert(t75.Loudness?.MeanLufs != null && Math.Abs(t75.Loudness.MeanLufs.Value - (-75)) < 0.01 && t75.Loudness.StartLufs != null && t75.Loudness.EndLufs != null,
+                        $"a genuine -75 LUFS tail (below the integrated gate, above the extractor floor) keeps finite scalars (mean {(t75.Loudness?.MeanLufs.HasValue == true ? t75.Loudness.MeanLufs.Value.ToString("F1") : "null")})");
+                    assert(r.HeadTail?.Loudness == 1.0, $"and a real head-tail divergence ({(r.HeadTail?.Loudness.HasValue == true ? r.HeadTail.Loudness.Value.ToString("F2") : "null")})");
+                }
+                // Digital silence exactly at the extractor floor (-300.691): no level, null — the sentinel case T02 exists for.
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: ExtractorSilence))) r = EdgeFold.Fold(f, 240, settings);
+                assert(r!.Tail.Loudness?.MeanLufs == null && r.HeadTail?.Loudness == null, $"a tail at the extractor's silence floor is null, no divergence ({r.Tail.Loudness?.MeanLufs}, {r.HeadTail?.Loudness})");
 
                 // Short tracks: clipped to half each -> short-context; under the floor -> unavailable.
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 40))) r = EdgeFold.Fold(f, 40, settings);
