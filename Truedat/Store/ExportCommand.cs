@@ -51,6 +51,11 @@ namespace Truedat.Store
     {
         internal const string KeyMovesFileName = "key-moves.json";
 
+        /// <summary>Self-test seam: runs after the entries are read and before the generation/edge reads, so a test
+        /// can commit to the same store in between and prove the exported set still comes from ONE snapshot
+        /// (keeper review of c89d48a, P1). Null in production.</summary>
+        internal static Action? AfterEntriesRead;
+
         internal static int Run(ExportOptions o)
         {
             try
@@ -76,10 +81,15 @@ namespace Truedat.Store
             if (!string.IsNullOrEmpty(outDir)) Directory.CreateDirectory(outDir!);
 
             using var os = OpenStore.Open(o.StorePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+            // ONE snapshot for everything the export reads — root, entries, generation, edge rows, key moves — so a
+            // commit by another connection in between cannot label generation-N entries with N+1 (keeper review of
+            // c89d48a, P1). A deferred read transaction: under WAL it blocks no writer and sees none.
+            using var snapshot = os.Db.BeginRead();
             var root = PickRoot(os.Dal, o.ExportRoot);
 
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
+            AfterEntriesRead?.Invoke();   // self-test seam: a concurrent commit lands here
             StoreLog.Info($"export: {dict.Count} entries of root {root.Path} -> {outFull}");
 
             // Store-v3 T07: --store-export means the TRIPLE — catalog (v2 header: contract + origin, the sidecar bound
@@ -113,6 +123,7 @@ namespace Truedat.Store
                 WriteKeyMoves(movesPath, os.Path, moves);
                 StoreLog.Info($"{moves.Count} key move(s) -> {movesPath}");
             }
+            snapshot.Complete();
             sw.Stop();
             return new ExportReport
             {

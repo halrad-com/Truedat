@@ -92,6 +92,17 @@ namespace Truedat.Store
             return new SqliteTransaction(this);
         }
 
+        /// <summary>A READ snapshot (deferred BEGIN): every read until <see cref="SqliteTransaction.Complete"/> sees
+        /// one consistent state of the store — under WAL a concurrent writer's commit becomes invisible to it. No
+        /// write lock is taken, so a running scan's flush is not blocked. Used by the export (store-v3 T07, keeper
+        /// review of c89d48a P1): generation, entries and edge rows must come from ONE snapshot or a commit between
+        /// the reads mislabels the published set.</summary>
+        internal SqliteTransaction BeginRead()
+        {
+            Exec("BEGIN;");
+            return new SqliteTransaction(this);
+        }
+
         internal int Changes => SqliteNative.sqlite3_changes(_db);
         internal long LastInsertRowId => SqliteNative.sqlite3_last_insert_rowid(_db);
 

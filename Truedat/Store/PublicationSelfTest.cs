@@ -32,6 +32,95 @@ namespace Truedat.Store
             Console.WriteLine("Publication self-test (store-v3 T07: SaveResultsPublished writes the real catalog + sidecar through the publisher; the plain save stays v1)");
             try { TestSaveResultsPublished(assert); }
             catch (Exception ex) { assert(false, $"Publication.SaveResultsPublished: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Publication self-test (store-v3 T07: a catalog past the single-file limit fails BEFORE touching the live set; keeper review of c89d48a, P2)");
+            try { TestOverflowFailsBeforeMutating(assert); }
+            catch (Exception ex) { assert(false, $"Publication.Overflow: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Publication self-test (store-v3 T07: --store-export reads generation, entries and edge rows from ONE store snapshot; keeper review of c89d48a, P1)");
+            try { TestExportSnapshot(assert); }
+            catch (Exception ex) { assert(false, $"Publication.ExportSnapshot: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ExportCommand.AfterEntriesRead = null; }
+        }
+
+        /// <summary>Keeper review of c89d48a, P1: a commit by another connection between the export's reads must not
+        /// produce a set whose entries are at N while the header claims N+1. The seam fires after the entries are
+        /// read; the concurrent writer advances the generation AND changes an entry; the published set must be all-N.</summary>
+        static void TestExportSnapshot(Action<bool, string> assert)
+        {
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                var now = DateTime.UtcNow.ToString("o");
+                const string path = @"D:\music\snap.flac";
+                var entries = new System.Collections.Generic.Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "Snap", Bpm = 120, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) },
+                };
+                ImportCommand.ExecuteEntries(store, entries, @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                using (var os = OpenStore.Open(store, false, VersionInfo.Display, now)) { os.Dal.AdvanceGeneration(); assert(os.Dal.Generation() == 1, "snapshot setup: store at generation 1"); }
+
+                var outDir = d.P("out"); Directory.CreateDirectory(outDir);
+                var outPath = Path.Combine(outDir, "mbxmoods.json");
+                int fired = 0;
+                ExportCommand.AfterEntriesRead = () =>
+                {
+                    fired++;
+                    // Another producer commits between the export's reads: generation 1 -> 2, bpm 120 -> 150.
+                    var changed = new System.Collections.Generic.Dictionary<string, TrackEntry>(PathComparer.Instance)
+                    {
+                        [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "Snap", Bpm = 150, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 2, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) },
+                    };
+                    ImportCommand.ExecuteEntries(store, changed, @"D:\music", "primary", true, "essentia", "x", "concurrent", null, null);
+                    using (var os2 = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) os2.Dal.AdvanceGeneration();
+                };
+                var rep = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath });
+                ExportCommand.AfterEntriesRead = null;
+                assert(fired == 1 && rep.Entries == 1 && rep.Published, "snapshot: the concurrent commit fired once; the export published");
+                assert(CatalogOrigin.TryRead(outPath, out var o) && o.Generation == 1, $"snapshot: the header carries the generation the ENTRIES were read at (1), not the concurrent commit's (got {(CatalogOrigin.TryRead(outPath, out var o2) ? o2.Generation : -1)})");
+                var back = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(outPath, back);
+                assert(back.TryGetValue(path, out var e) && e.Features != null && Math.Abs(e.Features.Bpm - 120) < 1e-9, "snapshot: the exported entry is the snapshot's value (bpm 120), not the concurrent commit's (150)");
+                using (var os3 = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    assert(os3.Dal.Generation() == 2, "snapshot: the store itself is at generation 2 afterwards (the export did not block or lose the concurrent commit)");
+            }
+        }
+
+        /// <summary>Keeper review of c89d48a, P2: the overflow fallback must not bypass the publisher and leave the
+        /// previous companion live beside new parts. Single-file scope: refuse before any live file moves.</summary>
+        static void TestOverflowFailsBeforeMutating(Action<bool, string> assert)
+        {
+            var saved = Program.CatalogMaxBytes;
+            try
+            {
+                using (var d = new Dir())
+                {
+                    var dict = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    for (int i = 0; i < 6; i++)
+                        dict[@"D:\music\t" + i + ".flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T" + i, Bpm = 100 + i, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                    var moods = d.P("mbxmoods.json"); var sidecar = d.P("mbxmoods.mbxs"); var companion = d.P("mbxedges.v1.json");
+                    // A live, complete set at generation 1 with a companion.
+                    var o1 = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = 1 };
+                    var r1 = Program.SaveResultsPublished(moods, dict, o1, tmp => { Put(tmp, CompanionText(1, "E1")); return true; });
+                    assert(r1 != null && r1.Completed && Marker(companion) == "E1", "overflow setup: live set at generation 1 with companion E1");
+                    var catalogBytes = new FileInfo(moods).Length; var sidecarSha = Publication.Sha256Hex(sidecar);
+
+                    Program.CatalogMaxBytes = 400;   // the split seam: header + a couple of tracks per part
+                    foreach (bool edgesOn in new[] { true, false })
+                    {
+                        var o2 = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = 2 };
+                        bool threw = false;
+                        try { Program.SaveResultsPublished(moods, dict, o2, edgesOn ? (tmp => { Put(tmp, CompanionText(2, "E2")); return true; }) : null); }
+                        catch (Exception) { threw = true; }
+                        string which = edgesOn ? "edges on" : "edges off";
+                        assert(threw, $"overflow ({which}): refused with an exception, not a silent fallback");
+                        assert(File.Exists(moods) && new FileInfo(moods).Length == catalogBytes && !File.Exists(moods + ".1"), $"overflow ({which}): the live catalog is untouched and no parts were written");
+                        assert(Publication.Sha256Hex(sidecar) == sidecarSha, $"overflow ({which}): the live sidecar is untouched");
+                        assert(Marker(companion) == "E1", $"overflow ({which}): the live companion E1 is still the set's own (never E1 beside new parts, never retired without a publish)");
+                        assert(!Publication.FilesBehind(moods, sidecar, companion, true, 1, out var why), $"overflow ({which}): the generation-1 set is still whole ({why})");
+                        assert(!File.Exists(moods + ".tmp") && !File.Exists(sidecar + ".tmp") && !File.Exists(companion + ".tmp") && !File.Exists(companion + Publication.CompanionAsideSuffix), $"overflow ({which}): no temps or .prev left");
+                    }
+                }
+            }
+            finally { Program.CatalogMaxBytes = saved; }
         }
 
         /// <summary>The integration: the real catalog writer and sidecar writer, published as a set with the

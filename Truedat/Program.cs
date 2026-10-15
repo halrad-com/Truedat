@@ -21216,8 +21216,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// sidecar LAST) with the catalog/sidecar mtimes stamped on the temps. <paramref name="writeCompanionTemp"/>
         /// writes the companion to the temp path it is handed and returns true; null, or false, means this
         /// generation publishes no companion (edges off) — the previous live one is still retired.
-        /// A catalog past <see cref="CatalogMaxBytes"/> cannot be published as one file: it falls back to the
-        /// plain split save (v1 header, no publication), says so, and returns null.
+        /// A catalog past <see cref="CatalogMaxBytes"/> cannot be published as one file: the call REFUSES
+        /// (InvalidOperationException) before any live file moves — multipart publication is out of scope,
+        /// and a fallback to the split save would leave the previous companion live beside new parts.
         /// </summary>
         internal static global::Truedat.Store.PublicationResult? SaveResultsPublished(string moodsPath,
             ConcurrentDictionary<string, TrackEntry> allTracks, global::Truedat.Store.CatalogOrigin origin, Func<string, bool>? writeCompanionTemp)
@@ -21244,12 +21245,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 bool overflow = WriteCatalogSingleTemp(plan.CatalogTmp, items, total, generatedAt, origin);
                 if (overflow)
                 {
-                    foreach (var t in new[] { plan.CatalogTmp, plan.SidecarTmp, companionTmp }) { try { File.Delete(t); } catch { } }
-                    Console.Error.WriteLine("  Warning: the catalog exceeds the single-file limit; written as numbered parts WITHOUT the publication header (multipart publication is not supported; readers use the legacy freshness rule).");
-                    SaveResultsSplit(moodsPath, items, total, generatedAt);
-                    try { CatalogSidecar.Write(sidecarPath, items); }
-                    catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not written: {ex.Message}"); }
-                    return null;
+                    // Refuse BEFORE any live file moves (keeper review of c89d48a, P2): the legacy split save
+                    // would bypass the publisher and leave the previous companion live beside new parts —
+                    // a mixed set. Multipart publication is out of scope; the live set stays whole and the
+                    // caller reports the refusal. (The temps are removed by the catch below.)
+                    throw new InvalidOperationException(
+                        $"the catalog ({total:N0} tracks) exceeds the single-file limit of {CatalogMaxBytes:N0} bytes; multipart publication is not supported, so nothing was published — the previous catalog, sidecar and mbxedges.v1.json are untouched.");
                 }
                 var result = global::Truedat.Store.Publication.Publish(plan, DateTime.UtcNow);
                 // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both.
