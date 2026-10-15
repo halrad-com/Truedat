@@ -630,6 +630,12 @@ namespace Truedat.Edges
                         $"a genuine -75 LUFS tail (below the integrated gate, above the extractor floor) keeps finite scalars (mean {(t75.Loudness?.MeanLufs.HasValue == true ? t75.Loudness.MeanLufs.Value.ToString("F1") : "null")})");
                     assert(r.HeadTail?.Loudness == 1.0, $"and a real head-tail divergence ({(r.HeadTail?.Loudness.HasValue == true ? r.HeadTail.Loudness.Value.ToString("F2") : "null")})");
                 }
+                // Keeper probe on dbd20a0: the smallest representable non-zero power (1e-22) reads -220.691 — a reading, not the floor.
+                // Only the clipped value itself (10*log10(1e-30) - 0.691) is "no level"; -200 was another blanket cutoff.
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: 10 * -22 - 0.691))) r = EdgeFold.Fold(f, 240, settings);
+                assert(r!.Tail.Loudness?.MeanLufs != null && Math.Abs(r.Tail.Loudness.MeanLufs.Value - (-220.691)) < 0.01,
+                    $"a -220.691 LUFS tail (representable non-zero power, above the clipped floor) keeps its finite value ({(r.Tail.Loudness?.MeanLufs.HasValue == true ? r.Tail.Loudness.MeanLufs.Value.ToString("F3") : "null")})");
+                assert(Math.Abs(EdgeFold.ExtractorSilenceLufs - (-300.691)) < 1e-9, $"the floor constant is derived from the source, 10*log10(1e-30) - 0.691 = -300.691 ({EdgeFold.ExtractorSilenceLufs:F6})");
                 // Digital silence exactly at the extractor floor (-300.691): no level, null — the sentinel case T02 exists for.
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: ExtractorSilence))) r = EdgeFold.Fold(f, 240, settings);
                 assert(r!.Tail.Loudness?.MeanLufs == null && r.HeadTail?.Loudness == null, $"a tail at the extractor's silence floor is null, no divergence ({r.Tail.Loudness?.MeanLufs}, {r.HeadTail?.Loudness})");

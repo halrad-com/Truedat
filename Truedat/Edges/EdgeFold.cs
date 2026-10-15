@@ -83,12 +83,14 @@ namespace Truedat.Edges
         internal const double TonalHop = 2048.0 / 44100.0;
         internal const double EbuHop = 0.1;
         internal const double SilenceLufs = -60;       // the EBU fallback floor for silenceMs (the PCM pass uses -60 dBFS slice peaks)
-        internal const double ExtractorSilenceLufs = -200;   // T02: "no level" is the extractor's OWN silence floor, not a gate. The momentary and
-                                                             // short-term series are NOT gated (loudnessebur128.cpp description); a digitally silent
-                                                             // window has its power clipped to 1e-30 before log10 (unaryoperator.cpp:83-84) and is
-                                                             // shifted by -0.691 -> -300.691 LUFS. Real audio cannot read below ~-144 dBFS, so any
-                                                             // window under -200 is that floor. The -70 absolute gate applies to INTEGRATED loudness
-                                                             // only and must not erase a genuine -75 momentary reading (keeper P2 on 24020d1).
+        // T02: "no level" is the extractor's OWN silence floor, exactly, not a gate. The momentary and short-term series are NOT
+        // gated (loudnessebur128.cpp description); a digitally silent window has its power clipped to 1e-30 before log10
+        // (unaryoperator.cpp:83-84 / unaryoperatorstream.cpp:83) and is shifted by -0.691 (loudnessebur128.cpp:157-162):
+        // 10*log10(1e-30) - 0.691 = -300.691 LUFS. Any representable non-zero power is a reading (1e-22 -> -220.691 stays finite;
+        // keeper, dbd20a0 probe). The -70 absolute gate applies to INTEGRATED loudness only and must not erase a genuine -75
+        // momentary reading (keeper P2 on 24020d1). The series carry the floor as float32, hence the tolerance.
+        internal static readonly double ExtractorSilenceLufs = 10 * Math.Log10(1e-30) - 0.691;
+        internal const double ExtractorSilenceToleranceLu = 1e-3;   // float32 ulp at 300 is ~3e-5; 1e-3 covers it with margin
         internal const double FadeMinLu = 10;          // a fade is a departure from the edge's plateau of at least this much ...
         internal const int FadeMinMs = 1000;           // ... lasting at least this long; anything else is a cut (fadeMs null)
         internal const double FadePlateauLu = 1;       // "on the plateau" = within this of the median non-silent level
@@ -355,7 +357,7 @@ namespace Truedat.Edges
         static double? LevelOrNull(float[] v, int from, int to)
         {
             if (to - from <= 0) return null;
-            for (int i = from; i < to; i++) if (v[i] > ExtractorSilenceLufs) return EnergyMean(v, from, to);
+            for (int i = from; i < to; i++) if (v[i] > ExtractorSilenceLufs + ExtractorSilenceToleranceLu) return EnergyMean(v, from, to);
             return null;
         }
 
