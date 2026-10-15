@@ -18,6 +18,8 @@ namespace Truedat.Store
     {
         /// <summary>The export contract name the hub pins; absence means a legacy v1 catalog.</summary>
         internal const string ContractV2 = "mbxmoods.v2";
+        /// <summary>The companion's contract (its root <c>contract</c> key; EdgeCompanion.Contract).</summary>
+        internal const string CompanionContractV1 = "mbxedges.v1";
 
         internal string Kind = "scan";            // scan | export | import | restore | <verb>
         internal string MachineId = "";
@@ -50,17 +52,26 @@ namespace Truedat.Store
         internal const int HeadBytes = 64 * 1024;
 
         /// <summary>
-        /// Read <c>contract</c> + <c>origin</c> from the head of a catalog without parsing the
-        /// file. Returns false for a legacy v1 catalog (no <c>contract</c>), an unreadable file, or a
-        /// head that does not reach the keys before <c>tracks</c>. Never throws.
+        /// Read <c>contract</c> + <c>origin</c> from the head of a v2 catalog without parsing the
+        /// file. False for a legacy v1 catalog (no <c>contract</c>), an unreadable file, a head that
+        /// does not reach the keys before <c>tracks</c>, or a malformed origin (wrong token type,
+        /// out-of-range number). Never throws.
         /// </summary>
         internal static bool TryRead(string catalogPath, out CatalogOrigin origin)
+            => TryReadHead(catalogPath, ContractV2, out origin);
+
+        /// <summary>
+        /// The same bounded read for any export whose root carries <c>contract</c> and <c>origin</c>
+        /// (the companion carries <c>origin.generation</c> from T07 on). <paramref name="requiredContract"/>
+        /// must match the root <c>contract</c> exactly.
+        /// </summary>
+        internal static bool TryReadHead(string path, string requiredContract, out CatalogOrigin origin)
         {
             origin = new CatalogOrigin();
             byte[] head;
             try
             {
-                using (var fs = new FileStream(catalogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
                     var buf = new byte[HeadBytes];
                     int n = 0, r;
@@ -89,7 +100,7 @@ namespace Truedat.Store
                     {
                         if (!reader.Read()) break;
                         sawContract = reader.TokenType == JsonTokenType.String
-                            && reader.GetString() == ContractV2;
+                            && reader.GetString() == requiredContract;
                         continue;
                     }
                     if (name == "origin")
@@ -101,15 +112,19 @@ namespace Truedat.Store
                         {
                             if (reader.TokenType == JsonTokenType.EndObject && reader.CurrentDepth == depth) { sawOrigin = true; break; }
                             if (reader.TokenType == JsonTokenType.PropertyName) { prop = reader.GetString(); continue; }
+                            // Malformed origin (wrong token type, out-of-range number) -> false, never a throw.
                             switch (prop)
                             {
-                                case "kind": origin.Kind = reader.GetString() ?? ""; break;
-                                case "machineId": origin.MachineId = reader.GetString() ?? ""; break;
-                                case "storeSchema": if (reader.TokenType == JsonTokenType.Number) origin.StoreSchema = reader.GetInt32(); break;
-                                case "truedat": origin.Truedat = reader.GetString() ?? ""; break;
-                                case "exportedAt": origin.ExportedAt = reader.GetString() ?? ""; break;
-                                case "generation": if (reader.TokenType == JsonTokenType.Number) origin.Generation = reader.GetInt64(); break;
-                                case "sidecarSha256": origin.SidecarSha256 = reader.GetString() ?? ""; break;
+                                case "kind": if (!Str(ref reader, out origin.Kind)) return false; break;
+                                case "machineId": if (!Str(ref reader, out origin.MachineId)) return false; break;
+                                case "storeSchema": if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out origin.StoreSchema)) return false; break;
+                                case "truedat": if (!Str(ref reader, out origin.Truedat)) return false; break;
+                                case "exportedAt": if (!Str(ref reader, out origin.ExportedAt)) return false; break;
+                                case "generation": if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt64(out origin.Generation)) return false; break;
+                                case "sidecarSha256": if (!Str(ref reader, out origin.SidecarSha256)) return false; break;
+                                default:   // an unknown origin key: skip its value, whatever shape
+                                    if ((reader.TokenType == JsonTokenType.StartObject || reader.TokenType == JsonTokenType.StartArray) && !reader.TrySkip()) return false;
+                                    break;
                             }
                             prop = null;
                         }
@@ -125,19 +140,32 @@ namespace Truedat.Store
                 }
             }
             catch (JsonException) { return false; }
+            catch (InvalidOperationException) { return false; }
+            catch (FormatException) { return false; }
             return sawContract && sawOrigin;
+        }
+
+        static bool Str(ref Utf8JsonReader reader, out string value)
+        {
+            value = "";
+            if (reader.TokenType != JsonTokenType.String) return false;
+            value = reader.GetString() ?? "";
+            return true;
         }
     }
 
-    /// <summary>The three temp files and their targets for one publication.</summary>
+    /// <summary>The temp files and their targets for one publication.</summary>
     internal sealed class PublicationPlan
     {
         internal string CatalogPath = "";
         internal string SidecarPath = "";
-        /// <summary>Null when this generation publishes no companion (edges off).</summary>
-        internal string? CompanionPath;
+        /// <summary>The companion's KNOWN target path — always set, whether or not this generation
+        /// publishes one, because a previous live companion must be retired either way.</summary>
+        internal string CompanionPath = "";
         internal string CatalogTmp = "";
         internal string SidecarTmp = "";
+        /// <summary>Null when this generation publishes no companion (edges off). The old one at
+        /// <see cref="CompanionPath"/> is still moved aside and removed on completion.</summary>
         internal string? CompanionTmp;
         internal long Generation;
     }
@@ -162,7 +190,9 @@ namespace Truedat.Store
     /// <list type="number">
     /// <item>move the live companion aside (<c>.prev</c>) — a legacy hub sees "no edges" for these
     /// seconds instead of serving the previous generation's edge values beside the new catalog
-    /// (the state the keeper measured as mixed; operator call #7 = aside while the window is open);</item>
+    /// (the state the keeper measured as mixed; operator call #7 = aside while the window is open);
+    /// this runs whether or not the new generation publishes a companion, so edges on → off never
+    /// leaves the old one live beside the new catalog;</item>
     /// <item>catalog (all parts);</item>
     /// <item>companion;</item>
     /// <item>sidecar LAST.</item>
@@ -222,13 +252,15 @@ namespace Truedat.Store
         internal static PublicationResult Publish(PublicationPlan plan, DateTime nowUtc, Func<PublicationStep, bool>? stopBefore = null)
         {
             if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (string.IsNullOrEmpty(plan.CompanionPath)) throw new ArgumentException("CompanionPath is the known target path and is always required", nameof(plan));
             if (!File.Exists(plan.CatalogTmp)) throw new FileNotFoundException("catalog temp missing", plan.CatalogTmp);
             if (!File.Exists(plan.SidecarTmp)) throw new FileNotFoundException("sidecar temp missing", plan.SidecarTmp);
-            bool withCompanion = !string.IsNullOrEmpty(plan.CompanionPath);
-            if (withCompanion && (string.IsNullOrEmpty(plan.CompanionTmp) || !File.Exists(plan.CompanionTmp)))
-                throw new FileNotFoundException("companion temp missing", plan.CompanionTmp ?? "(null)");
+            bool newCompanion = !string.IsNullOrEmpty(plan.CompanionTmp);
+            if (newCompanion && !File.Exists(plan.CompanionTmp!))
+                throw new FileNotFoundException("companion temp missing", plan.CompanionTmp);
 
             var result = new PublicationResult { Generation = plan.Generation };
+            var aside = plan.CompanionPath + CompanionAsideSuffix;
 
             // Stamp the temps BEFORE any rename (rename preserves the write time).
             var tc = CatalogMtime(nowUtc, plan.SidecarPath);
@@ -239,13 +271,12 @@ namespace Truedat.Store
             result.SidecarMtimeUtc = ts;
             result.SidecarSha256 = Sha256Hex(plan.SidecarTmp);
 
-            // (1) companion aside
+            // (1) companion aside — always, so a previous live companion never outlives this generation
             if (stopBefore != null && stopBefore(PublicationStep.CompanionAside)) return result;
-            if (withCompanion && File.Exists(plan.CompanionPath!))
+            if (File.Exists(plan.CompanionPath))
             {
-                var aside = plan.CompanionPath + CompanionAsideSuffix;
                 if (File.Exists(aside)) File.Delete(aside);
-                File.Move(plan.CompanionPath!, aside);
+                File.Move(plan.CompanionPath, aside);
             }
             result.Reached = PublicationStep.CompanionAside;
 
@@ -254,9 +285,9 @@ namespace Truedat.Store
             Swap(plan.CatalogTmp, plan.CatalogPath);
             result.Reached = PublicationStep.Catalog;
 
-            // (3) companion
+            // (3) companion — only when this generation has one
             if (stopBefore != null && stopBefore(PublicationStep.Companion)) return result;
-            if (withCompanion) Swap(plan.CompanionTmp!, plan.CompanionPath!);
+            if (newCompanion) Swap(plan.CompanionTmp!, plan.CompanionPath);
             result.Reached = PublicationStep.Companion;
 
             // (4) sidecar LAST — completes the fast-boot pair
@@ -265,11 +296,7 @@ namespace Truedat.Store
             result.Reached = PublicationStep.Sidecar;
 
             // Done: the aside copy has served its purpose (it is only evidence after an interruption).
-            if (withCompanion)
-            {
-                var aside = plan.CompanionPath + CompanionAsideSuffix;
-                try { if (File.Exists(aside)) File.Delete(aside); } catch { /* best effort */ }
-            }
+            try { if (File.Exists(aside)) File.Delete(aside); } catch { /* best effort */ }
             result.Reached = PublicationStep.Done;
             result.Completed = true;
             return result;
@@ -283,16 +310,32 @@ namespace Truedat.Store
         }
 
         /// <summary>
-        /// M8: are the published files behind the store? True when the catalog carries no v2 origin
-        /// (legacy or missing) or names an older generation. The caller re-publishes from the
-        /// committed store (idempotent).
+        /// M8 — the recovery predicate: is the published SET behind the store? It checks the whole
+        /// set, not the catalog alone: the catalog must carry a v2 origin at the store's generation,
+        /// the sidecar beside it must hash to <c>origin.sidecarSha256</c>, and the companion must be
+        /// present at that generation when edges are on — or absent when they are off (a stale one
+        /// left live is "behind", so the next publish retires it). Any failure names its reason.
+        /// The caller re-publishes every temp from the committed store (idempotent).
         /// </summary>
-        internal static bool FilesBehind(string catalogPath, long storeGeneration, out long fileGeneration)
+        internal static bool FilesBehind(string catalogPath, string sidecarPath, string companionPath, bool expectCompanion,
+            long storeGeneration, out string reason)
         {
-            fileGeneration = 0;
-            if (!CatalogOrigin.TryRead(catalogPath, out var o)) return true;
-            fileGeneration = o.Generation;
-            return o.Generation < storeGeneration;
+            reason = "";
+            if (!CatalogOrigin.TryRead(catalogPath, out var o)) { reason = "catalog has no v2 origin"; return true; }
+            if (o.Generation != storeGeneration) { reason = $"catalog at generation {o.Generation}, store at {storeGeneration}"; return true; }
+            if (!File.Exists(sidecarPath)) { reason = "sidecar missing"; return true; }
+            string sha;
+            try { sha = Sha256Hex(sidecarPath); } catch (Exception ex) { reason = "sidecar unreadable: " + ex.Message; return true; }
+            if (!string.Equals(sha, o.SidecarSha256, StringComparison.Ordinal)) { reason = "sidecar is not the catalog's (hash mismatch)"; return true; }
+            bool companionPresent = File.Exists(companionPath);
+            if (expectCompanion)
+            {
+                if (!companionPresent) { reason = "companion missing"; return true; }
+                if (!CatalogOrigin.TryReadHead(companionPath, CatalogOrigin.CompanionContractV1, out var c)) { reason = "companion has no origin"; return true; }
+                if (c.Generation != storeGeneration) { reason = $"companion at generation {c.Generation}, store at {storeGeneration}"; return true; }
+            }
+            else if (companionPresent) { reason = "stale companion present (edges are off)"; return true; }
+            return false;
         }
     }
 }

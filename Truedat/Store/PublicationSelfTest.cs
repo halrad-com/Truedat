@@ -17,13 +17,16 @@ namespace Truedat.Store
             Console.WriteLine("Publication self-test (store-v3 T07: the ruled rename order, explicit mtimes, sidecar hash binding)");
             try { TestHashAndMtimes(assert); }
             catch (Exception ex) { assert(false, $"Publication.HashAndMtimes: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Publication self-test (store-v3 T07: every interruption state is one row of the failure table)");
+            Console.WriteLine("Publication self-test (store-v3 T07: every interruption state is one row of the failure table, and the recovery predicate sees it)");
             try { TestInterruptionTable(assert); }
             catch (Exception ex) { assert(false, $"Publication.InterruptionTable: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Publication self-test (store-v3 T07: re-publish after an interruption is idempotent; no-companion plan)");
             try { TestRepublishAndNoCompanion(assert); }
             catch (Exception ex) { assert(false, $"Publication.Republish: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Publication self-test (store-v3 T08: catalog origin header round-trips through the bounded head read)");
+            Console.WriteLine("Publication self-test (store-v3 T07: edges on -> off retires the old companion; keeper review of a98ded7, defect 2)");
+            try { TestEdgesOnToOff(assert); }
+            catch (Exception ex) { assert(false, $"Publication.EdgesOnToOff: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Publication self-test (store-v3 T08: catalog origin header round-trips through the bounded head read; malformed origin is false, never a throw)");
             try { TestOriginHeader(assert); }
             catch (Exception ex) { assert(false, $"Publication.OriginHeader: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -41,8 +44,18 @@ namespace Truedat.Store
         static void Put(string path, string text) => File.WriteAllText(path, text, new UTF8Encoding(false));
         static string Get(string path) => File.Exists(path) ? File.ReadAllText(path) : "(absent)";
 
-        /// <summary>A live triple at generation <paramref name="g"/> plus temps at <paramref name="g"/>+1,
-        /// same track count (the hard case): the content differs only by the generation marker.</summary>
+        /// <summary>A catalog body whose head carries a v2 origin bound to <paramref name="sidecarPath"/>'s bytes.</summary>
+        static string CatalogText(long generation, string sidecarPath, string marker)
+            => "{\"version\":\"1.0\",\"trackCount\":1,\"contract\":\"" + CatalogOrigin.ContractV2 + "\",\"origin\":{\"kind\":\"scan\",\"machineId\":\"m\",\"storeSchema\":3,\"truedat\":\"t\",\"exportedAt\":\"x\",\"generation\":"
+               + generation + ",\"sidecarSha256\":\"" + Publication.Sha256Hex(sidecarPath) + "\"},\"tracks\":{\"" + marker + "\":{}}}";
+
+        /// <summary>A companion body whose head carries origin.generation (the shape the writer gains in T07).</summary>
+        static string CompanionText(long generation, string marker)
+            => "{\"contract\":\"mbxedges.v1\",\"origin\":{\"generation\":" + generation + "},\"trackCount\":1,\"tracks\":{\"" + marker + "\":{}}}";
+
+        /// <summary>A live, self-consistent triple at generation <paramref name="g"/> plus temps at
+        /// <paramref name="g"/>+1, same track count (the hard case): the content differs only by the
+        /// generation marker. Sidecar bytes are "S{g}"; catalogs are bound to them by hash.</summary>
         static PublicationPlan Triple(Dir d, long g, DateTime liveMtime)
         {
             var plan = new PublicationPlan
@@ -51,19 +64,34 @@ namespace Truedat.Store
                 CatalogTmp = d.P("mbxmoods.json.tmp"), SidecarTmp = d.P("mbxmoods.mbxs.tmp"), CompanionTmp = d.P("mbxedges.v1.json.tmp"),
                 Generation = g + 1,
             };
-            Put(plan.CatalogPath, "C" + g); Put(plan.SidecarPath, "S" + g); Put(plan.CompanionPath!, "E" + g);
+            Put(plan.SidecarPath, "S" + g); Put(plan.CatalogPath, CatalogText(g, plan.SidecarPath, "C" + g)); Put(plan.CompanionPath, CompanionText(g, "E" + g));
             File.SetLastWriteTimeUtc(plan.CatalogPath, liveMtime);
             File.SetLastWriteTimeUtc(plan.SidecarPath, liveMtime.AddSeconds(Publication.MtimeMarginSeconds));
             // Real temp-write order: companion, sidecar (hashed), catalog LAST — so without the
             // explicit stamps the sidecar temp is OLDER than the catalog temp. Pinned by mtime, not
             // by write order, so the stamp is load-bearing in every test below.
-            Put(plan.CompanionTmp!, "E" + (g + 1)); Put(plan.SidecarTmp, "S" + (g + 1)); Put(plan.CatalogTmp, "C" + (g + 1));
+            Put(plan.CompanionTmp!, CompanionText(g + 1, "E" + (g + 1))); Put(plan.SidecarTmp, "S" + (g + 1)); Put(plan.CatalogTmp, CatalogText(g + 1, plan.SidecarTmp, "C" + (g + 1)));
             // Both temps OLDER than anything live, so an unstamped sidecar would fail the legacy
             // predicate against the stamped catalog (mutation-checked 2026-10-15).
             File.SetLastWriteTimeUtc(plan.SidecarTmp, liveMtime.AddHours(-1));
             File.SetLastWriteTimeUtc(plan.CatalogTmp, liveMtime.AddHours(-1).AddSeconds(5));
             return plan;
         }
+
+        /// <summary>The generation marker inside a catalog/companion body ("C3", "E4"), or the raw
+        /// text for a sidecar, or "(absent)".</summary>
+        static string Marker(string path)
+        {
+            var t = Get(path);
+            int i = t.IndexOf("\"tracks\":{\"", StringComparison.Ordinal);
+            if (i < 0) return t;
+            int s = i + "\"tracks\":{\"".Length;
+            int e = t.IndexOf('"', s);
+            return e < 0 ? t : t.Substring(s, e - s);
+        }
+
+        static bool Behind(PublicationPlan plan, bool expectCompanion, out string reason)
+            => Publication.FilesBehind(plan.CatalogPath, plan.SidecarPath, plan.CompanionPath, expectCompanion, plan.Generation, out reason);
 
         // ------------------------------------------------------------------ tests
 
@@ -112,7 +140,10 @@ namespace Truedat.Store
         }
 
         /// <summary>Drive the publisher to a stop before each step and check the visible files against
-        /// the plan's table. "C0 beside S1" must be unreachable at every stop.</summary>
+        /// the plan's table. "C0 beside S1" must be unreachable at every stop, and the recovery
+        /// predicate (<see cref="Publication.FilesBehind"/>) must say "behind" at every stop short of
+        /// Done — including the ones where the catalog already carries the store's generation
+        /// (keeper review of a98ded7, defect 1).</summary>
         static void TestInterruptionTable(Action<bool, string> assert)
         {
             var live = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -122,31 +153,37 @@ namespace Truedat.Store
                 {
                     var plan = Triple(d, 0, live);
                     var r = Publication.Publish(plan, live.AddMinutes(1), s => s == stop);
-                    string c = Get(plan.CatalogPath), s_ = Get(plan.SidecarPath), e = Get(plan.CompanionPath!), prev = Get(plan.CompanionPath + Publication.CompanionAsideSuffix);
+                    string c = Marker(plan.CatalogPath), s_ = Marker(plan.SidecarPath), e = Marker(plan.CompanionPath), prev = Marker(plan.CompanionPath + Publication.CompanionAsideSuffix);
                     string state = $"stop-before={stop}: C={c} S={s_} E={e} prev={prev}";
 
                     // The one state no reader may ever see: new sidecar beside old catalog.
                     assert(!(c == "C0" && s_ == "S1"), "unreachable: C0 beside S1 — " + state);
 
+                    bool behind = Behind(plan, expectCompanion: true, out var why);
                     switch (stop)
                     {
                         case PublicationStep.CompanionAside:
                             assert(!r.Completed && c == "C0" && s_ == "S0" && e == "E0" && prev == "(absent)", "table row 'died before any rename': C0 S0 E0 intact — " + state);
                             assert(File.Exists(plan.CatalogTmp) && File.Exists(plan.SidecarTmp) && File.Exists(plan.CompanionTmp!), "temps untouched when nothing ran");
+                            assert(behind, "recovery predicate: files behind the store when nothing was renamed (" + why + ")");
                             break;
                         case PublicationStep.Catalog:
                             assert(!r.Completed && c == "C0" && s_ == "S0" && e == "(absent)" && prev == "E0", "table row 'aside done': C0 S0, companion absent (legacy: edges off), E0 kept as .prev — " + state);
+                            assert(behind, "recovery predicate: behind after the aside only (" + why + ")");
                             break;
                         case PublicationStep.Companion:
                             assert(!r.Completed && c == "C1" && s_ == "S0" && e == "(absent)", "table row C1 S0 (no companion): legacy S0 older -> catalog parse; upgraded hash mismatch -> catalog parse — " + state);
                             assert(File.GetLastWriteTimeUtc(plan.SidecarPath) < File.GetLastWriteTimeUtc(plan.CatalogPath), "C1 S0: old sidecar strictly older than the new catalog");
+                            assert(behind, "recovery predicate: behind when the catalog is at N but the sidecar is not bound to it (" + why + ")");
                             break;
                         case PublicationStep.Sidecar:
                             assert(!r.Completed && c == "C1" && s_ == "S0" && e == "E1", "table row C1 S0 E1: new consistent on both readers after one slow boot — " + state);
                             assert(File.Exists(plan.SidecarTmp), "sidecar temp still present for the re-publish");
+                            assert(behind, "recovery predicate: behind when catalog and companion are at N but the sidecar is not (" + why + ")");
                             break;
                         case PublicationStep.Done:
                             assert(r.Completed && c == "C1" && s_ == "S1" && e == "E1" && prev == "(absent)", "table row C1 S1 E1: complete — " + state);
+                            assert(!behind, "recovery predicate: NOT behind once the set is complete (" + why + ")");
                             break;
                     }
                 }
@@ -162,11 +199,13 @@ namespace Truedat.Store
                 // committed store and publishes again -> complete, same generation.
                 var plan = Triple(d, 3, live);
                 Publication.Publish(plan, live.AddMinutes(1), s => s == PublicationStep.Sidecar);
-                assert(Get(plan.CatalogPath) == "C4" && Get(plan.SidecarPath) == "S3", "republish setup: C1 S0 E1 left behind");
-                Put(plan.CatalogTmp, "C4"); Put(plan.SidecarTmp, "S4"); Put(plan.CompanionTmp!, "E4");
+                assert(Marker(plan.CatalogPath) == "C4" && Marker(plan.SidecarPath) == "S3", "republish setup: C1 S0 E1 left behind");
+                assert(Behind(plan, true, out _), "republish setup: recovery predicate says behind");
+                Put(plan.CompanionTmp!, CompanionText(4, "E4")); Put(plan.SidecarTmp, "S4"); Put(plan.CatalogTmp, CatalogText(4, plan.SidecarTmp, "C4"));
                 var r = Publication.Publish(plan, live.AddMinutes(2));
-                assert(r.Completed && Get(plan.CatalogPath) == "C4" && Get(plan.SidecarPath) == "S4" && Get(plan.CompanionPath!) == "E4",
+                assert(r.Completed && Marker(plan.CatalogPath) == "C4" && Marker(plan.SidecarPath) == "S4" && Marker(plan.CompanionPath) == "E4",
                     "republish: completes to C1 S1 E1 (idempotent; M8 recovery path)");
+                assert(!Behind(plan, true, out var why) , "republish: recovery predicate satisfied afterwards (" + why + ")");
                 assert(File.GetLastWriteTimeUtc(plan.SidecarPath) >= File.GetLastWriteTimeUtc(plan.CatalogPath), "republish: pair satisfies the legacy predicate");
 
                 // A missing temp is refused before anything moves.
@@ -174,22 +213,63 @@ namespace Truedat.Store
                 Put(plan.CatalogTmp, "C5"); Put(plan.CompanionTmp!, "E5");
                 bool threw = false;
                 try { Publication.Publish(plan, live.AddMinutes(3)); } catch (FileNotFoundException) { threw = true; }
-                assert(threw && Get(plan.CatalogPath) == "C4" && Get(plan.CompanionPath!) == "E4", "missing temp: refused up front, nothing renamed");
+                assert(threw && Marker(plan.CatalogPath) == "C4" && Marker(plan.CompanionPath) == "E4", "missing temp: refused up front, nothing renamed");
             }
             using (var d = new Dir())
             {
-                // No companion this generation (edges off): catalog then sidecar, nothing else touched.
+                // No companion this generation (edges off), nothing live either: catalog then
+                // sidecar, no companion created. CompanionPath is still the KNOWN target path.
                 var plan = new PublicationPlan
                 {
-                    CatalogPath = d.P("mbxmoods.json"), SidecarPath = d.P("mbxmoods.mbxs"), CompanionPath = null,
+                    CatalogPath = d.P("mbxmoods.json"), SidecarPath = d.P("mbxmoods.mbxs"), CompanionPath = d.P("mbxedges.v1.json"),
                     CatalogTmp = d.P("mbxmoods.json.tmp"), SidecarTmp = d.P("mbxmoods.mbxs.tmp"), CompanionTmp = null, Generation = 1,
                 };
-                Put(plan.CatalogTmp, "C1"); Put(plan.SidecarTmp, "S1");
+                Put(plan.SidecarTmp, "S1"); Put(plan.CatalogTmp, CatalogText(1, plan.SidecarTmp, "C1"));
                 var r = Publication.Publish(plan, live);
-                assert(r.Completed && Get(plan.CatalogPath) == "C1" && Get(plan.SidecarPath) == "S1" && !File.Exists(d.P("mbxedges.v1.json")),
+                assert(r.Completed && Marker(plan.CatalogPath) == "C1" && Marker(plan.SidecarPath) == "S1" && !File.Exists(plan.CompanionPath),
                     "no-companion plan: catalog + sidecar published, no companion created");
-                // FilesBehind: a catalog with no origin is 'behind' (legacy / unknown generation).
-                assert(Publication.FilesBehind(plan.CatalogPath, 1, out var fg) && fg == 0, "FilesBehind: no origin block -> behind, generation unknown");
+                assert(!Behind(plan, expectCompanion: false, out var w0), "no-companion plan: not behind when no companion is expected (" + w0 + ")");
+                assert(Behind(plan, expectCompanion: true, out var w1), "no-companion plan: behind when a companion IS expected and absent (" + w1 + ")");
+                // A catalog with no origin block is 'behind' (legacy / unknown generation).
+                Put(plan.CatalogPath, "{\"version\":\"1.0\",\"trackCount\":1,\"tracks\":{}}");
+                assert(Behind(plan, false, out var w2), "FilesBehind: no origin block -> behind (" + w2 + ")");
+            }
+        }
+
+        /// <summary>Keeper review of a98ded7, defect 2: a generation that publishes NO companion must
+        /// still retire the previous live one, or a legacy hub keeps serving E0 beside C1/S1 forever.</summary>
+        static void TestEdgesOnToOff(Action<bool, string> assert)
+        {
+            var live = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+            using (var d = new Dir())
+            {
+                var plan = Triple(d, 5, live);
+                File.Delete(plan.CompanionTmp!); plan.CompanionTmp = null;          // edges off this generation; E5 is live
+                var r = Publication.Publish(plan, live.AddMinutes(1));
+                assert(r.Completed && Marker(plan.CatalogPath) == "C6" && Marker(plan.SidecarPath) == "S6", "on->off: catalog + sidecar at N");
+                assert(!File.Exists(plan.CompanionPath), "on->off: the OLD companion is gone after a complete publish (no E0 beside C1/S1)");
+                assert(!File.Exists(plan.CompanionPath + Publication.CompanionAsideSuffix), "on->off: no .prev left behind on completion");
+                assert(!Behind(plan, expectCompanion: false, out var w0), "on->off: recovery predicate satisfied (" + w0 + ")");
+            }
+            using (var d = new Dir())
+            {
+                // Interrupted after the aside, before the catalog: the old companion is aside, nothing
+                // live — a legacy hub reads edges-off, never E0 beside C1 — and recovery is 'behind'.
+                var plan = Triple(d, 5, live);
+                File.Delete(plan.CompanionTmp!); plan.CompanionTmp = null;
+                var r = Publication.Publish(plan, live.AddMinutes(1), s => s == PublicationStep.Catalog);
+                assert(!r.Completed && Marker(plan.CatalogPath) == "C5" && !File.Exists(plan.CompanionPath) && Marker(plan.CompanionPath + Publication.CompanionAsideSuffix) == "E5",
+                    "on->off interrupted before the catalog: C0 S0, companion aside as .prev, none live");
+                assert(Behind(plan, expectCompanion: false, out var w1), "on->off interrupted: recovery predicate says behind (" + w1 + ")");
+                // And when a stale companion IS still live beside a complete C1/S1 (e.g. an older
+                // publisher), the predicate must flag it so the next publish retires it.
+                var plan2 = Triple(d, 7, live.AddHours(1));
+                File.Delete(plan2.CompanionTmp!); plan2.CompanionTmp = null;
+                Publication.Publish(plan2, live.AddHours(1).AddMinutes(1), s => s == PublicationStep.CompanionAside);   // nothing ran
+                Put(plan2.CompanionPath, CompanionText(7, "E7"));
+                Put(plan2.SidecarPath, "S8"); Put(plan2.CatalogPath, CatalogText(8, plan2.SidecarPath, "C8"));
+                File.SetLastWriteTimeUtc(plan2.SidecarPath, live.AddHours(2));
+                assert(Behind(plan2, expectCompanion: false, out var w2), "stale companion present when none is expected -> behind (" + w2 + ")");
             }
         }
 
@@ -230,8 +310,10 @@ namespace Truedat.Store
                        && back.Kind == "scan" && back.Truedat == "test-build" && back.ExportedAt == o.ExportedAt,
                     "TryRead: every origin field round-trips");
                 assert(back.SidecarSha256 == Publication.Sha256Hex(sidecar), "binding: the read hash matches the sidecar beside the catalog");
-                assert(!Publication.FilesBehind(catalog, 9, out var g9) && g9 == 9, "FilesBehind: files at the store's generation -> not behind");
-                assert(Publication.FilesBehind(catalog, 10, out var g10) && g10 == 9, "FilesBehind: store one ahead -> behind (M8), file generation reported");
+                assert(!Publication.FilesBehind(catalog, sidecar, d.P("mbxedges.v1.json"), false, 9, out var w9), "FilesBehind: files at the store's generation, sidecar bound -> not behind (" + w9 + ")");
+                assert(Publication.FilesBehind(catalog, sidecar, d.P("mbxedges.v1.json"), false, 10, out var w10) && w10.Contains("10"), "FilesBehind: store one ahead -> behind (M8), reason names the generations (" + w10 + ")");
+                Put(d.P("other.mbxs"), "different bytes");
+                assert(Publication.FilesBehind(catalog, d.P("other.mbxs"), d.P("mbxedges.v1.json"), false, 9, out var wS), "FilesBehind: sidecar not bound to the catalog -> behind (" + wS + ")");
 
                 // Legacy v1 catalog: no contract -> false (today's freshness pair applies, labelled unverified by the hub).
                 var legacy = d.P("legacy.json");
@@ -243,6 +325,20 @@ namespace Truedat.Store
                 assert(CatalogOrigin.TryRead(nested, out var n) && n.Generation == 4 && n.SidecarSha256 == "ff", "TryRead: skips unknown nested header values");
                 // Missing file never throws.
                 assert(!CatalogOrigin.TryRead(d.P("nope.json"), out _), "TryRead: missing file -> false, no throw");
+
+                // Keeper review of a98ded7, defect 3: malformed origin values return false, never throw.
+                var badKind = d.P("bad-kind.json");
+                Put(badKind, "{\"trackCount\":1,\"contract\":\"mbxmoods.v2\",\"origin\":{\"kind\":123,\"generation\":4,\"sidecarSha256\":\"ff\"},\"tracks\":{}}");
+                bool ok; try { ok = !CatalogOrigin.TryRead(badKind, out _); } catch (Exception ex) { ok = false; assert(false, "TryRead: kind:123 threw " + ex.GetType().Name); }
+                assert(ok, "TryRead: 'kind' is a number -> false, no throw");
+                var bigGen = d.P("big-gen.json");
+                Put(bigGen, "{\"trackCount\":1,\"contract\":\"mbxmoods.v2\",\"origin\":{\"kind\":\"scan\",\"generation\":99999999999999999999999999,\"sidecarSha256\":\"ff\"},\"tracks\":{}}");
+                try { ok = !CatalogOrigin.TryRead(bigGen, out _); } catch (Exception ex) { ok = false; assert(false, "TryRead: oversized generation threw " + ex.GetType().Name); }
+                assert(ok, "TryRead: oversized numeric generation -> false, no throw");
+                var strGen = d.P("str-gen.json");
+                Put(strGen, "{\"trackCount\":1,\"contract\":\"mbxmoods.v2\",\"origin\":{\"kind\":\"scan\",\"generation\":\"4\",\"sidecarSha256\":\"ff\"},\"tracks\":{}}");
+                try { ok = !CatalogOrigin.TryRead(strGen, out _); } catch (Exception ex) { ok = false; assert(false, "TryRead: string generation threw " + ex.GetType().Name); }
+                assert(ok, "TryRead: 'generation' is a string -> false, no throw");
             }
         }
     }
