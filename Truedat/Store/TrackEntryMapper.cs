@@ -336,6 +336,13 @@ namespace Truedat.Store
             }
         }
 
+        /// <summary>Every column that carries a number, with its kind name (Real / Int / VecF64 / VecI32) — the schema-walk seam the
+        /// FieldPrecision self-test uses to refuse a numeric column nobody declared a precision for (T03).</summary>
+        internal static IEnumerable<(string Name, string Kind)> NumericColumns()
+        {
+            foreach (var c in Cols) if (c.Kind != Kind.Text) yield return (c.Name, c.Kind.ToString());
+        }
+
         /// <summary>Quoted, comma-separated column lists for SQL built outside this class (the v2 migration).</summary>
         internal static string ContentColumnList(string? alias = null) => JoinQuoted(ContentIdx, alias);
         internal static string CopyColumnList(string? alias = null) => JoinQuoted(CopyIdx, alias);

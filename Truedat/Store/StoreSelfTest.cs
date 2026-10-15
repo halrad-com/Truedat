@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace Truedat.Store
 {
@@ -40,6 +41,9 @@ namespace Truedat.Store
             Block(assert, "Vacuum", () => TestVacuum(assert));
             Console.WriteLine("Store self-test (precision: six significant figures on the store path, the catalog writer untouched)");
             Block(assert, "CanonicalPrecision", () => TestCanonicalPrecision(assert));
+            Console.WriteLine("Store self-test (T03: one FieldPrecision registry; every numeric column declared; the parser rounds from it)");
+            Block(assert, "FieldPrecision", () => TestFieldPrecision(assert));
+            Block(assert, "FieldPrecisionWiring", () => TestFieldPrecisionWiring(assert));
             Console.WriteLine("Store self-test (S2 C0: default store location is local; network opens exclusive)");
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
             Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
@@ -1418,6 +1422,256 @@ namespace Truedat.Store
         }
 
         // ---------------------------------------------------------------- canonical precision (operator, 2026-10-12)
+        /// <summary>T03 (F7): one registry of field precision. (a) schema walk both ways — every numeric store column has an entry of the
+        /// matching shape and every entry names a column; (b) the pin — the parser's decimal-place literals as they stood when the
+        /// registry replaced them (change the registry and this list together, on purpose); (c) behaviour — the real parser rounds a
+        /// value at the registry's dp, so the registry is read, not merely declared.</summary>
+        static void TestFieldPrecision(Action<bool, string> assert)
+        {
+            var missing = new List<string>(); var cols = new HashSet<string>(StringComparer.Ordinal); int kindMismatch = 0; string firstMismatch = "";
+            foreach (var (name, kind) in TrackEntryMapper.NumericColumns())
+            {
+                cols.Add(name);
+                if (!FieldPrecision.TryGet(name, out var spec)) { missing.Add(name + ":" + kind); continue; }
+                bool kindOk = kind switch
+                {
+                    "Real" => spec.Shape == FieldPrecision.Shape.Fixed,
+                    "Int" => spec.Shape == FieldPrecision.Shape.Int,
+                    "VecF64" => spec.Shape == FieldPrecision.Shape.FixedVec,
+                    "VecI32" => spec.Shape == FieldPrecision.Shape.IntVec,
+                    _ => false
+                };
+                if (!kindOk) { kindMismatch++; if (firstMismatch == "") firstMismatch = $"{name}: mapper {kind}, registry {spec}"; }
+            }
+            assert(missing.Count == 0, $"FieldPrecision: every numeric store column has an entry ({missing.Count} missing: {string.Join(", ", missing.Take(8))}{(missing.Count > 8 ? ", …" : "")})");
+            assert(kindMismatch == 0, $"FieldPrecision: every entry's shape matches the mapper's column kind ({kindMismatch} mismatches; first: {firstMismatch})");
+            var extra = FieldPrecision.Names.Where(n => !cols.Contains(n)).ToList();
+            assert(extra.Count == 0, $"FieldPrecision: every registry entry names a store column ({extra.Count} extra: {string.Join(", ", extra)})");
+
+            // (b) the pin — the literals as measured 2026-10-15 before T03 moved them: Opt/OptN defaults 4; dB/LU 2; Hz 1; tiny spectral 6;
+            // spectralDecrease 12; vectors 4; writer-side analysisDuration 1, smfmBpm 3; ints as ints.
+            var pin = new (string Name, string Spec)[]
+            {
+                ("trackId","Int"), ("bitUsage_lowestNonZeroBit","Int"), ("bitUsage_samplesAnalyzed","Int"), ("smfmChannel","Int"),
+                ("fingerprint_v1_fileSize","Int"), ("fingerprint_v1_durationMs","Int"), ("fingerprint_v1_sampleRate","Int"), ("fingerprint_v1_channels","Int"),
+                ("fingerprint_v1_bitDepth","Int"), ("fingerprint_v1_bitrate","Int"), ("fingerprint_v1_mp3LameTag_infoTagRevision","Int"), ("fingerprint_v1_mp3LameTag_vbrMethodCode","Int"),
+                ("fingerprint_v1_mp3LameTag_lowpassHz","Int"), ("fingerprint_v1_mp3LameTag_encoderDelay","Int"), ("fingerprint_v1_mp3LameTag_encoderPadding","Int"), ("fingerprint_v1_mp3LameTag_musicCrc","Int"),
+                ("bpm","Fixed(1)"), ("spectralCentroid","Fixed(1)"), ("spectralRolloff","Fixed(1)"), ("bpmFirstPeak","Fixed(1)"), ("bpmSecondPeak","Fixed(1)"), ("spectralCentroidStdev","Fixed(1)"), ("analysisDuration","Fixed(1)"),
+                ("loudness","Fixed(2)"), ("onsetRate","Fixed(2)"), ("dynamicRange","Fixed(2)"), ("loudnessMomentary","Fixed(2)"), ("loudnessShortTerm","Fixed(2)"), ("replayGain","Fixed(2)"),
+                ("spectralComplexity","Fixed(2)"), ("hfc","Fixed(2)"), ("beatsLoudness","Fixed(2)"), ("hpcpCrest","Fixed(2)"), ("tuningFrequency","Fixed(2)"), ("bitUsage_effectiveBits","Fixed(2)"), ("hfSpectralStructure_peakToMean","Fixed(2)"),
+                ("smfmBpm","Fixed(3)"),
+                ("spectralFlux","Fixed(4)"), ("danceability","Fixed(4)"), ("dissonance","Fixed(4)"), ("pitchSalience","Fixed(4)"), ("chordsChangesRate","Fixed(4)"),
+                ("silenceRate20dB","Fixed(4)"), ("silenceRate30dB","Fixed(4)"), ("silenceRate60dB","Fixed(4)"), ("spectralEntropy","Fixed(4)"), ("spectralKurtosis","Fixed(4)"), ("spectralSkewness","Fixed(4)"), ("spectralSpread","Fixed(4)"), ("spectralStrongPeak","Fixed(4)"),
+                ("barkCrest","Fixed(4)"), ("barkFlatness","Fixed(4)"), ("barkKurtosis","Fixed(4)"), ("barkSkewness","Fixed(4)"), ("barkSpread","Fixed(4)"),
+                ("erbCrest","Fixed(4)"), ("erbFlatness","Fixed(4)"), ("erbKurtosis","Fixed(4)"), ("erbSkewness","Fixed(4)"), ("erbSpread","Fixed(4)"),
+                ("melCrest","Fixed(4)"), ("melFlatness","Fixed(4)"), ("melKurtosis","Fixed(4)"), ("melSkewness","Fixed(4)"), ("melSpread","Fixed(4)"),
+                ("chordsStrength","Fixed(4)"), ("hpcpEntropy","Fixed(4)"), ("keyVotes_krumhansl_strength","Fixed(4)"), ("keyVotes_temperley_strength","Fixed(4)"), ("keyVotes_edma_strength","Fixed(4)"),
+                ("bpmFirstPeakWeight","Fixed(4)"), ("bpmFirstPeakSpread","Fixed(4)"), ("bpmSecondPeakWeight","Fixed(4)"), ("bpmSecondPeakSpread","Fixed(4)"), ("chordsNumberRate","Fixed(4)"),
+                ("tuningEqualTemperedDeviation","Fixed(4)"), ("tuningDiatonicStrength","Fixed(4)"), ("tuningNontemperedEnergyRatio","Fixed(4)"), ("averageLoudness","Fixed(4)"), ("dynamicComplexity","Fixed(4)"),
+                ("beatsIntervalMean","Fixed(4)"), ("beatsIntervalStdev","Fixed(4)"), ("beatsIntervalMin","Fixed(4)"), ("beatsIntervalMax","Fixed(4)"),
+                ("dissonanceStdev","Fixed(4)"), ("pitchSalienceStdev","Fixed(4)"), ("hpcpEntropyStdev","Fixed(4)"), ("zeroCrossingRateStdev","Fixed(4)"),
+                ("bitUsage_bottomBitActivity","Fixed(4)"), ("hfSpectralStructure_flatness","Fixed(4)"), ("hfSpectralStructure_imagingSymmetry","Fixed(4)"),
+                ("spectralFlatness","Fixed(4)"),   // derived field: effective precision is the derive step's 4, not the initializer's old 6 (review finding 4)
+                ("zeroCrossingRate","Fixed(6)"), ("spectralRms","Fixed(6)"), ("spectralEnergy","Fixed(6)"), ("spectralEnergyLow","Fixed(6)"),
+                ("spectralEnergyMidLow","Fixed(6)"), ("spectralEnergyMidHigh","Fixed(6)"), ("spectralEnergyHigh","Fixed(6)"), ("spectralEnergyStdev","Fixed(6)"), ("hfEnergyRatio","Fixed(6)"),
+                ("spectralDecrease","Fixed(12)"),
+                ("mfcc","FixedVec(4)"), ("chordsHistogram","FixedVec(4)"), ("hpcp12","FixedVec(4)"), ("thpcp12","FixedVec(4)"), ("mfccStdev","FixedVec(4)"),
+                ("spectralContrastCoeffs","FixedVec(4)"), ("spectralContrastValleys","FixedVec(4)"), ("beatsLoudnessBandRatio","FixedVec(4)"), ("bpmHistogram","FixedVec(4)"), ("gfcc","FixedVec(4)"),
+                ("smfmScores","IntVec"),
+            };
+            int pinFail = 0; string firstPinFail = "";
+            foreach (var p in pin)
+            {
+                var got = FieldPrecision.TryGet(p.Name, out var s) ? s.ToString() : "absent";
+                if (got != p.Spec) { pinFail++; if (firstPinFail == "") firstPinFail = $"{p.Name}: pinned {p.Spec}, registry {got}"; }
+            }
+            assert(pinFail == 0, $"FieldPrecision pin: every pinned field has its 2026-10-15 precision ({pinFail} differ; first: {firstPinFail})");
+            assert(pin.Length == FieldPrecision.Count, $"FieldPrecision pin covers the whole registry ({pin.Length} pinned, {FieldPrecision.Count} entries)");
+            // Shared call sites (review finding 5): WriteKeyVote renders all three profiles with the edma entry and FoldHpcp36To12 serves
+            // thpcp12 with the hpcp12 entry, so those entries must stay equal or the sharing silently stops being true.
+            assert(FieldPrecision.Dp("keyVotes_krumhansl_strength") == FieldPrecision.Dp("keyVotes_edma_strength") && FieldPrecision.Dp("keyVotes_temperley_strength") == FieldPrecision.Dp("keyVotes_edma_strength"),
+                "FieldPrecision: the three key-vote strengths share one precision (the writer renders them through one entry)");
+            assert(FieldPrecision.Dp("hpcp12") == FieldPrecision.Dp("thpcp12"), "FieldPrecision: hpcp12 and thpcp12 share one precision (one fold serves both)");
+            // Typo guard (review finding 2): Opt resolves the field name BEFORE the null test, so parsing an EMPTY document touches every
+            // OptN key — a mistyped name throws here instead of on the first real track that carries the field.
+            TrackFeatures? empty = null; string emptyErr = "";
+            try { empty = Program.ParseEssentiaOutput("{}"); } catch (Exception ex) { emptyErr = ex.Message; }
+            assert(empty != null && emptyErr == "", $"FieldPrecision: parsing an empty document resolves every registered name without throwing ({(emptyErr == "" ? "ok" : emptyErr)})");
+
+            // (c) behaviour: the real parser, a real (minimal) extractor document, values chosen so the rounding is visible.
+            const string json = "{\"rhythm\":{\"bpm\":120.123456,\"onset_rate\":3.14159,\"danceability\":1.23456789,\"beats_loudness\":{\"mean\":0.123456}},"
+                + "\"tonal\":{\"key_edma\":{\"key\":\"C\",\"scale\":\"major\",\"strength\":0.987654321},\"chords_changes_rate\":0.0456789,\"chords_strength\":{\"mean\":0.5},\"hpcp_crest\":{\"mean\":12.3456},\"hpcp_entropy\":{\"mean\":2.0},\"tuning_frequency\":440.123456},"
+                + "\"lowlevel\":{\"spectral_centroid\":{\"mean\":1234.56789},\"spectral_flux\":{\"mean\":0.123456789},\"average_loudness\":0.9,\"dissonance\":{\"mean\":0.4567891},\"pitch_salience\":{\"mean\":0.5},"
+                + "\"zerocrossingrate\":{\"mean\":0.0123456789},\"spectral_rms\":{\"mean\":0.00123456789},\"spectral_rolloff\":{\"mean\":4321.98765},\"spectral_decrease\":{\"mean\":-1.23456789012345e-9},"
+                + "\"spectral_energy\":{\"mean\":0.0001234567},\"loudness_ebu128\":{\"integrated\":-14.123456,\"momentary\":{\"mean\":-13.456789},\"loudness_range\":7.891234},"
+                + "\"barkbands_flatness_db\":{\"mean\":0.1},\"erbbands_flatness_db\":{\"mean\":0.2},\"melbands_flatness_db\":{\"mean\":0.3}}}";
+            var f = Program.ParseEssentiaOutput(json);
+            assert(f != null, "FieldPrecision behaviour: the parser accepts the minimal document");
+            if (f != null)
+            {
+                assert(f.Bpm == 120.1 && f.SpectralCentroid == 1234.6 && f.SpectralRolloff == 4322.0, $"parser rounds 1-dp fields from the registry (bpm {f.Bpm}, centroid {f.SpectralCentroid}, rolloff {f.SpectralRolloff})");
+                assert(f.OnsetRate == 3.14 && f.LoudnessMomentary == -13.46 && f.TuningFrequency == 440.12 && f.HpcpCrest == 12.35, $"parser rounds 2-dp fields from the registry (onset {f.OnsetRate}, momentary {f.LoudnessMomentary}, tuning {f.TuningFrequency}, hpcpCrest {f.HpcpCrest})");
+                assert(f.Danceability == 1.2346 && f.SpectralFlux == 0.1235 && f.KeyVoteEdma?.Strength == 0.9877, $"parser rounds 4-dp fields from the registry (danceability {f.Danceability}, flux {f.SpectralFlux}, edma {f.KeyVoteEdma?.Strength})");
+                assert(f.ZeroCrossingRate == 0.012346 && f.SpectralRms == 0.001235 && f.SpectralEnergy == 0.000123, $"parser rounds 6-dp fields from the registry (zcr {f.ZeroCrossingRate}, rms {f.SpectralRms}, energy {f.SpectralEnergy})");
+                assert(f.SpectralDecrease == -1.235e-9, $"parser rounds spectralDecrease at 12 dp from the registry: 12 places keep 1e-9 values to 4 figures ({f.SpectralDecrease:R})");
+            }
+        }
+
+        /// <summary>T03 review finding 3: wiring proof for EVERY routed site, not one. A rich extractor document gives every parser-read
+        /// field a long-fraction value; the expectation is Math.Round(raw, dp) with dp taken from the test's own pin table, never from
+        /// FieldPrecision — so a call site reverted to a literal that differs from the registry fails here by field name. The writer
+        /// half renders a TrackEntry of long fractions through the real catalog writer and checks every writer-side rounding site the
+        /// same way.</summary>
+        static void TestFieldPrecisionWiring(Action<bool, string> assert)
+        {
+            int PinDp(string field)
+            {
+                // the same literals as TestFieldPrecision's pin, kept as a lookup here (a second, independent copy is the point)
+                switch (field)
+                {
+                    case "bpm": case "spectralCentroid": case "spectralRolloff": case "bpmFirstPeak": case "bpmSecondPeak": case "spectralCentroidStdev": case "analysisDuration": return 1;
+                    case "loudness": case "onsetRate": case "dynamicRange": case "loudnessMomentary": case "loudnessShortTerm": case "replayGain": case "spectralComplexity": case "hfc":
+                    case "beatsLoudness": case "hpcpCrest": case "tuningFrequency": case "bitUsage_effectiveBits": case "hfSpectralStructure_peakToMean": return 2;
+                    case "smfmBpm": return 3;
+                    case "zeroCrossingRate": case "spectralRms": case "spectralEnergy": case "spectralEnergyLow": case "spectralEnergyMidLow": case "spectralEnergyMidHigh": case "spectralEnergyHigh":
+                    case "spectralEnergyStdev": case "hfEnergyRatio": return 6;
+                    case "spectralDecrease": return 12;
+                    default: return 4;
+                }
+            }
+            // ---- parser half: (extractor path, field) for every OptN/core/array/key-vote site
+            var scalar = new (string Path, string Field)[]
+            {
+                ("rhythm.bpm","bpm"), ("lowlevel.loudness_ebu128.integrated","loudness"), ("lowlevel.spectral_centroid.mean","spectralCentroid"), ("lowlevel.spectral_flux.mean","spectralFlux"),
+                ("rhythm.danceability","danceability"), ("rhythm.onset_rate","onsetRate"), ("lowlevel.zerocrossingrate.mean","zeroCrossingRate"), ("lowlevel.spectral_rms.mean","spectralRms"),
+                ("lowlevel.dissonance.mean","dissonance"), ("lowlevel.pitch_salience.mean","pitchSalience"), ("tonal.chords_changes_rate","chordsChangesRate"), ("lowlevel.loudness_ebu128.loudness_range","dynamicRange"),
+                ("lowlevel.loudness_ebu128.momentary.mean","loudnessMomentary"), ("lowlevel.loudness_ebu128.short_term.mean","loudnessShortTerm"), ("metadata.audio_properties.replay_gain","replayGain"),
+                ("lowlevel.silence_rate_20dB.mean","silenceRate20dB"), ("lowlevel.silence_rate_30dB.mean","silenceRate30dB"), ("lowlevel.silence_rate_60dB.mean","silenceRate60dB"),
+                ("lowlevel.spectral_rolloff.mean","spectralRolloff"), ("lowlevel.spectral_complexity.mean","spectralComplexity"), ("lowlevel.spectral_entropy.mean","spectralEntropy"),
+                ("lowlevel.spectral_kurtosis.mean","spectralKurtosis"), ("lowlevel.spectral_skewness.mean","spectralSkewness"), ("lowlevel.spectral_spread.mean","spectralSpread"), ("lowlevel.spectral_strongpeak.mean","spectralStrongPeak"),
+                ("lowlevel.spectral_decrease.mean","spectralDecrease"), ("lowlevel.spectral_energy.mean","spectralEnergy"), ("lowlevel.spectral_energyband_low.mean","spectralEnergyLow"),
+                ("lowlevel.spectral_energyband_middle_low.mean","spectralEnergyMidLow"), ("lowlevel.spectral_energyband_middle_high.mean","spectralEnergyMidHigh"), ("lowlevel.spectral_energyband_high.mean","spectralEnergyHigh"),
+                ("lowlevel.hfc.mean","hfc"), ("lowlevel.barkbands_crest.mean","barkCrest"), ("lowlevel.barkbands_flatness_db.mean","barkFlatness"), ("lowlevel.barkbands_kurtosis.mean","barkKurtosis"),
+                ("lowlevel.barkbands_skewness.mean","barkSkewness"), ("lowlevel.barkbands_spread.mean","barkSpread"), ("lowlevel.erbbands_crest.mean","erbCrest"), ("lowlevel.erbbands_flatness_db.mean","erbFlatness"),
+                ("lowlevel.erbbands_kurtosis.mean","erbKurtosis"), ("lowlevel.erbbands_skewness.mean","erbSkewness"), ("lowlevel.erbbands_spread.mean","erbSpread"), ("lowlevel.melbands_crest.mean","melCrest"),
+                ("lowlevel.melbands_flatness_db.mean","melFlatness"), ("lowlevel.melbands_kurtosis.mean","melKurtosis"), ("lowlevel.melbands_skewness.mean","melSkewness"), ("lowlevel.melbands_spread.mean","melSpread"),
+                ("rhythm.beats_loudness.mean","beatsLoudness"), ("tonal.chords_strength.mean","chordsStrength"), ("tonal.hpcp_crest.mean","hpcpCrest"), ("tonal.hpcp_entropy.mean","hpcpEntropy"),
+                ("rhythm.bpm_histogram_first_peak_bpm","bpmFirstPeak"), ("rhythm.bpm_histogram_first_peak_weight","bpmFirstPeakWeight"), ("rhythm.bpm_histogram_first_peak_spread","bpmFirstPeakSpread"),
+                ("rhythm.bpm_histogram_second_peak_bpm","bpmSecondPeak"), ("rhythm.bpm_histogram_second_peak_weight","bpmSecondPeakWeight"), ("rhythm.bpm_histogram_second_peak_spread","bpmSecondPeakSpread"),
+                ("tonal.chords_number_rate","chordsNumberRate"), ("tonal.tuning_frequency","tuningFrequency"), ("tonal.tuning_equal_tempered_deviation","tuningEqualTemperedDeviation"),
+                ("tonal.tuning_diatonic_strength","tuningDiatonicStrength"), ("tonal.tuning_nontempered_energy_ratio","tuningNontemperedEnergyRatio"), ("lowlevel.average_loudness","averageLoudness"),
+                ("lowlevel.dynamic_complexity","dynamicComplexity"), ("lowlevel.spectral_centroid.stdev","spectralCentroidStdev"), ("lowlevel.spectral_energy.stdev","spectralEnergyStdev"),
+                ("lowlevel.dissonance.stdev","dissonanceStdev"), ("lowlevel.pitch_salience.stdev","pitchSalienceStdev"), ("tonal.hpcp_entropy.stdev","hpcpEntropyStdev"), ("lowlevel.zerocrossingrate.stdev","zeroCrossingRateStdev"),
+                ("tonal.key_krumhansl.strength","keyVotes_krumhansl_strength"), ("tonal.key_temperley.strength","keyVotes_temperley_strength"), ("tonal.key_edma.strength","keyVotes_edma_strength"),
+            };
+            var arrays = new (string Path, string Field, int N)[]
+            {
+                ("lowlevel.mfcc.mean","mfcc",13), ("tonal.chords_histogram","chordsHistogram",24), ("lowlevel.spectral_contrast_coeffs.mean","spectralContrastCoeffs",6),
+                ("lowlevel.spectral_contrast_valleys.mean","spectralContrastValleys",6), ("rhythm.beats_loudness_band_ratio.mean","beatsLoudnessBandRatio",6), ("rhythm.bpm_histogram","bpmHistogram",8), ("lowlevel.gfcc.mean","gfcc",13),
+            };
+            // long fractions, all below 1 in magnitude so the mapper's six-significant-figure read-back is exact for every dp in play
+            double Raw(int i) => 0.123456789 + i * 0.00100001;
+            double RawDecrease(int i) => -1.23456789e-9 - i * 1e-12;
+            var root = new Dictionary<string, object>(StringComparer.Ordinal);
+            void Put(string path, object value)
+            {
+                var parts = path.Split('.'); var node = root;
+                for (int p = 0; p < parts.Length - 1; p++)
+                {
+                    if (!node.TryGetValue(parts[p], out var child)) { child = new Dictionary<string, object>(StringComparer.Ordinal); node[parts[p]] = child; }
+                    node = (Dictionary<string, object>)child;
+                }
+                node[parts[parts.Length - 1]] = value;
+            }
+            var rawOf = new Dictionary<string, double>(StringComparer.Ordinal);
+            for (int i = 0; i < scalar.Length; i++) { double raw = scalar[i].Field == "spectralDecrease" ? RawDecrease(i) : Raw(i); rawOf[scalar[i].Field] = raw; Put(scalar[i].Path, raw); }
+            foreach (var profile in new[] { "krumhansl", "temperley", "edma" }) { Put($"tonal.key_{profile}.key", "C"); Put($"tonal.key_{profile}.scale", "major"); }
+            var rawArr = new Dictionary<string, double[]>(StringComparer.Ordinal);
+            for (int a = 0; a < arrays.Length; a++) { var v = new double[arrays[a].N]; for (int j = 0; j < v.Length; j++) v[j] = Raw(100 + a * 20 + j); rawArr[arrays[a].Field] = v; Put(arrays[a].Path, v); }
+            string json = System.Text.Json.JsonSerializer.Serialize(root);
+            var f = Program.ParseEssentiaOutput(json);
+            assert(f != null, "FieldPrecision wiring: the parser accepts the rich document");
+            if (f == null) return;
+            var row = TrackEntryMapper.ToRow(new TrackEntry { Features = f });
+            int wrong = 0, missing = 0; string first = "";
+            foreach (var s in scalar)
+            {
+                int k = TrackEntryMapper.ContentIndexOf(s.Field);
+                var got = TrackEntryMapper.ContentValue(row, k);
+                double expect = Math.Round(rawOf[s.Field], PinDp(s.Field));
+                if (got == null) { missing++; if (first == "") first = s.Field + " missing"; }
+                else if (!(got is double d) || d != expect) { wrong++; if (first == "") first = $"{s.Field}: parsed {got}, expected {expect} (raw {rawOf[s.Field]:R} at {PinDp(s.Field)} dp)"; }
+            }
+            foreach (var a in arrays)
+            {
+                int k = TrackEntryMapper.ContentIndexOf(a.Field);
+                var got = TrackEntryMapper.ContentValue(row, k) as double[];
+                if (got == null) { missing++; if (first == "") first = a.Field + " missing"; continue; }
+                for (int j = 0; j < got.Length; j++)
+                {
+                    double expect = Math.Round(rawArr[a.Field][j], PinDp(a.Field));
+                    if (got[j] != expect) { wrong++; if (first == "") first = $"{a.Field}[{j}]: parsed {got[j]:R}, expected {expect:R}"; break; }
+                }
+            }
+            assert(missing == 0 && wrong == 0, $"FieldPrecision wiring (parser): all {scalar.Length} scalar and {arrays.Length} array sites round at their pinned dp ({missing} missing, {wrong} wrong; first: {first})");
+
+            // ---- writer half: every writer-side rounding site, rendered through the real catalog writer
+            var e = new TrackEntry
+            {
+                AnalysisDurationSecs = 12.3456789,
+                Features = new TrackFeatures
+                {
+                    Bpm = 120, Key = "C", Mode = "major", Mfcc = new double[13],
+                    HfEnergyRatio = 0.123456789, HfEnergyMethod = "test",
+                    HfSpectralStructure = new HfSpectralStructure { Flatness = 0.234567891, PeakToMean = 3.456789123, ImagingSymmetry = 0.345678912 },
+                    SmfmBpm = 128.123456789, SmfmScores = new[] { 1, 2, 3 }, SmfmChannel = 0,
+                    KeyVoteKrumhansl = new KeyVote { Key = "C", Scale = "major", Strength = 0.456789123 },
+                    KeyVoteTemperley = new KeyVote { Key = "C", Scale = "major", Strength = 0.567891234 },
+                    KeyVoteEdma = new KeyVote { Key = "C", Scale = "major", Strength = 0.678912345 },
+                    ChordsHistogram = new[] { 0.111111111, 0.222222222 }, Hpcp12 = new[] { 0.333333333, 0.444444444 }, Thpcp12 = new[] { 0.555555555, 0.666666666 },
+                    MfccStdev = new[] { 0.777777777, 0.888888888 }, SpectralContrastCoeffs = new[] { 0.123412341 }, SpectralContrastValleys = new[] { 0.234523452 },
+                    BeatsLoudnessBandRatio = new[] { 0.345634563 }, BpmHistogram = new[] { 0.456745674 }, Gfcc = new[] { 0.567856785 },
+                },
+            };
+            string written;
+            using (var ms = new MemoryStream())
+            {
+                using (var jw = new System.Text.Json.Utf8JsonWriter(ms)) { jw.WriteStartObject(); Program.WriteTrackEntryForStore(jw, @"D:\m\w.flac", e); jw.WriteEndObject(); }
+                written = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            }
+            using (var doc = System.Text.Json.JsonDocument.Parse(written))
+            {
+                var t = doc.RootElement.GetProperty(@"D:\m\w.flac");
+                int wwrong = 0; string wfirst = "";
+                void Num(System.Text.Json.JsonElement el, string label, double raw, string field)
+                {
+                    double expect = Math.Round(raw, PinDp(field));
+                    if (el.ValueKind != System.Text.Json.JsonValueKind.Number || el.GetDouble() != expect) { wwrong++; if (wfirst == "") wfirst = $"{label}: wrote {el}, expected {expect:R}"; }
+                }
+                void Arr(string key, string field, double[] raw)
+                {
+                    if (!t.TryGetProperty(key, out var arr) || arr.ValueKind != System.Text.Json.JsonValueKind.Array) { wwrong++; if (wfirst == "") wfirst = key + " not written"; return; }
+                    for (int j = 0; j < raw.Length; j++) Num(arr[j], $"{key}[{j}]", raw[j], field);
+                }
+                Num(t.GetProperty("hfEnergyRatio"), "hfEnergyRatio", 0.123456789, "hfEnergyRatio");
+                var hs = t.GetProperty("hfSpectralStructure");
+                Num(hs.GetProperty("flatness"), "hf.flatness", 0.234567891, "hfSpectralStructure_flatness");
+                Num(hs.GetProperty("peakToMean"), "hf.peakToMean", 3.456789123, "hfSpectralStructure_peakToMean");
+                Num(hs.GetProperty("imagingSymmetry"), "hf.imagingSymmetry", 0.345678912, "hfSpectralStructure_imagingSymmetry");
+                Num(t.GetProperty("smfmBpm"), "smfmBpm", 128.123456789, "smfmBpm");
+                Num(t.GetProperty("analysisDuration"), "analysisDuration", 12.3456789, "analysisDuration");
+                var kv = t.GetProperty("keyVotes");
+                Num(kv.GetProperty("krumhansl").GetProperty("strength"), "keyVotes.krumhansl", 0.456789123, "keyVotes_krumhansl_strength");
+                Num(kv.GetProperty("temperley").GetProperty("strength"), "keyVotes.temperley", 0.567891234, "keyVotes_temperley_strength");
+                Num(kv.GetProperty("edma").GetProperty("strength"), "keyVotes.edma", 0.678912345, "keyVotes_edma_strength");
+                Arr("chordsHistogram", "chordsHistogram", new[] { 0.111111111, 0.222222222 }); Arr("hpcp12", "hpcp12", new[] { 0.333333333, 0.444444444 }); Arr("thpcp12", "thpcp12", new[] { 0.555555555, 0.666666666 });
+                Arr("mfccStdev", "mfccStdev", new[] { 0.777777777, 0.888888888 }); Arr("spectralContrastCoeffs", "spectralContrastCoeffs", new[] { 0.123412341 }); Arr("spectralContrastValleys", "spectralContrastValleys", new[] { 0.234523452 });
+                Arr("beatsLoudnessBandRatio", "beatsLoudnessBandRatio", new[] { 0.345634563 }); Arr("gfcc", "gfcc", new[] { 0.567856785 });
+                assert(wwrong == 0, $"FieldPrecision wiring (writer): every writer-side rounding site renders at its pinned dp ({wwrong} wrong; first: {wfirst})");
+                assert(!t.TryGetProperty("bpmHistogram", out _), "FieldPrecision wiring (writer): bpmHistogram is cut by FieldPolicy and not emitted (its registry entry serves the parser and the store only)");
+            }
+        }
+
         static void TestCanonicalPrecision(Action<bool, string> assert)
         {
             // Six significant figures, exact text, no trailing zeros, no exponent; 0 / NaN pass through.

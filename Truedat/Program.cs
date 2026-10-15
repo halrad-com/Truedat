@@ -4181,7 +4181,7 @@ namespace Truedat
                         features.SmfmScores      = afSmfmResult.Value.Scores;
                         features.SmfmChannel     = afSmfmResult.Value.Channel;
                         features.SmfmChannelName = SmfmReader.ChannelName(afSmfmResult.Value.Channel);
-                        features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, 3);
+                        features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, FieldPrecision.Dp("smfmBpm"));
                     }
 
                     // FIX 5 — record the mtime that was true when we captured the
@@ -4948,7 +4948,7 @@ namespace Truedat
                             features.SmfmScores      = flSmfmResult.Value.Scores;
                             features.SmfmChannel     = flSmfmResult.Value.Channel;
                             features.SmfmChannelName = SmfmReader.ChannelName(flSmfmResult.Value.Channel);
-                            features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, 3);
+                            features.SmfmBpm           = Math.Round(flSmfmResult.Value.Bpm, FieldPrecision.Dp("smfmBpm"));
                             if (flSmfmWasAbsent) { flOkSmfmTag = " +smfm"; Interlocked.Increment(ref flSmfmAdded); }
                         }
 
@@ -6220,7 +6220,7 @@ namespace Truedat
                             feat.SmfmScores      = smfmResult.Value.Scores;
                             feat.SmfmChannel     = smfmResult.Value.Channel;
                             feat.SmfmChannelName = SmfmReader.ChannelName(smfmResult.Value.Channel);
-                            feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, 3);
+                            feat.SmfmBpm           = Math.Round(smfmResult.Value.Bpm, FieldPrecision.Dp("smfmBpm"));
                             if (smfmWasAbsent)
                             {
                                 Interlocked.Increment(ref smfmAdded);
@@ -8937,7 +8937,7 @@ namespace Truedat
             f.SmfmScores      = smfm.Value.Scores;
             f.SmfmChannel     = smfm.Value.Channel;
             f.SmfmChannelName = SmfmReader.ChannelName(smfm.Value.Channel);
-            f.SmfmBpm           = Math.Round(smfm.Value.Bpm, 3);
+            f.SmfmBpm           = Math.Round(smfm.Value.Bpm, FieldPrecision.Dp("smfmBpm"));
             return priorScores == null;
         }
 
@@ -13883,8 +13883,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return new BitUsageSummary
                 {
                     LowestNonZeroBit = lowestNonZeroBit,
-                    BottomBitActivity = Math.Round(bottomBitActivity, 4),
-                    EffectiveBits = Math.Round(effectiveBits, 2),
+                    BottomBitActivity = Math.Round(bottomBitActivity, FieldPrecision.Dp("bitUsage_bottomBitActivity")),
+                    EffectiveBits = Math.Round(effectiveBits, FieldPrecision.Dp("bitUsage_effectiveBits")),
                     SamplesAnalyzed = (int)Math.Min(count, int.MaxValue),
                     // Method tag bumped from "ffmpeg-s32le-30s-mid" because the prior
                     // method forced -ar 48000 which contaminated the bit-depth measurement
@@ -13942,7 +13942,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             double sumHfEnergy, double sumTotalEnergy, string method)
         {
             if (sumTotalEnergy <= 0) return (null, null, true);
-            return (Math.Round(sumHfEnergy / sumTotalEnergy, 6), method, false);
+            return (Math.Round(sumHfEnergy / sumTotalEnergy, FieldPrecision.Dp("hfEnergyRatio")), method, false);
         }
 
         /// <summary>Overload for the scan-health gate (2026-07-30). notApplicable=true
@@ -14179,10 +14179,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             var structure = new HfSpectralStructure
             {
-                Flatness = Math.Round(sumFlatness / windowsValid, 4),
-                PeakToMean = Math.Round(sumPeakToMean / windowsValid, 2),
+                Flatness = Math.Round(sumFlatness / windowsValid, FieldPrecision.Dp("hfSpectralStructure_flatness")),
+                PeakToMean = Math.Round(sumPeakToMean / windowsValid, FieldPrecision.Dp("hfSpectralStructure_peakToMean")),
                 ImagingSymmetry = windowsValidImaging > 0
-                    ? Math.Round(sumImaging / windowsValidImaging, 4)
+                    ? Math.Round(sumImaging / windowsValidImaging, FieldPrecision.Dp("hfSpectralStructure_imagingSymmetry"))
                     : 0.0,
                 Method = method,
             };
@@ -14190,7 +14190,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 Console.Error.WriteLine($"[AUDIT] hfAnalysis file=\"{Path.GetFileName(filePath)}\" sr={sourceSampleRate} hfStart={hfStart} bins=[{hfStart}..{halfBins}) hfRatioRaw={hfRatio:E4} winValid={windowsValid} winValidSym={windowsValidImaging} sumHF={sumHfEnergy:E4} sumTot={sumTotalEnergy:E4}");
             }
-            return (Math.Round(hfRatio, 6), method, structure);
+            return (Math.Round(hfRatio, FieldPrecision.Dp("hfEnergyRatio")), method, structure);
         }
 
         /// <summary>Inline FFT sanity checks. Run via --self-test; exits 0 on
@@ -14211,6 +14211,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // v2 store (Truedat/Store/*): its own file, same Assert, so the single exe stays self-contained.
             global::Truedat.Store.StoreSelfTest.Run(Assert);
             global::Truedat.Edges.EdgeSelfTest.Run(Assert);
+            global::Truedat.Store.PublicationSelfTest.Run(Assert);   // T07/T08 slice (architect-2, a98ded7)
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);
@@ -19514,8 +19515,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(DeriveSpectralFlatness(0.4062, null, null) == 0.4062, "flatness: single present band");
                 Assert(DeriveSpectralFlatness(null, null, null) == 0.0, "flatness: none present -> 0 (core contract)");
 
-                // Decrease: real values are ~1e-9; 6 dp annihilated them to 0, 12 dp preserves them.
-                // Mirrors production Opt (NaN->null else Math.Round(v, dp)).
+                // Decrease: real values are ~1e-9; 6 dp annihilated them to 0, 12 dp preserves them. Opt2 is a local model of the
+                // rounding arithmetic only — production Opt reads its dp from FieldPrecision (T03), pinned here to the 12 this test needs.
+                Assert(FieldPrecision.Dp("spectralDecrease") == 12, "decrease: the registry declares 12 dp (the fix lives there now)");
                 static double? Opt2(double v, int dp) => double.IsNaN(v) ? (double?)null : Math.Round(v, dp);
                 Assert(Opt2(-5.13925e-09, 6) == 0.0, "decrease: 6 dp rounds the e-9 signal to 0 (the bug)");
                 Assert(Opt2(-5.13925e-09, 12) != 0.0, "decrease: 12 dp preserves the e-9 signal (the fix)");
@@ -20419,7 +20421,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (bark.HasValue) { sum += bark.Value; n++; }
             if (erb.HasValue) { sum += erb.Value; n++; }
             if (mel.HasValue) { sum += mel.Value; n++; }
-            return n > 0 ? Math.Round(sum / n, 4) : 0.0;
+            return n > 0 ? Math.Round(sum / n, FieldPrecision.Dp("spectralFlatness")) : 0.0;   // the field's effective precision (4) lives in the registry; the initializer re-rounds through the same entry
         }
 
         /// <summary>
@@ -21915,7 +21917,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 w.WriteStartObject();
                 w.WriteString("key", v.Key);
                 w.WriteString("scale", v.Scale);
-                WriteShortestNumber(w, "strength", Math.Round(v.Strength, 4));
+                WriteShortestNumber(w, "strength", Math.Round(v.Strength, FieldPrecision.Dp("keyVotes_edma_strength")));   // all three profiles share one precision (pinned equal)
                 w.WriteEndObject();
             }
             if (f.KeyVoteKrumhansl != null || f.KeyVoteTemperley != null || f.KeyVoteEdma != null)
@@ -21939,7 +21941,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("chordsHistogram");
                 jw.WriteStartArray();
-                foreach (var v in f.ChordsHistogram) WriteShortestNumber(jw, Math.Round(v, 4));
+                foreach (var v in f.ChordsHistogram) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp("chordsHistogram")));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "chordsNumberRate", f.ChordsNumberRate);
@@ -21952,7 +21954,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("hpcp12");
                 jw.WriteStartArray();
-                foreach (var v in f.Hpcp12) WriteShortestNumber(jw, Math.Round(v, 4));
+                foreach (var v in f.Hpcp12) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp("hpcp12")));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "dynamicComplexity", f.DynamicComplexity);
@@ -21960,7 +21962,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("thpcp12");
                 jw.WriteStartArray();
-                foreach (var v in f.Thpcp12) WriteShortestNumber(jw, Math.Round(v, 4));
+                foreach (var v in f.Thpcp12) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp("thpcp12")));
                 jw.WriteEndArray();
             }
             WriteOpt(jw, "beatsIntervalMean", f.BeatsIntervalMean);
@@ -21977,7 +21979,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("mfccStdev");
                 jw.WriteStartArray();
-                foreach (var v in f.MfccStdev) WriteShortestNumber(jw, Math.Round(v, 4));
+                foreach (var v in f.MfccStdev) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp("mfccStdev")));
                 jw.WriteEndArray();
             }
             void WriteArr(string name, double[]? a)
@@ -21985,7 +21987,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (a == null) return;
                 jw.WritePropertyName(name);
                 jw.WriteStartArray();
-                foreach (var v in a) WriteShortestNumber(jw, Math.Round(v, 4));
+                foreach (var v in a) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp(name)));   // the JSON key is the field name
                 jw.WriteEndArray();
             }
             WriteArr("spectralContrastCoeffs", f.SpectralContrastCoeffs);
@@ -22008,7 +22010,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             // Phase 3 — HF energy ratio; omit-when-null.
             if (f.HfEnergyRatio.HasValue)
-                WriteShortestNumber(jw, "hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, 6));
+                WriteShortestNumber(jw, "hfEnergyRatio", Math.Round(f.HfEnergyRatio.Value, FieldPrecision.Dp("hfEnergyRatio")));
             if (!string.IsNullOrEmpty(f.HfEnergyMethod))
                 jw.WriteString("hfEnergyMethod", f.HfEnergyMethod);
             // Phase 5 — HF spectral structure (FFT-derived); omit-when-null.
@@ -22016,9 +22018,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 jw.WritePropertyName("hfSpectralStructure");
                 jw.WriteStartObject();
-                WriteShortestNumber(jw, "flatness", Math.Round(f.HfSpectralStructure.Flatness, 4));
-                WriteShortestNumber(jw, "peakToMean", Math.Round(f.HfSpectralStructure.PeakToMean, 2));
-                WriteShortestNumber(jw, "imagingSymmetry", Math.Round(f.HfSpectralStructure.ImagingSymmetry, 4));
+                WriteShortestNumber(jw, "flatness", Math.Round(f.HfSpectralStructure.Flatness, FieldPrecision.Dp("hfSpectralStructure_flatness")));
+                WriteShortestNumber(jw, "peakToMean", Math.Round(f.HfSpectralStructure.PeakToMean, FieldPrecision.Dp("hfSpectralStructure_peakToMean")));
+                WriteShortestNumber(jw, "imagingSymmetry", Math.Round(f.HfSpectralStructure.ImagingSymmetry, FieldPrecision.Dp("hfSpectralStructure_imagingSymmetry")));
                 if (!string.IsNullOrEmpty(f.HfSpectralStructure.Method))
                     jw.WriteString("method", f.HfSpectralStructure.Method);
                 jw.WriteEndObject();
@@ -22033,7 +22035,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 jw.WriteEndArray();
                 WriteOpt(jw, "smfmChannel", (double?)f.SmfmChannel);
                 WriteOptStr(jw, "smfmChannelName", f.SmfmChannelName);
-                if (f.SmfmBpm.HasValue) WriteShortestNumber(jw, "smfmBpm", Math.Round(f.SmfmBpm.Value, 3));
+                if (f.SmfmBpm.HasValue) WriteShortestNumber(jw, "smfmBpm", Math.Round(f.SmfmBpm.Value, FieldPrecision.Dp("smfmBpm")));
             }
             if (f.Mfcc != null)
             {
@@ -22045,7 +22047,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             jw.WriteString("lastModified", entry.LastModified.ToString("o"));
             if (entry.AnalysisDurationSecs.HasValue)
             {
-                WriteShortestNumber(jw, "analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, 1));
+                WriteShortestNumber(jw, "analysisDuration", Math.Round(entry.AnalysisDurationSecs.Value, FieldPrecision.Dp("analysisDuration")));
             }
             if (!string.IsNullOrEmpty(entry.FileMd5))
                 jw.WriteString("fileMd5", entry.FileMd5);
@@ -22782,7 +22784,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var max = folded.Max();
             if (max <= 0) return null;   // silent / no-chroma track: null, not a fake all-zero vector
             for (int i = 0; i < 12; i++)
-                folded[i] = Math.Round(folded[i] / max, 4);
+                folded[i] = Math.Round(folded[i] / max, FieldPrecision.Dp("hpcp12"));   // thpcp12 shares the fold and the precision (pinned equal in FieldPrecision's test)
             return folded;
         }
 
@@ -22799,8 +22801,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             double mean = iv.Average();
             double varSum = 0;
             foreach (var v in iv) varSum += (v - mean) * (v - mean);
-            return (Math.Round(mean, 4), Math.Round(Math.Sqrt(varSum / iv.Length), 4),
-                    Math.Round(iv.Min(), 4), Math.Round(iv.Max(), 4));
+            return (Math.Round(mean, FieldPrecision.Dp("beatsIntervalMean")), Math.Round(Math.Sqrt(varSum / iv.Length), FieldPrecision.Dp("beatsIntervalStdev")),
+                    Math.Round(iv.Min(), FieldPrecision.Dp("beatsIntervalMin")), Math.Round(iv.Max(), FieldPrecision.Dp("beatsIntervalMax")));
         }
 
         /// <summary>Per-coefficient MFCC standard deviation from the extractor's already-
@@ -22816,12 +22818,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 if (cov[i] == null || cov[i].Length <= i) return null;
                 var d = cov[i][i];
-                sd[i] = Math.Round(d > 0 ? Math.Sqrt(d) : 0, 4);
+                sd[i] = Math.Round(d > 0 ? Math.Sqrt(d) : 0, FieldPrecision.Dp("mfccStdev"));
             }
             return sd;
         }
 
-        static TrackFeatures? ParseEssentiaOutput(string json)
+        internal static TrackFeatures? ParseEssentiaOutput(string json)
         {
             try
             {
@@ -22862,55 +22864,62 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Extended features — all nullable, propagate NaN/missing as null so legacy
                 // consumers don't see bogus zeros. Precision is picked per field: dB/LU values
                 // at 2 dp, Hz at 1 dp, tiny spectral energies at 6 dp, everything else at 4 dp.
-                static double? Opt(double v, int dp = 4) => double.IsNaN(v) ? (double?)null : Math.Round(v, dp);
-                static double? OptN(JsonElement r, string p, int dp = 4) => Opt(NavDbl(r, p, double.NaN), dp);
+                // T03: the decimal places come from FieldPrecision, keyed by the FIELD the value lands in — there is deliberately no
+                // int overload, so a precision literal cannot creep back into a call site. Rd is the non-nullable twin for the core set.
+                static double? Opt(double v, string field)
+                {
+                    int dp = FieldPrecision.Dp(field);   // resolved BEFORE the null test, so a mistyped field name throws on every parse — including the self-test's empty document — not only when the value happens to be present
+                    return double.IsNaN(v) ? (double?)null : Math.Round(v, dp);
+                }
+                static double? OptN(JsonElement r, string p, string field) => Opt(NavDbl(r, p, double.NaN), field);
+                static double Rd(string field, double v) => Math.Round(v, FieldPrecision.Dp(field));
 
-                var loudnessMomentary = OptN(root, "lowlevel.loudness_ebu128.momentary.mean", 2);
-                var loudnessShortTerm = OptN(root, "lowlevel.loudness_ebu128.short_term.mean", 2);
-                var replayGain = OptN(root, "metadata.audio_properties.replay_gain", 2);
-                var silenceRate20dB = OptN(root, "lowlevel.silence_rate_20dB.mean");
-                var silenceRate30dB = OptN(root, "lowlevel.silence_rate_30dB.mean");
-                var silenceRate60dB = OptN(root, "lowlevel.silence_rate_60dB.mean");
-                var spectralRolloff = OptN(root, "lowlevel.spectral_rolloff.mean", 1);
-                var spectralComplexity = OptN(root, "lowlevel.spectral_complexity.mean", 2);
-                var spectralEntropy = OptN(root, "lowlevel.spectral_entropy.mean");
-                var spectralKurtosis = OptN(root, "lowlevel.spectral_kurtosis.mean");
-                var spectralSkewness = OptN(root, "lowlevel.spectral_skewness.mean");
-                var spectralSpread = OptN(root, "lowlevel.spectral_spread.mean");
-                var spectralStrongPeak = OptN(root, "lowlevel.spectral_strongpeak.mean");
+                var loudnessMomentary = OptN(root, "lowlevel.loudness_ebu128.momentary.mean", "loudnessMomentary");
+                var loudnessShortTerm = OptN(root, "lowlevel.loudness_ebu128.short_term.mean", "loudnessShortTerm");
+                var replayGain = OptN(root, "metadata.audio_properties.replay_gain", "replayGain");
+                var silenceRate20dB = OptN(root, "lowlevel.silence_rate_20dB.mean", "silenceRate20dB");
+                var silenceRate30dB = OptN(root, "lowlevel.silence_rate_30dB.mean", "silenceRate30dB");
+                var silenceRate60dB = OptN(root, "lowlevel.silence_rate_60dB.mean", "silenceRate60dB");
+                var spectralRolloff = OptN(root, "lowlevel.spectral_rolloff.mean", "spectralRolloff");
+                var spectralComplexity = OptN(root, "lowlevel.spectral_complexity.mean", "spectralComplexity");
+                var spectralEntropy = OptN(root, "lowlevel.spectral_entropy.mean", "spectralEntropy");
+                var spectralKurtosis = OptN(root, "lowlevel.spectral_kurtosis.mean", "spectralKurtosis");
+                var spectralSkewness = OptN(root, "lowlevel.spectral_skewness.mean", "spectralSkewness");
+                var spectralSpread = OptN(root, "lowlevel.spectral_spread.mean", "spectralSpread");
+                var spectralStrongPeak = OptN(root, "lowlevel.spectral_strongpeak.mean", "spectralStrongPeak");
                 // spectral_decrease values are ~1e-9 and REAL/varying; the old 6-dp rounding
                 // annihilated them to 0 on every track (a precision bug, not a missing key). 12 dp
                 // preserves the e-9 signal.
-                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean", 12);
-                var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean", 6);
-                var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean", 6);
-                var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean", 6);
-                var spectralEnergyMidHigh = OptN(root, "lowlevel.spectral_energyband_middle_high.mean", 6);
-                var spectralEnergyHigh = OptN(root, "lowlevel.spectral_energyband_high.mean", 6);
-                var hfc = OptN(root, "lowlevel.hfc.mean", 2);
-                var barkCrest = OptN(root, "lowlevel.barkbands_crest.mean");
-                var barkFlatness = OptN(root, "lowlevel.barkbands_flatness_db.mean");
-                var barkKurtosis = OptN(root, "lowlevel.barkbands_kurtosis.mean");
-                var barkSkewness = OptN(root, "lowlevel.barkbands_skewness.mean");
-                var barkSpread = OptN(root, "lowlevel.barkbands_spread.mean");
-                var erbCrest = OptN(root, "lowlevel.erbbands_crest.mean");
-                var erbFlatness = OptN(root, "lowlevel.erbbands_flatness_db.mean");
-                var erbKurtosis = OptN(root, "lowlevel.erbbands_kurtosis.mean");
-                var erbSkewness = OptN(root, "lowlevel.erbbands_skewness.mean");
-                var erbSpread = OptN(root, "lowlevel.erbbands_spread.mean");
-                var melCrest = OptN(root, "lowlevel.melbands_crest.mean");
-                var melFlatness = OptN(root, "lowlevel.melbands_flatness_db.mean");
-                var melKurtosis = OptN(root, "lowlevel.melbands_kurtosis.mean");
-                var melSkewness = OptN(root, "lowlevel.melbands_skewness.mean");
-                var melSpread = OptN(root, "lowlevel.melbands_spread.mean");
+                var spectralDecrease = OptN(root, "lowlevel.spectral_decrease.mean", "spectralDecrease");
+                var spectralEnergy = OptN(root, "lowlevel.spectral_energy.mean", "spectralEnergy");
+                var spectralEnergyLow = OptN(root, "lowlevel.spectral_energyband_low.mean", "spectralEnergyLow");
+                var spectralEnergyMidLow = OptN(root, "lowlevel.spectral_energyband_middle_low.mean", "spectralEnergyMidLow");
+                var spectralEnergyMidHigh = OptN(root, "lowlevel.spectral_energyband_middle_high.mean", "spectralEnergyMidHigh");
+                var spectralEnergyHigh = OptN(root, "lowlevel.spectral_energyband_high.mean", "spectralEnergyHigh");
+                var hfc = OptN(root, "lowlevel.hfc.mean", "hfc");
+                var barkCrest = OptN(root, "lowlevel.barkbands_crest.mean", "barkCrest");
+                var barkFlatness = OptN(root, "lowlevel.barkbands_flatness_db.mean", "barkFlatness");
+                var barkKurtosis = OptN(root, "lowlevel.barkbands_kurtosis.mean", "barkKurtosis");
+                var barkSkewness = OptN(root, "lowlevel.barkbands_skewness.mean", "barkSkewness");
+                var barkSpread = OptN(root, "lowlevel.barkbands_spread.mean", "barkSpread");
+                var erbCrest = OptN(root, "lowlevel.erbbands_crest.mean", "erbCrest");
+                var erbFlatness = OptN(root, "lowlevel.erbbands_flatness_db.mean", "erbFlatness");
+                var erbKurtosis = OptN(root, "lowlevel.erbbands_kurtosis.mean", "erbKurtosis");
+                var erbSkewness = OptN(root, "lowlevel.erbbands_skewness.mean", "erbSkewness");
+                var erbSpread = OptN(root, "lowlevel.erbbands_spread.mean", "erbSpread");
+                var melCrest = OptN(root, "lowlevel.melbands_crest.mean", "melCrest");
+                var melFlatness = OptN(root, "lowlevel.melbands_flatness_db.mean", "melFlatness");
+                var melKurtosis = OptN(root, "lowlevel.melbands_kurtosis.mean", "melKurtosis");
+                var melSkewness = OptN(root, "lowlevel.melbands_skewness.mean", "melSkewness");
+                var melSpread = OptN(root, "lowlevel.melbands_spread.mean", "melSpread");
                 // Derive the global spectralFlatness scalar from the per-band flatnesses just read
                 // (the real tonal-vs-noisy signal). The three band values stay emitted separately —
                 // the consumer model uses those; this scalar is for schema continuity.
                 var spectralFlatness = DeriveSpectralFlatness(barkFlatness, erbFlatness, melFlatness);
-                var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean", 2);
-                var chordsStrength = OptN(root, "tonal.chords_strength.mean");
-                var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", 2);
-                var hpcpEntropy = OptN(root, "tonal.hpcp_entropy.mean");
+                var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean", "beatsLoudness");
+                var chordsStrength = OptN(root, "tonal.chords_strength.mean", "chordsStrength");
+                var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", "hpcpCrest");
+                var hpcpEntropy = OptN(root, "tonal.hpcp_entropy.mean", "hpcpEntropy");
 
                 // 2026-07-22 wave — key votes (all three tonal profiles), bpm-histogram
                 // peaks (half/double-time evidence), chord tonality, tuning, simple
@@ -22921,37 +22930,37 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var vs = NavStr(root, $"tonal.{profile}.scale");
                     var vst = NavDbl(root, $"tonal.{profile}.strength", double.NaN);
                     if (vk == "" || vs == "" || double.IsNaN(vst)) return null;
-                    return new KeyVote { Key = vk, Scale = vs, Strength = Math.Round(vst, 4) };
+                    return new KeyVote { Key = vk, Scale = vs, Strength = Rd("keyVotes_" + profile.Substring("key_".Length) + "_strength", vst) };
                 }
                 var keyVoteKrumhansl = Vote("key_krumhansl");
                 var keyVoteTemperley = Vote("key_temperley");
                 var keyVoteEdma = Vote("key_edma");
-                var bpmFirstPeak = OptN(root, "rhythm.bpm_histogram_first_peak_bpm", 1);
-                var bpmFirstPeakWeight = OptN(root, "rhythm.bpm_histogram_first_peak_weight");
-                var bpmFirstPeakSpread = OptN(root, "rhythm.bpm_histogram_first_peak_spread");
-                var bpmSecondPeak = OptN(root, "rhythm.bpm_histogram_second_peak_bpm", 1);
-                var bpmSecondPeakWeight = OptN(root, "rhythm.bpm_histogram_second_peak_weight");
-                var bpmSecondPeakSpread = OptN(root, "rhythm.bpm_histogram_second_peak_spread");
+                var bpmFirstPeak = OptN(root, "rhythm.bpm_histogram_first_peak_bpm", "bpmFirstPeak");
+                var bpmFirstPeakWeight = OptN(root, "rhythm.bpm_histogram_first_peak_weight", "bpmFirstPeakWeight");
+                var bpmFirstPeakSpread = OptN(root, "rhythm.bpm_histogram_first_peak_spread", "bpmFirstPeakSpread");
+                var bpmSecondPeak = OptN(root, "rhythm.bpm_histogram_second_peak_bpm", "bpmSecondPeak");
+                var bpmSecondPeakWeight = OptN(root, "rhythm.bpm_histogram_second_peak_weight", "bpmSecondPeakWeight");
+                var bpmSecondPeakSpread = OptN(root, "rhythm.bpm_histogram_second_peak_spread", "bpmSecondPeakSpread");
                 var chordsKeyStr = NavStr(root, "tonal.chords_key") is var ckv && ckv.Length > 0 ? ckv : null;
                 var chordsScaleStr = NavStr(root, "tonal.chords_scale") is var csv && csv.Length > 0 ? csv : null;
                 double[]? chordsHistogram = null;
                 var chEl = NavigatePath(root, "tonal.chords_histogram");
                 if (chEl.HasValue && chEl.Value.ValueKind == JsonValueKind.Array)
                 {
-                    chordsHistogram = chEl.Value.EnumerateArray().Select(v => Math.Round(v.GetDouble(), 4)).ToArray();
+                    chordsHistogram = chEl.Value.EnumerateArray().Select(v => Rd("chordsHistogram", v.GetDouble())).ToArray();
                     if (chordsHistogram.Length == 0) chordsHistogram = null;
                 }
-                var chordsNumberRate = OptN(root, "tonal.chords_number_rate");
-                var tuningFrequency = OptN(root, "tonal.tuning_frequency", 2);
-                var tuningEqualTemperedDeviation = OptN(root, "tonal.tuning_equal_tempered_deviation");
-                var tuningDiatonicStrength = OptN(root, "tonal.tuning_diatonic_strength");
-                var tuningNontemperedEnergyRatio = OptN(root, "tonal.tuning_nontempered_energy_ratio");
-                var averageLoudness = OptN(root, "lowlevel.average_loudness");
+                var chordsNumberRate = OptN(root, "tonal.chords_number_rate", "chordsNumberRate");
+                var tuningFrequency = OptN(root, "tonal.tuning_frequency", "tuningFrequency");
+                var tuningEqualTemperedDeviation = OptN(root, "tonal.tuning_equal_tempered_deviation", "tuningEqualTemperedDeviation");
+                var tuningDiatonicStrength = OptN(root, "tonal.tuning_diatonic_strength", "tuningDiatonicStrength");
+                var tuningNontemperedEnergyRatio = OptN(root, "tonal.tuning_nontempered_energy_ratio", "tuningNontemperedEnergyRatio");
+                var averageLoudness = OptN(root, "lowlevel.average_loudness", "averageLoudness");
                 double[]? hpcp12 = null;
                 var hpcpEl = NavigatePath(root, "tonal.hpcp.mean");
                 if (hpcpEl.HasValue && hpcpEl.Value.ValueKind == JsonValueKind.Array)
                     hpcp12 = FoldHpcp36To12(hpcpEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray());
-                var dynamicComplexity = OptN(root, "lowlevel.dynamic_complexity");
+                var dynamicComplexity = OptN(root, "lowlevel.dynamic_complexity", "dynamicComplexity");
                 double[]? thpcp12 = null;
                 var thpcpEl = NavigatePath(root, "tonal.thpcp");
                 if (thpcpEl.HasValue && thpcpEl.Value.ValueKind == JsonValueKind.Array)
@@ -22961,12 +22970,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (beatsEl.HasValue && beatsEl.Value.ValueKind == JsonValueKind.Array)
                     beatsPos = beatsEl.Value.EnumerateArray().Select(v => v.GetDouble()).ToArray();
                 var beatIv = BeatIntervalStats(beatsPos);
-                var spectralCentroidStdev = OptN(root, "lowlevel.spectral_centroid.stdev", 1);
-                var spectralEnergyStdev = OptN(root, "lowlevel.spectral_energy.stdev", 6);
-                var dissonanceStdev = OptN(root, "lowlevel.dissonance.stdev");
-                var pitchSalienceStdev = OptN(root, "lowlevel.pitch_salience.stdev");
-                var hpcpEntropyStdev = OptN(root, "tonal.hpcp_entropy.stdev");
-                var zeroCrossingRateStdev = OptN(root, "lowlevel.zerocrossingrate.stdev");
+                var spectralCentroidStdev = OptN(root, "lowlevel.spectral_centroid.stdev", "spectralCentroidStdev");
+                var spectralEnergyStdev = OptN(root, "lowlevel.spectral_energy.stdev", "spectralEnergyStdev");
+                var dissonanceStdev = OptN(root, "lowlevel.dissonance.stdev", "dissonanceStdev");
+                var pitchSalienceStdev = OptN(root, "lowlevel.pitch_salience.stdev", "pitchSalienceStdev");
+                var hpcpEntropyStdev = OptN(root, "tonal.hpcp_entropy.stdev", "hpcpEntropyStdev");
+                var zeroCrossingRateStdev = OptN(root, "lowlevel.zerocrossingrate.stdev", "zeroCrossingRateStdev");
                 double[][]? mfccCov = null;
                 var mfccCovEl = NavigatePath(root, "lowlevel.mfcc.cov");
                 if (mfccCovEl.HasValue && mfccCovEl.Value.ValueKind == JsonValueKind.Array)
@@ -22978,20 +22987,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     mfccCov = covRows.ToArray();
                 }
                 var mfccStdev = MfccStdevFromCov(mfccCov);
-                double[]? Arr(string path)
+                double[]? Arr(string path, string field)
                 {
                     var el = NavigatePath(root, path);
                     if (!el.HasValue || el.Value.ValueKind != JsonValueKind.Array) return null;
                     var list = new List<double>();
                     foreach (var v in el.Value.EnumerateArray())
-                        if (v.ValueKind == JsonValueKind.Number) list.Add(Math.Round(v.GetDouble(), 4));
+                        if (v.ValueKind == JsonValueKind.Number) list.Add(Rd(field, v.GetDouble()));
                     return list.Count > 0 ? list.ToArray() : null;
                 }
-                var spectralContrastCoeffs = Arr("lowlevel.spectral_contrast_coeffs.mean");
-                var spectralContrastValleys = Arr("lowlevel.spectral_contrast_valleys.mean");
-                var beatsLoudnessBandRatio = Arr("rhythm.beats_loudness_band_ratio.mean");
-                var bpmHistogram = Arr("rhythm.bpm_histogram");
-                var gfcc = Arr("lowlevel.gfcc.mean");
+                var spectralContrastCoeffs = Arr("lowlevel.spectral_contrast_coeffs.mean", "spectralContrastCoeffs");
+                var spectralContrastValleys = Arr("lowlevel.spectral_contrast_valleys.mean", "spectralContrastValleys");
+                var beatsLoudnessBandRatio = Arr("rhythm.beats_loudness_band_ratio.mean", "beatsLoudnessBandRatio");
+                var bpmHistogram = Arr("rhythm.bpm_histogram", "bpmHistogram");
+                var gfcc = Arr("lowlevel.gfcc.mean", "gfcc");
 
                 double[]? mfcc = null;
                 var mfccEl = NavigatePath(root, "lowlevel.mfcc.mean");
@@ -23019,20 +23028,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return new TrackFeatures
                 {
                     AnalyzedLengthSec = ParseAnalyzedLengthSec(root),
-                    Bpm = Math.Round(bpm, 1), Key = key, Mode = scale,
-                    SpectralCentroid = Math.Round(spectralCentroidMean, 1),
-                    SpectralFlux = Math.Round(spectralFluxMean, 4),
-                    Loudness = Math.Round(loudness, 2),
-                    Danceability = Math.Round(danceability, 4),
-                    OnsetRate = Math.Round(onsetRate, 2),
-                    ZeroCrossingRate = Math.Round(zeroCrossingRate, 6),
-                    SpectralRms = Math.Round(spectralRms, 6),
-                    SpectralFlatness = Math.Round(spectralFlatness, 6),
-                    Dissonance = Math.Round(dissonance, 4),
-                    PitchSalience = Math.Round(pitchSalience, 4),
-                    ChordsChangesRate = Math.Round(chordsChangesRate, 4),
-                    Mfcc = mfcc?.Select(v => Math.Round(v, 4)).ToArray(),
-                    DynamicRange = double.IsNaN(loudnessRange) ? (double?)null : Math.Round(loudnessRange, 2),
+                    Bpm = Rd("bpm", bpm), Key = key, Mode = scale,
+                    SpectralCentroid = Rd("spectralCentroid", spectralCentroidMean),
+                    SpectralFlux = Rd("spectralFlux", spectralFluxMean),
+                    Loudness = Rd("loudness", loudness),
+                    Danceability = Rd("danceability", danceability),
+                    OnsetRate = Rd("onsetRate", onsetRate),
+                    ZeroCrossingRate = Rd("zeroCrossingRate", zeroCrossingRate),
+                    SpectralRms = Rd("spectralRms", spectralRms),
+                    SpectralFlatness = Rd("spectralFlatness", spectralFlatness),
+                    Dissonance = Rd("dissonance", dissonance),
+                    PitchSalience = Rd("pitchSalience", pitchSalience),
+                    ChordsChangesRate = Rd("chordsChangesRate", chordsChangesRate),
+                    Mfcc = mfcc?.Select(v => Rd("mfcc", v)).ToArray(),
+                    DynamicRange = Opt(loudnessRange, "dynamicRange"),
                     DynamicRangeSource = double.IsNaN(loudnessRange) ? null : "essentia-lra",
                     // Extended fields
                     LoudnessMomentary = loudnessMomentary,
