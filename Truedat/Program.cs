@@ -10422,7 +10422,9 @@ namespace Truedat
                 // so it reads the build the store's newest essentia run recorded (the frames depend on the build).
                 var build = global::Truedat.Store.ScanSink.ExtractorBuild;
                 if (build == "unknown") build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
-                var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, _edgeSettings.ProducerVersion, "essentia_streaming_extractor_music " + build);
+                // origin.generation = the store's current generation, so an upgraded hub can pair the file with its catalog
+                // (and label it behind when --edges-export ran alone after the store moved on: "run --store-export").
+                var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, _edgeSettings.ProducerVersion, "essentia_streaming_extractor_music " + build, os.Dal.Generation());
                 if (announce) Console.WriteLine($"  edges file: {rep.Tracks:N0} tracks, {rep.Bytes:N0} bytes{(rep.OmittedNoSha > 0 ? $", {rep.OmittedNoSha:N0} no-sha media omitted" : "")} -> {rep.Path}");
                 return true;
             }
@@ -21108,11 +21110,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// WriteCatalogHeaderCommon so both writer families carry an identical generatedBy value from
         /// this single source. Idempotent — safe to call on a root that already has version/generatedAt.
         /// </summary>
-        static void StampCatalogHeader(JsonObject root, string generatedAt)
+        internal static void StampCatalogHeader(JsonObject root, string generatedAt)
         {
             root["version"] = "1.0";
             root["generatedAt"] = generatedAt;
             root["generatedBy"] = VersionInfo.Display;
+            // A DOM-mutating verb rewrites the catalog (and regenerates the sidecar) WITHOUT the store,
+            // so a v2 publication header it inherited would now lie: the sidecar hash no longer binds
+            // and the generation is not the store's. Drop it — the file is a v1 catalog again and the
+            // hub reads it by its legacy rule (labelled unverified) until the next publish. Store-v3
+            // T06 routes these verbs through the store, at which point they publish instead.
+            root.Remove("contract");
+            root.Remove("origin");
         }
 
         /// <summary>
@@ -21151,24 +21160,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// is unchanged, so an export from the store is the same bytes, parts and sidecar as a scan's save.</summary>
         internal static void SaveResultsForStore(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks) => SaveResults(moodsPath, allTracks);
 
-        static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
+        /// <summary>
+        /// Stream ONE catalog file into <paramref name="tmpPath"/>, tracking the running byte size with the
+        /// writer's own counters (BytesCommitted + BytesPending — the same counters the offset code uses).
+        /// The common case fits under CatalogMaxBytes in a single pass at today's cost. If it would cross
+        /// the line — a file that can no longer be LOADED, JsonDocument.Parse caps at Int32.MaxValue —
+        /// stops and returns true (overflow) with the partial temp left for the caller to discard.
+        /// <paramref name="origin"/>, when given, is the store-v3 v2 header (contract + origin), written right
+        /// after trackCount so it sits inside the hub's bounded head read; null writes the v1 catalog
+        /// byte-for-byte as before.
+        /// </summary>
+        static bool WriteCatalogSingleTemp(string tmpPath, KeyValuePair<string, TrackEntry>[] items, int total, string generatedAt,
+            global::Truedat.Store.CatalogOrigin? origin)
         {
-            // Snapshot the catalog once so the fast single-file write and any fallback split write
-            // share ONE consistent view even though scan workers may still be adding entries under
-            // the periodic-save lock. O(count) references, not O(bytes).
-            var items = allTracks.ToArray();
-            int total = items.Length;
-            var generatedAt = DateTime.UtcNow.ToString("o");
-
-            var tmpPath = moodsPath + ".tmp";
-            var bakPath = moodsPath + ".bak";
-            try { File.Delete(tmpPath); } catch { }
-
-            // Fast path: stream the whole catalog into ONE file, tracking the running byte size with
-            // the writer's own counters (BytesCommitted + BytesPending — the same counters the offset
-            // code uses). The common case fits under CatalogMaxBytes in a single pass at today's cost.
-            // If it would cross the line — a file that can no longer be LOADED, JsonDocument.Parse caps
-            // at Int32.MaxValue — stop, discard the partial temp, and fall through to the split writer.
             bool overflow = false;
             using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
             {
@@ -21180,6 +21184,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     jw.WriteStartObject();
                     WriteCatalogHeaderCommon(jw, generatedAt);
                     jw.WriteNumber("trackCount", total);
+                    if (origin != null) global::Truedat.Store.CatalogOrigin.WriteHeader(jw, origin);
                     jw.WritePropertyName("tracks");
                     jw.WriteStartObject();
                     foreach (var kvp in items)
@@ -21200,6 +21205,82 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // zeroed tail — and a scan save keeps no timestamped .bak to fall back to.
                 if (!overflow) fs.Flush(flushToDisk: true);
             }
+            return overflow;
+        }
+
+        /// <summary>
+        /// Store-v3 T07: publish the export triple — catalog (v2 header: contract + origin), sidecar and
+        /// companion — from ONE snapshot through <see cref="global::Truedat.Store.Publication"/>. Temps first,
+        /// in the order companion, sidecar (hashed into the catalog header: the catalog is the record and
+        /// binds the sidecar by content), catalog; then the ruled renames (companion aside, catalog, companion,
+        /// sidecar LAST) with the catalog/sidecar mtimes stamped on the temps. <paramref name="writeCompanionTemp"/>
+        /// writes the companion to the temp path it is handed and returns true; null, or false, means this
+        /// generation publishes no companion (edges off) — the previous live one is still retired.
+        /// A catalog past <see cref="CatalogMaxBytes"/> cannot be published as one file: it falls back to the
+        /// plain split save (v1 header, no publication), says so, and returns null.
+        /// </summary>
+        internal static global::Truedat.Store.PublicationResult? SaveResultsPublished(string moodsPath,
+            ConcurrentDictionary<string, TrackEntry> allTracks, global::Truedat.Store.CatalogOrigin origin, Func<string, bool>? writeCompanionTemp)
+        {
+            var items = allTracks.ToArray();
+            int total = items.Length;
+            var generatedAt = DateTime.UtcNow.ToString("o");
+            var sidecarPath = Path.ChangeExtension(moodsPath, ".mbxs");
+            var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var plan = new global::Truedat.Store.PublicationPlan
+            {
+                CatalogPath = moodsPath, SidecarPath = sidecarPath,
+                CompanionPath = Path.Combine(dir, global::Truedat.Edges.EdgeCompanion.FileName),
+                CatalogTmp = moodsPath + ".tmp", SidecarTmp = sidecarPath + ".tmp", Generation = origin.Generation,
+            };
+            var companionTmp = plan.CompanionPath + ".tmp";
+            foreach (var t in new[] { plan.CatalogTmp, plan.SidecarTmp, companionTmp }) { try { File.Delete(t); } catch { } }
+            try
+            {
+                if (writeCompanionTemp != null && writeCompanionTemp(companionTmp)) plan.CompanionTmp = companionTmp;
+                CatalogSidecar.WriteTemp(plan.SidecarTmp, items);
+                origin.SidecarSha256 = global::Truedat.Store.Publication.Sha256Hex(plan.SidecarTmp);
+                origin.ExportedAt = generatedAt;
+                bool overflow = WriteCatalogSingleTemp(plan.CatalogTmp, items, total, generatedAt, origin);
+                if (overflow)
+                {
+                    foreach (var t in new[] { plan.CatalogTmp, plan.SidecarTmp, companionTmp }) { try { File.Delete(t); } catch { } }
+                    Console.Error.WriteLine("  Warning: the catalog exceeds the single-file limit; written as numbered parts WITHOUT the publication header (multipart publication is not supported; readers use the legacy freshness rule).");
+                    SaveResultsSplit(moodsPath, items, total, generatedAt);
+                    try { CatalogSidecar.Write(sidecarPath, items); }
+                    catch (Exception ex) { Console.Error.WriteLine($"  Warning: sidecar (.mbxs) not written: {ex.Message}"); }
+                    return null;
+                }
+                var result = global::Truedat.Store.Publication.Publish(plan, DateTime.UtcNow);
+                // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both.
+                DeleteCatalogParts(moodsPath);
+                if (_audit) { try { Console.WriteLine($"  DEBUG publish: {moodsPath} generation {result.Generation} ({new FileInfo(moodsPath).Length / 1024} KB, {total} tracks, sidecar {result.SidecarSha256.Substring(0, 12)}…)"); } catch { } }
+                return result;
+            }
+            catch
+            {
+                // Never leave a half-written .tmp beside the catalog; the caller re-publishes from the committed store.
+                foreach (var t in new[] { plan.CatalogTmp, plan.SidecarTmp, companionTmp }) { try { File.Delete(t); } catch { } }
+                throw;
+            }
+        }
+
+        static void SaveResults(string moodsPath, ConcurrentDictionary<string, TrackEntry> allTracks)
+        {
+            // Snapshot the catalog once so the fast single-file write and any fallback split write
+            // share ONE consistent view even though scan workers may still be adding entries under
+            // the periodic-save lock. O(count) references, not O(bytes).
+            var items = allTracks.ToArray();
+            int total = items.Length;
+            var generatedAt = DateTime.UtcNow.ToString("o");
+
+            var tmpPath = moodsPath + ".tmp";
+            var bakPath = moodsPath + ".bak";
+            try { File.Delete(tmpPath); } catch { }
+
+            // Fast path: stream the whole catalog into ONE file (no origin header: a plain save writes
+            // the v1 catalog exactly as before — the v2 header is the published path's, SaveResultsPublished).
+            bool overflow = WriteCatalogSingleTemp(tmpPath, items, total, generatedAt, null);
 
             if (overflow)
             {

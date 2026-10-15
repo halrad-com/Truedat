@@ -29,14 +29,31 @@ namespace Truedat.Edges
         };
         static readonly string[] StatusWords = { "ok", "short-context", "unavailable", "failed" };
 
-        internal static EdgeCompanionReport WriteFromStore(StoreDal dal, string path, string producerVersion, string extractor)
+        /// <summary>Write the companion to <paramref name="path"/> atomically (temp + swap). <paramref name="generation"/>, when
+        /// given, is the store's publication generation (store-v3 T07): it lands as <c>origin.generation</c> in the root, which an
+        /// upgraded hub matches against the catalog's and an old hub ignores (unknown root key). Null keeps the pre-T07 shape.</summary>
+        internal static EdgeCompanionReport WriteFromStore(StoreDal dal, string path, string producerVersion, string extractor, long? generation = null)
         {
-            var rep = new EdgeCompanionReport { Path = path };
+            var tmp = path + ".tmp";
+            var rep = WriteTempFromStore(dal, tmp, producerVersion, extractor, generation);
+            try { if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path); }
+            catch { try { File.Delete(tmp); } catch { } throw; }
+            rep.Path = path;
+            rep.Bytes = new FileInfo(path).Length;
+            return rep;
+        }
+
+        /// <summary>Write the companion to <paramref name="tmpPath"/> and leave it there: the store-v3 publisher
+        /// (<c>Publication</c>) performs the rename in the ruled order (companion aside, catalog, companion, sidecar LAST).
+        /// Never leaves a half-written temp (deleted on failure).</summary>
+        internal static EdgeCompanionReport WriteTempFromStore(StoreDal dal, string tmpPath, string producerVersion, string extractor, long? generation = null)
+        {
+            var rep = new EdgeCompanionReport { Path = tmpPath };
             var keys = dal.ContentKeysWithEdges(producerVersion);
             // The header names the extractor the ROWS record (review M4), falling back to what the caller resolved.
             var recorded = dal.EdgesExtractorBuild(producerVersion);
             if (!string.IsNullOrEmpty(recorded)) extractor = "essentia_streaming_extractor_music " + recorded;
-            var tmp = path + ".tmp";
+            var tmp = tmpPath;
             try
             {
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
@@ -47,6 +64,11 @@ namespace Truedat.Edges
                 w.WriteString("producerVersion", producerVersion);
                 w.WriteString("extractor", extractor);
                 w.WriteString("generatedUtc", DateTime.UtcNow.ToString("o"));
+                if (generation.HasValue)
+                {
+                    // In the head, before the tracks: the hub's recovery/binding read is bounded (CatalogOrigin.TryReadHead).
+                    w.WriteStartObject("origin"); w.WriteNumber("generation", generation.Value); w.WriteEndObject();
+                }
                 w.WritePropertyName("spectralOrder"); w.WriteStartArray(); foreach (var s in SpectralOrder) w.WriteStringValue(s); w.WriteEndArray();
                 w.WritePropertyName("statusWords"); w.WriteStartArray(); foreach (var s in StatusWords) w.WriteStringValue(s); w.WriteEndArray();
                 int shaKeyed = 0; foreach (var k in keys) if (!k.StartsWith("entity:", StringComparison.Ordinal)) shaKeyed++;
@@ -69,10 +91,9 @@ namespace Truedat.Edges
                 w.WriteEndObject();
                 w.Flush();
             }
-            if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path);
             }
             catch { try { File.Delete(tmp); } catch { } throw; }   // never leave a half-written .tmp beside the catalog (review M6)
-            rep.Bytes = new FileInfo(path).Length;
+            rep.Bytes = new FileInfo(tmp).Length;
             return rep;
         }
 

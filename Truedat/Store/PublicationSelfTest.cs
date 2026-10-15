@@ -29,6 +29,67 @@ namespace Truedat.Store
             Console.WriteLine("Publication self-test (store-v3 T08: catalog origin header round-trips through the bounded head read; malformed origin is false, never a throw)");
             try { TestOriginHeader(assert); }
             catch (Exception ex) { assert(false, $"Publication.OriginHeader: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Publication self-test (store-v3 T07: SaveResultsPublished writes the real catalog + sidecar through the publisher; the plain save stays v1)");
+            try { TestSaveResultsPublished(assert); }
+            catch (Exception ex) { assert(false, $"Publication.SaveResultsPublished: threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>The integration: the real catalog writer and sidecar writer, published as a set with the
+        /// v2 header, bound by hash; the plain save (no store) writes the v1 catalog untouched; a DOM verb
+        /// re-stamp drops a stale header.</summary>
+        static void TestSaveResultsPublished(Action<bool, string> assert)
+        {
+            using (var d = new Dir())
+            {
+                var dict = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                for (int i = 0; i < 3; i++)
+                    dict[@"D:\music\t" + i + ".flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T" + i, Bpm = 100 + i, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                var moods = d.P("mbxmoods.json");
+                var sidecar = d.P("mbxmoods.mbxs");
+                var companion = d.P("mbxedges.v1.json");
+
+                // Published, no companion this generation.
+                var origin = new CatalogOrigin { Kind = "export", MachineId = "m-1", StoreSchema = 2, Truedat = "test", Generation = 5 };
+                var r = Program.SaveResultsPublished(moods, dict, origin, null);
+                assert(r != null && r.Completed && r.Generation == 5, "published: completes at the store's generation");
+                assert(CatalogOrigin.TryRead(moods, out var back) && back.Generation == 5 && back.Kind == "export" && back.MachineId == "m-1" && back.StoreSchema == 2,
+                    "published: the real catalog carries contract + origin in its head");
+                assert(back.SidecarSha256 == Publication.Sha256Hex(sidecar) && back.SidecarSha256.Length == 64, "published: origin.sidecarSha256 is the published sidecar's bytes");
+                assert(CatalogSidecar.Read(sidecar).TrackCount == 3, "published: the sidecar is the real v3 sidecar (3 records)");
+                assert(!File.Exists(companion) && !File.Exists(moods + ".tmp") && !File.Exists(sidecar + ".tmp") && !File.Exists(companion + ".tmp"), "published: no companion, no temps left");
+                assert(!Publication.FilesBehind(moods, sidecar, companion, false, 5, out var w0), "published: recovery predicate satisfied (" + w0 + ")");
+                assert(File.GetLastWriteTimeUtc(sidecar) >= File.GetLastWriteTimeUtc(moods), "published: legacy predicate holds (sidecar >= catalog)");
+                var reload = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                assert(Program.LoadExistingMoodsForStore(moods, reload) == 3, "published: truedat's own loader reads the v2 catalog (unknown root keys tolerated)");
+
+                // Published with a companion: the callback writes the temp; the publisher places it.
+                var origin2 = new CatalogOrigin { Kind = "export", MachineId = "m-1", StoreSchema = 2, Truedat = "test", Generation = 6 };
+                var r2 = Program.SaveResultsPublished(moods, dict, origin2, tmp => { Put(tmp, CompanionText(6, "x")); return true; });
+                assert(r2 != null && r2.Completed && File.Exists(companion) && Marker(companion) == "x", "published with companion: placed beside the catalog");
+                assert(!Publication.FilesBehind(moods, sidecar, companion, true, 6, out var w1), "published with companion: recovery predicate satisfied (" + w1 + ")");
+                assert(!File.Exists(companion + Publication.CompanionAsideSuffix), "published with companion: no .prev left");
+
+                // Edges off next generation: the companion is retired.
+                var origin3 = new CatalogOrigin { Kind = "export", MachineId = "m-1", StoreSchema = 2, Truedat = "test", Generation = 7 };
+                var r3 = Program.SaveResultsPublished(moods, dict, origin3, null);
+                assert(r3 != null && r3.Completed && !File.Exists(companion), "published, edges off: the previous companion is retired");
+                assert(!Publication.FilesBehind(moods, sidecar, companion, false, 7, out var w2), "published, edges off: recovery predicate satisfied (" + w2 + ")");
+
+                // The PLAIN save (no store in force) writes the v1 catalog: no contract, no origin — bytes untouched.
+                Program.SaveResultsForStore(moods, dict);
+                assert(!CatalogOrigin.TryRead(moods, out _) && !File.ReadAllText(moods).Contains("\"contract\""), "plain save: v1 catalog, no publication header");
+                assert(Program.LoadExistingMoodsForStore(moods, new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance)) == 3, "plain save: still loads");
+
+                // A DOM-verb re-stamp drops an inherited v2 header (the verb did not publish; the hash would lie).
+                var root = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["version"] = "1.0", ["contract"] = CatalogOrigin.ContractV2,
+                    ["origin"] = new System.Text.Json.Nodes.JsonObject { ["generation"] = 5, ["sidecarSha256"] = "ff" },
+                    ["tracks"] = new System.Text.Json.Nodes.JsonObject(),
+                };
+                Program.StampCatalogHeader(root, "T");
+                assert(root["contract"] == null && root["origin"] == null && root["generatedBy"] != null, "StampCatalogHeader: drops contract + origin (a verb that did not publish must not carry a stale binding)");
+            }
         }
 
         // ------------------------------------------------------------------ fixtures

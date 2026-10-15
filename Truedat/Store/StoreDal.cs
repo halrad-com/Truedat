@@ -68,6 +68,20 @@ namespace Truedat.Store
         internal void MetaSet(string key, string value)
             => Exec("INSERT INTO store_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;", key, value);
 
+        /// <summary>store-v3 T07: the consumer-visible publication generation, a <c>store_meta</c> row. 0 until the first
+        /// mutation advances it. Every successful consumer-visible mutation — scan flush, maintenance verb, merge, restore,
+        /// import — calls <see cref="AdvanceGeneration"/> inside its transaction; the exports carry the value in their headers
+        /// (<c>CatalogOrigin</c>), which is how a hub tells a current triple from one left behind (M8).</summary>
+        internal const string GenerationKey = "generation";
+        internal long Generation()
+            => long.TryParse(MetaGet(GenerationKey), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var g) ? g : 0;
+        internal long AdvanceGeneration()
+        {
+            var g = Generation() + 1;
+            MetaSet(GenerationKey, g.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return g;
+        }
+
         // ---------------------------------------------------------------- machine, roots
         internal void InsertMachine(string id, string hostname, string nowUtc)
             => Exec("INSERT INTO machine(id, hostname, created_utc) VALUES (?, ?, ?);", id, hostname, nowUtc);

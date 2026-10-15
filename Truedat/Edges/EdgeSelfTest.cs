@@ -214,6 +214,12 @@ namespace Truedat.Edges
                     }
                     System.IO.File.WriteAllText(path, "{\"stale\": true}");       // an older file is replaced atomically
                     rep = EdgeCompanion.WriteFromStore(os.Dal, path, version, "essentia_streaming_extractor_music unknown");   // the rows record the build (review M4); the caller's fallback is overridden
+                    // Store-v3 T07: with a generation the root gains origin{generation} (in the head); without, the pre-T07 shape.
+                    var pathGen = System.IO.Path.Combine(dir, "with-generation.json");
+                    EdgeCompanion.WriteFromStore(os.Dal, pathGen, version, "essentia_streaming_extractor_music unknown", 7);
+                    assert(Truedat.Store.CatalogOrigin.TryReadHead(pathGen, EdgeCompanion.Contract, out var cg) && cg.Generation == 7,
+                        "companion with a generation: origin.generation = 7 readable from the bounded head");
+                    assert(!Truedat.Store.CatalogOrigin.TryReadHead(path, EdgeCompanion.Contract, out _), "companion without a generation: no origin block (pre-T07 shape kept)");
                     // Review I2: --store-info's coverage is the drain's gap — current version only, unavailable counted as captured.
                     var info = Truedat.Store.StoreInfoCommand.Collect(os.Path);
                     assert(info.EdgeTracks == 4 && info.EdgeUnavailable == 1 && info.EdgesVersion == version, $"store-info: captured 4 content keys at the current version (1 unavailable; the entity-keyed media counts, it is a description too) ({info.EdgeTracks}, {info.EdgeUnavailable}, {info.EdgesVersion})");

@@ -259,6 +259,17 @@ namespace Truedat
         /// because the sidecar is a rebuildable cache and the reader falls back to JSON.</summary>
         internal static void Write(string sidecarPath, ICollection<KeyValuePair<string, TrackEntry>> tracks)
         {
+            var tmp = sidecarPath + ".tmp";
+            try { File.Delete(tmp); } catch { }
+            WriteTemp(tmp, tracks);
+            Program.AtomicReplace(tmp, sidecarPath, null);
+        }
+
+        /// <summary>Build the sidecar into <paramref name="tmpPath"/> and leave it there: the store-v3
+        /// publisher (<c>Publication</c>) hashes the temp into the catalog header and performs the
+        /// rename itself, in the ruled order (sidecar LAST). Same bytes as <see cref="Write"/>.</summary>
+        internal static void WriteTemp(string tmpPath, ICollection<KeyValuePair<string, TrackEntry>> tracks)
+        {
             int n = tracks.Count;
             var rec = new Rec[n];
             var chroma = new float[n * ChromaFloats];
@@ -347,9 +358,7 @@ namespace Truedat
             for (int i = 0; i < n; i++) order[i] = i;
             Array.Sort(order, (a, b) => rec[a].PathHash.CompareTo(rec[b].PathHash));
 
-            var tmp = sidecarPath + ".tmp";
-            try { File.Delete(tmp); } catch { }
-            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
             using (var bw = new BinaryWriter(fs))
             {
                 bw.Write(Encoding.ASCII.GetBytes("MBXS"));
@@ -397,7 +406,6 @@ namespace Truedat
                 bw.Flush();
                 fs.Flush(true);   // fsync: the sidecar is rebuildable, but don't leave a torn file
             }
-            Program.AtomicReplace(tmp, sidecarPath, null);
         }
 
         private static ushort GenreId(string genre, Dictionary<string, int> index, List<string> genres)

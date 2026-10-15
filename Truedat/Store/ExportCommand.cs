@@ -21,6 +21,9 @@ namespace Truedat.Store
     internal sealed class ExportReport
     {
         public string Root = ""; public string OutPath = ""; public int Entries; public int KeyMoves; public string? KeyMovesPath; public long ElapsedMs;
+        /// <summary>Store-v3 T07: the generation the triple carries; Published = the ruled publication ran (false = split
+        /// fallback, v1 header); Companion = mbxedges.v1.json was part of it (the store had edge rows).</summary>
+        public long Generation; public bool Published; public bool Companion;
     }
 
     internal sealed class RoundtripReport
@@ -53,7 +56,8 @@ namespace Truedat.Store
             try
             {
                 var r = Execute(o);
-                Console.WriteLine($"Exported {r.Entries} entries of root {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s");
+                Console.WriteLine($"Exported {r.Entries} entries of root {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s"
+                    + (r.Published ? $" (generation {r.Generation}: catalog + sidecar{(r.Companion ? " + mbxedges.v1.json" : "")} published together)" : ""));
                 if (r.KeyMovesPath != null) Console.WriteLine($"  {r.KeyMoves} content-hash key move(s) recorded in {r.KeyMovesPath}");
                 return 0;
             }
@@ -77,10 +81,29 @@ namespace Truedat.Store
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
             StoreLog.Info($"export: {dict.Count} entries of root {root.Path} -> {outFull}");
+
+            // Store-v3 T07: --store-export means the TRIPLE — catalog (v2 header: contract + origin, the sidecar bound
+            // by hash), sidecar and companion — published in the ruled order. The generation is the store's current one;
+            // an export re-emits it, it does not advance it (only mutations do).
+            var origin = new CatalogOrigin
+            {
+                Kind = "export", MachineId = os.Machine.Id, StoreSchema = SchemaMigrator.ReadVersion(os.Db),
+                Truedat = VersionInfo.Display, Generation = os.Dal.Generation(),
+            };
+            var producerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
+            bool hasEdges = os.Dal.ContentKeysWithEdges(producerVersion).Count > 0;
+            var build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
+            Func<string, bool>? companion = !hasEdges ? null : tmp =>
+            {
+                global::Truedat.Edges.EdgeCompanion.WriteTempFromStore(os.Dal, tmp, producerVersion, "essentia_streaming_extractor_music " + build, origin.Generation);
+                return true;
+            };
             // The store's canonical precision (six significant figures, exact text) on the way out; the writer itself is unchanged.
             Program.StoreCanonicalNumbers = true;
-            try { Program.SaveResultsForStore(outFull, dict); }
+            PublicationResult? published;
+            try { published = Program.SaveResultsPublished(outFull, dict, origin, companion); }
             finally { Program.StoreCanonicalNumbers = false; }
+            if (published != null) StoreLog.Info($"export: published generation {published.Generation} (sidecar {published.SidecarSha256.Substring(0, 12)}…, companion {(hasEdges ? "written" : "none — no edge rows at " + producerVersion)})");
 
             var moves = ReadKeyMoves(os.Dal);
             string? movesPath = null;
@@ -91,7 +114,11 @@ namespace Truedat.Store
                 StoreLog.Info($"{moves.Count} key move(s) -> {movesPath}");
             }
             sw.Stop();
-            return new ExportReport { Root = root.Path, OutPath = outFull, Entries = dict.Count, KeyMoves = moves.Count, KeyMovesPath = movesPath, ElapsedMs = sw.ElapsedMilliseconds };
+            return new ExportReport
+            {
+                Root = root.Path, OutPath = outFull, Entries = dict.Count, KeyMoves = moves.Count, KeyMovesPath = movesPath, ElapsedMs = sw.ElapsedMilliseconds,
+                Generation = origin.Generation, Published = published != null, Companion = hasEdges && published != null,
+            };
         }
 
         internal static int RunRoundtrip(string? storePath, string catalogPath, string? exportRoot, bool audit)
