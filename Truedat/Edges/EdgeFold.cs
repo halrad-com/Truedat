@@ -83,6 +83,8 @@ namespace Truedat.Edges
         internal const double TonalHop = 2048.0 / 44100.0;
         internal const double EbuHop = 0.1;
         internal const double SilenceLufs = -60;       // the EBU fallback floor for silenceMs (the PCM pass uses -60 dBFS slice peaks)
+        internal const double NoLevelLufs = -70;       // BS.1770 / EBU R128 absolute gate: below it there is no measurable level (T02) — a
+                                                       // -62..-69 LUFS pianissimo tail is "quiet but measurable" (silenceMs > 0, finite LUFS)
         internal const double FadeMinLu = 10;          // a fade is a departure from the edge's plateau of at least this much ...
         internal const int FadeMinMs = 1000;           // ... lasting at least this long; anything else is a cut (fadeMs null)
         internal const double FadePlateauLu = 1;       // "on the plateau" = within this of the median non-silent level
@@ -288,9 +290,9 @@ namespace Truedat.Edges
             var l = new EdgeLoudness();
             if (i1 - i0 <= 0) return l;
             int perSec = (int)Math.Round(1 / EbuHop);
-            l.MeanLufs = EnergyMean(momentary, i0, i1);
-            l.StartLufs = EnergyMean(momentary, i0, Math.Min(i1, i0 + perSec));
-            l.EndLufs = EnergyMean(momentary, Math.Max(i0, i1 - perSec), i1);
+            l.MeanLufs = LevelOrNull(momentary, i0, i1);
+            l.StartLufs = LevelOrNull(momentary, i0, Math.Min(i1, i0 + perSec));
+            l.EndLufs = LevelOrNull(momentary, Math.Max(i0, i1 - perSec), i1);
             // silence run at the outer end
             int silence = 0;
             if (outerAtStart) { for (int i = i0; i < i1 && momentary[i] < SilenceLufs; i++) silence++; }
@@ -339,6 +341,20 @@ namespace Truedat.Edges
             return m > 0 ? 10 * Math.Log10(m) : -300;
         }
 
+        /// <summary>The loudness SCALAR of a range (T02, F6.4): NULL when its energy mean is below <see cref="NoLevelLufs"/>, the
+        /// standard's absolute gate — below it there is no measurable level, and a sentinel (-90 from the extractor for digital
+        /// silence, -300 from the energy mean) stored as if it were LUFS put a +276 LU head-to-tail step and a 1.00 loudness
+        /// divergence on 23.5 % of one library's tracks. A window at -65 is quiet but measurable and stays finite (review: the
+        /// -60 silenceMs floor would have nulled a pianissimo tail). The mean, not a window count, decides: one sounding window
+        /// among silent ones lifts the mean only as far as the energy says. The int16 series keep their raw centi-dB readings — a
+        /// silent bin there is a reading, not a level claim.</summary>
+        static double? LevelOrNull(float[] v, int from, int to)
+        {
+            if (to - from <= 0) return null;
+            double m = EnergyMean(v, from, to);
+            return double.IsNaN(m) || m < NoLevelLufs ? (double?)null : m;
+        }
+
         /// <summary>Loudness: |Δ| over 20 LU clamped to 0..1. Harmony: cosine distance of the HPCP means. Texture: cosine distance
         /// of MFCC coefficients 1..12 — coefficient 0 is the frame energy (about -800 on real audio) and swamps the rest, so a
         /// cosine over all 13 read 0.00 on every real edge (restfulbee, 2026-10-12); the spectral-shape coefficients are what
@@ -346,7 +362,8 @@ namespace Truedat.Edges
         static EdgeDivergence Diverge(double[] mfccA, double[] mfccB, double[] hpcpA, double[] hpcpB, double? lufsA, double? lufsB)
         {
             var d = new EdgeDivergence();
-            if (lufsA.HasValue && lufsB.HasValue && !double.IsNaN(lufsA.Value) && !double.IsNaN(lufsB.Value)) d.Loudness = Math.Max(0, Math.Min(1, Math.Abs(lufsA.Value - lufsB.Value) / 20.0));
+            if (lufsA.HasValue && lufsB.HasValue && !double.IsNaN(lufsA.Value) && !double.IsNaN(lufsB.Value) && !double.IsInfinity(lufsA.Value) && !double.IsInfinity(lufsB.Value))
+                d.Loudness = Math.Max(0, Math.Min(1, Math.Abs(lufsA.Value - lufsB.Value) / 20.0));   // no level on either side = no divergence, never 1.00 (T02)
             d.Texture = CosineDistance(mfccA, mfccB, from: 1);
             d.Harmony = CosineDistance(hpcpA, hpcpB);
             return d;

@@ -113,6 +113,16 @@ namespace Truedat.Edges
                     $"read back: loudness scalars, silence source, rms ({back?.Tail.Loudness?.SilenceMs} {back?.Tail.Loudness?.SilenceSource} fade {back?.Tail.Loudness?.FadeMs} vs {r.Tail.Loudness!.FadeMs}; mean {back?.Tail.Loudness?.MeanLufs} vs {r.Tail.Loudness.MeanLufs}; crest {back?.Tail.Rms?.CrestDb})");
                 assert(back != null && back.HeadTail != null && Math.Abs(back.HeadTail.Harmony!.Value - r.HeadTail!.Harmony!.Value) < 1e-5 && back.Head.Divergence != null && Math.Abs(back.Head.Divergence.Texture!.Value - r.Head.Divergence!.Texture!.Value) < 1e-5,
                     "read back: divergences");
+                // T02 review finding 5: an all-silent tail's NULL scalars survive pack (NaN f32) and unpack (null); the Loudness
+                // object itself survives on silenceMs; the loudness divergences come back null, never 1.00.
+                EdgeFoldResult rs;
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31))) rs = EdgeFold.Fold(f, 240, new EdgeSettings());
+                const string ShaSilent = "2222222222222222222222222222222222222222222222222222222222222222";
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaSilent, ShaKind, null, rs); tx.Complete(); }
+                var backS = EdgeStore.Read(dal, ShaSilent, rs.ProducerVersion);
+                assert(backS != null && backS.Tail.Loudness != null && backS.Tail.Loudness.MeanLufs == null && backS.Tail.Loudness.StartLufs == null && backS.Tail.Loudness.EndLufs == null
+                    && backS.Tail.Loudness.SilenceMs == rs.Tail.Loudness!.SilenceMs && backS.HeadTail != null && backS.HeadTail.Loudness == null && backS.Tail.Divergence != null && backS.Tail.Divergence.Loudness == null,
+                    $"read back: an all-silent tail keeps NULL loudness scalars, its silence run, and null loudness divergences (mean {backS?.Tail.Loudness?.MeanLufs}, silence {backS?.Tail.Loudness?.SilenceMs} vs {rs.Tail.Loudness?.SilenceMs}, head-tail {backS?.HeadTail?.Loudness}, edge {backS?.Tail.Divergence?.Loudness})");
 
                 // Idempotent: the same version rewrites itself; a different version coexists.
                 using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
@@ -232,8 +242,9 @@ namespace Truedat.Edges
                 var bpm = head.GetProperty("bpm");
                 assert(Math.Abs(bpm.GetProperty("value").GetDouble() - 120) < 0.05 && bpm.GetProperty("beats").GetInt32() == 60 && bpm.GetProperty("regularity").GetDouble() > 0.99, "bpm: value, beats, regularity");
                 var loud = tail.GetProperty("loudness");
-                assert(Math.Abs(loud.GetProperty("startLufs").GetDouble() - (-14)) < 0.1 && loud.GetProperty("endLufs").GetDouble() < -80 && loud.GetProperty("fadeMs").GetInt32() > 3000
-                    && loud.GetProperty("silenceMs").GetInt32() == 1100 && loud.GetProperty("silenceSource").GetString() == "pcm", "loudness: start, end, mean, fade, silence, source");
+                // T02: the tail's last second is digital silence, so endLufs is JSON null in the companion — the hub reads null as "no level".
+                assert(Math.Abs(loud.GetProperty("startLufs").GetDouble() - (-14)) < 0.1 && loud.GetProperty("endLufs").ValueKind == System.Text.Json.JsonValueKind.Null && loud.GetProperty("fadeMs").GetInt32() > 3000
+                    && loud.GetProperty("silenceMs").GetInt32() == 1100 && loud.GetProperty("silenceSource").GetString() == "pcm", $"loudness: start, end NULL (silence), fade, silence, source (end kind {loud.GetProperty("endLufs").ValueKind})");
                 var tex = head.GetProperty("texture");
                 assert(tex.GetProperty("mfccMean").GetArrayLength() == 13 && Math.Abs(tex.GetProperty("mfccMean")[0].GetDouble() - (-500)) < 0.1 && tex.GetProperty("mfccSpread").GetArrayLength() == 13
                     && tex.GetProperty("spectralMean").GetArrayLength() == 11 && Math.Abs(tex.GetProperty("spectralMean")[10].GetDouble() - 1100) < 0.1 && tex.GetProperty("spectralSpread").GetArrayLength() == 11,
@@ -488,16 +499,17 @@ namespace Truedat.Edges
         /// <summary>A synthetic 240 s track: a 6 s fade-in from silence then steady -14 LUFS; a 4 s fade-out to silence at the end
         /// with 1 s of digital silence after it; beats every 0.5 s (120 bpm) throughout; C-major chroma in the head, A-minor in
         /// the tail; MFCC and spectral scalars constant per half so spreads are 0 and means are known.</summary>
-        static string BuildSyntheticFrames(string dir, double durationSec = 240, bool withBeats = true, bool withHpcp = true)
+        static string BuildSyntheticFrames(string dir, double durationSec = 240, bool withBeats = true, bool withHpcp = true, double silentTailSec = 1, double silentLevel = -90)
         {
             int ll = (int)Math.Round(durationSec / EdgeFold.LowLevelHop), tn = (int)Math.Round(durationSec / EdgeFold.TonalHop), eb = (int)Math.Round(durationSec / EdgeFold.EbuHop);
             // EBU series as the extractor emits them: trailing windows every 0.1 s, so momentary has eb-3 frames (400 ms window) and
             // short-term eb-29 (3 s window); frame i's value is the level at the time its window ENDS. (A 60 s track: 597 / 571.)
+            // silentTailSec > 1 stretches the trailing digital silence (T02: a whole edge of silence must fold to NULL loudness).
             Func<double, double> lufsAt = t =>
             {
                 if (t < 6) return -40 + (26.0 * t / 6.0);                       // fade-in: -40 -> -14 over 6 s
-                if (t >= durationSec - 1) return -90;                           // trailing digital silence (1 s)
-                if (t >= durationSec - 5) return -14 - 30.0 * (t - (durationSec - 5)) / 4.0;   // fade-out 4 s: -14 -> -44
+                if (t >= durationSec - silentTailSec) return silentLevel;       // trailing silence (silentTailSec, default 1 s at -90 = digital; a -65 run is "quiet but measurable")
+                if (t >= durationSec - silentTailSec - 4) return -14 - 30.0 * (t - (durationSec - silentTailSec - 4)) / 4.0;   // fade-out 4 s: -14 -> -44
                 return -14;
             };
             var momentary = new float[Math.Max(0, eb - 3)]; var shortTerm = new float[Math.Max(0, eb - 29)];
@@ -571,12 +583,39 @@ namespace Truedat.Edges
                 // 239 s is the 11 windows ending in [239, 240].
                 assert(h.Loudness != null && h.Loudness.StartLufs < -35 && Math.Abs(h.Loudness.EndLufs!.Value - (-14)) < 0.01 && h.Loudness.FadeMs.HasValue && Math.Abs(h.Loudness.FadeMs.Value - 6000) <= 300 && h.Loudness.SilenceMs == 0 && h.Loudness.SilenceSource == "ebu",
                     $"head loudness: start ~-36, end -14, a ~6 s fade-in, no silence, source ebu ({h.Loudness?.StartLufs:F1}, {h.Loudness?.EndLufs:F1}, fade {h.Loudness?.FadeMs}, silence {h.Loudness?.SilenceMs})");
-                assert(t.Loudness != null && Math.Abs(t.Loudness.StartLufs!.Value - (-14)) < 0.01 && t.Loudness.EndLufs < -80 && t.Loudness.FadeMs.HasValue && Math.Abs(t.Loudness.FadeMs.Value - 4000) <= 300 && t.Loudness.SilenceMs >= 1000 && t.Loudness.SilenceMs <= 1100,
-                    $"tail loudness: start -14, end silent, a ~4 s fade-out, ~1,000 ms of trailing silence ({t.Loudness?.StartLufs:F1}, {t.Loudness?.EndLufs:F1}, fade {t.Loudness?.FadeMs}, silence {t.Loudness?.SilenceMs})");
+                // T02 (F6.4, I03): the last second of the tail is digital silence — every window below the silence floor — so its
+                // loudness is NULL (no measurable level), never a sentinel like -90/-300 stored as if it were LUFS.
+                assert(t.Loudness != null && Math.Abs(t.Loudness.StartLufs!.Value - (-14)) < 0.01 && t.Loudness.EndLufs == null && t.Loudness.FadeMs.HasValue && Math.Abs(t.Loudness.FadeMs.Value - 4000) <= 300 && t.Loudness.SilenceMs >= 1000 && t.Loudness.SilenceMs <= 1100,
+                    $"tail loudness: start -14, end NULL (digital silence), a ~4 s fade-out, ~1,000 ms of trailing silence ({t.Loudness?.StartLufs:F1}, {(t.Loudness?.EndLufs.HasValue == true ? t.Loudness.EndLufs.Value.ToString("F1") : "null")}, fade {t.Loudness?.FadeMs}, silence {t.Loudness?.SilenceMs})");
                 assert(h.Divergence != null && h.Divergence.Loudness.HasValue && h.Divergence.Texture.HasValue && h.Divergence.Harmony.HasValue
                     && r.HeadTail != null && r.HeadTail.Harmony > 0.3 && r.HeadTail.Texture > 0 && r.HeadTail.Loudness < 0.5,
                     $"divergence per edge vs the whole and head vs tail (head-tail harmony {r.HeadTail?.Harmony:F2}, texture {r.HeadTail?.Texture:F2}, loudness {r.HeadTail?.Loudness:F2})");
                 assert(r.DurationMs == 240000 && r.ProducerVersion == "edges@v2;e30;p10", $"the result names the duration and the producer version ({r.ProducerVersion})");
+
+                // T02 (F6.4, I03): a tail edge that is ENTIRELY digital silence has no measurable loudness: every LUFS scalar is NULL,
+                // the loudness divergences are NULL (not 1.00 from a -300 sentinel), and the head is untouched. 240 s with a 31 s
+                // silent tail: the 30 s tail edge holds nothing but -90 windows.
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31))) r = EdgeFold.Fold(f, 240, settings);
+                {
+                    var ts = r!.Tail; var hs = r.Head;
+                    assert(ts.Loudness != null && ts.Loudness.MeanLufs == null && ts.Loudness.StartLufs == null && ts.Loudness.EndLufs == null,
+                        $"an all-silent tail edge folds to NULL loudness scalars, never a sentinel (mean {(ts.Loudness?.MeanLufs.HasValue == true ? ts.Loudness.MeanLufs.Value.ToString("F1") : "null")}, start {(ts.Loudness?.StartLufs.HasValue == true ? ts.Loudness.StartLufs.Value.ToString("F1") : "null")}, end {(ts.Loudness?.EndLufs.HasValue == true ? ts.Loudness.EndLufs.Value.ToString("F1") : "null")})");
+                    assert(ts.Loudness != null && ts.Loudness.SilenceMs >= 29000 && ts.Loudness.FadeMs == null,
+                        $"the silent tail still reports its silence run and no fade (silence {ts.Loudness?.SilenceMs}, fade {ts.Loudness?.FadeMs})");
+                    assert(ts.Divergence != null && ts.Divergence.Loudness == null && r.HeadTail != null && r.HeadTail.Loudness == null,
+                        $"loudness divergence is NULL when one side has no level (edge-vs-whole {(ts.Divergence?.Loudness.HasValue == true ? ts.Divergence.Loudness.Value.ToString("F2") : "null")}, head-tail {(r.HeadTail?.Loudness.HasValue == true ? r.HeadTail.Loudness.Value.ToString("F2") : "null")})");
+                    assert(hs.Loudness?.MeanLufs != null && hs.Loudness.MeanLufs > -60, $"the head is unaffected ({hs.Loudness?.MeanLufs:F1})");
+                }
+
+                // T02 review finding 1: a QUIET tail (-65 LUFS, below the -60 silenceMs floor but above the -70 absolute gate) is
+                // measurable — its scalars stay finite while silenceMs still reports the run. Only below the gate is there no level.
+                using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: -65))) r = EdgeFold.Fold(f, 240, settings);
+                {
+                    var tq = r!.Tail;
+                    assert(tq.Loudness?.MeanLufs != null && Math.Abs(tq.Loudness.MeanLufs.Value - (-65)) < 0.01 && tq.Loudness.EndLufs != null && tq.Loudness.SilenceMs >= 29000,
+                        $"a quiet-but-measurable tail keeps finite LUFS (mean {(tq.Loudness?.MeanLufs.HasValue == true ? tq.Loudness.MeanLufs.Value.ToString("F1") : "null")}) with silence {tq.Loudness?.SilenceMs} ms — the gate is -70, not the -60 silence floor");
+                    assert(r.HeadTail?.Loudness != null && r.HeadTail.Loudness == 1.0, $"its head-tail loudness divergence is a real 1.00 (-14 vs -65 clamps), not a null ({r.HeadTail?.Loudness:F2})");
+                }
 
                 // Short tracks: clipped to half each -> short-context; under the floor -> unavailable.
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 40))) r = EdgeFold.Fold(f, 40, settings);
