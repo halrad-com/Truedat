@@ -12,7 +12,7 @@ namespace Truedat.Store
     internal sealed class ScanSinkReport
     {
         public bool Ok; public string? Error;
-        public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Stale, EntitiesCreated, Artifacts, ArtifactsShared;
+        public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Remeasured, Stale, EntitiesCreated, Artifacts, ArtifactsShared;
         public long ArtifactBytes;
         /// <summary>S2 C4: edge rows written / edge folds that failed (a failed 'edges' run row, no partial row).</summary>
         public int Edges, EdgesFailed;
@@ -171,7 +171,7 @@ namespace Truedat.Store
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
                     $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, resultPath, rootHints, artifacts, edges);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
-                report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Stale = r.Stale;
+                report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Remeasured = r.Remeasured; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
                 report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed;

@@ -242,6 +242,68 @@ namespace Truedat.Store
                 var r3c = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
                 assert(r3c.Ok && r3c.ContentReplaced == 1, $"a build that cannot be ordered replaces (with its trace) rather than guessing ({r3c.ContentReplaced} replaced, {r3c.Drift} drift)");
 
+                // T01 (F2, I01): a fresh measurement from the SAME producer/version REPLACES the description and stamps its own run.
+                // The store never keeps the older value under the newer run; within-noise tolerance is import-only.
+                var remeasured = FixtureEntries(@"D:\Music");
+                var bpmSame = 77 * 1.25;
+                remeasured[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpmSame;           // beyond noise; same producer as the stored row (essentia@md5:deadbeef0123)
+                ScanSink.Record(@"D:\Music\Tool\a.flac", remeasured[@"D:\Music\Tool\a.flac"]);
+                var r6 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                string driftRowsAfterRemeasure;
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    driftRowsAfterRemeasure = os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") ?? "";
+                    assert(r6.Ok && r6.Remeasured == 1 && r6.Drift == 0,
+                        $"a same-producer fresh measurement beyond noise is a REMEASURE, never a kept-stored drift ({r6.Remeasured} remeasured, {r6.Drift} drift, {r6.ContentReplaced} replaced, {r6.Unchanged} unchanged)");
+                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpmSame.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                        $"the store holds the fresh value ({os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {bpmSame})");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac' AND c.run_id = (SELECT max(id) FROM run WHERE producer_key = 'essentia' AND producer_version = 'md5:deadbeef0123' AND outcome = 'ok');") == "1",
+                        "the description's run is the measuring run (the newest ok run of that producer), not the older one");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'resolved' AND field = 'bpm' AND value_a = '77' AND value_b = '" + bpmSame.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "';") == "1",
+                        $"the old/new pair is kept as a RESOLVED value-drift record (history), not an open conflict ({os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")} value-drift rows: {os.Db.ExecScalar("SELECT group_concat(state || ':' || field || ':' || value_a || '>' || value_b, ' ') FROM conflict WHERE kind = 'value-drift';")})");
+                }
+                // Within run-to-run noise, same producer: STILL a remeasure — the exact fresh value and its run land; no conflict row (noise is not information).
+                var noise = FixtureEntries(@"D:\Music");
+                var bpmNoise = bpmSame * 1.001;
+                noise[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpmNoise;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", noise[@"D:\Music\Tool\a.flac"]);
+                var r7 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                // "Exactly" = as the mapper stores it: the store path's precision rule (six significant figures until T04 removes it)
+                // applies to every write, so the oracle is the mapper's own rendering of the fresh entry, never a literal.
+                int bpmCol = TrackEntryMapper.ContentIndexOf("bpm");
+                var bpmNoiseStored = TrackEntryMapper.FormatContent(bpmCol, TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(noise[@"D:\Music\Tool\a.flac"]), bpmCol));
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r7.Ok && r7.Remeasured == 1 && r7.Unchanged == 0 && r7.Drift == 0
+                        && os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpmNoiseStored
+                        && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == driftRowsAfterRemeasure,
+                        $"a within-noise fresh measurement still replaces exactly (as the mapper stores it), with no new conflict row ({r7.Remeasured} remeasured, {r7.Unchanged} unchanged, stored {os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {bpmNoiseStored}, conflicts {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")} vs {driftRowsAfterRemeasure})");
+
+                // T01 review finding 1: a remeasure must not wipe stored values that the arrival did not observe (NULL columns —
+                // ffmpeg absent, --no-bitusage). First store a bitUsage under this producer, then remeasure with it nulled and bpm changed.
+                var withBits = FixtureEntries(@"D:\Music");
+                withBits[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpmNoise;
+                withBits[@"D:\Music\Tool\a.flac"].Features!.BitUsage = new BitUsageSummary { LowestNonZeroBit = 9, BottomBitActivity = 0.25, EffectiveBits = 23, SamplesAnalyzed = 500, Method = "test" };
+                ScanSink.Record(@"D:\Music\Tool\a.flac", withBits[@"D:\Music\Tool\a.flac"]);
+                var r8 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                var noBits = FixtureEntries(@"D:\Music");
+                noBits[@"D:\Music\Tool\a.flac"].Features!.Bpm = bpmNoise * 1.3;      // a real change, so the remeasure fires
+                noBits[@"D:\Music\Tool\a.flac"].Features!.BitUsage = null;          // not observed this time
+                ScanSink.Record(@"D:\Music\Tool\a.flac", noBits[@"D:\Music\Tool\a.flac"]);
+                var r9 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(r8.Remeasured == 1 && r9.Remeasured == 1
+                        && os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == "9",
+                        $"a remeasure keeps a stored value the arrival did not observe (bitUsage null on arrival): lowestNonZeroBit {os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") ?? "null"} (r8 {r8.Remeasured} remeasured, r9 {r9.Remeasured} remeasured)");
+                // Idempotency after a remeasure: the identical entry again writes nothing.
+                ScanSink.Record(@"D:\Music\Tool\a.flac", noBits[@"D:\Music\Tool\a.flac"]);
+                var r10 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
+                assert(r10.Ok && r10.Unchanged == 1 && r10.Remeasured == 0 && r10.Drift == 0,
+                    $"re-flushing the remeasured entry unchanged writes nothing ({r10.Unchanged} unchanged, {r10.Remeasured} remeasured, {r10.Drift} drift)");
+                // Review finding 5: once the description is replaced, an OPEN drift row for that field is stale — it is closed.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'open' AND field = 'bpm';") == "0",
+                        $"a remeasure closes the stale open drift rows for the field it replaced ({os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'open' AND field = 'bpm';")} still open)");
+
                 // A store that cannot be opened: reported, never thrown.
                 ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
                 var bad = ScanSink.Flush(dir, "output-x64.4");   // a directory is not a database
@@ -315,12 +377,18 @@ namespace Truedat.Store
                 filled[@"D:\Music\Tool\a.flac"].Features!.Bpm = origBpmA * 1.25;   // keep the known drift in place
                 filled[@"D:\Music\Tool\b.mp3"].Features!.BitUsage = new BitUsageSummary { LowestNonZeroBit = 8, BottomBitActivity = 0.5, EffectiveBits = 24, SamplesAnalyzed = 1000, Method = "test" };
                 WriteCatalog(catalog, filled);
+                string runBeforeFill;
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    runBeforeFill = os.Db.ExecScalar("SELECT c.run_id FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") ?? "";
                 var rf = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     assert(rf.Filled == 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1",
                         $"a null bitUsage gaining values is filled (1 filled), no new conflict ({rf.Filled} filled, conflicts {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")})");
                     assert(os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == "8", "the filled value is stored");
+                    // T01 (F2, I01): a fill never re-stamps the row — the retained columns keep the run that measured them.
+                    assert(os.Db.ExecScalar("SELECT c.run_id FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == runBeforeFill,
+                        $"a fill keeps the description's run stamp (was {runBeforeFill}, now {os.Db.ExecScalar("SELECT c.run_id FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';")})");
                 }
                 WriteCatalog(catalog, changed);   // back to bitUsage null for b.mp3
                 var rn = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });

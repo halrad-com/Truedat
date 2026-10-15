@@ -246,13 +246,24 @@ namespace Truedat.Store
         /// <summary>A content value that differs beyond noise under the same producer: recorded, never written over (S2 C2).</summary>
         /// <summary>Idempotent: the same open drift (entity, field, both values) is recorded once, however many times the same
         /// catalog is re-imported — the 32 known drifts on the real store must not grow by 128 rows per pass.</summary>
-        internal bool InsertDriftConflict(string entityId, string field, string? valueA, string? valueB, long? runA, long? runB, string detail, string nowUtc)
+        /// <para><paramref name="state"/> is <c>open</c> for an import's kept-stored drift and <c>resolved</c> for a fresh
+        /// re-measurement that replaced the description (T01): the old/new pair is history there, not a question.</para>
+        internal bool InsertDriftConflict(string entityId, string field, string? valueA, string? valueB, long? runA, long? runB, string detail, string nowUtc, string state = "open")
         {
             Exec("INSERT INTO conflict(entity_a, kind, field, value_a, value_b, run_a, run_b, detail, state, created_utc) " +
-                 "SELECT ?, 'value-drift', ?, ?, ?, ?, ?, ?, 'open', ? " +
-                 "WHERE NOT EXISTS (SELECT 1 FROM conflict WHERE entity_a = ? AND kind = 'value-drift' AND state = 'open' AND field = ? AND value_a IS ? AND value_b IS ?);",
-                 entityId, field, valueA, valueB, runA, runB, detail, nowUtc, entityId, field, valueA, valueB);
+                 "SELECT ?, 'value-drift', ?, ?, ?, ?, ?, ?, ?, ? " +
+                 "WHERE NOT EXISTS (SELECT 1 FROM conflict WHERE entity_a = ? AND kind = 'value-drift' AND state = ? AND field = ? AND value_a IS ? AND value_b IS ?);",
+                 entityId, field, valueA, valueB, runA, runB, detail, state, nowUtc, entityId, state, field, valueA, valueB);
             return Db.Changes > 0;
+        }
+
+        /// <summary>Closes the OPEN value-drift rows for one field of a media once a fresh measurement has replaced the description
+        /// (T01, review finding 5): the question "which value is right?" is answered by the remeasure, so the open row would be
+        /// stale. Returns how many were closed.</summary>
+        internal int CloseOpenDrift(string entityId, string field)
+        {
+            Exec("UPDATE conflict SET state = 'resolved' WHERE entity_a = ? AND kind = 'value-drift' AND state = 'open' AND field = ?;", entityId, field);
+            return Db.Changes;
         }
 
         /// <summary>Every entry under a root, with the display path the catalog keys it by: the copy's facts joined

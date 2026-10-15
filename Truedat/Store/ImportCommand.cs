@@ -47,6 +47,9 @@ namespace Truedat.Store
         public int Edges, EdgesFailed;
         /// <summary>Entries where a stored NULL content column gained a value under the same producer — written as a fill, never a conflict (review #4).</summary>
         public int Filled;
+        /// <summary>Entries whose description was replaced by a fresh measurement from the SAME producer/version (T01, F2): the
+        /// store holds the newest observation and its measuring run; a beyond-noise old/new pair is kept as a resolved value-drift record.</summary>
+        public int Remeasured;
         /// <summary>Aggregate artifacts filed this call (new content-addressed files), ones already present for their content, and the bytes of the new ones (S2 C-A).</summary>
         public int Artifacts, ArtifactsShared;
         public long ArtifactBytes;
@@ -73,7 +76,7 @@ namespace Truedat.Store
                 // Wording (operator's MB3 import, 2026-10-12): "3138 unrecoverable" read as damage. It counts FLAC entries that carry only
                 // the current frame-anchored hash — i.e. a mirror catalog scanned before 2026-07-21 could not be matched to them. Normal.
                 Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); conflicts: {r.Conflicts}; FLAC hashes: {r.LegacySha} pre-2026-07 (kept as a facet), {r.LegacyShaUnrecoverable} current-only (a pre-2026-07 mirror would not match them; normal for a library scanned since)");
-                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Drift} drifted (conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
+                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Remeasured} remeasured (fresh values stored), {r.Drift} drifted (conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
                 Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts" +
                                   (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
@@ -190,7 +193,7 @@ namespace Truedat.Store
             catch (SqliteException ex) { StoreLog.Warn($"WAL checkpoint did not complete ({ex.Message}); the -wal file will fold on the next open"); }
             r.StoreBytesAfter = new FileInfo(os.Path).Length;
             if (resultPath != null) { r.ResultPath = resultPath; WriteResult(r, os.Path, role, producerKey + "@" + producerVersion); }
-            StoreLog.Info($"{producerKey}@{producerVersion} wrote {r.Entries} entries: {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Unchanged} unchanged, {r.Drift} drift, {r.ContentReplaced} replaced, {r.ErrorsRows} failures, {r.ElapsedMs} ms");
+            StoreLog.Info($"{producerKey}@{producerVersion} wrote {r.Entries} entries: {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Unchanged} unchanged, {r.Remeasured} remeasured, {r.Drift} drift, {r.ContentReplaced} replaced, {r.ErrorsRows} failures, {r.ElapsedMs} ms");
             return r;
         }
 
@@ -448,18 +451,44 @@ namespace Truedat.Store
                 // Three classes per content column (review #4): a stored NULL gaining a value is a FILL (the signal was not
                 // measured before — ffmpeg absent, --no-bitusage — and is now); a value arriving as NULL is NOT OBSERVED and
                 // changes nothing; two values differing beyond noise are DRIFT.
-                var drift = new List<int>(); var fills = new List<int>();
+                // T01 (F2, I01): the noise tolerance is IMPORT-ONLY. A fresh measurement from the SAME producer/version is the
+                // newest observation of the media: it REPLACES the description — exact values, its own run — and a beyond-noise
+                // old/new pair is kept as a RESOLVED value-drift record, so the history survives without the store ever holding
+                // the older value under the newer run (MB3: 3,143 rows did, stamped with the 2026-10-12 refresh). An import (a
+                // catalog re-read, not a measurement) keeps the rules below: within noise writes nothing, beyond noise under the
+                // same producer is an OPEN drift with the stored description kept.
+                bool isImport = string.Equals(producerKey, "import", StringComparison.Ordinal);
+                bool sameProducer = string.Equals(existing.ProducerKey, producerKey, StringComparison.Ordinal)
+                                 && string.Equals(existing.ProducerVersion, producerVersion, StringComparison.Ordinal);
+                var drift = new List<int>(); var fills = new List<int>(); var changed = new List<int>();
                 for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
                 {
                     var a = existing.Values[k]; var b = TrackEntryMapper.ContentValue(row, k);
                     if (a == null && b != null) fills.Add(k);
-                    else if (b == null) continue;
-                    else if (!TrackEntryMapper.ContentEqualWithinNoise(k, a, b)) drift.Add(k);
+                    else if (b == null) continue;                        // not observed this time: never a change, never a wipe
+                    else
+                    {
+                        if (!TrackEntryMapper.ContentEqualWithinNoise(k, a, b)) drift.Add(k);
+                        if (!TrackEntryMapper.ContentEqualExact(k, a, b)) changed.Add(k);
+                    }
                 }
-                if (drift.Count > 0)
+                if (!isImport && sameProducer && (changed.Count > 0 || fills.Count > 0))
                 {
-                    bool sameProducer = string.Equals(existing.ProducerKey, producerKey, StringComparison.Ordinal)
-                                     && string.Equals(existing.ProducerVersion, producerVersion, StringComparison.Ordinal);
+                    // The row written is the arrival where it observed a value and the stored value where it did not (review
+                    // finding 1: a scan without ffmpeg must not erase bitUsage/HF measured earlier). Those retained columns ride
+                    // under the new run_id — provenance per column is not modelled; the resolved drift rows and the run table
+                    // keep the history (finding 6, documented, not hidden).
+                    dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentWhereUnobserved(row, existing.Values), now);
+                    foreach (var k in drift)
+                        dal.InsertDriftConflict(entityId, TrackEntryMapper.ContentColumnName(k),
+                            TrackEntryMapper.FormatContent(k, existing.Values[k]), TrackEntryMapper.FormatContent(k, TrackEntryMapper.ContentValue(row, k)),
+                            existing.RunId, runId, displayPath, now, state: "resolved");
+                    foreach (var k in changed) dal.CloseOpenDrift(entityId, TrackEntryMapper.ContentColumnName(k));   // finding 5: the question is answered
+                    contentWritten = true; r.Remeasured++;
+                    StoreLog.Info($"description remeasured on {displayPath} by {producerKey}@{producerVersion}: fresh values and run stored" + (drift.Count > 0 ? $"; {drift.Count} field(s) beyond noise kept as resolved value-drift history ({TrackEntryMapper.ContentColumnName(drift[0])}{(drift.Count > 1 ? ", …" : "")})" : ""));
+                }
+                else if (drift.Count > 0)
+                {
                     // Review #5: a replacement has a direction. An arrival from an OLDER build of the same producer is drift
                     // (the newer description stays); a newer or unorderable one replaces, and leaves a resolved trace.
                     bool olderArrival = !sameProducer && ArrivalIsOlder(existing.ProducerKey, existing.ProducerVersion, producerKey, producerVersion);
@@ -482,7 +511,9 @@ namespace Truedat.Store
                 }
                 if (!contentWritten && fills.Count > 0)
                 {
-                    dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentExcept(row, existing.Values, fills), now);
+                    // T01: a fill never re-stamps the row — the retained columns keep the run that measured them (existing.RunId);
+                    // the filling run exists as its own run row, so nothing is lost by not moving the stamp.
+                    dal.UpsertContent(entityId, contentKey, contentKeyKind, existing.RunId, TrackEntryMapper.WithStoredContentExcept(row, existing.Values, fills), now);
                     contentWritten = true; r.Filled++;
                     StoreLog.Info($"description filled on {displayPath}: {fills.Count} column(s) that were null now have values ({TrackEntryMapper.ContentColumnName(fills[0])}{(fills.Count > 1 ? ", …" : "")})");
                 }
@@ -648,7 +679,7 @@ namespace Truedat.Store
                 ["entries"] = r.Entries, ["unrooted"] = r.Unrooted,
                 ["entitiesCreated"] = r.EntitiesCreated, ["matchedBySha"] = r.MatchedHash, ["matchedByPath"] = r.MatchedPath, ["createdWithoutSha"] = r.CreatedNoSha,
                 ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew, ["conflicts"] = r.Conflicts,
-                ["unchanged"] = r.Unchanged, ["drift"] = r.Drift, ["contentReplaced"] = r.ContentReplaced, ["contentRekeyed"] = r.ContentRekeyed, ["stale"] = r.Stale,
+                ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift, ["contentReplaced"] = r.ContentReplaced, ["contentRekeyed"] = r.ContentRekeyed, ["stale"] = r.Stale,
                 ["artifacts"] = r.Artifacts, ["artifactsShared"] = r.ArtifactsShared, ["artifactBytes"] = r.ArtifactBytes,
                 ["legacySha"] = r.LegacySha, ["legacyShaUnrecoverable"] = r.LegacyShaUnrecoverable,
                 ["ledgers"] = new JsonObject { ["errors"] = r.ErrorsRows, ["skipped"] = r.SkippedRows, ["review"] = r.ReviewRows, ["verify"] = r.VerifyRows, ["receipts"] = r.ReceiptRows, ["unrooted"] = r.LedgerUnrooted },

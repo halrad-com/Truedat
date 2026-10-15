@@ -232,6 +232,10 @@ namespace Truedat.Store
         /// 1% relative or 1e-6 absolute (element-wise); ints, text and int vectors exactly; null only equals null.</summary>
         internal static bool ContentEqualWithinNoise(int k, object? a, object? b) => ValueEqual(Cols[ContentIdx[k]].Kind, a, b, exact: false);
 
+        /// <summary>True when two values of content column k are exactly equal (no noise allowance) — the comparison a fresh
+        /// measurement is held to (T01): a re-measurement that differs at all is the newer observation and is stored as such.</summary>
+        internal static bool ContentEqualExact(int k, object? a, object? b) => ValueEqual(Cols[ContentIdx[k]].Kind, a, b, exact: true);
+
         /// <summary>The content column k of a ToRow() row.</summary>
         internal static object? ContentValue(object?[] row, int k) => row[ContentIdx[k]];
 
@@ -305,6 +309,16 @@ namespace Truedat.Store
         {
             var merged = (object?[])row.Clone();
             for (int k = 0; k < ContentIdx.Length; k++) if (!fills.Contains(k)) merged[ContentIdx[k]] = storedContent[k];
+            return merged;
+        }
+
+        /// <summary>A ToRow() row whose content columns are the ARRIVING values wherever the arrival observed one, and the STORED
+        /// values where it did not (arrived NULL) — the row a remeasure writes (T01, review finding 1): a scan without ffmpeg, or
+        /// with --no-bitusage, must not erase the bitUsage / HF values an earlier scan measured.</summary>
+        internal static object?[] WithStoredContentWhereUnobserved(object?[] row, object?[] storedContent)
+        {
+            var merged = (object?[])row.Clone();
+            for (int k = 0; k < ContentIdx.Length; k++) if (merged[ContentIdx[k]] == null) merged[ContentIdx[k]] = storedContent[k];
             return merged;
         }
 
