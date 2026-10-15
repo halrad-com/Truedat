@@ -610,13 +610,14 @@ namespace Truedat.Edges
                     assert(hs.Loudness?.MeanLufs != null && hs.Loudness.MeanLufs > -60, $"the head is unaffected ({hs.Loudness?.MeanLufs:F1})");
                 }
 
-                // T02 review finding 1: a QUIET tail (-65 LUFS, below the -60 silenceMs floor but above the -70 absolute gate) is
-                // measurable — its scalars stay finite while silenceMs still reports the run. Only below the gate is there no level.
+                // T02 review finding 1: a QUIET tail (-65 LUFS, below the -60 silenceMs floor) is measurable — its scalars stay finite
+                // while silenceMs still reports the run. Nothing above the extractor's own silence floor (-300.691) is "no level";
+                // there is no gate on momentary loudness (the -70 figure is the INTEGRATED gate and does not apply here).
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: -65))) r = EdgeFold.Fold(f, 240, settings);
                 {
                     var tq = r!.Tail;
                     assert(tq.Loudness?.MeanLufs != null && Math.Abs(tq.Loudness.MeanLufs.Value - (-65)) < 0.01 && tq.Loudness.EndLufs != null && tq.Loudness.SilenceMs >= 29000,
-                        $"a quiet-but-measurable tail keeps finite LUFS (mean {(tq.Loudness?.MeanLufs.HasValue == true ? tq.Loudness.MeanLufs.Value.ToString("F1") : "null")}) with silence {tq.Loudness?.SilenceMs} ms — the gate is -70, not the -60 silence floor");
+                        $"a quiet-but-measurable tail keeps finite LUFS (mean {(tq.Loudness?.MeanLufs.HasValue == true ? tq.Loudness.MeanLufs.Value.ToString("F1") : "null")}) with silence {tq.Loudness?.SilenceMs} ms — no gate on momentary loudness; the -60 figure is the silenceMs floor only");
                     assert(r.HeadTail?.Loudness != null && r.HeadTail.Loudness == 1.0, $"its head-tail loudness divergence is a real 1.00 (-14 vs -65 clamps), not a null ({r.HeadTail?.Loudness:F2})");
                 }
 
@@ -630,7 +631,7 @@ namespace Truedat.Edges
                         $"a genuine -75 LUFS tail (below the integrated gate, above the extractor floor) keeps finite scalars (mean {(t75.Loudness?.MeanLufs.HasValue == true ? t75.Loudness.MeanLufs.Value.ToString("F1") : "null")})");
                     assert(r.HeadTail?.Loudness == 1.0, $"and a real head-tail divergence ({(r.HeadTail?.Loudness.HasValue == true ? r.HeadTail.Loudness.Value.ToString("F2") : "null")})");
                 }
-                // Keeper probe on dbd20a0: the smallest representable non-zero power (1e-22) reads -220.691 — a reading, not the floor.
+                // Keeper probe on dbd20a0: a representable non-zero power (1e-22, well above the 1e-30 clip) reads -220.691 — a reading, not the floor.
                 // Only the clipped value itself (10*log10(1e-30) - 0.691) is "no level"; -200 was another blanket cutoff.
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir, 240, silentTailSec: 31, silentLevel: 10 * -22 - 0.691))) r = EdgeFold.Fold(f, 240, settings);
                 assert(r!.Tail.Loudness?.MeanLufs != null && Math.Abs(r.Tail.Loudness.MeanLufs.Value - (-220.691)) < 0.01,
