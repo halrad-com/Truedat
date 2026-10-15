@@ -43,12 +43,19 @@ One row of file facts per copy, one audio description per media:
 Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql`, `v2.sql`); a v1 store migrates
 to v2 on first open by a v2 build, and an older build refuses a newer store.
 
-**Precision.** Every floating-point feature enters the store, and leaves it on export, at **six
-significant figures**, written exactly (no trailing zeros, no exponent). Essentia computes in float32,
-which carries at most seven significant decimal digits and guarantees six, so nothing past the sixth
-figure is measurement. The scan's own catalog writer is untouched (its bytes are the hub's contract);
-the rule applies to the store, `--store-export` and `--store-roundtrip` only. Rounding a REAL saves
-nothing in SQLite (eight bytes regardless); the savings are in the exported text.
+**Precision and types (schema v3, 2026-10-15).** Every numeric field has one declared precision
+(`FieldPrecision`: the decimal places the catalog writer renders), and the store holds it exactly at
+that precision: a fixed-decimal scalar as a scaled `INTEGER` (`round(value × 10^dp)`, read back as the
+double `Math.Round(value, dp)` produced), a fixed-decimal vector as an int32 `×10^dp` blob, and
+`bpmHistogram` — about 94 % zeros — as a self-describing sparse blob (length, count, then bin + value per
+non-zero). Integers stay integers. Nothing is rounded a second time: the former six-significant-figure
+rule is gone, and `--store-export` writes the same bytes the scan writer would, so
+`--store-roundtrip` is a byte comparison of the same writer on both sides. Two fields are held finer
+than the writer renders them, because a scan sets them from an unrounded source: `analysisDuration`
+(six places in the store, one in the catalog) and `smfmBpm` (six and three). A v2 store migrates on
+first open by a v3 build — backup first (`truedat.db.bak.v2.<stamp>`, via `VACUUM INTO`, after a
+free-space check), every value preserved exactly; a v2 value the typed column could not hold exactly
+makes the migration refuse and roll back, naming the column, rather than round it.
 
 ## Verbs
 
@@ -56,8 +63,8 @@ nothing in SQLite (eight bytes regardless); the savings are in the exported text
 |---|---|
 | `--store-import` with `--moods <catalog>` | loads the catalog and the ledgers beside it (errors, skipped, review, verify, receipts), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
 | a scan with `--store` | writes the entries it analysed this run (never cache hits) after the catalog is saved, as producer `essentia@<build>`, one run row per entry; failures become failed runs |
-| `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer, numbers at the store's precision; `key-moves.json` beside it when a content hash was superseded |
-| `--store-roundtrip <catalog>` | per-entry equality of store against catalog at the store's precision; exit 1 on any difference; `--audit` prints where the first difference is |
+| `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
+| `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
 | `--store-info` | bytes per track and the 156k projection, analysis speed, failure rate by component, coverage by wave, shared content, key moves, conflicts by kind, edges coverage and the work queue; `store-info.json` beside the store |
 | `--store-vacuum [--page-size N]` | repacks the file (16 KB pages by default) |
 | `--stats --store`, `--duplicates --store` | the existing reports answering from the store instead of the catalog |

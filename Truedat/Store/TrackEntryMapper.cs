@@ -263,13 +263,14 @@ namespace Truedat.Store
             {
                 int c = firstColumn + k;
                 if (st.IsNull(c)) continue;
-                values[k] = Cols[idx[k]].Kind switch
+                int ci = idx[k];
+                values[k] = Cols[ci].Kind switch
                 {
-                    Kind.Real => st.GetDouble(c),
+                    Kind.Real => FromScaled(st.GetInt64(c), ColScale[ci], ColDp[ci]),                             // T04: scaled INTEGER -> the double Math.Round(v, dp) produced
                     Kind.Int => st.GetInt64(c),
                     Kind.Text => st.GetString(c),
-                    Kind.VecF64 => DecodeF64(st.GetBlob(c)!),
-                    _ => DecodeI32(st.GetBlob(c)!),
+                    Kind.VecF64 => ColSparse[ci] ? DecodeSparse(st.GetBlob(c)!, ColScale[ci], ColDp[ci], Cols[ci].Name) : DecodeI32Scaled(st.GetBlob(c)!, ColScale[ci], ColDp[ci], Cols[ci].Name),
+                    _ => DecodeI32(st.GetBlob(c)!, Cols[ci].Name),
                 };
             }
             return values;
@@ -343,6 +344,45 @@ namespace Truedat.Store
             foreach (var c in Cols) if (c.Kind != Kind.Text) yield return (c.Name, c.Kind.ToString());
         }
 
+        internal static int CopyColumnCount => CopyIdx.Length;
+        /// <summary>Index of a column in a full ToRow() row (Cols order); -1 when unknown. Test seam for building raw rows.</summary>
+        internal static int RowIndexOf(string name) { for (int i = 0; i < Cols.Length; i++) if (Cols[i].Name == name) return i; return -1; }
+        /// <summary>Index of a copy column in CopyIdx order (what ReadCopyValues returns); -1 when unknown.</summary>
+        internal static int CopyIndexOf(string name) { for (int k = 0; k < CopyIdx.Length; k++) if (Cols[CopyIdx[k]].Name == name) return k; return -1; }
+
+        /// <summary>Names of the columns (ContentIdx or CopyIdx order) whose value carries more digits than the field's declared
+        /// precision — what the v3 migration must canonicalise and therefore report (T04b). Parser output never appears here.</summary>
+        internal static IEnumerable<string> ColumnsBeyondPrecision(object?[] values, bool content)
+        {
+            var idx = content ? ContentIdx : CopyIdx;
+            for (int k = 0; k < idx.Length; k++)
+            {
+                int i = idx[k]; var v = values[k];
+                if (v is double d) { if (!Representable(d, ColScale[i])) yield return Cols[i].Name; }
+                else if (v is double[] a)
+                {
+                    const long vecMax = int.MaxValue;   // vector elements are int32 ×scale in both the dense and the sparse layout
+                    for (int j = 0; j < a.Length; j++)
+                        if (!Representable(a[j], ColScale[i]) || (!double.IsNaN(a[j]) && !double.IsInfinity(a[j]) && Math.Abs(Math.Round(a[j] * ColScale[i])) > vecMax)) { yield return Cols[i].Name; break; }
+                }
+            }
+        }
+
+        /// <summary>A full row (Cols order) whose content columns are the given content values (ContentIdx order), everything else
+        /// null — the shape <see cref="BindContent"/> takes; used by the v3 migration to re-bind rows read with the v2 reader.</summary>
+        internal static object?[] ContentRowFromValues(object?[] contentValues)
+        {
+            var row = new object?[Cols.Length];
+            for (int k = 0; k < ContentIdx.Length; k++) row[ContentIdx[k]] = contentValues[k];
+            return row;
+        }
+        internal static object?[] CopyRowFromValues(object?[] copyValues)
+        {
+            var row = new object?[Cols.Length];
+            for (int k = 0; k < CopyIdx.Length; k++) row[CopyIdx[k]] = copyValues[k];
+            return row;
+        }
+
         /// <summary>Quoted, comma-separated column lists for SQL built outside this class (the v2 migration).</summary>
         internal static string ContentColumnList(string? alias = null) => JoinQuoted(ContentIdx, alias);
         internal static string CopyColumnList(string? alias = null) => JoinQuoted(CopyIdx, alias);
@@ -353,9 +393,10 @@ namespace Truedat.Store
             return sb.ToString();
         }
 
-        /// <summary>The entry as a row — every REAL and every f64 vector element at the store's canonical precision (six
-        /// significant figures, <see cref="CanonicalPrecision"/>), so two renderings of one measurement can never disagree in
-        /// the store and the drift/unchanged tests compare like with like. Ints and text pass through.</summary>
+        /// <summary>The entry as a row — every REAL and every f64 vector element at the field's STORE precision (FieldPrecision
+        /// StoreDp; T04), so a value agrees with what the scaled-integer column can hold and two arrivals of one measurement
+        /// compare like with like in the drift/unchanged tests. The identity for every parser-produced value. Ints and text pass
+        /// through.</summary>
         internal static object?[] ToRow(TrackEntry entry)
         {
             var row = new object?[Cols.Length];
@@ -364,8 +405,11 @@ namespace Truedat.Store
                 var v = Cols[i].Get(entry);
                 switch (Cols[i].Kind)
                 {
-                    case Kind.Real when v is double d: row[i] = CanonicalPrecision.Sig6(d); break;
-                    case Kind.VecF64 when v is double[] a: { var c = new double[a.Length]; for (int k = 0; k < a.Length; k++) c[k] = CanonicalPrecision.Sig6(a[k]); row[i] = c; break; }
+                    // T04: the canonical form of a numeric field is its declared precision (FieldPrecision), not six significant figures.
+                    // Parser output is already at that dp, so this is the identity for every scanned value; it makes a hand-built entry
+                    // (a fixture, a future producer) agree with what the scaled-integer column can hold, so a re-arrival compares equal.
+                    case Kind.Real when v is double d: row[i] = Canon(d, ColDp[i]); break;
+                    case Kind.VecF64 when v is double[] a: { var c = new double[a.Length]; for (int k = 0; k < a.Length; k++) c[k] = Canon(a[k], ColDp[i]); row[i] = c; break; }
                     default: row[i] = v; break;
                 }
             }
@@ -389,11 +433,12 @@ namespace Truedat.Store
                 if (st.IsNull(c)) continue;
                 values[i] = Cols[i].Kind switch
                 {
-                    Kind.Real => st.GetDouble(c),
+                    // T04: the same v3 decode as ReadIdx — this is the export path (StoreDal.ReadExportEntries), so it must read what BindIdx wrote.
+                    Kind.Real => FromScaled(st.GetInt64(c), ColScale[i], ColDp[i]),
                     Kind.Int => st.GetInt64(c),
                     Kind.Text => st.GetString(c),
-                    Kind.VecF64 => DecodeF64(st.GetBlob(c)!),
-                    _ => DecodeI32(st.GetBlob(c)!),
+                    Kind.VecF64 => ColSparse[i] ? DecodeSparse(st.GetBlob(c)!, ColScale[i], ColDp[i], Cols[i].Name) : DecodeI32Scaled(st.GetBlob(c)!, ColScale[i], ColDp[i], Cols[i].Name),
+                    _ => DecodeI32(st.GetBlob(c)!, Cols[i].Name),
                 };
             }
             return FromValues(values, lastModified);
@@ -419,6 +464,71 @@ namespace Truedat.Store
                 if (v == null) { st.BindNull(p); continue; }
                 switch (Cols[i].Kind)
                 {
+                    // T04 storage (schema v3): scaled INTEGER for a fixed-dp scalar; int32 ×10^dp blob (or the sparse layout) for a fixed-dp vector.
+                    case Kind.Real:
+                    {
+                        double d = (double)v;
+                        if (double.IsNaN(d) || double.IsInfinity(d)) st.BindNull(p); else st.Bind(p, ToScaled(d, ColScale[i], Cols[i].Name));
+                        break;
+                    }
+                    case Kind.Int: st.Bind(p, (long)v); break;
+                    case Kind.Text: st.Bind(p, (string)v); break;
+                    case Kind.VecF64: st.Bind(p, ColSparse[i] ? EncodeSparse((double[])v, ColScale[i], Cols[i].Name) : EncodeI32Scaled((double[])v, ColScale[i], Cols[i].Name)); break;
+                    default: st.Bind(p, EncodeI32((int[])v)); break;
+                }
+            }
+        }
+
+        /// <summary>The v2 representation (REAL columns, float64 blobs), kept verbatim for the v2 → v3 migration's data step and for
+        /// self-tests that build a v2 fixture: reads a v2 content row's values.</summary>
+        internal static object?[] ReadContentValuesLegacyV2(SqliteStmt st, int firstColumn)
+        {
+            var values = new object?[ContentIdx.Length];
+            for (int k = 0; k < ContentIdx.Length; k++)
+            {
+                int c = firstColumn + k;
+                if (st.IsNull(c)) continue;
+                values[k] = Cols[ContentIdx[k]].Kind switch
+                {
+                    Kind.Real => st.GetDouble(c),
+                    Kind.Int => st.GetInt64(c),
+                    Kind.Text => st.GetString(c),
+                    Kind.VecF64 => DecodeF64(st.GetBlob(c)!),
+                    _ => DecodeI32(st.GetBlob(c)!, Cols[ContentIdx[k]].Name),
+                };
+            }
+            return values;
+        }
+        internal static object?[] ReadCopyValuesLegacyV2(SqliteStmt st, int firstColumn)
+        {
+            var values = new object?[CopyIdx.Length];
+            for (int k = 0; k < CopyIdx.Length; k++)
+            {
+                int c = firstColumn + k;
+                if (st.IsNull(c)) continue;
+                values[k] = Cols[CopyIdx[k]].Kind switch
+                {
+                    Kind.Real => st.GetDouble(c),
+                    Kind.Int => st.GetInt64(c),
+                    Kind.Text => st.GetString(c),
+                    Kind.VecF64 => DecodeF64(st.GetBlob(c)!),
+                    _ => DecodeI32(st.GetBlob(c)!, Cols[CopyIdx[k]].Name),
+                };
+            }
+            return values;
+        }
+        /// <summary>Binds a ToRow() row's chosen columns in the v2 representation (self-test fixture builder only).</summary>
+        internal static void BindLegacyV2(SqliteStmt st, int firstParam, object?[] row, bool content)
+        {
+            var idx = content ? ContentIdx : CopyIdx;
+            for (int k = 0; k < idx.Length; k++)
+            {
+                int i = idx[k], p = firstParam + k;
+                var v = row[i];
+                if (v == null) { st.BindNull(p); continue; }
+                switch (Cols[i].Kind)
+                {
+                    // v2 representation, verbatim: REAL for every scalar, float64 blobs for vectors. Fixture builder only.
                     case Kind.Real: st.Bind(p, (double)v); break;
                     case Kind.Int: st.Bind(p, (long)v); break;
                     case Kind.Text: st.Bind(p, (string)v); break;
@@ -428,10 +538,106 @@ namespace Truedat.Store
             }
         }
 
+        // ---- T04: the store's representation of numbers (schema v3). In-memory rows stay double / double[]; only the bytes change.
+        // Fixed(dp)       -> INTEGER = round(v × 10^dp). Read back as stored / 10^dp, which is the double Math.Round(v, dp) produced.
+        // FixedVec(dp)    -> BLOB of int32 ×10^dp, little-endian.
+        // SparseFixedVec  -> BLOB: u16 length, u16 count, then (u16 index, int32 value) per non-zero — self-describing, exact.
+        static readonly int[] ColDp = BuildDp();
+        static readonly long[] ColScale = BuildScales();
+        static readonly bool[] ColSparse = BuildSparse();
+        // ColDp is the STORE precision (FieldPrecision.StoreDp): what the typed column holds and what ToRow canonicalises to. For every
+        // parser field it equals the writer's Dp; for analysisDuration / smfmBpm it is 6 so a v2 store's six-figure values survive.
+        static int[] BuildDp() { var d = new int[Cols.Length]; for (int i = 0; i < Cols.Length; i++) d[i] = (Cols[i].Kind == Kind.Real || Cols[i].Kind == Kind.VecF64) && FieldPrecision.TryGet(Cols[i].Name, out var s) ? s.StoreDp : 0; return d; }
+        static long[] BuildScales() { var s = new long[Cols.Length]; for (int i = 0; i < Cols.Length; i++) { s[i] = 1; for (int k = 0; k < ColDp[i]; k++) s[i] *= 10; } return s; }
+        static bool[] BuildSparse() { var b = new bool[Cols.Length]; for (int i = 0; i < Cols.Length; i++) b[i] = Cols[i].Kind == Kind.VecF64 && FieldPrecision.TryGet(Cols[i].Name, out var s) && s.Shape == FieldPrecision.Shape.SparseFixedVec; return b; }
+        // Canon normalises -0.0 to +0.0 as well (review finding 2): Math.Round(-tiny, dp) is -0.0, the catalog writer prints it "-0", but the
+        // store's integer has no signed zero. The values are equal; the exporter's round-trip classes "-0" vs "0" as the sign of zero.
+        static double Canon(double v, int dp) => double.IsNaN(v) || double.IsInfinity(v) ? v : Math.Round(v, dp) + 0.0;   // + 0.0 turns -0.0 into +0.0
+        /// <summary>True when the decimal d stands for is exactly representable as an integer at this scale: |d × scale| is within a few
+        /// ulps of an integer. This — not double equality with Math.Round — is the migration's preservation test (review finding 1): a
+        /// real v2 value is a shortest-text double, and Math.Round of it can legitimately sit one ulp away while the DECIMAL is intact.</summary>
+        internal static bool Representable(double d, long scale)
+        {
+            if (double.IsNaN(d) || double.IsInfinity(d)) return true;   // binds NULL; nothing to lose
+            double s = d * scale;
+            if (Math.Abs(s) > 9.0e15) return false;
+            double tol = Math.Max(1e-9, Math.Abs(s) * 8.9e-16);          // ~4 ulps of s, floored for tiny magnitudes (an exact-integer gate refuses genuine data: mutation-checked)
+            return Math.Abs(s - Math.Round(s)) <= tol;
+        }
+        static long ToScaled(double v, long scale, string name)
+        {
+            double s = v * scale;
+            if (Math.Abs(s) > 9.0e15) throw new StoreException($"{name}: {v:R} does not fit the store's scaled-integer column at {scale} (|v × scale| > 9e15); nothing was written.");
+            return (long)Math.Round(s);
+        }
+        /// <summary>The double a stored scaled integer stands for — DEFINED as what Math.Round(v, dp) produces, so the store
+        /// reproduces the PARSER's double by construction (the parser is Math.Round(raw, dp)). THE 1-ULP CASE (named and pinned,
+        /// T04; measured on .NET Framework 4.8 x64): the double nearest 0.022454 renders "0.022454", but Math.Round(it, 6) — and
+        /// 22454.0 / 1e6 — return the neighbour one ulp BELOW ("0.022453999999999998"). The scan wrote that lower neighbour, the
+        /// catalog's text carries it, and the store must give back exactly that double, not the shortest-text decimal, for the
+        /// export to be byte-equal. Wrapping the division in Math.Round makes "same as the parser" the definition rather than a
+        /// coincidence of this runtime's division.</summary>
+        static double FromScaled(long s, long scale, int dp) => Math.Round((double)s / scale, dp);
+        static int ToScaled32(double v, long scale, string name)
+        {
+            double s = Math.Round(v * scale);
+            if (s > int.MaxValue || s < int.MinValue) throw new StoreException($"{name}: element {v:R} does not fit the store's int32 ×{scale} vector; nothing was written.");
+            return (int)s;
+        }
+        static byte[] EncodeI32Scaled(double[] a, long scale, string name)
+        {
+            var o = new int[a.Length];
+            for (int i = 0; i < a.Length; i++) o[i] = double.IsNaN(a[i]) || double.IsInfinity(a[i]) ? 0 : ToScaled32(a[i], scale, name);
+            return EncodeI32(o);
+        }
+        static double[] DecodeI32Scaled(byte[] b, long scale, int dp, string name)
+        {
+            var o = DecodeI32(b, name); var a = new double[o.Length];
+            for (int i = 0; i < o.Length; i++) a[i] = FromScaled(o[i], scale, dp);
+            return a;
+        }
+        static byte[] EncodeSparse(double[] a, long scale, string name)
+        {
+            if (a.Length > ushort.MaxValue) throw new StoreException($"{name}: a {a.Length}-element vector exceeds the sparse layout's u16 length; nothing was written.");
+            // NaN / Infinity elements are treated as 0 here exactly as the dense encoder does (review finding 3: the two must agree).
+            int count = 0; for (int i = 0; i < a.Length; i++) if (a[i] != 0 && !double.IsNaN(a[i]) && !double.IsInfinity(a[i])) count++;
+            var b = new byte[4 + count * 6]; int o = 0;
+            b[o++] = (byte)(a.Length & 0xFF); b[o++] = (byte)(a.Length >> 8);
+            b[o++] = (byte)(count & 0xFF); b[o++] = (byte)(count >> 8);
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] == 0 || double.IsNaN(a[i]) || double.IsInfinity(a[i])) continue;
+                b[o++] = (byte)(i & 0xFF); b[o++] = (byte)(i >> 8);
+                int v = ToScaled32(a[i], scale, name);
+                b[o++] = (byte)v; b[o++] = (byte)(v >> 8); b[o++] = (byte)(v >> 16); b[o++] = (byte)(v >> 24);
+            }
+            return b;
+        }
+        // A corrupt blob is refused with the column named, never decoded into a plausible wrong vector (review finding 4).
+        static double[] DecodeSparse(byte[] b, long scale, int dp, string name)
+        {
+            if (b.Length < 4) throw new StoreException($"{name}: sparse vector blob is {b.Length} bytes, shorter than its 4-byte header — the row is damaged.");
+            int length = b[0] | (b[1] << 8), count = b[2] | (b[3] << 8);
+            if (b.Length != 4 + count * 6) throw new StoreException($"{name}: sparse vector blob declares {count} non-zero(s) but holds {b.Length} bytes (expected {4 + count * 6}) — the row is damaged.");
+            var a = new double[length]; int o = 4;
+            for (int n = 0; n < count; n++)
+            {
+                int i = b[o] | (b[o + 1] << 8); o += 2;
+                int v = b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24); o += 4;
+                if (i >= length) throw new StoreException($"{name}: sparse vector blob names bin {i} of {length} — the row is damaged.");
+                a[i] = FromScaled(v, scale, dp);
+            }
+            return a;
+        }
+
         static byte[] EncodeF64(double[] a) { var b = new byte[a.Length * 8]; Buffer.BlockCopy(a, 0, b, 0, b.Length); return b; }
         static double[] DecodeF64(byte[] b) { var a = new double[b.Length / 8]; Buffer.BlockCopy(b, 0, a, 0, a.Length * 8); return a; }
         static byte[] EncodeI32(int[] a) { var b = new byte[a.Length * 4]; Buffer.BlockCopy(a, 0, b, 0, b.Length); return b; }
-        static int[] DecodeI32(byte[] b) { var a = new int[b.Length / 4]; Buffer.BlockCopy(b, 0, a, 0, a.Length * 4); return a; }
+        static int[] DecodeI32(byte[] b, string name)
+        {
+            if (b.Length % 4 != 0) throw new StoreException($"{name}: int32 vector blob is {b.Length} bytes, not a multiple of 4 — the row is damaged.");
+            var a = new int[b.Length / 4]; Buffer.BlockCopy(b, 0, a, 0, a.Length * 4); return a;
+        }
 
         static string Q(string name) => "\"" + name + "\"";
 

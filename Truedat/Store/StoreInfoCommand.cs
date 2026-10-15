@@ -123,7 +123,7 @@ namespace Truedat.Store
                 while (st.Step())
                 {
                     // Nx realtime = audio seconds per wall second, truedat's throughput convention.
-                    double wall = st.GetDouble(0);
+                    double wall = st.GetInt64(0) / (double)FieldPrecision.Scale("analysisDuration");   // v3: scaled INTEGER at the field's store precision (FieldPrecision.StoreDp)
                     if (wall > 0) rtfs.Add((st.GetInt64(1) / 1000.0) / wall);
                 }
             i.RtfSamples = rtfs.Count;

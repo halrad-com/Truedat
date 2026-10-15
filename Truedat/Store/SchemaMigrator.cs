@@ -14,7 +14,7 @@ namespace Truedat.Store
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>
     internal static class StoreSchema
     {
-        internal const int CurrentVersion = 2;
+        internal const int CurrentVersion = 3;   // v3 (T04): typed columns — scaled INTEGER, int32 vectors, sparse histogram
 
         /// <summary>Columns of track_content / track_copy that are not catalog JSON keys (v2 split).</summary>
         internal static readonly string[] TrackContentMetaColumns = { "entity_id", "content_key", "content_key_kind", "run_id", "updated_utc" };
@@ -56,6 +56,40 @@ namespace Truedat.Store
                 return;
             }
 
+            // T04b: an EXISTING store is backed up before anything is changed — a consistent snapshot via VACUUM INTO (SQLite ≥ 3.27),
+            // beside the store, named with the schema it holds — and the message names that path. A fresh file (current == 0)
+            // has nothing to back up. The backup is the operator's "archive what I have" without a manual step.
+            string? backup = null;
+            if (current > 0)
+            {
+                var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+                backup = $"{db.Path}.bak.v{current}.{stamp}";
+                for (int n = 2; File.Exists(backup); n++) backup = $"{db.Path}.bak.v{current}.{stamp}-{n}";   // two migrations in one second (self-tests) never collide
+                // The backup is a second copy of the whole store (a real store is hundreds of MB to a few GB); refuse up front, with the
+                // numbers, rather than fail half way through VACUUM INTO on a full disk (review finding 7).
+                try
+                {
+                    long need = new FileInfo(db.Path).Length;
+                    var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(db.Path));
+                    if (!string.IsNullOrEmpty(root))
+                    {
+                        long free = new DriveInfo(root!).AvailableFreeSpace;
+                        if (free < need + need / 10)
+                            throw new StoreException($"The store {db.Path} is schema v{current} and needs migrating to v{target}, which writes a backup copy first ({need / 1048576:N0} MB), but only {free / 1048576:N0} MB are free on {root}. Nothing was changed; free the space and open the store again.");
+                    }
+                }
+                catch (StoreException) { throw; }
+                catch (Exception ex) { StoreLog.Debug($"free-space check skipped: {ex.Message}"); }   // an exotic path (UNC without a drive) — VACUUM INTO's own error is the fallback
+                db.Exec($"VACUUM INTO '{backup.Replace("'", "''")}';");
+                StoreLog.Info($"store is schema v{current}; this build uses v{target}. Migrating now; backup first at {backup}");
+                // A table rebuild (v3 re-stores every row into typed tables, then renames) follows SQLite's documented recipe: foreign-key
+                // enforcement off for the rebuild, on again after. The rows are copied as they are; whatever referential state the old
+                // store had, it keeps — the migration neither repairs nor judges it. (Must be set outside the transaction.)
+                db.Exec("PRAGMA foreign_keys=OFF;");
+            }
+
+            try
+            {
             using (var tx = db.BeginTransaction())
             {
                 for (int v = current + 1; v <= target; v++)
@@ -63,6 +97,7 @@ namespace Truedat.Store
                     StoreLog.Info($"applying schema v{v} to {db.Path}");
                     db.Exec(LoadScript(v));
                     SchemaV2Migration.RunDataStep(db, v);
+                    SchemaV3Migration.RunDataStep(db, v);
                     using (var st = db.Prepare("INSERT INTO schema_version(version, applied_utc, truedat_version) VALUES (?, ?, ?);"))
                     {
                         st.Bind(1, (long)v).Bind(2, DateTime.UtcNow.ToString("o")).Bind(3, truedatVersion);
@@ -71,7 +106,9 @@ namespace Truedat.Store
                 }
                 tx.Complete();
             }
-            StoreLog.Info($"schema now v{StoreSchema.CurrentVersion}");
+            }
+            finally { if (current > 0) db.Exec("PRAGMA foreign_keys=ON;"); }
+            StoreLog.Info($"schema now v{StoreSchema.CurrentVersion}" + (backup != null ? $" (backup of the previous store: {backup})" : ""));
         }
 
         static string LoadScript(int version)

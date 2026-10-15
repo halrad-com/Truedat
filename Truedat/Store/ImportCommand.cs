@@ -214,7 +214,20 @@ namespace Truedat.Store
                     // The fold was spilled to disk by the sink (review I3): read it here, one entry at a time, and the file goes.
                     global::Truedat.Edges.EdgeFoldResult? edges = null;
                     if (pendingEdges != null && pendingEdges.TryGetValue(keys[i], out var edgesFile)) edges = ScanSink.ReadEdges(edgesFile);
-                    ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
+                    try
+                    {
+                        ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
+                    }
+                    catch (StoreException ex)
+                    {
+                        // T04 review finding 3: a value the typed store cannot hold (a vector element beyond int32 ×10^dp, a scalar beyond
+                        // int64) fails THIS entry as a recorded failed run and the batch goes on — never a poison pill that aborts every
+                        // re-run of the whole import. The entity/location rows it may already have written stay (a real file with no
+                        // description, exactly like a failed extractor run).
+                        dal.InsertRun(producerKey, producerVersion, null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", "store", "unrepresentable", $"{keys[i]}: {ex.Message}", source);
+                        r.ErrorsRows++;
+                        StoreLog.Warn($"{keys[i]}: not stored — {ex.Message}");
+                    }
                     processed++;
                     if (failAfterEntries > 0 && processed == failAfterEntries)
                         throw new InvalidOperationException($"fail-after seam fired at entry {processed}");

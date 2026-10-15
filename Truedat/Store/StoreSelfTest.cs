@@ -39,11 +39,13 @@ namespace Truedat.Store
             Block(assert, "StoreInfo", () => TestStoreInfo(assert));
             Console.WriteLine("Store self-test (page size: 16 KB pages by default, --store-vacuum repacks)");
             Block(assert, "Vacuum", () => TestVacuum(assert));
-            Console.WriteLine("Store self-test (precision: six significant figures on the store path, the catalog writer untouched)");
-            Block(assert, "CanonicalPrecision", () => TestCanonicalPrecision(assert));
+            Console.WriteLine("Store self-test (precision: the field's declared dp on the store path, no six-figure rewrite, the catalog writer untouched)");
+            Block(assert, "StorePrecision", () => TestStorePrecision(assert));
             Console.WriteLine("Store self-test (T03: one FieldPrecision registry; every numeric column declared; the parser rounds from it)");
             Block(assert, "FieldPrecision", () => TestFieldPrecision(assert));
             Block(assert, "FieldPrecisionWiring", () => TestFieldPrecisionWiring(assert));
+            Console.WriteLine("Store self-test (T04: schema v3 — typed columns, exact values, sparse histogram, v2 -> v3 migration with backup)");
+            Block(assert, "SchemaV3", () => TestSchemaV3(assert));
             Console.WriteLine("Store self-test (S2 C0: default store location is local; network opens exclusive)");
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
             Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
@@ -237,8 +239,8 @@ namespace Truedat.Store
                 var r3b = ScanSink.Flush(store, "output-x64.3", entries.Keys);
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(r3b.Ok && r3b.ContentReplaced == 0 && r3b.Drift == 1
-                        && os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpm5.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                        $"an older build (.3 over .5) is drift, never a replacement; the .5 description stays ({r3b.ContentReplaced} replaced, {r3b.Drift} drift)");
+                        && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == Canon1(bpm5),
+                        $"an older build (.3 over .5) is drift, never a replacement; the .5 description stays ({r3b.ContentReplaced} replaced, {r3b.Drift} drift; stored {StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} vs {Canon1(bpm5)})");
                 // An unknown build string cannot be ordered: it replaces, with the trace.
                 var unk = FixtureEntries(@"D:\Music");
                 unk[@"D:\Music\Tool\a.flac"].Features!.Bpm = 77;
@@ -259,11 +261,11 @@ namespace Truedat.Store
                     driftRowsAfterRemeasure = os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") ?? "";
                     assert(r6.Ok && r6.Remeasured == 1 && r6.Drift == 0,
                         $"a same-producer fresh measurement beyond noise is a REMEASURE, never a kept-stored drift ({r6.Remeasured} remeasured, {r6.Drift} drift, {r6.ContentReplaced} replaced, {r6.Unchanged} unchanged)");
-                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpmSame.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                        $"the store holds the fresh value ({os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {bpmSame})");
+                    assert(StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == Canon1(bpmSame),
+                        $"the store holds the fresh value at bpm's declared precision ({StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} vs {Canon1(bpmSame)} from {bpmSame})");
                     assert(os.Db.ExecScalar("SELECT count(*) FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac' AND c.run_id = (SELECT max(id) FROM run WHERE producer_key = 'essentia' AND producer_version = 'md5:deadbeef0123' AND outcome = 'ok');") == "1",
                         "the description's run is the measuring run (the newest ok run of that producer), not the older one");
-                    assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'resolved' AND field = 'bpm' AND value_a = '77' AND value_b = '" + bpmSame.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "';") == "1",
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'resolved' AND field = 'bpm' AND value_a = '77' AND value_b = '" + Canon1(bpmSame) + "';") == "1",
                         $"the old/new pair is kept as a RESOLVED value-drift record (history), not an open conflict ({os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")} value-drift rows: {os.Db.ExecScalar("SELECT group_concat(state || ':' || field || ':' || value_a || '>' || value_b, ' ') FROM conflict WHERE kind = 'value-drift';")})");
                 }
                 // Within run-to-run noise, same producer: STILL a remeasure — the exact fresh value and its run land; no conflict row (noise is not information).
@@ -278,9 +280,9 @@ namespace Truedat.Store
                 var bpmNoiseStored = TrackEntryMapper.FormatContent(bpmCol, TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(noise[@"D:\Music\Tool\a.flac"]), bpmCol));
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(r7.Ok && r7.Remeasured == 1 && r7.Unchanged == 0 && r7.Drift == 0
-                        && os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == bpmNoiseStored
+                        && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == bpmNoiseStored
                         && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == driftRowsAfterRemeasure,
-                        $"a within-noise fresh measurement still replaces exactly (as the mapper stores it), with no new conflict row ({r7.Remeasured} remeasured, {r7.Unchanged} unchanged, stored {os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {bpmNoiseStored}, conflicts {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")} vs {driftRowsAfterRemeasure})");
+                        $"a within-noise fresh measurement still replaces exactly (as the mapper stores it), with no new conflict row ({r7.Remeasured} remeasured, {r7.Unchanged} unchanged, stored {StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} vs {bpmNoiseStored}, conflicts {os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';")} vs {driftRowsAfterRemeasure})");
 
                 // T01 review finding 1: a remeasure must not wipe stored values that the arrival did not observe (NULL columns —
                 // ffmpeg absent, --no-bitusage). First store a bitUsage under this producer, then remeasure with it nulled and bpm changed.
@@ -361,13 +363,13 @@ namespace Truedat.Store
                 {
                     assert(os.Dal.Count("conflict") == conflictsBefore + 1 && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift';") == "1", $"exactly one value-drift conflict ({os.Dal.Count("conflict") - conflictsBefore} new)");
                     assert(os.Db.ExecScalar("SELECT field FROM conflict WHERE kind = 'value-drift';") == "bpm"
-                        && os.Db.ExecScalar("SELECT value_a FROM conflict WHERE kind = 'value-drift';") == origBpmA.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
-                        && os.Db.ExecScalar("SELECT value_b FROM conflict WHERE kind = 'value-drift';") == (origBpmA * 1.25).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                        && os.Db.ExecScalar("SELECT value_a FROM conflict WHERE kind = 'value-drift';") == Canon1(origBpmA)
+                        && os.Db.ExecScalar("SELECT value_b FROM conflict WHERE kind = 'value-drift';") == Canon1(origBpmA * 1.25)
                         && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND run_a IS NOT NULL AND run_b IS NOT NULL AND run_a <> run_b;") == "1",
                         $"the drift conflict names the field, both values and both runs ({os.Db.ExecScalar("SELECT field || ' ' || value_a || ' ' || value_b || ' ' || run_a || '/' || run_b FROM conflict WHERE kind = 'value-drift';")})");
-                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == origBpmA.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + (origBpmA == Math.Floor(origBpmA) ? ".0" : ""),
-                        $"the stored description is NOT overwritten by the drifted value ({os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';")} vs {origBpmA})");
-                    assert(os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\b.mp3';") == "120.0", "a noise-level difference writes nothing (b.mp3 bpm stays 120)");
+                    assert(StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == Canon1(origBpmA),
+                        $"the stored description is NOT overwritten by the drifted value ({StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} vs {Canon1(origBpmA)})");
+                    assert(StoredText(os, @"D:\Music\Tool\b.mp3", "bpm") == "120", $"a noise-level difference writes nothing (b.mp3 bpm stays 120: {StoredText(os, @"D:\Music\Tool\b.mp3", "bpm")})");
                     assert(os.Db.ExecScalar("SELECT p.artist FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';") == "Renamed", "a copy fact (artist) is updated: newer wins, no conflict");
                 }
 
@@ -939,13 +941,14 @@ namespace Truedat.Store
                 && minBack.Features.HfSpectralStructure == null && minBack.Features.Mfcc == null && minBack.Features.SmfmScores == null,
                 "absent blocks come back null, not as empty objects");
 
-            // Vectors round-trip at the store's canonical precision (six significant figures, operator 2026-10-12): the float64
-            // blob is exact, the values in it are the canonical ones.
+            // Vectors round-trip at the field's DECLARED precision (T04: mfcc is FixedVec(4)); the in-memory row keeps doubles, so
+            // ToRow canonicalises each element at 4 dp and nothing else changes. (The store's int32 ×10^4 column additionally bounds
+            // an element to ±214,748 — real MFCC/GFCC/contrast values are a few hundred at most; the bind refuses loudly beyond it.)
             var prec = new TrackEntry { Features = new TrackFeatures { Mfcc = new[] { -821.3456789012345, 1e-9, 0.1, 12345678.9 } }, LastModified = DateTime.UtcNow };
             var precBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(prec), prec.LastModified);
             assert(precBack.Features.Mfcc != null && precBack.Features.Mfcc.Length == 4
-                && precBack.Features.Mfcc[0] == -821.346 && precBack.Features.Mfcc[1] == 1e-9 && precBack.Features.Mfcc[2] == 0.1 && precBack.Features.Mfcc[3] == 12345700,
-                $"vectors round-trip exactly at six significant figures (float64 blobs) ({precBack.Features.Mfcc?[0]}, {precBack.Features.Mfcc?[3]})");
+                && precBack.Features.Mfcc[0] == -821.3457 && precBack.Features.Mfcc[1] == 0 && precBack.Features.Mfcc[2] == 0.1 && precBack.Features.Mfcc[3] == 12345678.9,
+                $"vectors canonicalise at the field's declared precision, 4 dp ({precBack.Features.Mfcc?[0]:R}, {precBack.Features.Mfcc?[1]:R}, {precBack.Features.Mfcc?[3]:R})");
             var smfm = new TrackEntry { Features = new TrackFeatures { SmfmScores = new[] { 0, 255, 17 } }, LastModified = DateTime.UtcNow };
             var smfmBack = TrackEntryMapper.FromValues(TrackEntryMapper.ToRow(smfm), smfm.LastModified);
             assert(smfmBack.Features.SmfmScores != null && smfmBack.Features.SmfmScores.Length == 3 && smfmBack.Features.SmfmScores[1] == 255, "int vectors round-trip (int32 blobs)");
@@ -1282,10 +1285,10 @@ namespace Truedat.Store
                     db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (10, 'e1', 1, 'a/one.flac', 'a/one.flac', 'D:\\Music\\a\\one.flac', '{now}', '{now}', 'present');");
                     db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (11, 'e1', 1, 'b/one copy.flac', 'b/one copy.flac', 'D:\\Music\\b\\one copy.flac', '{now}', '{now}', 'present');");
                     db.Exec($"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) VALUES (12, 'e2', 1, 'c/two.mp3', 'c/two.mp3', 'D:\\Music\\c\\two.mp3', '{now}', '{now}', 'present');");
-                    // e1 has two copies: the second differs by run-to-run NOISE on spectralCentroid (1793.406 vs 1793.656, 0.014%)
+                    // e1 has two copies: the second differs by run-to-run NOISE on spectralCentroid (1793.4 vs 1793.7, 0.017%)
                     // and by a REAL disagreement on bpm (120 vs 135). e2 has one copy.
-                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (10, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'Tool', 120.0, 1793.406, 1.5, 118, 'sha1');");
-                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (11, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'TOOL', 135.0, 1793.656, 2.5, NULL, 'sha1');");
+                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (10, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'Tool', 120.0, 1793.4, 1.5, 118, 'sha1');");   // values at their declared precision (T04: the typed v3 column holds spectralCentroid at 1 dp)
+                    db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, spectralCentroid, analysisDuration, smfmBpm, audioStreamSha256) VALUES (11, 'sha1', '{FacetKinds.ShaFrames}', '{now}', 'TOOL', 135.0, 1793.7, 2.5, NULL, 'sha1');");
                     db.Exec($"INSERT INTO track_feature(location_id, content_key, content_key_kind, updated_utc, artist, bpm, analysisDuration, audioStreamSha256) VALUES (12, 'sha2', '{FacetKinds.ShaFrames}', '{now}', 'Zep', 90.0, 3.0, 'sha2');");
                 }
                 var v1Now = DateTime.ParseExact("2026-10-12T10:00:00.0000000Z", "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
@@ -1303,14 +1306,14 @@ namespace Truedat.Store
                 using (var db = SqliteDb.Open(v1Path, create: false))
                 {
                     SchemaMigrator.Apply(db, "selftest-v2");
-                    assert(SchemaMigrator.ReadVersion(db) == 2, "v1 store migrates forward to v2 in one Apply");
+                    assert(SchemaMigrator.ReadVersion(db) == 3, $"v1 store migrates forward through v2 to v3 in one Apply (v{SchemaMigrator.ReadVersion(db)})");
                     assert(db.ExecScalar("SELECT count(*) FROM track_content;") == "2" && db.ExecScalar("SELECT count(*) FROM track_copy;") == "3",
                         $"split: 2 content rows (one per media) and 3 copy rows (one per location) ({db.ExecScalar("SELECT count(*) FROM track_content;")}/{db.ExecScalar("SELECT count(*) FROM track_copy;")})");
-                    assert(db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';") == "120.0", "the first-imported copy's content values win (bpm 120 from location 10)");
+                    assert(db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';") == "1200", $"the first-imported copy's content values win (bpm 120 from location 10; v3 stores it as 1200, ×10 at 1 dp: {db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';")})");
                     assert(db.ExecScalar("SELECT content_key FROM track_content WHERE entity_id = 'e1';") == "sha1" && db.ExecScalar("SELECT audioStreamSha256 FROM track_content WHERE entity_id = 'e1';") == "sha1", "content key and the hash itself sit on the content row");
-                    assert(db.ExecScalar("SELECT artist FROM track_copy WHERE location_id = 11;") == "TOOL" && db.ExecScalar("SELECT analysisDuration FROM track_copy WHERE location_id = 11;") == "2.5" && db.ExecScalar("SELECT smfmBpm FROM track_copy WHERE location_id = 10;") == "118.0",
-                        "per-copy facts (tags, analysisDuration, SMFM) stay with their own copy");
-                    assert(db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'content-disagree-at-split';") == "1", $"ONE conflict: bpm 120 vs 135 is a disagreement; spectralCentroid 1793.406 vs 1793.656 is run-to-run noise and is not ({db.ExecScalar("SELECT count(*) FROM conflict;")})");
+                    assert(db.ExecScalar("SELECT artist FROM track_copy WHERE location_id = 11;") == "TOOL" && db.ExecScalar("SELECT analysisDuration FROM track_copy WHERE location_id = 11;") == "2500000" && db.ExecScalar("SELECT smfmBpm FROM track_copy WHERE location_id = 10;") == "118000000",
+                        $"per-copy facts (tags, analysisDuration, SMFM) stay with their own copy — v3 scaled at the store's six places: 2.5 s -> 2500000, 118 bpm -> 118000000 ({db.ExecScalar("SELECT analysisDuration FROM track_copy WHERE location_id = 11;")}, {db.ExecScalar("SELECT smfmBpm FROM track_copy WHERE location_id = 10;")})");
+                    assert(db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'content-disagree-at-split';") == "1", $"ONE conflict: bpm 120 vs 135 is a disagreement; spectralCentroid 1793.4 vs 1793.7 is run-to-run noise and is not ({db.ExecScalar("SELECT count(*) FROM conflict;")})");
                     assert(db.ExecScalar("SELECT field FROM conflict WHERE kind = 'content-disagree-at-split';") == "bpm" && db.ExecScalar("SELECT value_a FROM conflict WHERE kind = 'content-disagree-at-split';") == "120" && db.ExecScalar("SELECT value_b FROM conflict WHERE kind = 'content-disagree-at-split';") == "135",
                         $"the conflict names the field and both values ({db.ExecScalar("SELECT field || ' ' || value_a || ' ' || value_b FROM conflict WHERE kind = 'content-disagree-at-split';")})");
                     assert(db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_feature';") == "0", "the wide row is dropped after the split");
@@ -1330,8 +1333,8 @@ namespace Truedat.Store
                 var v1Catalog = Path.Combine(dir, "v1-mbxmoods.json");
                 var v1Entries = new Dictionary<string, TrackEntry>(PathComparer.Instance)
                 {
-                    [@"D:\Music\a\one.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 1.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "Tool", Bpm = 120.0, SpectralCentroid = 1793.406, SmfmBpm = 118 } },
-                    [@"D:\Music\b\one copy.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 2.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "TOOL", Bpm = 135.0, SpectralCentroid = 1793.656 } },
+                    [@"D:\Music\a\one.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 1.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "Tool", Bpm = 120.0, SpectralCentroid = 1793.4, SmfmBpm = 118 } },
+                    [@"D:\Music\b\one copy.flac"] = new TrackEntry { AudioStreamSha256 = "sha1", AnalysisDurationSecs = 2.5, LastModified = v1Now, Features = new TrackFeatures { Artist = "TOOL", Bpm = 135.0, SpectralCentroid = 1793.7 } },
                     [@"D:\Music\c\two.mp3"] = new TrackEntry { AudioStreamSha256 = "sha2", AnalysisDurationSecs = 3.0, LastModified = v1Now, Features = new TrackFeatures { Artist = "Zep", Bpm = 90.0 } },
                 };
                 WriteCatalog(v1Catalog, v1Entries);
@@ -1437,7 +1440,7 @@ namespace Truedat.Store
                 {
                     "Real" => spec.Shape == FieldPrecision.Shape.Fixed,
                     "Int" => spec.Shape == FieldPrecision.Shape.Int,
-                    "VecF64" => spec.Shape == FieldPrecision.Shape.FixedVec,
+                    "VecF64" => spec.Shape == FieldPrecision.Shape.FixedVec || spec.Shape == FieldPrecision.Shape.SparseFixedVec,   // T04a: the sparse layout is a fixed-dp vector in memory
                     "VecI32" => spec.Shape == FieldPrecision.Shape.IntVec,
                     _ => false
                 };
@@ -1476,7 +1479,7 @@ namespace Truedat.Store
                 ("spectralEnergyMidLow","Fixed(6)"), ("spectralEnergyMidHigh","Fixed(6)"), ("spectralEnergyHigh","Fixed(6)"), ("spectralEnergyStdev","Fixed(6)"), ("hfEnergyRatio","Fixed(6)"),
                 ("spectralDecrease","Fixed(12)"),
                 ("mfcc","FixedVec(4)"), ("chordsHistogram","FixedVec(4)"), ("hpcp12","FixedVec(4)"), ("thpcp12","FixedVec(4)"), ("mfccStdev","FixedVec(4)"),
-                ("spectralContrastCoeffs","FixedVec(4)"), ("spectralContrastValleys","FixedVec(4)"), ("beatsLoudnessBandRatio","FixedVec(4)"), ("bpmHistogram","FixedVec(4)"), ("gfcc","FixedVec(4)"),
+                ("spectralContrastCoeffs","FixedVec(4)"), ("spectralContrastValleys","FixedVec(4)"), ("beatsLoudnessBandRatio","FixedVec(4)"), ("bpmHistogram","SparseFixedVec(4)"), ("gfcc","FixedVec(4)"),   // T04a: sparse storage, same 4 dp
                 ("smfmScores","IntVec"),
             };
             int pinFail = 0; string firstPinFail = "";
@@ -1492,6 +1495,11 @@ namespace Truedat.Store
             assert(FieldPrecision.Dp("keyVotes_krumhansl_strength") == FieldPrecision.Dp("keyVotes_edma_strength") && FieldPrecision.Dp("keyVotes_temperley_strength") == FieldPrecision.Dp("keyVotes_edma_strength"),
                 "FieldPrecision: the three key-vote strengths share one precision (the writer renders them through one entry)");
             assert(FieldPrecision.Dp("hpcp12") == FieldPrecision.Dp("thpcp12"), "FieldPrecision: hpcp12 and thpcp12 share one precision (one fold serves both)");
+            // T04: the STORE precision equals the writer's for every parser field; only the two unrounded writer-side fields hold more.
+            int storeWider = 0; string widerNames = "";
+            foreach (var n in FieldPrecision.Names) { FieldPrecision.TryGet(n, out var sp); if (sp.StoreDp != sp.Dp) { storeWider++; widerNames += n + " "; } }
+            assert(storeWider == 2 && FieldPrecision.StoreDp("analysisDuration") == 6 && FieldPrecision.Dp("analysisDuration") == 1 && FieldPrecision.StoreDp("smfmBpm") == 6 && FieldPrecision.Dp("smfmBpm") == 3,
+                $"FieldPrecision: exactly analysisDuration (1 -> 6) and smfmBpm (3 -> 6) hold more places in the store than the writer renders ({storeWider}: {widerNames.Trim()})");
             // Typo guard (review finding 2): Opt resolves the field name BEFORE the null test, so parsing an EMPTY document touches every
             // OptN key — a mistyped name throws here instead of on the first real track that carries the field.
             TrackFeatures? empty = null; string emptyErr = "";
@@ -1672,46 +1680,301 @@ namespace Truedat.Store
             }
         }
 
-        static void TestCanonicalPrecision(Action<bool, string> assert)
+        /// <summary>A stored content value as the mapper reads it back (v3 decode) and formats it — the way tests must read a numeric
+        /// column now that the SQL column holds a scaled integer, never raw SELECT text.</summary>
+        static string StoredText(OpenStore os, string displayPath, string column)
         {
-            // Six significant figures, exact text, no trailing zeros, no exponent; 0 / NaN pass through.
-            string T(double v) => CanonicalPrecision.Text(v);
-            assert(T(0.022454000000000002) == "0.022454", $"the parsed double of 0.022454 renders as 0.022454 ({T(0.022454000000000002)})");
-            assert(T(3600111.25) == "3600110", $"3600111.25 -> 3600110 (6 sf; the 7th+ figures are float32 noise) ({T(3600111.25)})");
-            assert(T(-0.000000005555) == "-0.000000005555", $"spectralDecrease-sized values keep their figures by magnitude, no exponent ({T(-0.000000005555)})");
-            assert(T(1293.3) == "1293.3" && T(-18.09) == "-18.09" && T(135.9) == "135.9", $"values already under 6 sf are unchanged ({T(1293.3)}, {T(-18.09)})");
-            assert(T(123456.789) == "123457" && T(0.1234567) == "0.123457" && T(0.1) == "0.1" && T(100) == "100", $"rounding at the 6th figure ({T(123456.789)}, {T(0.1234567)}, {T(0.1)}, {T(100)})");
-            assert(T(1e20) == "100000000000000000000" && T(-7.5e-12) == "-0.0000000000075", $"large and tiny magnitudes stay exact decimal text ({T(1e20)}, {T(-7.5e-12)})");
-            assert(CanonicalPrecision.Sig6(0) == 0 && double.IsNaN(CanonicalPrecision.Sig6(double.NaN)) && double.IsPositiveInfinity(CanonicalPrecision.Sig6(double.PositiveInfinity)), "0, NaN and infinity pass through");
-            assert(CanonicalPrecision.Sig6(0.022454000000000002) == CanonicalPrecision.Sig6(BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.022454000000000002) - 1)),
-                "two doubles one bit apart canonicalise to the same double");
+            var entity = os.Db.ExecScalar("SELECT c.entity_id FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = '" + displayPath.Replace("'", "''") + "';");
+            if (entity == null) return "no-row";
+            var back = os.Dal.ReadContent(entity);
+            if (back == null) return "no-content";
+            int k = TrackEntryMapper.ContentIndexOf(column);
+            return TrackEntryMapper.FormatContent(k, back.Values[k]) ?? "null";
+        }
+        static string Canon1(double v) => Math.Round(v, 1).ToString("R", System.Globalization.CultureInfo.InvariantCulture);   // bpm's declared precision
 
-            // The mapper canonicalises every REAL and every f64 vector element on the way into the store; ints and text untouched.
+        /// <summary>T04 (A02): schema v3 — fixed-dp fields as scaled INTEGER, fixed-dp vectors as int32 blobs, the histogram sparse, no
+        /// six-figure rounding anywhere on the store path; and T04b — a v2 store migrates forward on open, backup first, every value
+        /// preserved exactly (V15), columns typed afterwards.</summary>
+        static void TestSchemaV3(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "v3-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                // ---- (a) fresh store: typed columns, exact values incl. the named extremes and the 1-ulp case, sparse histogram
+                var store = Path.Combine(dir, "truedat.db");
+                var entries = FixtureEntries(@"D:\Music");
+                var f = entries[@"D:\Music\Tool\a.flac"].Features!;
+                f.SpectralSpread = 22500000.1234;                 // wide-range 4 dp (MB3 maximum 2.25e7): 2.25e11 scaled, needs int64
+                f.MelKurtosis = 1200000000.5678;                  // 1.2e9 at 4 dp
+                f.SpectralDecrease = -0.00000007;                 // 7e-8 at 12 dp -> -70000 scaled
+                f.Danceability = 0;                               // zero
+                f.DynamicRange = null;                            // null stays null
+                f.SpectralEnergyStdev = 0.022454000000000002;     // the 1-ulp case (C6a): net48 renders this double as 17 digits; it IS the double nearest 0.022454
+                var hist = new double[250]; hist[10] = 0.1234; hist[120] = 0.5; hist[249] = 0.0001; f.BpmHistogram = hist;
+                f.Mfcc = new double[13]; for (int i = 0; i < 13; i++) f.Mfcc[i] = -800.1234 + i;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
+                var r1 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
+                assert(r1.Ok && r1.Entries == 1, $"v3: the fixture entry is written ({r1.Entries} entries, {r1.Error})");
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a fresh store is schema v3 ({SchemaMigrator.ReadVersion(os.Db)})");
+                    string T(string col) => os.Db.ExecScalar($"SELECT typeof({col}) FROM track_content;") ?? "";
+                    assert(T("bpm") == "integer" && T("spectralSpread") == "integer" && T("melKurtosis") == "integer" && T("spectralDecrease") == "integer" && T("danceability") == "integer" && T("dynamicRange") == "null",
+                        $"fixed-dp fields are stored as scaled INTEGER (bpm {T("bpm")}, spread {T("spectralSpread")}, melKurtosis {T("melKurtosis")}, decrease {T("spectralDecrease")}, zero {T("danceability")}, null {T("dynamicRange")})");
+                    assert(os.Db.ExecScalar("SELECT spectralDecrease FROM track_content;") == "-70000" && os.Db.ExecScalar("SELECT danceability FROM track_content;") == "0" && os.Db.ExecScalar("SELECT spectralSpread FROM track_content;") == "225000001234",
+                        $"the stored integer is the decimal × 10^dp (decrease {os.Db.ExecScalar("SELECT spectralDecrease FROM track_content;")}, zero {os.Db.ExecScalar("SELECT danceability FROM track_content;")}, spread {os.Db.ExecScalar("SELECT spectralSpread FROM track_content;")})");
+                    assert(T("mfcc") == "blob" && os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "52", $"fixed-dp vectors are int32 ×10^dp blobs (mfcc {T("mfcc")}, {os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes; was 104 as float64)");
+                    var histLen = int.Parse(os.Db.ExecScalar("SELECT length(bpmHistogram) FROM track_content;") ?? "0");
+                    assert(T("bpmHistogram") == "blob" && histLen == 4 + 3 * 6, $"bpmHistogram is sparse and self-describing: u16 length + u16 count + 3 × (u16 bin, i32 value) = 22 bytes for three non-zeros ({histLen} bytes; was 2,000)");
+                    var entity = os.Db.ExecScalar("SELECT entity_id FROM track_content;")!;
+                    var back = os.Dal.ReadContent(entity)!;
+                    object? V(string n) => back.Values[TrackEntryMapper.ContentIndexOf(n)];
+                    assert(V("spectralSpread") is double ss && ss == 22500000.1234 && V("melKurtosis") is double mk && mk == 1200000000.5678 && V("spectralDecrease") is double sd && sd == -0.00000007
+                        && V("danceability") is double dz && dz == 0 && V("dynamicRange") == null,
+                        $"read-back is EXACT, no six-figure rounding: spread {V("spectralSpread")} (was 22500000 under Sig6), melKurtosis {V("melKurtosis")}, decrease {V("spectralDecrease"):R}, zero {V("danceability")}, null {(V("dynamicRange") == null ? "null" : V("dynamicRange"))}");
+                    // THE 1-ULP CASE, measured on .NET Framework 4.8 x64 (2026-10-15): the literal 0.022454000000000002 IS the double nearest
+                    // 0.022454 (its "R" text is "0.022454"); Math.Round(it, 6) returns the double ONE ULP BELOW ("0.022453999999999998"), and so
+                    // does 22454.0 / 1e6. The parser's output for this family is therefore the lower neighbour, the scan writes that double, and
+                    // the store must reproduce IT — not the shortest-text decimal — for the catalog bytes to round-trip. FromScaled is defined
+                    // as Math.Round((double)s / scale, dp), i.e. whatever Math.Round produces, so the three agree by construction.
+                    string R(double d) => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+                    double parserForm = Math.Round(0.022454000000000002, 6);
+                    assert(V("spectralEnergyStdev") is double se && se == parserForm && se == Math.Round(0.022454, 6) && R(se) == "0.022453999999999998" && R(0.022454000000000002) == "0.022454",
+                        $"the 1-ulp case: the store reproduces the parser's double (Math.Round at 6 dp), one ulp below the shortest-text decimal: read back {R((double)V("spectralEnergyStdev")!)}, parser form {R(parserForm)}, literal {R(0.022454000000000002)}, 22454/1e6 {R(22454.0 / 1e6)}");
+                    var hb = V("bpmHistogram") as double[]; var mb = V("mfcc") as double[];
+                    bool histOk = hb != null && hb.Length == 250; if (histOk) for (int i = 0; i < 250; i++) if (hb![i] != hist[i]) { histOk = false; break; }
+                    bool mfccOk = mb != null && mb.Length == 13; if (mfccOk) for (int i = 0; i < 13; i++) if (mb![i] != f.Mfcc[i]) { mfccOk = false; break; }
+                    assert(histOk && mfccOk, $"the sparse histogram reconstructs all 250 bins exactly and the int32 vector reads back exactly (hist {(hb == null ? "null" : hb.Length.ToString())}, mfcc {(mb == null ? "null" : mb.Length.ToString())})");
+                }
+
+                // ---- (b) migration: a v2 store with rows in the v2 representation migrates on open — backup first, values exact (V15), columns typed
+                var v2dir = Path.Combine(dir, "v2"); Directory.CreateDirectory(v2dir);
+                var v2store = Path.Combine(v2dir, "truedat.db");
+                var row = TrackEntryMapper.ToRow(entries[@"D:\Music\Tool\a.flac"]);
+                int copyCols = TrackEntryMapper.CopyColumnList().Split(',').Length;
+                string Q(int n) { var sb = new System.Text.StringBuilder(); for (int i = 0; i < n; i++) sb.Append(", ?"); return sb.ToString(); }
+                using (var db = SqliteDb.Open(v2store, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, "e1").Bind(2, "k1").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, row, content: true); st.Step(); }
+                    using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (7, NULL, ?" + Q(copyCols) + ");"))
+                    { st.Bind(1, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 2, row, content: false); st.Step(); }
+                    assert(SchemaMigrator.ReadVersion(db) == 2 && db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "real" && db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "104",
+                        $"v2 fixture: REAL columns and float64 blobs before migration (v{SchemaMigrator.ReadVersion(db)}, {db.ExecScalar("SELECT typeof(bpm) FROM track_content;")}, mfcc {db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes)");
+                }
+                using (var os = OpenStore.Open(v2store, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a v2 store migrates to v3 on open ({SchemaMigrator.ReadVersion(os.Db)})");
+                    assert(os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "integer" && os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "52" && os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;") == "integer" && os.Db.ExecScalar("SELECT count(*) FROM track_content;") == "1" && os.Db.ExecScalar("SELECT count(*) FROM track_copy;") == "1",
+                        $"migrated columns are typed and every row survived (bpm {os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;")}, mfcc {os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes, smfmBpm {os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;")}, rows {os.Db.ExecScalar("SELECT count(*) FROM track_content;")}/{os.Db.ExecScalar("SELECT count(*) FROM track_copy;")})");
+                    var back = os.Dal.ReadContent("e1");
+                    int diff = 0; string firstDiff = "";
+                    for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
+                        if (!TrackEntryMapper.ContentEqualExact(k, TrackEntryMapper.ContentValue(row, k), back?.Values[k])) { diff++; if (firstDiff == "") firstDiff = $"{TrackEntryMapper.ContentColumnName(k)}: {TrackEntryMapper.FormatContent(k, TrackEntryMapper.ContentValue(row, k))} -> {TrackEntryMapper.FormatContent(k, back?.Values[k])}"; }
+                    var copyBack = os.Dal.ReadCopyValues(7);
+                    var copyDiff = copyBack == null ? "copy row missing" : TrackEntryMapper.FirstCopyDifference(copyBack, row);
+                    assert(back != null && diff == 0 && copyDiff == null, $"V15: every v2 value lands in its typed column EXACTLY ({diff} content differences{(firstDiff == "" ? "" : "; first: " + firstDiff)}; copy: {copyDiff ?? "equal"})");
+                    assert(os.Db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='ix_content_key';") == "1", "the content-key index exists on the migrated table");
+                }
+                var backups = Directory.GetFiles(v2dir, "truedat.db.bak.v2.*");
+                assert(backups.Length == 1 && new FileInfo(backups[0]).Length > 0, $"the migration wrote a backup of the v2 store first, beside it ({backups.Length} found: {string.Join(", ", backups.Select(Path.GetFileName))})");
+                if (backups.Length == 1)
+                    using (var db = SqliteDb.Open(backups[0], false, exclusiveLocking: false))
+                        assert(SchemaMigrator.ReadVersion(db) == 2 && db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "real" && db.ExecScalar("SELECT count(*) FROM track_content;") == "1",
+                            $"the backup is the untouched v2 store (v{SchemaMigrator.ReadVersion(db)}, {db.ExecScalar("SELECT typeof(bpm) FROM track_content;")})");
+                using (var os = OpenStore.Open(v2store, false, "selftest-v3-again", DateTime.UtcNow.ToString("o")))
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3 && Directory.GetFiles(v2dir, "truedat.db.bak.v2.*").Length == 1, "a second open applies nothing and writes no second backup");
+                assert(SchemaV3Migration.LastCanonicalisationNote == null && SchemaV3Migration.LastRefusedValues == 0,
+                    $"a v2 store whose values were already at their declared precision is migrated with NOTHING canonicalised ({SchemaV3Migration.LastCanonicalisationNote ?? "none"})");
+
+                // ---- (c) keeper (T04 preservation gate): a REAL v2 value with more digits than the writer renders — a scan's raw elapsed
+                // seconds 1.23456 in analysisDuration (writer 1 dp), a tag's float32 97.65432 in smfmBpm (writer 3 dp) — SURVIVES the
+                // migration exactly, because the store holds those two fields at six places (FieldPrecision StoreDp). The fixture is
+                // written in the raw v2 representation (BindLegacyV2), never through ToRow, so nothing pre-rounds it.
+                var v2bdir = Path.Combine(dir, "v2b"); Directory.CreateDirectory(v2bdir);
+                var v2bstore = Path.Combine(v2bdir, "truedat.db");
+                var rawEntry = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\b.mp3"];
+                var rawRow = TrackEntryMapper.ToRow(rawEntry);
+                rawRow[TrackEntryMapper.RowIndexOf("analysisDuration")] = 1.23456;
+                rawRow[TrackEntryMapper.RowIndexOf("smfmBpm")] = 97.65432;
+                using (var db = SqliteDb.Open(v2bstore, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, "e2").Bind(2, "k2").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, rawRow, content: true); st.Step(); }
+                    using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (8, NULL, ?" + Q(copyCols) + ");"))
+                    { st.Bind(1, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 2, rawRow, content: false); st.Step(); }
+                    assert(db.ExecScalar("SELECT analysisDuration FROM track_copy;") == "1.23456" && db.ExecScalar("SELECT smfmBpm FROM track_copy;") == "97.65432", $"raw v2 fixture holds the un-rounded values ({db.ExecScalar("SELECT analysisDuration FROM track_copy;")}, {db.ExecScalar("SELECT smfmBpm FROM track_copy;")})");
+                }
+                using (var os = OpenStore.Open(v2bstore, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
+                {
+                    var copyBack = os.Dal.ReadCopyValues(8)!;
+                    var ad = copyBack[TrackEntryMapper.CopyIndexOf("analysisDuration")]; var sb = copyBack[TrackEntryMapper.CopyIndexOf("smfmBpm")];
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3 && ad is double d1 && d1 == 1.23456 && sb is double d2 && d2 == 97.65432 && SchemaV3Migration.LastCanonicalisationNote == null,
+                        $"V15: the un-rounded v2 values SURVIVE the migration exactly (analysisDuration {ad}, smfmBpm {sb}; stored as {os.Db.ExecScalar("SELECT analysisDuration FROM track_copy;")} / {os.Db.ExecScalar("SELECT smfmBpm FROM track_copy;")} at six places; note {SchemaV3Migration.LastCanonicalisationNote ?? "none"})");
+                    // and the writer still renders them at ITS precision, so the catalog bytes are unchanged by the finer store
+                    var wEntry = new TrackEntry { AnalysisDurationSecs = 1.23456, LastModified = DateTime.UtcNow, Features = new TrackFeatures { Bpm = 120, Key = "C", Mode = "major", Mfcc = new double[13], SmfmBpm = 97.65432, SmfmScores = new[] { 1 }, SmfmChannel = 0 } };
+                    string wj;
+                    using (var ms = new MemoryStream()) { using (var jw = new System.Text.Json.Utf8JsonWriter(ms)) { jw.WriteStartObject(); Program.WriteTrackEntryForStore(jw, @"D:\m\w.flac", wEntry); jw.WriteEndObject(); } wj = System.Text.Encoding.UTF8.GetString(ms.ToArray()); }
+                    assert(wj.Contains("\"analysisDuration\":1.2") && wj.Contains("\"smfmBpm\":97.654"), $"the catalog writer still renders analysisDuration at 1 dp and smfmBpm at 3 dp ({(wj.IndexOf("analysisDuration", StringComparison.Ordinal) is int ai && ai >= 0 ? wj.Substring(ai, Math.Min(26, wj.Length - ai)) : "?")})");
+                }
+
+                // ---- (c2) the gate: a v2 value in any OTHER column that the typed column cannot hold exactly (a hand-built mfcc element with
+                // six decimals; no parser-produced value can be one) makes the migration REFUSE and roll back — the store stays v2, the
+                // backup stays, the message names the column. No retained value is ever rounded away by a migration.
+                var v2ddir = Path.Combine(dir, "v2d"); Directory.CreateDirectory(v2ddir);
+                var v2dstore = Path.Combine(v2ddir, "truedat.db");
+                var badRow = TrackEntryMapper.ToRow(rawEntry);
+                badRow[TrackEntryMapper.RowIndexOf("mfcc")] = new[] { -825.123456, 227.5, 0.333333333 };
+                using (var db = SqliteDb.Open(v2dstore, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, "e4").Bind(2, "k4").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, badRow, content: true); st.Step(); }
+                }
+                bool refused = false; string refusal = "";
+                try { using (var os = OpenStore.Open(v2dstore, false, "selftest-v3", DateTime.UtcNow.ToString("o"))) { } } catch (StoreException ex) { refused = true; refusal = ex.Message; }
+                using (var db = SqliteDb.Open(v2dstore, false, exclusiveLocking: false))
+                    assert(refused && refusal.Contains("mfcc 1") && refusal.Contains("NOT migrated") && SchemaMigrator.ReadVersion(db) == 2 && db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "24",
+                        $"a value the typed column cannot hold makes the migration REFUSE: still v2, float64 blob intact, message names the column (refused {refused}: {refusal}; v{SchemaMigrator.ReadVersion(db)})");
+                assert(Directory.GetFiles(v2ddir, "truedat.db.bak.v2.*").Length == 1, "the pre-migration backup is still there after a refusal");
+
+                // ---- (e) review finding 1: the gate must test REPRESENTABILITY at the store's scale, not double equality. A real v2
+                // value is a shortest-text double (Sig6 -> decimal -> double): double.Parse("0.022454") is the double nearest 0.022454,
+                // and Math.Round(it, 6) is one ulp BELOW it — so `Canon(d) != d` would refuse a genuine store. The decimal 0.022454 IS
+                // representable (22454 at scale 1e6); the migration must proceed and the read-back must be the parser's form.
+                var v2edir = Path.Combine(dir, "v2e"); Directory.CreateDirectory(v2edir);
+                var v2estore = Path.Combine(v2edir, "truedat.db");
+                var realRow = TrackEntryMapper.ToRow(rawEntry);
+                realRow[TrackEntryMapper.RowIndexOf("spectralEnergyStdev")] = double.Parse("0.022454", System.Globalization.CultureInfo.InvariantCulture);
+                realRow[TrackEntryMapper.RowIndexOf("spectralSpread")] = (double)3600111.25m;
+                realRow[TrackEntryMapper.RowIndexOf("mfcc")] = new[] { double.Parse("-825.1235", System.Globalization.CultureInfo.InvariantCulture), 0.3333 };
+                using (var db = SqliteDb.Open(v2estore, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, "e5").Bind(2, "k5").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, realRow, content: true); st.Step(); }
+                }
+                bool refusedE = false; string refusalE = "";
+                try
+                {
+                    using (var os = OpenStore.Open(v2estore, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
+                    {
+                        var back = os.Dal.ReadContent("e5")!;
+                        var se2 = (double)back.Values[TrackEntryMapper.ContentIndexOf("spectralEnergyStdev")]!;
+                        assert(SchemaMigrator.ReadVersion(os.Db) == 3 && se2 == Math.Round(double.Parse("0.022454", System.Globalization.CultureInfo.InvariantCulture), 6) && os.Db.ExecScalar("SELECT spectralEnergyStdev FROM track_content;") == "22454",
+                            $"a shortest-text v2 double in the 1-ulp family migrates (decimal 0.022454 -> 22454) and reads back as the parser's form ({se2:R}, stored {os.Db.ExecScalar("SELECT spectralEnergyStdev FROM track_content;")})");
+                    }
+                }
+                catch (StoreException ex) { refusedE = true; refusalE = ex.Message; }
+                assert(!refusedE, $"the gate does NOT refuse a real v2 store whose values are shortest-text doubles of representable decimals ({refusalE})");
+
+                // ---- (f) review finding 2 (negative zero), MEASURED: the catalog writer's zero branch is sign-blind (-0.0 == 0.0), so a
+                // Math.Round(-tiny, dp) that lands on -0.0 is written "0" — the catalog never carries "-0", and the store's unsigned
+                // integer 0 exports the same bytes. Pinned here so the claim stays measured, not assumed.
+                var zcat = Path.Combine(dir, "zero-mbxmoods.json"); var zstore = Path.Combine(dir, "zero", "truedat.db"); Directory.CreateDirectory(Path.GetDirectoryName(zstore)!);
+                var zentries = FixtureEntries(@"D:\Music");
+                zentries[@"D:\Music\Tool\a.flac"].Features!.SpectralSkewness = -0.0;
+                WriteCatalog(zcat, zentries);
+                var ztext = File.ReadAllText(zcat);
+                assert(ztext.Contains("\"spectralSkewness\":0,") && !ztext.Contains("\"spectralSkewness\":-0"), "the catalog writer prints negative zero as \"0\" — the sign of zero never reaches the catalog's bytes");
+                var zr = ImportCommand.Execute(new ImportOptions { StorePath = zstore, CatalogPath = zcat, LibraryRoot = @"D:\Music" });
+                var zrt = ExportCommand.Roundtrip(zstore, zcat, null);
+                assert(zr.Entries == zentries.Count && zrt.Equal && zrt.Different == 0,
+                    $"a -0.0 feature round-trips through the store as EQUAL ({zrt.Same} same, {zrt.Different} different; first {zrt.FirstDifferentPath})");
+
+                // ---- (g) review finding 3: an out-of-range vector element (int32 ×10^4 holds ±214,748) fails THAT entry, recorded as a
+                // failed run; the rest of the batch is written and a re-run is not poisoned.
+                // Baseline first: the fixture has its own undescribed entries, so "everything else written" is measured, not assumed.
+                var bstore = Path.Combine(dir, "overflow-base", "truedat.db"); Directory.CreateDirectory(Path.GetDirectoryName(bstore)!);
+                foreach (var kv in FixtureEntries(@"D:\Music")) ScanSink.Record(kv.Key, kv.Value);
+                var brr = ScanSink.Flush(bstore, "output-x64.4", FixtureEntries(@"D:\Music").Keys);
+                string baseline;
+                using (var os = OpenStore.Open(bstore, false, "selftest", DateTime.UtcNow.ToString("o"))) baseline = os.Db.ExecScalar("SELECT count(*) FROM track_content;") ?? "?";
+                var ostore = Path.Combine(dir, "overflow", "truedat.db"); Directory.CreateDirectory(Path.GetDirectoryName(ostore)!);
+                var oentries = FixtureEntries(@"D:\Music");
+                oentries[@"D:\Music\Tool\a.flac"].Features!.Mfcc = new[] { 1e9, 0.0 };
+                foreach (var kv in oentries) ScanSink.Record(kv.Key, kv.Value);
+                var orr = ScanSink.Flush(ostore, "output-x64.4", oentries.Keys);
+                using (var os = OpenStore.Open(ostore, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(brr.Ok && orr.Ok && orr.Failures == brr.Failures + 1 && os.Db.ExecScalar("SELECT count(*) FROM track_content;") == (int.Parse(baseline) - 1).ToString() && os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed' AND error_text LIKE '%mfcc%';") == "1",
+                        $"an unrepresentable vector element fails only its entry (ok {orr.Ok}, failures {orr.Failures} vs baseline {brr.Failures}, {os.Db.ExecScalar("SELECT count(*) FROM track_content;")} descriptions vs baseline {baseline}, failed run naming the column: {os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed' AND error_text LIKE '%mfcc%';")})");
+
+                // ---- (h) review finding 4: a corrupt blob is refused loudly, never decoded into a plausible wrong vector.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    os.Db.Exec("UPDATE track_content SET bpmHistogram = X'FA000300';");   // length 250, count 3, no pairs
+                    bool threwH = false; string msgH = "";
+                    try { os.Dal.ReadContent(os.Db.ExecScalar("SELECT entity_id FROM track_content;")!); } catch (StoreException ex) { threwH = true; msgH = ex.Message; }
+                    assert(threwH && msgH.Contains("bpmHistogram"), $"a truncated sparse blob throws a StoreException naming the column ({threwH}: {msgH})");
+                    os.Db.Exec("UPDATE track_content SET mfcc = X'010203';");               // not a multiple of 4
+                    threwH = false; msgH = "";
+                    try { os.Dal.ReadContent(os.Db.ExecScalar("SELECT entity_id FROM track_content;")!); } catch (StoreException ex) { threwH = true; msgH = ex.Message; }
+                    assert(threwH && msgH.Contains("mfcc"), $"an int32 blob of the wrong length throws a StoreException naming the column ({threwH}: {msgH})");
+                }
+
+                // ---- (i) the 1-ulp family re-scans as Unchanged (T01 exact comparison is a fixed point of bind -> read).
+                var ustore = Path.Combine(dir, "ulp", "truedat.db"); Directory.CreateDirectory(Path.GetDirectoryName(ustore)!);
+                var uentries = FixtureEntries(@"D:\Music");
+                uentries[@"D:\Music\Tool\a.flac"].Features!.SpectralEnergyStdev = double.Parse("0.022454", System.Globalization.CultureInfo.InvariantCulture);
+                ScanSink.Record(@"D:\Music\Tool\a.flac", uentries[@"D:\Music\Tool\a.flac"]);
+                var u1 = ScanSink.Flush(ustore, "output-x64.4", uentries.Keys);
+                ScanSink.Record(@"D:\Music\Tool\a.flac", uentries[@"D:\Music\Tool\a.flac"]);
+                var u2 = ScanSink.Flush(ustore, "output-x64.4", uentries.Keys);
+                assert(u1.Ok && u2.Ok && u2.Unchanged == 1 && u2.Remeasured == 0, $"a re-scan of a 1-ulp-family value is Unchanged, not a perpetual remeasure ({u2.Unchanged} unchanged, {u2.Remeasured} remeasured)");
+
+                // ---- (d) the migration's transaction rolls back whole when the data step fails after moving rows (same seam shape as v2)
+                var v2cdir = Path.Combine(dir, "v2c"); Directory.CreateDirectory(v2cdir);
+                var v2cstore = Path.Combine(v2cdir, "truedat.db");
+                using (var db = SqliteDb.Open(v2cstore, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, "e3").Bind(2, "k3").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, row, content: true); st.Step(); }
+                }
+                SchemaV3Migration.FailAfterMoveForTest = true;
+                bool threw3 = false; string threwMsg = "";
+                try { using (var os = OpenStore.Open(v2cstore, false, "selftest-v3", DateTime.UtcNow.ToString("o"))) { } } catch (Exception ex) { threw3 = true; threwMsg = ex.Message; }
+                finally { SchemaV3Migration.FailAfterMoveForTest = false; }
+                using (var db = SqliteDb.Open(v2cstore, false, exclusiveLocking: false))
+                    assert(threw3 && SchemaMigrator.ReadVersion(db) == 2 && db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "real" && db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_content_v3';") == "0",
+                        $"a v3 migration that fails after moving rows rolls back whole: still v2, REAL columns, no _v3 table (threw {threw3}: {threwMsg}; v{SchemaMigrator.ReadVersion(db)})");
+                assert(Directory.GetFiles(v2cdir, "truedat.db.bak.v2.*").Length == 1, "the backup written before the failed migration is still there (the operator's untouched copy)");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>T04: the store path's one number rule is now the field's DECLARED precision (FieldPrecision), applied by ToRow; six
+        /// significant figures (the former CanonicalPrecision, DBA finding F1) is gone from the store path and from the exporter, so the
+        /// store reproduces the parsed decimal exactly and the export writes the same bytes the scan writer would.</summary>
+        static void TestStorePrecision(Action<bool, string> assert)
+        {
             var e = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
             e.Features!.SpectralEnergyStdev = 0.022454000000000002; e.Features.SpectralSpread = 3600111.25; e.Features.Mfcc = new[] { -825.70000000000005, 227.5, 1.0 / 3.0 };
             var row = TrackEntryMapper.ToRow(e);
             double Col(string name) => (double)TrackEntryMapper.ContentValue(row, TrackEntryMapper.ContentIndexOf(name))!;
-            assert(Col("spectralEnergyStdev") == CanonicalPrecision.Sig6(0.022454) && Col("spectralSpread") == 3600110.0, $"ToRow: REAL columns are canonical ({Col("spectralEnergyStdev")}, {Col("spectralSpread")})");
+            assert(Col("spectralEnergyStdev") == 0.022454 && Col("spectralEnergyStdev") == Math.Round(0.022454000000000002, 6), $"ToRow canonicalises at the field's dp (6): the 17-digit double is the double of 0.022454 ({Col("spectralEnergyStdev"):R})");
+            assert(Col("spectralSpread") == 3600111.25, $"ToRow keeps every figure the field's dp allows: 3600111.25 stays 3600111.25, not 3600110 ({Col("spectralSpread"):R})");
             var mf = (double[])TrackEntryMapper.ContentValue(row, TrackEntryMapper.ContentIndexOf("mfcc"))!;
-            assert(mf.Length == 3 && mf[0] == -825.7 && mf[2] == 0.333333, $"ToRow: f64 vector elements are canonical ({mf[0]}, {mf[2]})");
+            assert(mf.Length == 3 && mf[0] == -825.7 && mf[1] == 227.5 && mf[2] == 0.3333, $"ToRow canonicalises vector elements at the field's dp (4) ({mf[0]:R}, {mf[1]:R}, {mf[2]:R})");
+            assert(Math.Round(0.022454000000000002, 6) == Math.Round(BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.022454000000000002) - 1), 6),
+                "two doubles one bit apart canonicalise to the same double at the field's dp");
 
-            // The writer: in store mode two entries whose doubles differ by a bit write the same bytes, at 6 sf; in default
-            // mode (the scan's catalog) the writer is untouched and still tells them apart - the hub's bytes do not move.
-            var a = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; var b = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
-            a.Features!.SpectralEnergyStdev = 0.022454000000000002; b.Features!.SpectralEnergyStdev = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.022454000000000002) - 1);
-            a.Features.SpectralSpread = 3600111.25; b.Features.SpectralSpread = 3600111.25;
-            // EntryJson is the store's unit (canonical); the default writer is reached through the shim with the flag off.
+            // The exporter renders through the ordinary catalog writer: the bytes for a store entry are the bytes the scan would write.
+            var a = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
+            a.Features!.SpectralEnergyStdev = 0.022454000000000002; a.Features.SpectralSpread = 3600111.25;
             string DefaultJson(TrackEntry t) { using var ms = new MemoryStream(); using (var jw = new System.Text.Json.Utf8JsonWriter(ms)) { jw.WriteStartObject(); Program.WriteTrackEntryForStore(jw, @"D:\Music\Tool\a.flac", t); jw.WriteEndObject(); } return System.Text.Encoding.UTF8.GetString(ms.ToArray()); }
-            assert(DefaultJson(a).Contains("\"spectralSpread\":3600111.25,"), "default writer (the catalog): untouched - still writes the 7th and 8th figures the scan computed");
-            Program.StoreCanonicalNumbers = true;
-            try
-            {
-                string ca = EntryJson(@"D:\Music\Tool\a.flac", a), cb = EntryJson(@"D:\Music\Tool\a.flac", b);
-                assert(ca == cb, "store mode: the two render identically");
-                assert(ca.Contains("\"spectralEnergyStdev\":0.022454,") && ca.Contains("\"spectralSpread\":3600110,"), $"store mode: six significant figures, exact text ({(ca.IndexOf("spectralEnergyStdev", StringComparison.Ordinal) is int i && i >= 0 ? ca.Substring(i, Math.Min(60, ca.Length - i)) : "?")})");
-                assert(!ca.Contains("00000000"), "store mode: no round-trip noise anywhere in the entry");
-            }
-            finally { Program.StoreCanonicalNumbers = false; }
+            string dj = DefaultJson(a), ej = EntryJson(@"D:\Music\Tool\a.flac", a);
+            assert(dj.Contains("\"spectralSpread\":3600111.25,"), "the catalog writer still writes every figure the scan computed");
+            assert(ej.Contains("\"spectralSpread\":3600111.25,") && !ej.Contains("\"spectralSpread\":3600110,"), $"the export's entry rendering is the catalog writer's — no six-figure rewrite ({(ej.IndexOf("spectralSpread", StringComparison.Ordinal) is int i && i >= 0 ? ej.Substring(i, Math.Min(40, ej.Length - i)) : "?")})");
         }
 
         static void Block(Action<bool, string> assert, string name, Action body)

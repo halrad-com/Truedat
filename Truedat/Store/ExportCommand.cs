@@ -108,11 +108,9 @@ namespace Truedat.Store
                 global::Truedat.Edges.EdgeCompanion.WriteTempFromStore(os.Dal, tmp, producerVersion, "essentia_streaming_extractor_music " + build, origin.Generation);
                 return true;
             };
-            // The store's canonical precision (six significant figures, exact text) on the way out; the writer itself is unchanged.
-            Program.StoreCanonicalNumbers = true;
-            PublicationResult? published;
-            try { published = Program.SaveResultsPublished(outFull, dict, origin, companion); }
-            finally { Program.StoreCanonicalNumbers = false; }
+            // T04: no store-side rendering rule any more — the store holds each field at its declared precision, so the ordinary catalog
+            // writer produces the same bytes the scan would.
+            PublicationResult? published = Program.SaveResultsPublished(outFull, dict, origin, companion);
             if (published != null) StoreLog.Info($"export: published generation {published.Generation} (sidecar {published.SidecarSha256.Substring(0, 12)}…, companion {(hasEdges ? "written" : "none — no edge rows at " + producerVersion)})");
 
             var moves = ReadKeyMoves(os.Dal);
@@ -190,25 +188,20 @@ namespace Truedat.Store
             return r;
         }
 
-        /// <summary>The catalog writer's bytes for one entry at the store's canonical precision — the unit of the round-trip
-        /// gate. Both sides (the loaded catalog entry and the store's) render through the same six-figure rule, so a one-bit
-        /// difference between a parsed double and a computed one (C6a: "0.022454" vs "0.022454000000000002") is not a difference;
-        /// a changed measurement still is.</summary>
+        /// <summary>The catalog writer's bytes for one entry — the unit of the round-trip gate. T04: no rendering rule sits between
+        /// the writer and the bytes any more. Both sides (the loaded catalog entry and the store's) go through the same writer; the
+        /// store side holds each field at its declared precision (the double Math.Round(v, dp) produced), which is the same double the
+        /// catalog's text parses to, so the C6a one-bit case ("0.022454" vs "0.022454000000000002") renders identically because the
+        /// VALUES are identical, not because a rule hid the difference. A changed measurement still differs.</summary>
         internal static string EntryJson(string path, TrackEntry entry)
         {
             using var ms = new MemoryStream();
-            bool prior = Program.StoreCanonicalNumbers;
-            Program.StoreCanonicalNumbers = true;
-            try
+            using (var jw = new Utf8JsonWriter(ms))
             {
-                using (var jw = new Utf8JsonWriter(ms))
-                {
-                    jw.WriteStartObject();
-                    Program.WriteTrackEntryForStore(jw, path, entry);
-                    jw.WriteEndObject();
-                }
+                jw.WriteStartObject();
+                Program.WriteTrackEntryForStore(jw, path, entry);
+                jw.WriteEndObject();
             }
-            finally { Program.StoreCanonicalNumbers = prior; }
             return Encoding.UTF8.GetString(ms.ToArray());
         }
 

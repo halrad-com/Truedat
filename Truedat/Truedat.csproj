@@ -115,6 +115,7 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
     <!-- v2 store schema: the versioned DDL is the cross-repo contract; embedded so the single exe carries it. -->
     <EmbeddedResource Include="Store\Schema\v1.sql" LogicalName="Truedat.Store.Schema.v1.sql" />
     <EmbeddedResource Include="Store\Schema\v2.sql" LogicalName="Truedat.Store.Schema.v2.sql" />
+    <EmbeddedResource Include="Store\Schema\v3.sql" LogicalName="Truedat.Store.Schema.v3.sql" />
   </ItemGroup>
 
 </Project>

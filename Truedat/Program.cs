@@ -4197,7 +4197,7 @@ namespace Truedat
                     {
                         Features = features,
                         LastModified = afLastMod,
-                        AnalysisDurationSecs = afSw.Elapsed.TotalSeconds,
+                        AnalysisDurationSecs = Math.Round(afSw.Elapsed.TotalSeconds, FieldPrecision.StoreDp("analysisDuration")),   // at the STORE's 6 places (not the writer's 1), so the scan's 1-dp text and the export's Round(stored, 1) agree on every tie (review finding 5)
                         FileMd5 = afFileMd5,
                         AudioStreamSha256 = string.IsNullOrEmpty(afAudioStreamSha256) ? null : afAudioStreamSha256,
                         AudioStreamSha256Source = afAudioStreamSha256Source,
@@ -6240,7 +6240,7 @@ namespace Truedat
                         {
                             Features = feat,
                             LastModified = lastMod,
-                            AnalysisDurationSecs = analyzeDuration.TotalSeconds,
+                            AnalysisDurationSecs = Math.Round(analyzeDuration.TotalSeconds, FieldPrecision.StoreDp("analysisDuration")),   // the store's 6 places, so scan text == export text on ties
                             FileMd5 = fileMd5,
                             AudioStreamSha256 = string.IsNullOrEmpty(audioStreamSha256) ? null : audioStreamSha256,
                             AudioStreamSha256Source = audioStreamSha256Source,
@@ -21874,10 +21874,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// excluded on purpose: (double)((decimal)(-0.0)) == -0.0 compares TRUE under ==,
         /// so the decimal path would silently launder the sign bit of a negative zero —
         /// both zeros take the plain double writer instead (same bytes as today).</summary>
-        /// <summary>v2 store (operator, 2026-10-12): when true, the catalog writer renders every floating-point feature at the
-        /// store's canonical precision (six significant figures, exact text). Set ONLY by the store's export and round-trip,
-        /// never by a scan — the scan's catalog bytes are the hub's contract and do not move.</summary>
-        internal static bool StoreCanonicalNumbers;
+        // T04 (store v3): the six-significant-figure store rendering (StoreCanonicalNumbers / CanonicalPrecision, 2026-10-12) is gone —
+        // the store holds every field at its declared precision, so the export writes the same bytes the scan writer does.
 
         static bool TryShortestDecimal(double v, out decimal m)
         {
@@ -21900,7 +21898,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// (same bytes as today).</summary>
         static void WriteShortestNumber(Utf8JsonWriter jw, double v)
         {
-            if (StoreCanonicalNumbers && !double.IsNaN(v) && !double.IsInfinity(v)) { jw.WriteNumberValue(global::Truedat.Store.CanonicalPrecision.Exact(v)); return; }
             if (TryShortestDecimal(v, out var m)) jw.WriteNumberValue(m);
             else jw.WriteNumberValue(v);
         }
@@ -21908,7 +21905,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Property-name overload of WriteShortestNumber.</summary>
         static void WriteShortestNumber(Utf8JsonWriter jw, string name, double v)
         {
-            if (StoreCanonicalNumbers && !double.IsNaN(v) && !double.IsInfinity(v)) { jw.WriteNumber(name, global::Truedat.Store.CanonicalPrecision.Exact(v)); return; }
             if (TryShortestDecimal(v, out var m)) jw.WriteNumber(name, m);
             else jw.WriteNumber(name, v);
         }

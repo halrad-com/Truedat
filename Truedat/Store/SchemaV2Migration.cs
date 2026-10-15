@@ -50,7 +50,7 @@ namespace Truedat.Store
                 {
                     var entity = sel.GetString(0)!;
                     var display = sel.GetString(2) ?? "";
-                    var values = TrackEntryMapper.ReadContentValues(sel, 3);
+                    var values = TrackEntryMapper.ReadContentValuesLegacyV2(sel, 3);   // v1 rows are REAL / float64 (the v2 representation); the v3 decoder must not touch them (keeper, T04 WIP review)
                     if (entity != currentEntity) { currentEntity = entity; primary = values; continue; }   // lowest location id = the description
                     bool anyConflict = false, anyNoise = false;
                     for (int k = 0; k < values.Length; k++)

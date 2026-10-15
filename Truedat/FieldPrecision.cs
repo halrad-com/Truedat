@@ -5,18 +5,26 @@ namespace Truedat
 {
     /// <summary>The one place a numeric field's precision is declared (store v3 sprint, T03 / finding F7). The extractor parser
     /// and the catalog writer read their decimal places from here (T03), so a field is rounded the same way wherever it is
-    /// rendered and a schema-walk self-test can refuse a numeric column nobody declared. The store mapper and the exporter still
-    /// apply CanonicalPrecision.Sig6 until T04 replaces that with types derived from this registry.
+    /// rendered and a schema-walk self-test can refuse a numeric column nobody declared. Since T04 the store mapper derives its
+    /// column types and scales from here too (scaled INTEGER at StoreDp, int32 vectors, the sparse histogram); the former
+    /// six-significant-figure store rule (CanonicalPrecision, 2026-10-12) is gone.
     /// Before T03 the ~90 decimal-place literals lived at the call sites (<c>Opt</c>/<c>OptN</c>, the core initializer, the
     /// vector folds, the writer) and nothing asserted they agreed.</summary>
     internal static class FieldPrecision
     {
-        internal enum Shape { Int, Fixed, FixedVec, IntVec }
+        // SparseFixedVec (T04a): a mostly-zero fixed-dp vector stored self-describing — u16 length, u16 count, then (u16 index, int32 scaled
+        // value) per non-zero — reconstructing the full vector exactly; bpmHistogram is ~94 % zeros (1,992 B/track as f64 -> ~100 B).
+        internal enum Shape { Int, Fixed, FixedVec, IntVec, SparseFixedVec }
 
         internal readonly struct Spec
         {
-            public readonly Shape Shape; public readonly int Dp;
-            public Spec(Shape shape, int dp) { Shape = shape; Dp = dp; }
+            /// <summary>Dp = the decimal places the catalog WRITER renders (the hub's bytes). StoreDp = the places the STORE holds
+            /// (≥ Dp; T04). They differ only for the two writer-side fields a scan sets from an unrounded source: analysisDuration
+            /// (raw elapsed seconds) and smfmBpm (a tag's float32). v2 stores hold those at up to six significant figures, and the
+            /// operator's rule is that no retained value is lost, so the typed column keeps six places and the writer still rounds
+            /// to its own. Every parser field is rounded at Dp on parse, so Dp == StoreDp there.</summary>
+            public readonly Shape Shape; public readonly int Dp; public readonly int StoreDp;
+            public Spec(Shape shape, int dp, int? storeDp = null) { Shape = shape; Dp = dp; StoreDp = storeDp ?? dp; }
             public override string ToString() => Shape == Shape.Int || Shape == Shape.IntVec ? Shape.ToString() : $"{Shape}({Dp})";
         }
 
@@ -39,11 +47,13 @@ namespace Truedat
               "fingerprint_v1_bitDepth", "fingerprint_v1_bitrate", "fingerprint_v1_mp3LameTag_infoTagRevision", "fingerprint_v1_mp3LameTag_vbrMethodCode",
               "fingerprint_v1_mp3LameTag_lowpassHz", "fingerprint_v1_mp3LameTag_encoderDelay", "fingerprint_v1_mp3LameTag_encoderPadding", "fingerprint_v1_mp3LameTag_musicCrc");
             // 1 dp: Hz and bpm-like counts per minute; the frame-stdev of the centroid is Hz too; analysisDuration is the writer's own 1 dp.
-            F(1, "bpm", "spectralCentroid", "spectralRolloff", "bpmFirstPeak", "bpmSecondPeak", "spectralCentroidStdev", "analysisDuration");
+            F(1, "bpm", "spectralCentroid", "spectralRolloff", "bpmFirstPeak", "bpmSecondPeak", "spectralCentroidStdev");
+            // Writer-side fields a scan sets from an UNROUNDED source: the writer renders 1 / 3 dp, the store holds 6 (see Spec).
+            t.Add("analysisDuration", new Spec(Shape.Fixed, 1, storeDp: 6));
             // 2 dp: dB / LU values and the few coarse scalars.
             F(2, "loudness", "onsetRate", "dynamicRange", "loudnessMomentary", "loudnessShortTerm", "replayGain",
                  "spectralComplexity", "hfc", "beatsLoudness", "hpcpCrest", "tuningFrequency", "bitUsage_effectiveBits", "hfSpectralStructure_peakToMean");
-            F(3, "smfmBpm");
+            t.Add("smfmBpm", new Spec(Shape.Fixed, 3, storeDp: 6));
             // 4 dp: the default for everything else the parser reads.
             F(4, "spectralFlux", "danceability", "dissonance", "pitchSalience", "chordsChangesRate",
                  "silenceRate20dB", "silenceRate30dB", "silenceRate60dB", "spectralEntropy", "spectralKurtosis", "spectralSkewness", "spectralSpread", "spectralStrongPeak",
@@ -65,10 +75,26 @@ namespace Truedat
             // 12 dp: spectralDecrease lives at ~1e-9 — 6 dp rounded every track to 0 (CLAUDE.md, 8c06ec2).
             F(12, "spectralDecrease");
             VF(4, "mfcc", "chordsHistogram", "hpcp12", "thpcp12", "mfccStdev",
-                  "spectralContrastCoeffs", "spectralContrastValleys", "beatsLoudnessBandRatio", "bpmHistogram", "gfcc");
+                  "spectralContrastCoeffs", "spectralContrastValleys", "beatsLoudnessBandRatio", "gfcc");
+            t.Add("bpmHistogram", new Spec(Shape.SparseFixedVec, 4));   // T04a: ~94 % zeros — sparse in the store, the same 4 dp everywhere else
             VI("smfmScores");
             return t;
         }
+
+        /// <summary>10^dp as a long, for the store's scaled-integer representation of a Fixed / FixedVec / SparseFixedVec field (T04);
+        /// 1 for Int / IntVec. A value v is stored as round(v × Scale) and read back as stored / Scale — the same double
+        /// Math.Round(v, dp) produced, because .NET's Math.Round(double, digits) is itself round(v × 10^dp) / 10^dp.</summary>
+        internal static long Scale(string name)
+        {
+            var s = TryGet(name, out var spec) ? spec : throw new InvalidOperationException($"FieldPrecision: no entry for '{name}'");
+            long p = 1; for (int i = 0; i < s.StoreDp; i++) p *= 10;
+            return p;
+        }
+
+        /// <summary>The decimal places the STORE holds (≥ the writer's Dp; equal for every parser field).</summary>
+        internal static int StoreDp(string name) => TryGet(name, out var s) ? s.StoreDp : throw new InvalidOperationException($"FieldPrecision: no entry for '{name}'");
+
+        internal static Shape ShapeOf(string name) => TryGet(name, out var spec) ? spec.Shape : throw new InvalidOperationException($"FieldPrecision: no entry for '{name}'");
 
         internal static bool TryGet(string name, out Spec spec) => Table.TryGetValue(name, out spec);
 

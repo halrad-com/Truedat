@@ -81,7 +81,7 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 ### Store (preview, v2) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
 
 **`STORE.md` is the reference** for the store: what the tables hold, where the file lives, the edges
-layer (`--edges`, `--edges-export`), the six-significant-figure precision rule, and how to open
+layer (`--edges`, `--edges-export`), the typed columns (every field at its declared precision; schema v3), and how to open
 the file with DB Browser for SQLite or `sqlite3`. This section is the summary.
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
