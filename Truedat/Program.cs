@@ -780,7 +780,8 @@ namespace Truedat
             Console.WriteLine("                      JSON would change nothing). Prints how many entries carry scored");
             Console.WriteLine("                      12-TONE data before acting — those lose the fused mood model's");
             Console.WriteLine("                      SMFM input. Add --dry-run to report and write nothing. SMFM is");
-            Console.WriteLine("                      read from file tags, so scan with --no-smfm to keep it removed.");
+            Console.WriteLine("                      read from file tags and off by default, so it stays removed unless");
+            Console.WriteLine("                      a scan runs with --smfm.");
             Console.WriteLine("  --prune-entry <path>  Remove exactly this catalog entry. Repeat the flag for");
             Console.WriteLine("                      several. Matching ignores case and slash direction (the");
             Console.WriteLine("                      catalog's own path comparer); a path that matches nothing is");
@@ -836,10 +837,11 @@ namespace Truedat
             Console.WriteLine("                      (the batch saves one SMB round trip per cached track; this reverts it)");
             Console.WriteLine("  --no-bitusage       Suppress ComputeBitUsage (omits bitUsage JSON block)");
             Console.WriteLine("  --no-hf-analysis    Suppress ComputeHfAnalysis (omits hfEnergyRatio + hfSpectralStructure)");
-            Console.WriteLine("  --no-smfm           Suppress every Sony 12-TONE (SMFM) read (omits smfm* JSON fields).");
-            Console.WriteLine("                      SMFM comes from the file's tag, not from analysis, so this is what");
-            Console.WriteLine("                      makes a --strip-smfm durable: without it the next cache MISS on a");
-            Console.WriteLine("                      file still carrying the block puts the data straight back.");
+            Console.WriteLine("  --smfm              Read Sony 12-TONE (SMFM) tags. OFF by default: nothing picks or matches");
+            Console.WriteLine("                      on SMFM any more. Blocks already in the catalog are kept either way");
+            Console.WriteLine("                      (cache hits carry them forward). --refresh-smfm also turns it on.");
+            Console.WriteLine("  --no-smfm           Suppress every SMFM read, overriding --smfm / config `smfm` (omits");
+            Console.WriteLine("                      smfm* JSON fields on newly analysed tracks).");
             Console.WriteLine("                      Refuses to run alongside --refresh-smfm (they contradict).");
             Console.WriteLine("  --edges             With --store: on every analysed track, also fold the first and last 30 s");
             Console.WriteLine("                      (loudness series, beats, key, texture, fades, PCM crest/transition) into");
@@ -940,7 +942,7 @@ namespace Truedat
             "no-quick-cache", "no-dir-batch", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
             "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
-            "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "version", "v",
+            "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
             "config", "no-config", "fixup-after-scan",
@@ -2370,7 +2372,7 @@ namespace Truedat
                     // read verb before the first scan answers from the catalog, and a per-file mode without --moods skips edges.
                     _storeFromConfig = configArgs.Contains("--store", StringComparer.OrdinalIgnoreCase) && !args.Contains("--store", StringComparer.OrdinalIgnoreCase);
                     _edgesFromConfig = configArgs.Contains("--edges", StringComparer.OrdinalIgnoreCase) && !args.Contains("--edges", StringComparer.OrdinalIgnoreCase);
-                    args = configArgs.Concat(args).ToArray();
+                    args = DropConfigArgsOverriddenBy(configArgs, args).Concat(args).ToArray();
                 }
             }
 
@@ -2401,6 +2403,7 @@ namespace Truedat
             bool edgesExportMode = false;         // --edges-export [path]: mbxedges.v1.json from the store (default: beside the catalog)
             string? edgesExportPath = null;
             bool noStore = false, noEdges = false; // --no-store / --no-edges: one-run overrides of the config keys `store` / `edges`
+            bool smfmOn = false;                  // --smfm: read Sony SMFM tags (off by default since 2026-10-14; see ResolveNoSmfm)
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
             bool listReviewMode = false;  // --list-review: read-only, names what is in the review ledger (--stats counts it but cannot show it)
@@ -2746,6 +2749,7 @@ namespace Truedat
                 else if (canonical == "no-bitusage") _noBitUsage = true;
                 else if (canonical == "no-hf-analysis") _noHfAnalysis = true;
                 else if (canonical == "no-smfm") _noSmfm = true;
+                else if (canonical == "smfm") smfmOn = true;
                 else if (canonical == "version" || canonical == "v")
                 {
                     Console.WriteLine(VersionInfo.Display);
@@ -2835,6 +2839,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
                 return;
             }
+            _noSmfm = ResolveNoSmfm(smfmOn, _noSmfm, _refreshSmfm);
 
             if (selfTest)
             {
@@ -5205,12 +5210,12 @@ namespace Truedat
                 Console.WriteLine($"  Source staging: enabled, dir={_stageOpts.StageDir}");
             }
 
-            // Signal-extraction opt-outs — only print when at least one is set.
-            if (_noBitUsage || _noHfAnalysis || _noSmfm)
+            // Signal extraction — only print when something differs from the defaults (bitUsage/HF on, SMFM off).
+            if (_noBitUsage || _noHfAnalysis || !_noSmfm)
             {
                 string bu = _noBitUsage   ? "DISABLED" : "enabled";
                 string hf = _noHfAnalysis ? "DISABLED" : "enabled";
-                string sm = _noSmfm       ? "DISABLED" : "enabled";
+                string sm = _noSmfm       ? "off" : "on";
                 Console.WriteLine($"  Signal extraction: bitUsage={bu} hfAnalysis={hf} smfm={sm}");
             }
             Console.WriteLine($"  Catalog:    {(catalogPath != null ? catalogPath : "not found — only used by --synthesize to build a synthetic test library; safe to ignore for a normal scan")}");
@@ -8906,6 +8911,21 @@ namespace Truedat
         /// data is newly added this scan, so the caller can surface a "+smfm" marker.
         /// Pass the prior entry's SmfmScores so the marker fires once (when the file first
         /// gains SMFM) instead of on every rescan of an already-tagged track.</summary>
+        /// <summary>Whether this run reads SMFM at all. Off unless asked (operator 2026-10-14): no consumer picks or matches
+        /// on it any more and nothing yet decodes what the slots mean, so it is parked dark — kept, opt-in, never removed by
+        /// a default. --smfm / config `smfm` / --refresh-smfm (an explicit re-read request) turn it on; --no-smfm wins.
+        /// Data already in a catalog is untouched either way: cache hits carry the block forward.</summary>
+        internal static bool ResolveNoSmfm(bool smfm, bool noSmfm, bool refreshSmfm) => noSmfm || !(smfm || refreshSmfm);
+
+        /// <summary>A typed --smfm must beat a config `no-smfm` (the command line wins over the file), and the parser alone
+        /// cannot do that because --no-smfm wins whenever both are present. So the config's --no-smfm is dropped before the
+        /// operator's tokens are appended. Nothing else is touched.</summary>
+        internal static string[] DropConfigArgsOverriddenBy(string[] configArgs, string[] typedArgs)
+        {
+            if (!typedArgs.Any(a => CanonicalFlag(a) == "smfm")) return configArgs;
+            return configArgs.Where(a => CanonicalFlag(a) != "no-smfm").ToArray();
+        }
+
         static bool ApplySmfmInPlace(TrackFeatures f, string filePath, int[]? priorScores = null)
         {
             // --no-smfm suppresses every ingest route, including the --refresh-smfm
@@ -9663,8 +9683,8 @@ namespace Truedat
                 Console.WriteLine();
                 Console.WriteLine($"Note: {plan.WithData:N0} entr{(plan.WithData == 1 ? "y" : "ies")} will drop to the essentia-only mood head,");
                 Console.WriteLine("      which is the weaker one for valence. SMFM is read from the file's Sony tag,");
-                Console.WriteLine("      so a later analysis of a file that still carries the block puts it back —");
-                Console.WriteLine("      scan with --no-smfm if the removal is meant to stay.");
+                Console.WriteLine("      so a later analysis with --smfm of a file that still carries the block puts");
+                Console.WriteLine("      it back. SMFM is off by default, so without --smfm the removal stays.");
             }
 
             if (dryRun)
@@ -15143,6 +15163,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.WriteAllText(cfgFile, "{ \"store\": false, \"edges\": false }");
                     Assert(TruedatConfig.BuildArgs(TruedatConfig.Load(cfgDir).Values).Length == 0, "config: store = false / edges = false emit nothing");
                     Assert(KnownFlags.Contains("no-store") && KnownFlags.Contains("no-edges"), "config: --no-store and --no-edges exist as the one-run overrides");
+                    // SMFM is read only when asked (operator 2026-10-14): --smfm, config `smfm`, or --refresh-smfm turn it on;
+                    // --no-smfm always wins; a typed --smfm beats a config no-smfm (the command line wins over the file).
+                    Assert(ResolveNoSmfm(smfm: false, noSmfm: false, refreshSmfm: false), "smfm: off by default - nothing asked, nothing read");
+                    Assert(!ResolveNoSmfm(smfm: true, noSmfm: false, refreshSmfm: false), "smfm: --smfm turns the read on");
+                    Assert(!ResolveNoSmfm(smfm: false, noSmfm: false, refreshSmfm: true), "smfm: --refresh-smfm is an explicit read request and turns the read on");
+                    Assert(ResolveNoSmfm(smfm: true, noSmfm: true, refreshSmfm: false), "smfm: --no-smfm wins over --smfm");
+                    Assert(KnownFlags.Contains("smfm"), "smfm: --smfm exists as the opt-in flag");
+                    File.WriteAllText(cfgFile, "{ \"smfm\": true }");
+                    var smfmCfg = TruedatConfig.Load(cfgDir);
+                    var smfmArgs = TruedatConfig.BuildArgs(smfmCfg.Values);
+                    Assert(smfmCfg.Errors.Count == 0 && smfmArgs.Length == 1 && smfmArgs[0] == "--smfm",
+                        $"config: smfm = true emits --smfm ({string.Join(" ", smfmArgs)}{(smfmCfg.Errors.Count > 0 ? "; " + smfmCfg.Errors[0] : "")})");
+                    Assert(DropConfigArgsOverriddenBy(new[] { "--no-smfm", "--keep-backups", "3" }, new[] { "--smfm" }).SequenceEqual(new[] { "--keep-backups", "3" }),
+                        "smfm: a typed --smfm drops the config's --no-smfm and nothing else");
+                    Assert(DropConfigArgsOverriddenBy(new[] { "--no-smfm" }, new string[0]).SequenceEqual(new[] { "--no-smfm" }),
+                        "smfm: with nothing typed the config's --no-smfm stands");
                     // --budget forms (the library scan's session cap).
                     Assert(ParseBudget("90s") == TimeSpan.FromSeconds(90) && ParseBudget("30m") == TimeSpan.FromMinutes(30) && ParseBudget("2h") == TimeSpan.FromHours(2)
                         && ParseBudget("1h30m") == TimeSpan.FromMinutes(90) && ParseBudget("120") == TimeSpan.FromSeconds(120),
@@ -16388,10 +16424,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // fan-out one. Same file, same reader, only the switch differs — so a
                     // guard deleted from ApplySmfmInPlace fails here by name instead of
                     // silently re-populating a catalog the operator just stripped.
+                    var prevNoSmfm = _noSmfm;
+                    _noSmfm = false;   // SMFM is off by default since 2026-10-14; this case is the opted-in reader route
                     var ingested = new TrackFeatures();
                     Assert(ApplySmfmInPlace(ingested, tmpM4a) && ingested.HasSmfm,
-                        "no-smfm: by default ApplySmfmInPlace ingests the block");
-                    var prevNoSmfm = _noSmfm;
+                        "no-smfm: with SMFM turned on, ApplySmfmInPlace ingests the block");
                     _noSmfm = true;
                     try
                     {

@@ -5,7 +5,7 @@ Truedat is a Windows .NET CLI that extracts **per-track mood** across a music li
 **Mood is the core job, and truedat captures it two independent ways:**
 
 - **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract the per-track acoustic feature set (see [Extracted Features](#extracted-features) for the exact counts). The primary mood read. Truedat writes features, not an interpretation: the valence/arousal mapping is made downstream by the consumer (MBXHub/AutoQ) from these fields. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
-- **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
+- **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). **Off by default**: it is read only with `--smfm` (or `truedat --config smfm true`), because nothing picks or matches on it today and nothing yet decodes what the slots mean.
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
 
@@ -360,9 +360,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           and that count is wildly library-dependent (~2% of one library,
                           93% of another) so it is reported as a count, never a share you
                           have to remember. Add --dry-run to report and write nothing.
-                          SMFM is READ from the file's Sony tag and never computed, so a
-                          later analysis of a file still carrying the block puts it back —
-                          scan with --no-smfm if the removal is meant to stay.
+                          SMFM is READ from the file's Sony tag and never computed, and it
+                          is off by default, so the removal stays unless a later scan runs
+                          with --smfm on a file still carrying the block.
   --prune-excluded [path] Remove catalog entries that an exclusion rule now covers — the
                           ones scanned before the rule existed, which exclusions otherwise
                           only ever keep out of FUTURE scans. Rules are the sole authority:
@@ -475,15 +475,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --budget <time>         Library scan: after 90s / 30m / 2h / 1h30m, finish the tracks in hand, save and
                           exit. Run the same command again to continue.
   --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
-  --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
-                          and the --refresh-smfm backfill alike (omits the smfm* fields).
-                          Unlike its two siblings above this saves no meaningful time: SMFM
-                          is read from the file's tag, never computed. It exists to make a
-                          --strip-smfm durable, because without it the next cache MISS on
-                          any file still carrying the Sony block puts the data straight
-                          back. Refuses to run alongside --refresh-smfm: one forces the
-                          re-read the other suppresses, and a silent no-op is worse than a
-                          refusal.
+  --smfm                  Read Sony SMFM (12-TONE) tags. OFF by default (2026-10-14): nothing
+                          picks or matches on SMFM today. Config key `smfm` makes it the
+                          instance default; --refresh-smfm also turns it on. Blocks already
+                          in the catalog are kept either way (cache hits carry them forward).
+  --no-smfm               Suppress every SMFM read, overriding --smfm and config `smfm` —
+                          the cache-miss fan-out and the --refresh-smfm backfill alike. A
+                          typed --smfm still beats a config `no-smfm`. Refuses to run
+                          alongside --refresh-smfm: one forces the re-read the other
+                          suppresses, and a silent no-op is worse than a refusal.
   --file-md5              Maintain the whole-file fileMd5 field (default off). Off means it is
                           never written: fresh analysis omits it, cache-tier refreshes drop it,
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
@@ -1286,9 +1286,11 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 
 ### Sony SMFM (12-TONE)
 
-When the source file carries a Sony SMFM block (embedded by Sony Music Center) truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant slot index) and `smfmBpm`. Slot *names* never appear: a 2026-06-27 device test refuted the slot→name mapping (Sony's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so `smfmChannelName` is kept as a back-compat property, held permanently null, and omitted from the JSON. Any mood label is derived downstream by MBXHub. Renamed from `sensme*` on 2026-06-28 — the reader still accepts the old keys and `--migrate` converts them.
+**Off by default** (2026-10-14): SMFM is read only with `--smfm`, config `smfm`, or `--refresh-smfm`; `--no-smfm` overrides all three. Blocks already in a catalog are kept — cache hits carry them forward — so turning it off removes nothing.
 
-truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, made durable by `--no-smfm`. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
+When the source file carries a Sony SMFM block (embedded by Sony Music Center) and SMFM is on, truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant slot index) and `smfmBpm`. Slot *names* never appear: a 2026-06-27 device test refuted the slot→name mapping (Sony's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so `smfmChannelName` is kept as a back-compat property, held permanently null, and omitted from the JSON. Any mood label is derived downstream by MBXHub. Renamed from `sensme*` on 2026-06-28 — the reader still accepts the old keys and `--migrate` converts them.
+
+truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, which stays removed because SMFM is off by default. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
 
 ### `fingerprint.v1.codec` — two buckets that refuse to guess
 

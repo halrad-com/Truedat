@@ -12,6 +12,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
+- **SMFM off by default.** Sony 12-TONE tags are read only with `--smfm` (new), config `smfm`, or
+  `--refresh-smfm`; `--no-smfm` still overrides. SMFM blocks already in a catalog are kept. Newly analysed
+  tracks carry no `smfm*` fields unless SMFM is turned on.
+
 - **`--stats` no longer prints the store's `store open` line inside its summary** (`--audit` still shows it).
 - **Console lines name their file.** `FAILED:` lines in the library scan carry artist, title and file name;
   the ffmpeg transcode and downmix announcements and the under-decode retry name the source file. In a

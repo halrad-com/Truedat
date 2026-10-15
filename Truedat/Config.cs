@@ -15,8 +15,8 @@ namespace Truedat
     /// from doing what it says.
     ///
     /// Keys ARE flag names, so there is no second vocabulary and no mapping table to drift.
-    /// The consequence: a negative flag stays negative, so "always skip SMFM" is
-    /// <c>"no-smfm": true</c>.
+    /// The consequence: a negative flag stays negative, so "always skip the HF signals" is
+    /// <c>"no-hf-analysis": true</c>.
     ///
     /// Per-machine policy needs nothing extra — each machine has its own install, so it has
     /// its own config.
@@ -70,7 +70,10 @@ namespace Truedat
             new Setting { Key = "no-quick-cache",  Kind = Kind.Bool, Default = "false", Help = "disable the head-64k quick cache tier" },
             new Setting { Key = "no-bitusage",     Kind = Kind.Bool, Default = "false", Help = "skip the bitUsage signal (one ffmpeg pass per track)" },
             new Setting { Key = "no-hf-analysis",  Kind = Kind.Bool, Default = "false", Help = "skip the HF signals (one ffmpeg pass per track)" },
-            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Default = "false", Help = "never read Sony SMFM tags" },
+            // SMFM is parked dark (operator 2026-10-14): off unless `smfm` or --smfm turns it on. `no-smfm` stays as the
+            // override that beats `smfm`, and so an existing config carrying it still loads.
+            new Setting { Key = "smfm",            Kind = Kind.Bool, Default = "false", Help = "read Sony SMFM tags (off unless set; --no-smfm overrides for one run)" },
+            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Default = "false", Help = "never read Sony SMFM tags, even when smfm is set" },
             new Setting { Key = "file-md5",        Kind = Kind.Bool, Default = "false", Help = "compute and store the whole-file MD5" },
             new Setting { Key = "enableshortfiles",Kind = Kind.Bool, Default = "false", Help = "analyze files under the short-file threshold" },
             new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Default = "false", Help = "do not hold the machine awake during a scan" },
