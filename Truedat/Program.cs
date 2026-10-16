@@ -19872,6 +19872,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ["C:/m/b.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 90, Key = "A", Mode = "minor", Hpcp12 = hp1, KeyVoteEdma = Kv("A", "minor"), Genre = "Techno" } },
                     ["C:/m/c.flac"] = new TrackEntry { Features = new TrackFeatures { Bpm = 0, Key = "", Mode = "" } },
                 };
+                // restfulbee 053 (2026-10-16): the sidecar is an index of the CATALOG, so it applies the catalog writer's SMFM gate — smfmBpm is
+                // written only inside the smfmScores block. A track with a GBPM but no scores has no smfm keys in the catalog, and must read as
+                // "no SMFM" (NaN) from the sidecar too; otherwise a hub booting sidecar-first shows a value the full catalog read then removes.
+                {
+                    var gate = new Dictionary<string, TrackEntry>
+                    {
+                        ["C:/m/no-scores.mp3"] = new TrackEntry { Features = new TrackFeatures { Bpm = 100, Key = "C", Mode = "major", SmfmBpm = 88.76543, SmfmScores = null } },
+                        ["C:/m/scores.mp3"] = new TrackEntry { Features = new TrackFeatures { Bpm = 100, Key = "C", Mode = "major", SmfmBpm = 97.654, SmfmScores = new[] { 1, 2 } } },
+                    };
+                    var gPath = Path.Combine(Path.GetTempPath(), ".truedat-selftest-mbxs-gate-" + Guid.NewGuid().ToString("N") + ".mbxs");
+                    try
+                    {
+                        CatalogSidecar.Write(gPath, gate);
+                        var g = CatalogSidecar.Read(gPath);
+                        int ins = g.IndexOf("C:/m/no-scores.mp3"), iws = g.IndexOf("C:/m/scores.mp3");
+                        Assert(ins >= 0 && float.IsNaN(g.SmfmBpm[ins]) && g.HasSmfm[ins] == 0,
+                               $"sidecar: smfmBpm without smfmScores is NaN — the catalog writer emits smfmBpm only inside the scores block (got {(ins >= 0 ? g.SmfmBpm[ins].ToString("R") : "-")})");
+                        Assert(iws >= 0 && Math.Abs(g.SmfmBpm[iws] - 97.654f) < 1e-3, "sidecar: smfmBpm with scores still round-trips");
+                    }
+                    finally { try { File.Delete(gPath); } catch { } }
+                }
                 var scPath = Path.Combine(Path.GetTempPath(), ".truedat-selftest-mbxs-" + Guid.NewGuid().ToString("N") + ".mbxs");
                 try
                 {

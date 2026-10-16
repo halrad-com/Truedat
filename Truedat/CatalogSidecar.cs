@@ -313,7 +313,9 @@ namespace Truedat
                     r.Dissonance = F(f.Dissonance);
                     r.PitchSalience = F(f.PitchSalience);
                     r.ChordsChanges = F(f.ChordsChangesRate);
-                    r.SmfmBpm = FN(f.SmfmBpm);
+                    // The catalog writer emits smfmBpm only inside the smfmScores block, so the sidecar — an index of the catalog — applies the same
+                    // gate (restfulbee 053): no scores, no SMFM, NaN. Layout unchanged (NaN already means "no SMFM tag").
+                    r.SmfmBpm = f.SmfmScores != null ? FN(f.SmfmBpm) : float.NaN;
                     r.GenreId = GenreId(f.Genre, genreIndex, genres);
                     r.SpectralSkewness = FN(f.SpectralSkewness);
                     r.SpectralEntropy = FN(f.SpectralEntropy);
