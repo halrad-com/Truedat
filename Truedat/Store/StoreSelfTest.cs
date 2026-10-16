@@ -585,6 +585,35 @@ namespace Truedat.Store
                 assert(Copy("smfmBpm") == "88250000" && Copy("smfmChannelName") == "modern" && Copy("smfmChannel") == "4",
                     $"smfmBpm / smfmChannelName / smfmChannel: a valid modern value beats the legacy one (bpm {Copy("smfmBpm")}, name {Copy("smfmChannelName")}, channel {Copy("smfmChannel")})");
 
+                // Keeper 078 / TDA 088 — the name pair. The reader has always treated an EMPTY modern smfmChannelName as "no value here"
+                // and fallen through to the legacy name; 027d43a's shared selector picked the empty modern key instead (read as none,
+                // counted observed), so an import could clear a stored name. The rule now treats "" like null, in the reader and the mask.
+                string? NameRun() => CopyExpr("p.smfmChannelName || '@' || p.run_id");
+                Write(entries, t => t["smfmChannelName"] = "seeded");
+                Import();
+                var runSeeded = Copy("run_id");
+                assert(Copy("smfmChannelName") == "seeded", $"name seed stored ({Copy("smfmChannelName")})");
+                Write(entries, t => { t["smfmChannelName"] = ""; t["sensmeChannelName"] = "legacyName"; });
+                Import();
+                assert(Copy("smfmChannelName") == "legacyName" && Copy("run_id") != runSeeded,
+                    $"an empty modern smfmChannelName beside a legacy name reads the legacy name (as the reader always has) and writes it under the import's run ({NameRun()}, seeded run {runSeeded})");
+                var runLegacyName = Copy("run_id");
+                Write(entries, t => t["smfmChannelName"] = "");
+                Import();
+                assert(Copy("smfmChannelName") == "legacyName" && Copy("run_id") == runLegacyName,
+                    $"an empty modern smfmChannelName alone carries no name: nothing observed, the stored name and its run stay ({NameRun()})");
+                Write(entries, t => { t["smfmChannelName"] = ""; t["sensmeChannelName"] = ""; });
+                Import();
+                assert(Copy("smfmChannelName") == "legacyName" && Copy("run_id") == runLegacyName,
+                    $"both names empty: nothing observed, the stored name and its run stay ({NameRun()})");
+                Write(entries);
+                Import();
+                assert(Copy("smfmChannelName") == "legacyName" && Copy("run_id") == runLegacyName,
+                    $"both name keys missing: nothing observed, the stored name and its run stay ({NameRun()})");
+                Write(entries, t => { t["smfmChannelName"] = "modernName"; t["sensmeChannelName"] = "legacyName2"; });
+                Import();
+                assert(Copy("smfmChannelName") == "modernName", $"a non-empty modern name beats the legacy one ({NameRun()})");
+
                 // 4. Explicit values are observations and replace: zero, empty, a disagreeing duration — no blanket ignore-zero rule.
                 entries[P].AnalysisDurationSecs = 9.1;
                 Write(entries, t => { t["trackId"] = 0; t["artist"] = ""; t["fileMd5"] = ""; Fp(t)["bitDepth"] = 0; Fp(t)["encoder"] = ""; t["sensmeChannel"] = 5; });

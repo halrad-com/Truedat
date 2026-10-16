@@ -22717,14 +22717,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// mask (TrackEntryMapper.ObservedCopyMask), so the two can never disagree about what an entry carries (keeper 073: the
         /// reader stopped at <c>"smfmScores": null</c> while the mask went on to a legacy <c>sensmeScores</c> array, and the import
         /// wrote the reader's null over the stored scores). The modern <c>smfm*</c> key when present and not JSON null, else its
-        /// legacy <c>sensme*</c> name under the same rule — the precedence <c>--migrate</c>'s <c>SmfmScoresFromJson</c> already uses.</summary>
+        /// legacy <c>sensme*</c> name under the same rule — the precedence <c>--migrate</c>'s <c>SmfmScoresFromJson</c> already uses.
+        /// An EMPTY string counts as no value, like null (keeper 078): the reader has always fallen through an empty modern
+        /// <c>smfmChannelName</c> to the legacy name, and the mask must not count an empty name as an observation that clears one.</summary>
         internal static bool SelectSmfmKey(JsonElement track, string modernKey, out JsonElement value)
         {
-            if (track.TryGetProperty(modernKey, out value) && value.ValueKind != JsonValueKind.Null) return true;
-            if (track.TryGetProperty("sensme" + modernKey.Substring("smfm".Length), out value) && value.ValueKind != JsonValueKind.Null) return true;
+            if (track.TryGetProperty(modernKey, out value) && SmfmValuePresent(value)) return true;
+            if (track.TryGetProperty("sensme" + modernKey.Substring("smfm".Length), out value) && SmfmValuePresent(value)) return true;
             value = default;
             return false;
         }
+        static bool SmfmValuePresent(JsonElement v) => v.ValueKind != JsonValueKind.Null && !(v.ValueKind == JsonValueKind.String && v.GetString()!.Length == 0);
 
         /// <summary>Read one profile's vote from the nested keyVotes block.
         /// Returns null when the block or profile is absent (legacy entries).</summary>
