@@ -400,6 +400,19 @@ namespace Truedat.Edges
                 assert(dHead.GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Null && dHead.GetProperty("key").ValueKind == System.Text.Json.JsonValueKind.Object
                        && dHead.GetProperty("bpm").ValueKind == System.Text.Json.JsonValueKind.Object && dHead.GetProperty("loudness").ValueKind == System.Text.Json.JsonValueKind.Object,
                     $"default-row companion: texture null, key/bpm/loudness present (texture {dHead.GetProperty("texture").ValueKind})");
+                // A04 (d), ruled by the operator 2026-10-16 ("yes to A04 (d)"): every folded edge window carries `centroid` and `dissonance` as DIRECT
+                // keys — default and opt-in rows alike — so a hub gets the regional values without the texture block. Unknown keys are ignored by
+                // the v1 reader, so the file stays v1-valid. Same 4 dp as texture.spectralMean, from the same summary (SpectralMean[0] / [5]).
+                // ShaB's fold (no PCM pass) has the same frames as Sha1's, so its spectral means equal the opt-in track's texture.spectralMean.
+                var refMean = tex.GetProperty("spectralMean");
+                assert(dHead.TryGetProperty("centroid", out var dc) && dc.ValueKind == System.Text.Json.JsonValueKind.Number && dc.GetDouble() == refMean[0].GetDouble()
+                       && dHead.TryGetProperty("dissonance", out var dd) && dd.GetDouble() == refMean[5].GetDouble(),
+                    $"A04 (d): the default-row window carries centroid / dissonance directly ({(dHead.TryGetProperty("centroid", out var dc2) ? dc2.ToString() : "absent")} / {(dHead.TryGetProperty("dissonance", out var dd2) ? dd2.ToString() : "absent")}; expected {refMean[0]} / {refMean[5]})");
+                assert(head.GetProperty("centroid").GetDouble() == tex.GetProperty("spectralMean")[0].GetDouble() && head.GetProperty("dissonance").GetDouble() == tex.GetProperty("spectralMean")[5].GetDouble(),
+                    "A04 (d): an opt-in window carries the same two keys, equal to its texture.spectralMean[0] / [5]");
+                var uHead = tracks.GetProperty(ShaC).GetProperty("head");
+                assert(uHead.TryGetProperty("centroid", out var uc) && uc.ValueKind == System.Text.Json.JsonValueKind.Null && uHead.GetProperty("dissonance").ValueKind == System.Text.Json.JsonValueKind.Null,
+                    "A04 (d): an edge that did not fold (unavailable) writes centroid / dissonance null, like its other blocks");
                 assert(head.GetProperty("divergence").GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Number && t1.GetProperty("divergence").GetProperty("harmony").GetDouble() > 0.3,
                     "divergence: per edge (vs the whole) and per track (head vs tail)");
                 var tB = tracks.GetProperty(ShaB);

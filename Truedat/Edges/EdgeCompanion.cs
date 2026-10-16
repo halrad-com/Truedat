@@ -153,6 +153,12 @@ namespace Truedat.Edges
                 w.WriteEndObject();
             }
             else w.WriteNullValue();
+            // A04 (d) — ruled by the operator 2026-10-16 ("yes to A04 (d)"): the window's spectral centroid and dissonance as DIRECT keys, on
+            // every folded edge (default and opt-in capture alike), so a hub has the regional values without the texture block. Same summary
+            // and 4 dp as texture.spectralMean[0] / [5]. The v1 reader ignores unknown keys, so the file stays v1-valid.
+            bool hasSummary = folded && e.Whole != null && e.Whole.SpectralMean.Length >= 6;
+            Num(w, "centroid", hasSummary ? e.Whole!.SpectralMean[0] : (double?)null, 4);
+            Num(w, "dissonance", hasSummary ? e.Whole!.SpectralMean[5] : (double?)null, 4);
             w.WritePropertyName("divergence");
             if (folded && e.Divergence != null) WriteDivergence(w, e.Divergence); else w.WriteNullValue();
             w.WritePropertyName("rms");
