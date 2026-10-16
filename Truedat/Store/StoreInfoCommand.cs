@@ -159,7 +159,9 @@ namespace Truedat.Store
             { st.Bind(1, edgesVersion); st.Step(); i.EdgeTracks = st.GetInt64(0); }
             using (var st = db.Prepare("SELECT count(DISTINCT content_hash) FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.status' AND txt = 'unavailable';"))
             { st.Bind(1, edgesVersion); st.Step(); i.EdgeUnavailable = st.GetInt64(0); }
-            i.EdgeBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(length(vec)), 0) FROM value WHERE producer_key = 'edges';") ?? "0");
+            // v4 (T05): the typed edge rows' blobs (HPCP + opt-in arrays) plus the whole-track vector rows.
+            i.EdgeBytes = long.Parse(db.ExecScalar("SELECT coalesce(sum(length(vec)), 0) FROM value WHERE producer_key = 'edges';") ?? "0")
+                        + long.Parse(db.ExecScalar("SELECT coalesce(sum(coalesce(length(hpcp), 0) + coalesce(length(arrays), 0)), 0) FROM edge;") ?? "0");
             i.EdgeRunsOk = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'ok';") ?? "0");
             i.EdgeRunsFailed = long.Parse(db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed';") ?? "0");
             var edgeMs = new List<long>();

@@ -49,6 +49,7 @@ namespace Truedat.Store
                 SchemaMigrator.Apply(db, truedatVersion);
                 var dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);
+                VerdictStore.EnsureCurrent(db, dal, nowUtc);   // T19: derive / re-derive the verdict projection when the build's tags differ
                 StoreLog.Info($"store open: {full} (schema v{SchemaMigrator.ReadVersion(db)}, sqlite {probe.VersionText}, machine {machine.Id} on {machine.CreatedByHost})");
                 return new OpenStore(db, dal, machine, probe, full);
             }

@@ -6,10 +6,16 @@ using Truedat.Store;
 
 namespace Truedat.Edges
 {
-    /// <summary>S2 C4 — the ruled row in the store. Per track: 2 <c>segment</c> rows (head and tail, <c>set_key</c> = the
-    /// producer version), ONE packed <c>value</c> row per edge (<c>edge.row</c>, scalars + series + the edge's summary + its
-    /// three sub-window summaries), plus three whole-track rows (status, duration, head-vs-tail divergence). Keyed by
-    /// content hash so a second copy of the same audio costs nothing.
+    /// <summary>S2 C4 / store-v3 T05 — the edge in the store (schema v4). Per track: 2 <c>segment</c> rows (head and tail, <c>set_key</c>
+    /// = the producer version), ONE typed <c>edge</c> row per edge — the DEFAULT row is the scalars the readers use plus the edge's
+    /// whole-summary HPCP (36 × float32); the opt-in capture (series, beats, sub-window summaries, MFCC/spectral vectors) rides in the
+    /// row's <c>arrays</c> column as the edge-row/1 blob below — plus whole-track <c>value</c> rows (status, duration, extractor,
+    /// head-vs-tail divergence). Keyed by content hash so a second copy of the same audio costs nothing. Capture is STICKY per track
+    /// (operator, 2026-10-15: "sticky per track. keep what we captured"): a row that holds arrays keeps getting them on every later
+    /// write whatever the flag says; only <see cref="DropArrays"/> (the explicit discard verb) clears them. The flag gates
+    /// PERSISTENCE only — the fold computes the same arrays either way, because the scalars derive from them.
+    ///
+    /// (Before v4 the whole edge was one packed <c>value</c> row, <c>edge.row</c>; SchemaV4Migration moves each into this table.)
     ///
     /// Why packed, not one row per field — measured 2026-10-12 in a vacuumed store: one value row per field (131 rows)
     /// cost 43 KB/track; one packed row per segment with 8 segments (sub-windows as rows) cost 11.5 KB; the plan's budget
@@ -39,14 +45,22 @@ namespace Truedat.Edges
         const long WholeTrack = 0;
         static readonly byte[] EdgeMagic = { (byte)'E', (byte)'D', (byte)'G', 1 };
 
-        /// <summary>Returns the number of value rows written (0 for a failed result).</summary>
-        internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r)
+        /// <summary>The arrays blob's format name (edge.arrays_dtype).</summary>
+        internal const string ArraysDtype = "edge-row/1";
+
+        /// <summary>The capture flag in force for writes that do not say (the scan's `--edge-arrays` / config `edgeArrays`; default OFF —
+        /// the config Default is the only default). Set once by the scan before any write.</summary>
+        internal static bool CaptureArraysDefault;
+
+        /// <summary>Returns the number of rows written — whole-track value rows plus edge rows (0 for a failed result).
+        /// <paramref name="captureArrays"/> null = <see cref="CaptureArraysDefault"/>. A row that already holds arrays keeps them (sticky).</summary>
+        internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r, bool? captureArrays = null)
         {
             if (r.Status == "failed") return 0;
             dal.EnsureProducer(ProducerKey, r.ProducerVersion, "analysis", needsAudio: true);
             int n = 0;
-            void Put(long seg, string field, double? num, string? txt, byte[]? vec, long? dims, string? unit)
-            { dal.UpsertValue(contentKey, contentKeyKind, seg, field, ProducerKey, r.ProducerVersion, runId, num, txt, vec, dims, unit); n++; }
+            void Put(long seg, string field, double? num, string? txt, byte[]? vec, long? dims, string? unit, string? dtype = null)
+            { dal.UpsertValue(contentKey, contentKeyKind, seg, field, ProducerKey, r.ProducerVersion, runId, num, txt, vec, dims, unit, dtype); n++; }
             Put(WholeTrack, "edges.status", null, r.Status, null, null, null);
             Put(WholeTrack, "edges.durationMs", r.DurationMs, null, null, null, null);
             if (!string.IsNullOrEmpty(r.Extractor)) Put(WholeTrack, "edges.extractor", null, r.Extractor, null, null, null);   // the frames depend on the build (review M4)
@@ -54,15 +68,70 @@ namespace Truedat.Edges
             if (r.HeadTail != null)
             {
                 var d = r.HeadTail;
-                Put(WholeTrack, "edges.headTail", null, null, F32Bytes(new[] { (float)(d.Loudness ?? double.NaN), (float)(d.Texture ?? double.NaN), (float)(d.Harmony ?? double.NaN) }), 3, "loudness,texture,harmony");
+                Put(WholeTrack, "edges.headTail", null, null, F32Bytes(new[] { (float)(d.Loudness ?? double.NaN), (float)(d.Texture ?? double.NaN), (float)(d.Harmony ?? double.NaN) }), 3, "loudness,texture,harmony", "f32");
             }
+            bool capture = captureArrays ?? CaptureArraysDefault;
+            bool sticky = !capture && ArraysCaptured(dal, contentKey, r.ProducerVersion);   // "keep what we captured"
+            var now = DateTime.UtcNow.ToString("o");
             foreach (var e in new[] { r.Head, r.Tail })
             {
-                long seg = dal.UpsertSegment(contentKey, contentKeyKind, r.ProducerVersion, e.Kind, 0, e.StartMs, e.EndMs);
-                var blob = PackEdge(e);
-                Put(seg, EdgeField, null, null, blob, blob.Length, "edge-row/v1");
+                dal.UpsertSegment(contentKey, contentKeyKind, r.ProducerVersion, e.Kind, 0, e.StartMs, e.EndMs);
+                UpsertEdgeRow(dal, contentKey, contentKeyKind, r.ProducerVersion, runId, e, capture || sticky ? PackEdge(e) : null, now);
+                n++;
             }
             return n;
+        }
+
+        static float F(double? v) => (float)(v ?? double.NaN);
+        static object? R(double? v) { if (!v.HasValue || double.IsNaN(v.Value) || double.IsInfinity(v.Value)) return null; return (double)(float)v.Value; }   // the fold's float32, widened
+
+        /// <summary>The typed default row (plus the arrays blob when captured). The scalars are the fold's float32 values widened to REAL,
+        /// exactly what the edge-row/1 blob holds for them, so a row reads back the same with or without its arrays.</summary>
+        internal static void UpsertEdgeRow(StoreDal dal, string contentKey, string contentKeyKind, string producerVersion, long? runId, EdgeRow e, byte[]? arrays, string now)
+        {
+            var w = e.Whole; var k = w?.Key; var l = e.Loudness;
+            byte[]? hpcp = null;
+            if (w != null) { var f = new float[36]; for (int i = 0; i < 36; i++) f[i] = i < w.HpcpMean.Length ? (float)w.HpcpMean[i] : float.NaN; hpcp = F32Bytes(f); }
+            dal.ExecBound("INSERT INTO edge(content_hash, content_hash_kind, producer_version, kind, run_id, status, start_ms, end_ms, " +
+                "key_name, key_scale, key_code, key_strength, key_agreement, key_votes, bpm, bpm_beats, bpm_regularity, " +
+                "start_lufs, end_lufs, mean_lufs, fade_ms, silence_ms, silence_source, crest_db, transition_ms, div_loudness, div_texture, div_harmony, " +
+                "centroid, dissonance, hpcp, arrays, arrays_dtype, updated_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "ON CONFLICT(content_hash, producer_version, kind) DO UPDATE SET content_hash_kind = excluded.content_hash_kind, run_id = excluded.run_id, status = excluded.status, " +
+                "start_ms = excluded.start_ms, end_ms = excluded.end_ms, key_name = excluded.key_name, key_scale = excluded.key_scale, key_code = excluded.key_code, " +
+                "key_strength = excluded.key_strength, key_agreement = excluded.key_agreement, key_votes = excluded.key_votes, bpm = excluded.bpm, bpm_beats = excluded.bpm_beats, " +
+                "bpm_regularity = excluded.bpm_regularity, start_lufs = excluded.start_lufs, end_lufs = excluded.end_lufs, mean_lufs = excluded.mean_lufs, fade_ms = excluded.fade_ms, " +
+                "silence_ms = excluded.silence_ms, silence_source = excluded.silence_source, crest_db = excluded.crest_db, transition_ms = excluded.transition_ms, " +
+                "div_loudness = excluded.div_loudness, div_texture = excluded.div_texture, div_harmony = excluded.div_harmony, centroid = excluded.centroid, " +
+                "dissonance = excluded.dissonance, hpcp = excluded.hpcp, arrays = excluded.arrays, arrays_dtype = excluded.arrays_dtype, updated_utc = excluded.updated_utc;",
+                contentKey, contentKeyKind, producerVersion, e.Kind, runId, e.Status == "short-context" ? "short-context" : "ok", (long)e.StartMs, (long)e.EndMs,
+                k?.Name, k?.Scale, k?.Code, k == null ? null : R(k.Strength), k == null ? null : (object)(long)k.Agreement, k == null ? null : (object)(long)k.VotesPresent,
+                e.Bpm == null ? null : R(e.Bpm.Value), e.Bpm == null ? null : (object)(long)e.Bpm.Beats, e.Bpm == null ? null : R(e.Bpm.Regularity),
+                l == null ? null : R(l.StartLufs), l == null ? null : R(l.EndLufs), l == null ? null : R(l.MeanLufs), l?.FadeMs == null ? null : (object)(long)l.FadeMs.Value,
+                l == null ? null : (object)(long)l.SilenceMs, l?.SilenceSource,
+                e.Rms == null ? null : R(e.Rms.CrestDb), e.Rms == null ? null : (object)(long)e.Rms.TransitionMs,
+                e.Divergence == null ? null : R(e.Divergence.Loudness), e.Divergence == null ? null : R(e.Divergence.Texture), e.Divergence == null ? null : R(e.Divergence.Harmony),
+                w == null || w.SpectralMean.Length < 1 ? null : R(w.SpectralMean[0]), w == null || w.SpectralMean.Length < 6 ? null : R(w.SpectralMean[5]),
+                hpcp, arrays, arrays == null ? null : ArraysDtype, now);
+        }
+
+        /// <summary>True when any edge row of this content at this producer version holds the opt-in arrays (sticky capture).</summary>
+        internal static bool ArraysCaptured(StoreDal dal, string contentKey, string producerVersion)
+            => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;", contentKey, producerVersion) > 0;
+
+        internal sealed class DropArraysResult { public long Rows, Tracks, Bytes; }
+
+        /// <summary>The explicit discard verb: clears the opt-in arrays (and their dtype) from every edge row that holds them, keeping the
+        /// row and its scalars. <paramref name="dryRun"/> counts what it would clear and changes nothing. The caller owns the transaction.</summary>
+        internal static DropArraysResult DropArrays(StoreDal dal, bool dryRun)
+        {
+            var r = new DropArraysResult
+            {
+                Rows = long.Parse(dal.Db.ExecScalar("SELECT count(*) FROM edge WHERE arrays IS NOT NULL;") ?? "0"),
+                Tracks = long.Parse(dal.Db.ExecScalar("SELECT count(DISTINCT content_hash) FROM edge WHERE arrays IS NOT NULL;") ?? "0"),
+                Bytes = long.Parse(dal.Db.ExecScalar("SELECT coalesce(sum(length(arrays)), 0) FROM edge;") ?? "0"),
+            };
+            if (!dryRun) dal.Db.Exec("UPDATE edge SET arrays = NULL, arrays_dtype = NULL WHERE arrays IS NOT NULL;");
+            return r;
         }
 
         internal static EdgeFoldResult? Read(StoreDal dal, string contentKey, string producerVersion)
@@ -81,16 +150,49 @@ namespace Truedat.Edges
                 r.Head.Status = r.Tail.Status = "unavailable"; r.Head.EndMs = r.Tail.StartMs = (int)Math.Round(r.DurationMs / 2.0); r.Tail.EndMs = r.DurationMs;
                 return r;
             }
-            foreach (var s in dal.ReadSegments(contentKey, producerVersion))
+            using (var st = dal.Db.Prepare("SELECT kind, status, start_ms, end_ms, key_name, key_scale, key_code, key_strength, key_agreement, key_votes, bpm, bpm_beats, bpm_regularity, " +
+                "start_lufs, end_lufs, mean_lufs, fade_ms, silence_ms, silence_source, crest_db, transition_ms, div_loudness, div_texture, div_harmony, centroid, dissonance, hpcp, arrays " +
+                "FROM edge WHERE content_hash = ? AND producer_version = ?;"))
             {
-                var row = s.Kind == "head" ? r.Head : s.Kind == "tail" ? r.Tail : null;
-                if (row == null || s.Ordinal != 0) continue;
-                var v = dal.ReadValues(contentKey, s.Id, ProducerKey, producerVersion);
-                if (!v.TryGetValue(EdgeField, out var ev) || ev.Vec == null) continue;
-                UnpackEdge(ev.Vec, row); row.StartMs = s.StartMs; row.EndMs = s.EndMs;
-                if (row.Whole != null) { row.Whole.StartMs = s.StartMs; row.Whole.EndMs = s.EndMs; }
+                st.Bind(1, contentKey); st.Bind(2, producerVersion);
+                while (st.Step())
+                {
+                    var kind = st.GetString(0);
+                    var row = kind == "head" ? r.Head : kind == "tail" ? r.Tail : null;
+                    if (row == null) continue;
+                    int startMs = (int)st.GetInt64(2), endMs = (int)st.GetInt64(3);
+                    var arrays = st.IsNull(27) ? null : st.GetBlob(27);
+                    if (arrays != null) UnpackEdge(arrays, row);   // the opt-in capture: the whole edge, scalars included (identical to the columns)
+                    else ReadDefaultRow(st, row);
+                    row.Status = st.GetString(1) ?? "ok";
+                    row.StartMs = startMs; row.EndMs = endMs;
+                    if (row.Whole != null) { row.Whole.StartMs = startMs; row.Whole.EndMs = endMs; }
+                }
             }
             return r;
+        }
+
+        /// <summary>The default row: every scalar and the whole-summary HPCP; series, beats and sub-windows empty; MFCC and the other nine
+        /// spectral means/spreads NaN (not captured) — centroid and dissonance at their places in <c>SpectralMean</c> (0 and 5).</summary>
+        static void ReadDefaultRow(Truedat.Store.SqliteStmt st, EdgeRow row)
+        {
+            double? D(int c) => st.IsNull(c) ? (double?)null : st.GetDouble(c);
+            int? I(int c) => st.IsNull(c) ? (int?)null : (int)st.GetInt64(c);
+            var w = new EdgeWindowSummary();
+            for (int i = 0; i < w.MfccMean.Length; i++) { w.MfccMean[i] = double.NaN; w.MfccSpread[i] = double.NaN; }
+            for (int i = 0; i < w.SpectralMean.Length; i++) { w.SpectralMean[i] = double.NaN; w.SpectralSpread[i] = double.NaN; }
+            w.SpectralMean[0] = D(24) ?? double.NaN; w.SpectralMean[5] = D(25) ?? double.NaN;
+            var hp = st.IsNull(26) ? null : st.GetBlob(26);
+            if (hp != null && hp.Length == 36 * 4) { var f = F32s(hp); for (int i = 0; i < 36; i++) w.HpcpMean[i] = f[i]; }
+            else for (int i = 0; i < 36; i++) w.HpcpMean[i] = double.NaN;
+            if (!st.IsNull(4)) w.Key = new EdgeKeyVote { Name = st.GetString(4) ?? "", Scale = st.GetString(5) ?? "", Code = st.GetString(6) ?? "", Strength = D(7) ?? 0, Agreement = I(8) ?? 0, VotesPresent = I(9) ?? 0 };
+            row.Whole = w;
+            if (D(10) is double bpm) row.Bpm = new EdgeBpm { Value = bpm, Beats = I(11) ?? 0, Regularity = D(12) ?? 0 };
+            if (I(17) is int silence) row.Loudness = new EdgeLoudness { StartLufs = D(13), EndLufs = D(14), MeanLufs = D(15), FadeMs = I(16), SilenceMs = silence, SilenceSource = st.GetString(18) ?? "ebu" };
+            if (I(20) is int transition) row.Rms = new EdgeRms { CrestDb = D(19), TransitionMs = transition };
+            if (!st.IsNull(21) || !st.IsNull(22) || !st.IsNull(23)) row.Divergence = new EdgeDivergence { Loudness = D(21), Texture = D(22), Harmony = D(23) };
+            row.MomentaryCentiDb = Array.Empty<short>(); row.ShortTermCentiDb = Array.Empty<short>();
+            row.BeatsMs = Array.Empty<int>(); row.BeatsLoudness = Array.Empty<float>(); row.Sub = Array.Empty<EdgeWindowSummary>();
         }
 
         // ---------------------------------------------------------------- the whole result as bytes (the sink's spill, review I3)
@@ -170,7 +272,7 @@ namespace Truedat.Edges
 
         // ---------------------------------------------------------------- unpack
 
-        static void UnpackEdge(byte[] blob, EdgeRow row)
+        internal static void UnpackEdge(byte[] blob, EdgeRow row)
         {
             var r = new BinaryReader(new MemoryStream(blob));
             Magic(r, EdgeMagic);

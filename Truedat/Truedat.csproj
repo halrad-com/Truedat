@@ -116,6 +116,7 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
     <EmbeddedResource Include="Store\Schema\v1.sql" LogicalName="Truedat.Store.Schema.v1.sql" />
     <EmbeddedResource Include="Store\Schema\v2.sql" LogicalName="Truedat.Store.Schema.v2.sql" />
     <EmbeddedResource Include="Store\Schema\v3.sql" LogicalName="Truedat.Store.Schema.v3.sql" />
+    <EmbeddedResource Include="Store\Schema\v4.sql" LogicalName="Truedat.Store.Schema.v4.sql" />
   </ItemGroup>
 
 </Project>

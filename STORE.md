@@ -35,13 +35,30 @@ One row of file facts per copy, one audio description per media:
 | `track_copy` | copy | tags as found in the copy, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` |
 | `run` | attempt | producer + version, entity, content hash, location, outcome, duration, failed components, reason, source |
 | `producer` | producer | key, current version, kind |
-| `value`, `segment` | content key (+ segment) | the edge rows (below); any future measurement that is a function of the audio |
+| `edge` | (content key, producer version, head / tail) | the typed edge row (below): scalars + the edge's HPCP; the opt-in arrays when captured |
+| `value`, `segment` | content key (+ segment) | the edge's whole-track words (status, duration, extractor, head-vs-tail divergence) and windows; any future measurement that is a function of the audio |
+| `verdict` | copy | the catalog's `truedat` block, derived from the stored rows (below) — a row iff the catalog writes the block |
 | `artifact` | (content key, build) | where the compressed extractor output sits, bytes, sha |
 | `work_item` | (entity, producer) | review records imported from the scan ledgers (review state, attempts) |
 | `conflict`, `check_result` | event | drift between runs, sha collisions, split disagreements; checks |
 
-Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql`, `v2.sql`); a v1 store migrates
-to v2 on first open by a v2 build, and an older build refuses a newer store.
+Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql` … `v4.sql`); an older store migrates
+forward on first open by a newer build (backup first), and an older build refuses a newer store.
+
+**Edges and verdicts (schema v4, 2026-10-16).** The edge is a typed `edge` row per edge. By default it holds
+the scalars the readers use — status, window, key name / scale / code / strength / agreement / votes, bpm with
+beats and regularity, start / end / mean LUFS, fade, silence and its source, RMS crest and transition, the
+edge's three divergences, spectral centroid and dissonance — plus the edge's whole-summary HPCP (36 × float32);
+values are the fold's float32 widened to `REAL`, nothing rounded on the way in. `--edge-arrays` (config key
+`edge-arrays`, off by default) also keeps the arrays — the EBU series, beats, the 10 s sub-window summaries
+and the MFCC / spectral vectors — in the row's `arrays` column as the `edge-row/1` blob (`arrays_dtype`).
+Capture is sticky per track: a row that holds arrays keeps getting them on every later write whatever the
+flag says, and only `--edge-arrays-drop [--dry-run]` removes them (the scalar row stays). The `verdict` table
+is the catalog's `truedat` block, keyed per copy (the verdict reads the copy's codec, bit depth, sample rate
+and LAME tag as well as the media's description), computed by the same function the catalog writer uses from
+the rows as stored; the build's two algorithm tags are kept in `store_meta`, and when either differs at open
+every row is re-derived, no audio read. A v3 store migrates on open: each packed `edge.row` becomes a typed
+row with its blob kept as the arrays (a v3 store captured them), and the verdicts are derived.
 
 **Precision and types (schema v3, 2026-10-15).** Every numeric field has one declared precision
 (`FieldPrecision`: the decimal places the catalog writer renders), and the store holds it exactly at
@@ -77,9 +94,11 @@ output (`--frames-bin`, a curated descriptor list; the file is deleted after the
 EBU momentary and short-term loudness series at 10 per second (int16 centi-dB), the beats inside the
 window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
 Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
-from a short ffmpeg PCM pass the RMS crest and the transition into silence. One packed binary row per
-edge (`edge-row/v1`, documented in `Truedat/Edges/EdgeStore.cs`), about 6.4 KB per track, with an
-`edges` run row carrying the fold and PCM time. Producer version `edges@v2;e30;p10` carries the
+from a short ffmpeg PCM pass the RMS crest and the transition into silence. The fold computes all of
+it; the store keeps the typed default row (scalars + HPCP; measured about 1.6 KB per track in a vacuumed
+store) and, only with `--edge-arrays`, the arrays as well (`edge-row/1`, documented in
+`Truedat/Edges/EdgeStore.cs`; about 11.5 KB per track with the scalar row), with an `edges` run row
+carrying the fold and PCM time. Producer version `edges@v2;e30;p10` carries the
 algorithm generation and the settings; a fold-rule change is a new version and old rows stay
 attributable.
 
@@ -92,7 +111,8 @@ attributable.
   library scan cleanly (save and exit) once that long has passed; run it again to continue.
 - `mbxedges.v1.json` beside `mbxmoods.json`: the hub-facing companion, keyed by `audioStreamSha256`,
   scalars only (status, window, key, bpm, loudness, texture, divergences, rms), about 1.8 KB per track,
-  compact. Rewritten after any `--edges` scan that added rows, and on demand by
+  compact. `texture` is written only for a track whose arrays were captured; a default-row track writes
+  `texture: null`, which the v1 reader accepts. Rewritten after any `--edges` scan that added rows, and on demand by
   `--edges-export [path]`. Media without a sha are counted and omitted. Absent means not yet.
 
 ## Looking inside
@@ -130,8 +150,8 @@ SELECT s.kind, s.start_ms, s.end_ms, length(v.vec) AS bytes FROM segment s JOIN 
 SELECT kind, count(*) FROM conflict WHERE state = 'open' GROUP BY kind;
 ```
 
-The edge rows' binary layout is `edge-row/v1`; the SQL above shows their presence and size, truedat's
-`--edges-export` renders their scalars.
+The edge rows' scalars are plain columns of `edge`; the opt-in arrays' binary layout is `edge-row/1`
+(`arrays_dtype`), and `--edges-export` renders the scalars.
 
 ## What stays frozen
 

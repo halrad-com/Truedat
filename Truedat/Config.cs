@@ -94,6 +94,10 @@ namespace Truedat
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
             new Setting { Key = "store",           Kind = Kind.Bool, Default = "false", Help = "every scan also writes the store (default location); off unless set" },
             new Setting { Key = "edges",           Kind = Kind.Bool, Default = "false", Help = "every scan also folds edge rows (needs the store and extractor output-x64.5); off unless set" },
+            // store-v3 T05 (operator, 2026-10-15: "opt in for the arrays. just keep the minimal mvp by default"): with edges on, also keep the
+            // edge arrays (series, beats, sub-window summaries, MFCC/spectral vectors) in the store. Off = the default row (scalars + HPCP).
+            // Sticky per track: a track that already holds arrays keeps them whatever this says; --edge-arrays-drop is the only discard.
+            new Setting { Key = "edge-arrays",     Kind = Kind.Bool, Default = "false", Help = "with edges on, also keep the edge arrays (opt-in capture); off = the default edge row" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes

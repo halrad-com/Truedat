@@ -486,6 +486,8 @@ namespace Truedat.Store
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
             WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r);
+            // T19: the verdict projection, from the rows AS STORED, for every copy of this media (a content change re-derives them all).
+            VerdictStore.DeriveForEntity(dal, res.EntityId, now);
 
             // S2 C-A: the extractor's aggregate output, kept once per content key as a compressed file beside the store.
             if (pendingArtifact != null && storeDir != null)

@@ -390,11 +390,11 @@ namespace Truedat.Store
                     using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
                     {
                         content = os.Dal.Count("track_content"); artifacts = os.Dal.Count("artifact");
-                        segments = os.Dal.CountSegments(sha, settings.ProducerVersion); values = os.Dal.CountValues(sha, global::Truedat.Edges.EdgeStore.ProducerKey, settings.ProducerVersion);
+                        segments = os.Dal.CountSegments(sha, settings.ProducerVersion); values = os.Dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ?;", sha);
                         back = global::Truedat.Edges.EdgeStore.Read(os.Dal, sha, settings.ProducerVersion);
                     }
                     assert(fin.Ok && fin.Entries == 1 && fin.Edges == 1 && fin.EdgesFailed == 0, $"retry: ok, 1 entry, 1 edge result written ({fin.Ok}; entries {fin.Entries}, edges {fin.Edges}, failed {fin.EdgesFailed}; {fin.Error})");
-                    assert(content == 1 && artifacts == 1 && segments == 2 && values >= 5, $"retry committed the whole payload: content {content} (1), artifact {artifacts} (1), edge segments {segments} (2), edge value rows {values} (>= 5)");
+                    assert(content == 1 && artifacts == 1 && segments == 2 && values == 2, $"retry committed the whole payload: content {content} (1), artifact {artifacts} (1), edge segments {segments} (2), typed edge rows {values} (2)");
                     assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.Extractor == "output-x64.5" && back.Head.Bpm != null && Math.Abs(back.Head.Bpm.Value - 123.5) < 1e-4 && back.Head.Bpm.Beats == 60 && back.Tail.StartMs == 210000,
                         $"the edge rows read back as the fold that was spilled (status {back?.Status}, duration {back?.DurationMs}, extractor {back?.Extractor}, head bpm {back?.Head.Bpm?.Value}, tail start {back?.Tail.StartMs})");
                     var rec = new StoreResultFile();

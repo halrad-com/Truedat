@@ -143,7 +143,9 @@ namespace Truedat.Edges
             }
             else w.WriteNullValue();
             w.WritePropertyName("texture");
-            if (folded && e.Whole != null)
+            // The texture block exists only when the arrays were captured (opt-in): the default row has no MFCC/spectral vectors, and a
+            // block of nulls would be a present object the v1 reader drops the track for. Null texture is v1-valid (EdgeRow.cs:179).
+            if (folded && e.Whole != null && HasTexture(e.Whole))
             {
                 w.WriteStartObject();
                 Arr(w, "mfccMean", e.Whole.MfccMean, 1); Arr(w, "mfccSpread", e.Whole.MfccSpread, 1);
@@ -160,6 +162,12 @@ namespace Truedat.Edges
             }
             else w.WriteNullValue();
             w.WriteEndObject();
+        }
+
+        static bool HasTexture(EdgeWindowSummary s)
+        {
+            foreach (var x in s.MfccMean) if (!double.IsNaN(x)) return true;
+            return false;
         }
 
         static void WriteDivergence(Utf8JsonWriter w, EdgeDivergence d)

@@ -1311,7 +1311,7 @@ namespace Truedat.Store
                 using (var db = SqliteDb.Open(v1Path, create: false))
                 {
                     SchemaMigrator.Apply(db, "selftest-v2");
-                    assert(SchemaMigrator.ReadVersion(db) == 3, $"v1 store migrates forward through v2 to v3 in one Apply (v{SchemaMigrator.ReadVersion(db)})");
+                    assert(SchemaMigrator.ReadVersion(db) == StoreSchema.CurrentVersion, $"v1 store migrates forward through v2 and v3 to the current schema in one Apply (v{SchemaMigrator.ReadVersion(db)})");
                     assert(db.ExecScalar("SELECT count(*) FROM track_content;") == "2" && db.ExecScalar("SELECT count(*) FROM track_copy;") == "3",
                         $"split: 2 content rows (one per media) and 3 copy rows (one per location) ({db.ExecScalar("SELECT count(*) FROM track_content;")}/{db.ExecScalar("SELECT count(*) FROM track_copy;")})");
                     assert(db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';") == "1200", $"the first-imported copy's content values win (bpm 120 from location 10; v3 stores it as 1200, ×10 at 1 dp: {db.ExecScalar("SELECT bpm FROM track_content WHERE entity_id = 'e1';")})");
@@ -1724,7 +1724,7 @@ namespace Truedat.Store
                 assert(r1.Ok && r1.Entries == 1, $"v3: the fixture entry is written ({r1.Entries} entries, {r1.Error})");
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a fresh store is schema v3 ({SchemaMigrator.ReadVersion(os.Db)})");   // T05 (schema v4) raises this to 4 with the stashed edge tests
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 4, $"a fresh store is schema v4 — v3 types + the T05 edge table and value.dtype + the T19 verdict table ({SchemaMigrator.ReadVersion(os.Db)})");
                     string T(string col) => os.Db.ExecScalar($"SELECT typeof({col}) FROM track_content;") ?? "";
                     assert(T("bpm") == "integer" && T("spectralSpread") == "integer" && T("melKurtosis") == "integer" && T("spectralDecrease") == "integer" && T("danceability") == "integer" && T("dynamicRange") == "null",
                         $"fixed-dp fields are stored as scaled INTEGER (bpm {T("bpm")}, spread {T("spectralSpread")}, melKurtosis {T("melKurtosis")}, decrease {T("spectralDecrease")}, zero {T("danceability")}, null {T("dynamicRange")})");
@@ -1773,7 +1773,7 @@ namespace Truedat.Store
                 }
                 using (var os = OpenStore.Open(v2store, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a v2 store migrates to v3 on open ({SchemaMigrator.ReadVersion(os.Db)})");   // T05 (schema v4) raises this to 4 with the stashed edge tests
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 4, $"a v2 store migrates to the current schema (v4) on open ({SchemaMigrator.ReadVersion(os.Db)})");
                     assert(os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "integer" && os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "52" && os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;") == "integer" && os.Db.ExecScalar("SELECT count(*) FROM track_content;") == "1" && os.Db.ExecScalar("SELECT count(*) FROM track_copy;") == "1",
                         $"migrated columns are typed and every row survived (bpm {os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;")}, mfcc {os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes, smfmBpm {os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;")}, rows {os.Db.ExecScalar("SELECT count(*) FROM track_content;")}/{os.Db.ExecScalar("SELECT count(*) FROM track_copy;")})");
                     var back = os.Dal.ReadContent("e1");
@@ -1792,7 +1792,7 @@ namespace Truedat.Store
                         assert(SchemaMigrator.ReadVersion(db) == 2 && db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "real" && db.ExecScalar("SELECT count(*) FROM track_content;") == "1",
                             $"the backup is the untouched v2 store (v{SchemaMigrator.ReadVersion(db)}, {db.ExecScalar("SELECT typeof(bpm) FROM track_content;")})");
                 using (var os = OpenStore.Open(v2store, false, "selftest-v3-again", DateTime.UtcNow.ToString("o")))
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3 && Directory.GetFiles(v2dir, "truedat.db.bak.v2.*").Length == 1, "a second open applies nothing and writes no second backup");
+                    assert(SchemaMigrator.ReadVersion(os.Db) == StoreSchema.CurrentVersion && Directory.GetFiles(v2dir, "truedat.db.bak.v2.*").Length == 1, "a second open applies nothing and writes no second backup");
                 assert(SchemaV3Migration.LastCanonicalisationNote == null && SchemaV3Migration.LastRefusedValues == 0,
                     $"a v2 store whose values were already at their declared precision is migrated with NOTHING canonicalised ({SchemaV3Migration.LastCanonicalisationNote ?? "none"})");
 
@@ -1820,7 +1820,7 @@ namespace Truedat.Store
                 {
                     var copyBack = os.Dal.ReadCopyValues(8)!;
                     var ad = copyBack[TrackEntryMapper.CopyIndexOf("analysisDuration")]; var sb = copyBack[TrackEntryMapper.CopyIndexOf("smfmBpm")];
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3 && ad is double d1 && d1 == 1.23456 && sb is double d2 && d2 == 97.65432 && SchemaV3Migration.LastCanonicalisationNote == null,
+                    assert(SchemaMigrator.ReadVersion(os.Db) == StoreSchema.CurrentVersion && ad is double d1 && d1 == 1.23456 && sb is double d2 && d2 == 97.65432 && SchemaV3Migration.LastCanonicalisationNote == null,
                         $"V15: the un-rounded v2 values SURVIVE the migration exactly (analysisDuration {ad}, smfmBpm {sb}; stored as {os.Db.ExecScalar("SELECT analysisDuration FROM track_copy;")} / {os.Db.ExecScalar("SELECT smfmBpm FROM track_copy;")} at six places; note {SchemaV3Migration.LastCanonicalisationNote ?? "none"})");
                     // and the writer still renders them at ITS precision, so the catalog bytes are unchanged by the finer store
                     var wEntry = new TrackEntry { AnalysisDurationSecs = 1.23456, LastModified = DateTime.UtcNow, Features = new TrackFeatures { Bpm = 120, Key = "C", Mode = "major", Mfcc = new double[13], SmfmBpm = 97.65432, SmfmScores = new[] { 1 }, SmfmChannel = 0 } };
@@ -1874,7 +1874,7 @@ namespace Truedat.Store
                     {
                         var back = os.Dal.ReadContent("e5")!;
                         var se2 = (double)back.Values[TrackEntryMapper.ContentIndexOf("spectralEnergyStdev")]!;
-                        assert(SchemaMigrator.ReadVersion(os.Db) == 3 && se2 == Math.Round(double.Parse("0.022454", System.Globalization.CultureInfo.InvariantCulture), 6) && os.Db.ExecScalar("SELECT spectralEnergyStdev FROM track_content;") == "22454",
+                        assert(SchemaMigrator.ReadVersion(os.Db) == StoreSchema.CurrentVersion && se2 == Math.Round(double.Parse("0.022454", System.Globalization.CultureInfo.InvariantCulture), 6) && os.Db.ExecScalar("SELECT spectralEnergyStdev FROM track_content;") == "22454",
                             $"a shortest-text v2 double in the 1-ulp family migrates (decimal 0.022454 -> 22454) and reads back as the parser's form ({se2:R}, stored {os.Db.ExecScalar("SELECT spectralEnergyStdev FROM track_content;")})");
                     }
                 }

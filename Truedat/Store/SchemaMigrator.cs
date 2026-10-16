@@ -14,7 +14,7 @@ namespace Truedat.Store
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>
     internal static class StoreSchema
     {
-        internal const int CurrentVersion = 3;   // v3 (T04): typed columns — scaled INTEGER, int32 vectors, sparse histogram
+        internal const int CurrentVersion = 4;   // v4 (T05 + T19): the typed edge table + value.dtype, the per-location verdict projection; v3 (T04): typed columns
 
         /// <summary>Columns of track_content / track_copy that are not catalog JSON keys (v2 split).</summary>
         internal static readonly string[] TrackContentMetaColumns = { "entity_id", "content_key", "content_key_kind", "run_id", "updated_utc" };
@@ -98,6 +98,7 @@ namespace Truedat.Store
                     db.Exec(LoadScript(v));
                     SchemaV2Migration.RunDataStep(db, v);
                     SchemaV3Migration.RunDataStep(db, v);
+                    SchemaV4Migration.RunDataStep(db, v);
                     using (var st = db.Prepare("INSERT INTO schema_version(version, applied_utc, truedat_version) VALUES (?, ?, ?);"))
                     {
                         st.Bind(1, (long)v).Bind(2, DateTime.UtcNow.ToString("o")).Bind(3, truedatVersion);

@@ -62,6 +62,11 @@ namespace Truedat.Store
             try { return st.Step() ? onRow(st) : none; } finally { st.Reset(); }
         }
 
+        /// <summary>Parameterised statement for callers outside the DAL (the edge table, the verdict projection) — same cache, same binding.</summary>
+        internal void ExecBound(string sql, params object?[] binds) => Exec(sql, binds);
+        /// <summary>First column of the first row as a long (0 when no row or NULL).</summary>
+        internal long ScalarLong(string sql, params object?[] binds) => Row(sql, s => s.IsNull(0) ? 0L : s.GetInt64(0), 0L, binds);
+
         // ---------------------------------------------------------------- store_meta
         internal string? MetaGet(string key) => Row("SELECT value FROM store_meta WHERE key = ?;", s => s.GetString(0), null, key);
 
@@ -280,6 +285,41 @@ namespace Truedat.Store
             return Db.Changes;
         }
 
+        /// <summary>T19: every entry of one media (each of its copies), with the location id and display path — the verdict projection's
+        /// input, rebuilt through the mapper from the rows AS STORED. Its own statement (callers write while iterating).</summary>
+        internal List<(long LocationId, string DisplayPath, TrackEntry Entry)> ReadEntriesForEntity(string entityId)
+            => ReadLocationEntries(" WHERE l.entity_id = ?", entityId);
+
+        /// <summary>T19: every entry in the store with its location id (the re-derive pass).</summary>
+        internal List<(long LocationId, string DisplayPath, TrackEntry Entry)> ReadAllLocationEntries() => ReadLocationEntries("", null);
+
+        List<(long, string, TrackEntry)> ReadLocationEntries(string where, string? bind)
+        {
+            var list = new List<(long, string, TrackEntry)>();
+            using var st = Db.Prepare(
+                "SELECT l.id, l.display_path, l.last_modified_utc, " + TrackEntryMapper.SelectList +
+                " FROM track_copy p JOIN track_location l ON l.id = p.location_id JOIN track_content c ON c.entity_id = l.entity_id" + where + " ORDER BY l.id;");
+            if (bind != null) st.Bind(1, bind);
+            while (st.Step())
+            {
+                var lm = st.GetString(2);
+                var lastModified = lm == null ? default
+                    : DateTime.ParseExact(lm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+                list.Add((st.GetInt64(0), st.GetString(1)!, TrackEntryMapper.FromRow(st, 3, lastModified)));
+            }
+            return list;
+        }
+
+        /// <summary>Location ids of one media (including copies with no stored description).</summary>
+        internal List<long> LocationIdsOf(string entityId)
+        {
+            var list = new List<long>();
+            using var st = Db.Prepare("SELECT id FROM track_location WHERE entity_id = ? ORDER BY id;");
+            st.Bind(1, entityId);
+            while (st.Step()) list.Add(st.GetInt64(0));
+            return list;
+        }
+
         /// <summary>Every entry under a root, with the display path the catalog keys it by: the copy's facts joined
         /// to its media's description. Its own statement (not the cache) because callers iterate it while
         /// running other statements.</summary>
@@ -391,10 +431,10 @@ namespace Truedat.Store
         }
 
         internal void UpsertValue(string contentHash, string contentHashKind, long segmentId, string field, string producerKey, string producerVersion, long? runId,
-            double? num, string? txt, byte[]? vec, long? dims, string? unit)
-            => Exec("INSERT INTO value(content_hash, content_hash_kind, segment_id, field, producer_key, producer_version, run_id, num, txt, vec, dims, unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-                    "ON CONFLICT(content_hash, segment_id, field, producer_key, producer_version) DO UPDATE SET run_id = excluded.run_id, num = excluded.num, txt = excluded.txt, vec = excluded.vec, dims = excluded.dims, unit = excluded.unit;",
-                    contentHash, contentHashKind, segmentId, field, producerKey, producerVersion, runId, num, txt, vec, dims, unit);
+            double? num, string? txt, byte[]? vec, long? dims, string? unit, string? dtype = null)
+            => Exec("INSERT INTO value(content_hash, content_hash_kind, segment_id, field, producer_key, producer_version, run_id, num, txt, vec, dims, unit, dtype) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                    "ON CONFLICT(content_hash, segment_id, field, producer_key, producer_version) DO UPDATE SET run_id = excluded.run_id, num = excluded.num, txt = excluded.txt, vec = excluded.vec, dims = excluded.dims, unit = excluded.unit, dtype = excluded.dtype;",
+                    contentHash, contentHashKind, segmentId, field, producerKey, producerVersion, runId, num, txt, vec, dims, unit, dtype);
 
         internal sealed class StoredValue { public double? Num; public string? Txt; public byte[]? Vec; public long? Dims; public string? Unit; }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Truedat.Edges
 {
@@ -26,6 +27,9 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the ruled row in the store — segments, values, idempotent, versions coexist)");
             try { TestStore(assert); }
             catch (Exception ex) { assert(false, $"Store: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (store-v3 T05: a v3 store's packed edge rows move into the typed edge table on open, arrays kept)");
+            try { TestV4Migration(assert); }
+            catch (Exception ex) { assert(false, $"V4Migration: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Edges self-test (S2 C4: through the scan sink — stash by analysed path, tie at Record, write at the flush)");
             try { TestSink(assert); }
             catch (Exception ex) { assert(false, $"Sink: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -89,11 +93,17 @@ namespace Truedat.Edges
 
                 // Write + read back.
                 int values;
-                using (var tx = os.Db.BeginTransaction()) { values = EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
-                long segs = dal.CountSegments(Sha1, r.ProducerVersion), vrows = dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion); long vecBytes = dal.SumVecBytes(Sha1, EdgeStore.ProducerKey, r.ProducerVersion);
+                // T05: the OPT-IN path — captureArrays: true writes the typed edge rows AND the full edge-row blob in `arrays`.
+                using (var tx = os.Db.BeginTransaction()) { values = EdgeStore.Write(dal, Sha1, ShaKind, null, r, captureArrays: true); tx.Complete(); }
+                long segs = dal.CountSegments(Sha1, r.ProducerVersion), vrows = dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion);
+                long edgeRows = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM edge WHERE content_hash = '" + Sha1 + "';") ?? "0");
+                long arrayBytes = long.Parse(os.Db.ExecScalar("SELECT coalesce(sum(length(arrays)), 0) FROM edge WHERE content_hash = '" + Sha1 + "';") ?? "0");
                 assert(segs == 2, $"2 segment rows: head and tail; the sub-windows ride inside the edge row ({segs})");
-                assert(values == vrows && vrows == 6, $"one packed row per edge plus four whole-track rows (status, duration, extractor, head-tail divergence): 6 value rows ({vrows} rows, {values} written)");
-                assert(vecBytes >= 5000 && vecBytes <= 7500, $"the packed rows are the plan's payload: per edge EBU pair 1.2 KB + beats 0.4 KB + four summaries 1.4 KB -> ~6 KB per track ({vecBytes} bytes)");
+                assert(values == 6 && vrows == 4 && edgeRows == 2, $"T05: two typed edge rows in `edge` plus four whole-track value rows (status, duration, extractor, head-tail divergence); no edge.row value rows ({edgeRows} edge rows, {vrows} value rows, {values} written)");
+                assert(os.Db.ExecScalar("SELECT count(*) FROM value WHERE field = 'edge.row';") == "0", "T05: the packed edge.row value rows are gone — the edge table holds the edge");
+                assert(arrayBytes >= 5000 && arrayBytes <= 7500, $"opt-in arrays are the plan's payload: per edge EBU pair 1.2 KB + beats 0.4 KB + four summaries 1.4 KB -> ~6 KB per track ({arrayBytes} bytes)");
+                assert(os.Db.ExecScalar("SELECT typeof(bpm) || '/' || typeof(mean_lufs) || '/' || typeof(fade_ms) || '/' || length(hpcp) || '/' || arrays_dtype FROM edge WHERE content_hash = '" + Sha1 + "' AND kind = 'head';") == "real/real/integer/144/edge-row/1",
+                    $"T05 typed default row: bpm/mean_lufs REAL (the fold's float32, exact), fade_ms INTEGER, hpcp 36 × f32 = 144 bytes, arrays_dtype names the blob format ({os.Db.ExecScalar("SELECT typeof(bpm) || '/' || typeof(mean_lufs) || '/' || typeof(fade_ms) || '/' || length(hpcp) || '/' || coalesce(arrays_dtype, 'null') FROM edge WHERE content_hash = '" + Sha1 + "' AND kind = 'head';")})");
                 var back = EdgeStore.Read(dal, Sha1, r.ProducerVersion);
                 assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.ProducerVersion == r.ProducerVersion, $"read back: status, duration, version ({back?.Status}, {back?.DurationMs})");
                 assert(back != null && back.Head.StartMs == 0 && back.Head.EndMs == 30000 && back.Tail.StartMs == 210000 && back.Tail.EndMs == 240000 && back.Head.Status == "ok", "read back: the edge windows");
@@ -124,8 +134,54 @@ namespace Truedat.Edges
                     && backS.Tail.Loudness.SilenceMs == rs.Tail.Loudness!.SilenceMs && backS.HeadTail != null && backS.HeadTail.Loudness == null && backS.Tail.Divergence != null && backS.Tail.Divergence.Loudness == null,
                     $"read back: an all-silent tail keeps NULL loudness scalars, its silence run, and null loudness divergences (mean {backS?.Tail.Loudness?.MeanLufs}, silence {backS?.Tail.Loudness?.SilenceMs} vs {rs.Tail.Loudness?.SilenceMs}, head-tail {backS?.HeadTail?.Loudness}, edge {backS?.Tail.Divergence?.Loudness})");
 
-                // Idempotent: the same version rewrites itself; a different version coexists.
-                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r); tx.Complete(); }
+                // ---- T05 (A03): the DEFAULT path — captureArrays: false writes the typed edge rows (scalars, divergences, 36 × f32 HPCP) and
+                // NO arrays blob; Read gives back every scalar and the whole-edge HPCP, with empty series/beats/sub-windows.
+                const string ShaDefault = "3333333333333333333333333333333333333333333333333333333333333333";
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaDefault, ShaKind, null, r, captureArrays: false); tx.Complete(); }
+                assert(os.Db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || count(arrays_dtype) FROM edge WHERE content_hash = '" + ShaDefault + "';") == "2/0/0",
+                    $"default capture: two edge rows, no arrays blob, no arrays dtype ({os.Db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || count(arrays_dtype) FROM edge WHERE content_hash = '" + ShaDefault + "';")})");
+                var backD = EdgeStore.Read(dal, ShaDefault, r.ProducerVersion);
+                assert(backD != null && backD.Status == "ok" && backD.Tail.Loudness != null && Math.Abs(backD.Tail.Loudness.MeanLufs!.Value - r.Tail.Loudness!.MeanLufs!.Value) < 1e-4
+                    && backD.Tail.Bpm != null && Math.Abs(backD.Tail.Bpm.Value - r.Tail.Bpm!.Value) < 1e-4 && backD.Tail.Bpm.Beats == r.Tail.Bpm.Beats
+                    && backD.Tail.Whole?.Key != null && backD.Tail.Whole.Key.Code == r.Tail.Whole!.Key!.Code && backD.Tail.Whole.Key.Agreement == r.Tail.Whole.Key.Agreement && backD.Tail.Whole.Key.VotesPresent == r.Tail.Whole.Key.VotesPresent
+                    && Math.Abs(backD.Tail.Whole.SpectralMean[0] - r.Tail.Whole.SpectralMean[0]) < 1e-3 && Math.Abs(backD.Tail.Whole.SpectralMean[5] - r.Tail.Whole.SpectralMean[5]) < 1e-6
+                    && backD.Tail.Rms != null && Math.Abs(backD.Tail.Rms.CrestDb!.Value - 3.61) < 1e-5 && backD.Tail.Loudness.SilenceMs == 1100 && backD.Tail.Loudness.FadeMs == r.Tail.Loudness.FadeMs
+                    && backD.Tail.Divergence != null && Math.Abs(backD.Tail.Divergence.Texture!.Value - r.Tail.Divergence!.Texture!.Value) < 1e-5 && backD.HeadTail != null && Math.Abs(backD.HeadTail.Harmony!.Value - r.HeadTail!.Harmony!.Value) < 1e-5,
+                    "default row read back: status, bpm (value + beats), key (code/agreement/votes), centroid (SpectralMean[0]) and dissonance (SpectralMean[5]), loudness block, rms pair, divergences, head-tail divergence");
+                bool hpcpOk = backD?.Tail.Whole != null; if (hpcpOk) for (int i = 0; i < 36; i++) if (Math.Abs(backD!.Tail.Whole!.HpcpMean[i] - r.Tail.Whole!.HpcpMean[i]) > 1e-6) { hpcpOk = false; break; }
+                assert(hpcpOk && backD!.Tail.MomentaryCentiDb.Length == 0 && backD.Tail.BeatsMs.Length == 0 && backD.Tail.Sub.Length == 0 && backD.Tail.Whole!.MfccMean.All(double.IsNaN),
+                    $"default row read back: the 36-bin HPCP is there (f32 exact), the series / beats / sub-windows / MFCC are not (hpcp {hpcpOk}, series {backD?.Tail.MomentaryCentiDb.Length}, beats {backD?.Tail.BeatsMs.Length}, subs {backD?.Tail.Sub.Length})");
+
+                // Sticky per track (operator: "keep what we captured"): once a track holds arrays, a flag-off re-write keeps and refreshes them.
+                long run77, run78;
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    run77 = dal.InsertRun(EdgeStore.ProducerKey, r.ProducerVersion, null, ShaDefault, ShaKind, null, now, 1, "selftest", "selftest", "ok", null, null, null, "selftest");
+                    run78 = dal.InsertRun(EdgeStore.ProducerKey, r.ProducerVersion, null, ShaDefault, ShaKind, null, now, 1, "selftest", "selftest", "ok", null, null, null, "selftest");
+                    tx.Complete();
+                }
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaDefault, ShaKind, run77, r, captureArrays: true); tx.Complete(); }
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaDefault, ShaKind, run78, r, captureArrays: false); tx.Complete(); }
+                assert(os.Db.ExecScalar("SELECT count(arrays) || '/' || min(run_id) || '/' || max(run_id) FROM edge WHERE content_hash = '" + ShaDefault + "';") == "2/" + run78 + "/" + run78,
+                    $"sticky: a flag-off re-write of a track that holds arrays keeps the arrays and carries the new run ({os.Db.ExecScalar("SELECT count(arrays) || '/' || min(run_id) || '/' || max(run_id) FROM edge WHERE content_hash = '" + ShaDefault + "';")})");
+                assert(EdgeStore.ArraysCaptured(dal, ShaDefault, r.ProducerVersion) && !EdgeStore.ArraysCaptured(dal, ShaSilent, rs.ProducerVersion), "ArraysCaptured answers per track");
+
+                // The explicit discard verb: dry-run names what it would remove and changes nothing; the real run removes exactly those.
+                long withArrays = long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0");
+                var dry = EdgeStore.DropArrays(dal, dryRun: true);
+                assert(dry.Rows == withArrays && dry.Tracks == 2 && long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0") == withArrays,
+                    $"--edge-arrays-drop --dry-run: names {dry.Rows} rows on {dry.Tracks} tracks and removes nothing ({os.Db.ExecScalar("SELECT count(arrays) FROM edge;")} still held)");
+                EdgeStore.DropArraysResult real;
+                using (var tx = os.Db.BeginTransaction()) { real = EdgeStore.DropArrays(dal, dryRun: false); tx.Complete(); }
+                assert(real.Rows == withArrays && os.Db.ExecScalar("SELECT count(arrays) || '/' || count(arrays_dtype) || '/' || count(*) FROM edge;") == "0/0/" + os.Db.ExecScalar("SELECT count(*) FROM edge;"),
+                    $"--edge-arrays-drop: removes exactly the arrays (and their dtype), keeps every edge row and its scalars ({os.Db.ExecScalar("SELECT count(arrays) || '/' || count(arrays_dtype) || '/' || count(*) FROM edge;")})");
+                var backAfter = EdgeStore.Read(dal, Sha1, r.ProducerVersion);
+                assert(backAfter != null && backAfter.Tail.Loudness != null && backAfter.Tail.MomentaryCentiDb.Length == 0 && Math.Abs(backAfter.Tail.Bpm!.Value - r.Tail.Bpm!.Value) < 1e-4,
+                    "after the drop the opt-in track reads back as a default row: scalars intact, series gone");
+
+                // Idempotent: the same version rewrites itself; a different version coexists. (Re-captured explicitly: the drop above cleared
+                // Sha1's arrays, and the default write would — correctly — leave it a default row.)
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r, captureArrays: true); tx.Complete(); }
                 assert(dal.CountSegments(Sha1, r.ProducerVersion) == 2 && dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion) == vrows, "a second write of the same version adds no rows");
                 var r2 = SyntheticFold(dir); r2.ProducerVersion = "edges@v1;e20;p10";
                 using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r2); tx.Complete(); }
@@ -159,24 +215,93 @@ namespace Truedat.Edges
             {
                 var now = DateTime.UtcNow.ToString("o");
                 var dbPath = System.IO.Path.Combine(dir2, "truedat.db");
-                long before, after, vecBytes;
+                long before, mid, after, payloadOptIn;
                 using (var os = Truedat.Store.OpenStore.Open(dbPath, true, VersionInfo.Display, now))
                 {
                     os.Db.Exec("VACUUM;"); before = LogicalBytes(os.Db);
                     var r = SyntheticFold(dir2);
                     using (var tx = os.Db.BeginTransaction())
                     {
-                        for (int i = 0; i < 20; i++) EdgeStore.Write(os.Dal, i.ToString("x2") + Sha1.Substring(2), ShaKind, null, r);
+                        for (int i = 0; i < 20; i++) EdgeStore.Write(os.Dal, i.ToString("x2") + Sha1.Substring(2), ShaKind, null, r, captureArrays: false);
                         tx.Complete();
                     }
-                    vecBytes = os.Dal.SumVecBytes("00" + Sha1.Substring(2), EdgeStore.ProducerKey, r.ProducerVersion);
+                    os.Dal.ResetAll(); os.Db.Exec("VACUUM;"); mid = LogicalBytes(os.Db);
+                    using (var tx = os.Db.BeginTransaction())
+                    {
+                        for (int i = 20; i < 40; i++) EdgeStore.Write(os.Dal, i.ToString("x2") + Sha1.Substring(2), ShaKind, null, r, captureArrays: true);
+                        tx.Complete();
+                    }
+                    payloadOptIn = os.Dal.ScalarLong("SELECT coalesce(sum(length(arrays)), 0) FROM edge WHERE content_hash = ?;", "20" + Sha1.Substring(2));
                     os.Dal.ResetAll(); os.Db.Exec("VACUUM;"); after = LogicalBytes(os.Db);
                 }
-                long perTrack = (after - before) / 20;
-                Console.WriteLine($"        store bytes per track with edges: {perTrack:N0} (20 tracks, vacuumed, page_count x page_size; vector payload {vecBytes:N0}/track)");
-                assert(perTrack > 0 && perTrack <= 10000, $"the ruled row costs under 10 KB/track in the store, payload included ({perTrack:N0} bytes/track; plan ~6,600; per-field rows measured 43,417)");
+                long perDefault = (mid - before) / 20, perOptIn = (after - mid) / 20;
+                Console.WriteLine($"        store bytes per track with edges: default row {perDefault:N0}, opt-in arrays {perOptIn:N0} (20 tracks each, vacuumed, page_count x page_size; opt-in arrays payload {payloadOptIn:N0}/track)");
+                assert(perDefault > 0 && perOptIn <= 12000 && perDefault < perOptIn, $"T05: the default row costs less than the opt-in capture, and the opt-in row stays under 12 KB/track ({perDefault:N0} vs {perOptIn:N0} bytes/track)");
             }
             finally { try { System.IO.Directory.Delete(dir2, true); } catch { } }
+        }
+
+        /// <summary>T05 / schema v4: a v3 store (built at v3 with the test seam, holding ONE track's packed edge.row value rows exactly as v3
+        /// wrote them) opens as v4: each packed row is now a typed edge row WITH its blob as the arrays (sticky: v3 captured them), the packed
+        /// value rows are gone, the head-tail vector row carries its dtype, the backup is the untouched v3 file, and the edge reads back whole.</summary>
+        static void TestV4Migration(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "edgev4-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                var store = System.IO.Path.Combine(dir, "truedat.db");
+                var r = SyntheticFold(dir);
+                var headBlob = EdgeStore.PackEdge(r.Head); var tailBlob = EdgeStore.PackEdge(r.Tail);
+                using (var db = Truedat.Store.SqliteDb.Open(store, create: true))
+                {
+                    Truedat.Store.SchemaMigrator.Apply(db, "selftest-v3", targetVersion: 3);
+                    // v3's own rows for one track (S2 C4 shape): producer, 2 segments, 4 whole-track values, 2 packed edge.row values.
+                    db.Exec("INSERT INTO producer(key, version, kind, needs_audio) VALUES ('edges', '" + r.ProducerVersion + "', 'analysis', 1);");
+                    db.Exec("INSERT INTO segment(id, content_hash, content_hash_kind, set_key, kind, ordinal, start_ms, end_ms) VALUES (1, '" + Sha1 + "', '" + ShaKind + "', '" + r.ProducerVersion + "', 'head', 0, 0, 30000);");
+                    db.Exec("INSERT INTO segment(id, content_hash, content_hash_kind, set_key, kind, ordinal, start_ms, end_ms) VALUES (2, '" + Sha1 + "', '" + ShaKind + "', '" + r.ProducerVersion + "', 'tail', 0, 210000, 240000);");
+                    void V(long seg, string field, double? num, string? txt, byte[]? vec, long? dims, string? unit)
+                    {
+                        using var st = db.Prepare("INSERT INTO value(content_hash, content_hash_kind, segment_id, field, producer_key, producer_version, run_id, num, txt, vec, dims, unit) VALUES (?, ?, ?, ?, 'edges', ?, NULL, ?, ?, ?, ?, ?);");
+                        st.Bind(1, Sha1); st.Bind(2, ShaKind); st.Bind(3, seg); st.Bind(4, field); st.Bind(5, r.ProducerVersion);
+                        if (num.HasValue) st.Bind(6, num.Value); else st.BindNull(6);
+                        if (txt != null) st.Bind(7, txt); else st.BindNull(7);
+                        if (vec != null) st.Bind(8, vec); else st.BindNull(8);
+                        if (dims.HasValue) st.Bind(9, dims.Value); else st.BindNull(9);
+                        if (unit != null) st.Bind(10, unit); else st.BindNull(10);
+                        st.Step();
+                    }
+                    V(0, "edges.status", null, "ok", null, null, null);
+                    V(0, "edges.durationMs", 240000, null, null, null, null);
+                    V(0, "edges.extractor", null, "output-x64.5", null, null, null);
+                    var ht = new float[] { (float)(r.HeadTail!.Loudness ?? double.NaN), (float)(r.HeadTail.Texture ?? double.NaN), (float)(r.HeadTail.Harmony ?? double.NaN) };
+                    var htb = new byte[12]; Buffer.BlockCopy(ht, 0, htb, 0, 12);
+                    V(0, "edges.headTail", null, null, htb, 3, "loudness,texture,harmony");
+                    V(1, "edge.row", null, null, headBlob, headBlob.Length, "edge-row/v1");
+                    V(2, "edge.row", null, null, tailBlob, tailBlob.Length, "edge-row/v1");
+                    assert(Truedat.Store.SchemaMigrator.ReadVersion(db) == 3 && db.ExecScalar("SELECT count(*) FROM value WHERE field = 'edge.row';") == "2", "v3 fixture: schema 3, two packed edge.row values");
+                }
+                using (var os = Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                {
+                    var db = os.Db;
+                    assert(Truedat.Store.SchemaMigrator.ReadVersion(db) == 4 && Truedat.Store.SchemaV4Migration.LastMovedEdgeRows == 2, $"v3 -> v4 on open: {Truedat.Store.SchemaV4Migration.LastMovedEdgeRows} packed rows moved");
+                    assert(db.ExecScalar("SELECT count(*) FROM value WHERE field = 'edge.row';") == "0" && db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || min(arrays_dtype) FROM edge WHERE content_hash = '" + Sha1 + "';") == "2/2/" + EdgeStore.ArraysDtype,
+                        $"the packed rows are gone; two typed edge rows, BOTH with their arrays kept ({db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || coalesce(min(arrays_dtype), '-') FROM edge;")})");
+                    var keptHead = db.Prepare("SELECT arrays FROM edge WHERE kind = 'head';"); keptHead.Step(); var kept = keptHead.GetBlob(0); keptHead.Dispose();
+                    bool same = kept != null && kept.Length == headBlob.Length; if (same) for (int i = 0; i < kept!.Length; i++) if (kept[i] != headBlob[i]) { same = false; break; }
+                    assert(same, "the head's arrays are the v3 blob byte for byte");
+                    assert(db.ExecScalar("SELECT dtype FROM value WHERE field = 'edges.headTail';") == "f32", "the head-tail vector row gains dtype f32");
+                    var back = EdgeStore.Read(os.Dal, Sha1, r.ProducerVersion);
+                    assert(back != null && back.Head.MomentaryCentiDb.Length == 300 && back.Head.Sub.Length == 3 && back.Head.Bpm != null && Math.Abs(back.Head.Bpm.Value - 120) < 0.01 && back.Tail.StartMs == 210000 && back.HeadTail != null,
+                        "the migrated edge reads back whole: series, sub-windows, bpm, windows, head-tail divergence");
+                    assert(Math.Abs(double.Parse(db.ExecScalar("SELECT bpm FROM edge WHERE kind = 'head';")!, System.Globalization.CultureInfo.InvariantCulture) - (double)(float)r.Head.Bpm!.Value) < 1e-9,
+                        "the typed bpm column equals the blob's float32 value");
+                    assert(os.Dal.MetaGet(Truedat.Store.VerdictStore.MethodKey) == Truedat.Store.VerdictStore.BuildMethod && os.Dal.MetaGet(Truedat.Store.VerdictStore.SpeechMethodKey) == Truedat.Store.VerdictStore.BuildSpeechMethod,
+                        "the migrated store's verdict tags are recorded (the table derived at open)");
+                }
+                assert(System.IO.Directory.GetFiles(dir, "truedat.db.bak.v3.*").Length == 1, "the v3 file was backed up before the migration");
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         static long LogicalBytes(Truedat.Store.SqliteDb db)
@@ -206,8 +331,8 @@ namespace Truedat.Edges
                     var shortR = SyntheticFold(dir, 15);                         // unavailable
                     using (var tx = os.Db.BeginTransaction())
                     {
-                        EdgeStore.Write(os.Dal, Sha1, ShaKind, null, full);
-                        EdgeStore.Write(os.Dal, ShaB, ShaKind, null, noPcm);
+                        EdgeStore.Write(os.Dal, Sha1, ShaKind, null, full, captureArrays: true);   // the opt-in capture: the full texture block
+                        EdgeStore.Write(os.Dal, ShaB, ShaKind, null, noPcm, captureArrays: false);   // the default row: no texture block
                         EdgeStore.Write(os.Dal, ShaC, ShaKind, null, shortR);
                         EdgeStore.Write(os.Dal, "entity:01a12e52-bf89-705c-9cf8-4c0133113724", "entity", null, full);   // no sha: no key in the contract
                         tx.Complete();
@@ -256,6 +381,12 @@ namespace Truedat.Edges
                     && tex.GetProperty("spectralMean").GetArrayLength() == 11 && Math.Abs(tex.GetProperty("spectralMean")[10].GetDouble() - 1100) < 0.1 && tex.GetProperty("spectralSpread").GetArrayLength() == 11,
                     "texture: mfccMean[13], mfccSpread[13], spectralMean[11], spectralSpread[11]");
                 assert(tail.GetProperty("rms").GetProperty("crestDb").GetDouble() == 3.61 && tail.GetProperty("rms").GetProperty("transitionMs").GetInt32() == 0, "rms: crestDb, transitionMs");
+                // T05 writer rule: a default-row track (no arrays) writes texture NULL — never a block of nulls the v1 reader would drop the track
+                // for (EdgeRow.cs:187 requires 13/11 when present; null is accepted, :179) — and still carries key, bpm and loudness.
+                var dHead = tracks.GetProperty(ShaB).GetProperty("head");
+                assert(dHead.GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Null && dHead.GetProperty("key").ValueKind == System.Text.Json.JsonValueKind.Object
+                       && dHead.GetProperty("bpm").ValueKind == System.Text.Json.JsonValueKind.Object && dHead.GetProperty("loudness").ValueKind == System.Text.Json.JsonValueKind.Object,
+                    $"default-row companion: texture null, key/bpm/loudness present (texture {dHead.GetProperty("texture").ValueKind})");
                 assert(head.GetProperty("divergence").GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Number && t1.GetProperty("divergence").GetProperty("harmony").GetDouble() > 0.3,
                     "divergence: per edge (vs the whole) and per track (head vs tail)");
                 var tB = tracks.GetProperty(ShaB);

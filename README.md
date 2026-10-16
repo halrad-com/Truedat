@@ -148,17 +148,19 @@ truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\trued
 
 **Edges (`--edges`, preview, v2 S2).** On a scan run with `--store`, `--edges` asks the extractor for a
 small binary frames file per analysed track (build `output-x64.5` is required; the run refuses on an
-older one and names what it found) and folds the first and last 30 s into one packed *edge row* per
-edge in the store: the EBU momentary and short-term loudness series at 10/s, the beats inside the
-window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
+older one and names what it found) and folds the first and last 30 s of each analysed track: the EBU
+momentary and short-term loudness series at 10/s, the beats inside the window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
 Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
 from a short ffmpeg PCM pass over the two windows the RMS crest and the transition into silence
 (null without ffmpeg, never approximated). Each track also gets an `edges` run row carrying the fold
 and PCM time, and a fold that fails is a failed run naming the reason and no rows. The frames file and
 the profile live beside the extractor's temp output in the stage directory and are deleted with it;
 nothing is written to `mbxmoods.json`, and a cache hit folds nothing, so `--edges` populates the tracks
-a scan actually analyses. Measured on a local library: about 6.3 KB per track in the store and
-roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage
+a scan actually analyses. The store keeps a typed *edge row* per edge — by default the scalars and the
+edge's HPCP (about 1.6 KB per track); with `--edge-arrays` (config `edge-arrays`, off by default) also the
+series, beats, sub-window summaries and MFCC/spectral vectors. Captured arrays are sticky per track and
+leave only through `--edge-arrays-drop [--dry-run]`. Roughly 0.2 s of fold plus PCM per track beside the
+analysis. `--store-info` reports the coverage
 (eligible, captured, missing), bytes per track, median time and the work queue by state. In
 `--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
 catalog entry.
@@ -171,8 +173,9 @@ in hand, save and exit once that long has passed; run the same command again to 
 
 **The companion file (`mbxedges.v1.json`).** The hub reads edges from a small JSON file beside
 `mbxmoods.json`, keyed by `audioStreamSha256`, carrying per edge the status word, window, key vote,
-bpm, loudness scalars, texture means and spreads, divergences and the PCM `rms` block, and per track the
-head-vs-tail divergence; the 10/s series, beats, HPCP and sub-window summaries stay in the store. It is
+bpm, loudness scalars, texture means and spreads (when the arrays were captured; `null` otherwise),
+divergences and the PCM `rms` block, and per track the head-vs-tail divergence; the 10/s series, beats,
+HPCP and sub-window summaries stay in the store. It is
 written from the store, compactly (about 1.8 KB per track), after any `--edges` scan
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
