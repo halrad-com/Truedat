@@ -453,12 +453,17 @@ namespace Truedat.Store
         /// left out unless <paramref name="includeFailed"/> (--retry-errors), the scan's errors-ledger rule: nothing is retried
         /// implicitly, so a file whose fold fails is not re-analysed on every --refresh. Entity-keyed content has no sha for a
         /// catalog entry to match, so it is never listed.</summary>
+        /// <summary>The query behind <see cref="ContentKeysLackingEdges"/>; a field so the self-test can EXPLAIN exactly this SQL.</summary>
+        internal const string LackingEdgesSql = "SELECT c.content_key FROM track_content c WHERE c.content_key_kind <> 'entity' " +
+            "AND NOT EXISTS (SELECT 1 FROM value v WHERE v.content_hash = c.content_key AND v.producer_key = ?1 AND v.producer_version = ?2 AND v.segment_id = 0 AND v.field = 'edges.status') " +
+            "AND (?3 = 1 OR NOT EXISTS (SELECT 1 FROM run r WHERE r.entity_id = c.entity_id AND r.producer_key = ?1 AND r.producer_version = ?2 AND +r.outcome = 'failed' AND coalesce(r.failed_components, '') <> 'spill-lost'));";   // a lost spill never parks a track (TDA N1)
+        // `+r.outcome`: the unary plus keeps the planner off ix_run_outcome, so the failed-run test goes through ix_run_entity — the
+        // track's few runs — instead of every failed run in the store for every candidate track (TDA 040; pinned by EdgeSelfTest).
+
         internal HashSet<string> ContentKeysLackingEdges(string producerKey, string version, bool includeFailed)
         {
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            using var st = Db.Prepare("SELECT c.content_key FROM track_content c WHERE c.content_key_kind <> 'entity' " +
-                "AND NOT EXISTS (SELECT 1 FROM value v WHERE v.content_hash = c.content_key AND v.producer_key = ?1 AND v.producer_version = ?2 AND v.segment_id = 0 AND v.field = 'edges.status') " +
-                "AND (?3 = 1 OR NOT EXISTS (SELECT 1 FROM run r WHERE r.entity_id = c.entity_id AND r.producer_key = ?1 AND r.producer_version = ?2 AND r.outcome = 'failed' AND coalesce(r.failed_components, '') <> 'spill-lost'));");   // a lost spill never parks a track (TDA N1)
+            using var st = Db.Prepare(LackingEdgesSql);
             st.Bind(1, producerKey); st.Bind(2, version); st.Bind(3, includeFailed ? 1L : 0L);
             while (st.Step()) { var k = st.GetString(0); if (!string.IsNullOrEmpty(k)) set.Add(k!); }
             return set;

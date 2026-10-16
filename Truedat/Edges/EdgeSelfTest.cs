@@ -547,6 +547,19 @@ namespace Truedat.Edges
                     assert(newer.Contains(shaA) && newer.Contains(shaB), "a newer producer version lists everything again, the old version's rows and failures included");
                     bool anyEntity = false; foreach (var k in retry) if (k.StartsWith("entity:", StringComparison.Ordinal)) anyEntity = true;
                     assert(!anyEntity, "no entity-keyed content is ever listed");
+                    // TDA 040 (from the T14 plan check): the per-track failed-run test must find the TRACK's runs through
+                    // ix_run_entity. Without sqlite_stat1 the planner preferred ix_run_outcome (outcome='failed'), so every candidate
+                    // track walked every failed run in the store — tracks x failed runs on each --refresh. Pinned on truedat's own
+                    // SQLite (winsqlite3), the plan the scan actually gets.
+                    var plan = new List<string>();
+                    using (var ep = os.Dal.Db.Prepare("EXPLAIN QUERY PLAN " + Truedat.Store.StoreDal.LackingEdgesSql))
+                    {
+                        ep.Bind(1, EdgeStore.ProducerKey); ep.Bind(2, ok.ProducerVersion); ep.Bind(3, 0L);
+                        while (ep.Step()) plan.Add(ep.GetString(3) ?? "");
+                    }
+                    var runLine = plan.Find(p => p.Contains(" r ") || p.EndsWith(" r") || p.Contains("SEARCH r") || p.Contains("SCAN r")) ?? "(no run step)";
+                    assert(runLine.Contains("ix_run_entity") && !runLine.Contains("ix_run_outcome"),
+                        $"lacking-edges: the failed-run check searches the track's runs by ix_run_entity, never every failed run by ix_run_outcome (plan: {string.Join(" | ", plan)})");
                 }
             }
             finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
