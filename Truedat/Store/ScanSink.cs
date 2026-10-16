@@ -18,13 +18,16 @@ namespace Truedat.Store
         public int Edges, EdgesFailed;
         /// <summary>Checkpoint flushes (final: false) that failed this scan; their entries were re-queued for the final flush.</summary>
         public int CheckpointFailures;
+        /// <summary>Edge spills the store could not read back when writing (recorded as failed edges runs): a STORE-side loss, so the scan's
+        /// record is failed, not completed (keeper 006 / TDA rule).</summary>
+        public int SpillsLost;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
 
         internal void Add(ScanSinkReport r)
         {
             Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
             Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
-            Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs;
+            Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost;
         }
     }
 
@@ -85,17 +88,36 @@ namespace Truedat.Store
         }
 
 
-        /// <summary>Reads a spilled fold and deletes its file; null (logged) when the file is gone or unreadable.</summary>
-        internal static global::Truedat.Edges.EdgeFoldResult? ReadEdges(string file)
+        /// <summary>Reads a spilled fold. READ ONLY — the file is deleted by the import loop after the transaction that wrote its rows has
+        /// committed (<see cref="DeleteSpill"/>), never here: deleting at read lost the fold when the batch rolled back (keeper 006 on
+        /// b4622f7 — the re-queued retry found no file, wrote no edge rows, and the record said completed). Null, with the reason, when the
+        /// file is gone or unreadable; the caller records that as a FAILED edges run, never as "no fold".</summary>
+        internal static global::Truedat.Edges.EdgeFoldResult? ReadEdges(string file, out string? error)
         {
-            try
-            {
-                var r = global::Truedat.Edges.EdgeStore.UnpackResult(System.IO.File.ReadAllBytes(file));
-                TryDelete(file);
-                return r;
-            }
-            catch (Exception ex) { StoreLog.Warn($"spilled edge fold unreadable ({file}): {ex.Message}"); TryDelete(file); return null; }
+            error = null;
+            try { return global::Truedat.Edges.EdgeStore.UnpackResult(System.IO.File.ReadAllBytes(file)); }
+            catch (Exception ex) { error = $"spilled edge fold unreadable ({file}): {ex.Message}"; StoreLog.Warn(error); return null; }
         }
+
+        /// <summary>A spill file whose rows are committed: delete it. Called by the import loop after <c>tx.Complete()</c>.</summary>
+        internal static void DeleteSpill(string file) => TryDelete(file);
+
+        /// <summary>The edge producer version the scan runs with (set at the edge preflight) — the version a LOST spill's failed run is
+        /// recorded under, since the file that carried the version is the thing that is missing.</summary>
+        internal static string EdgeProducerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
+
+        /// <summary>The fold result that stands in for a spill the store could not read back: a FAILED edges run naming the reason (TDA
+        /// rule: a missing or unreadable stash is EdgesFailed, never "no fold").</summary>
+        internal static global::Truedat.Edges.EdgeFoldResult LostFold(string reason)
+        {
+            var r = new global::Truedat.Edges.EdgeFoldResult { ProducerVersion = EdgeProducerVersion };
+            r.Head.Status = "failed"; r.Tail.Status = "failed"; r.Head.Error = r.Tail.Error = reason;
+            return r;
+        }
+
+        /// <summary>Self-test accessors: the pending stash files tied to a recorded path (null when none).</summary>
+        internal static string? PendingArtifactFile(string path) => _artifacts.TryGetValue(path, out var p) ? p : null;
+        internal static string? PendingEdgeFile(string path) => _edges.TryGetValue(path, out var p) ? p : null;
 
         /// <summary>Called by the extractor core right after a successful parse, with the JSON text it is about to delete.</summary>
         internal static void StashMainJson(string analysedPath, string json)
@@ -183,13 +205,15 @@ namespace Truedat.Store
             {
                 // store-v3 T11: the scan's record (store-result.json, the hub:H03d shape) is written by the scan itself at the
                 // end of the run (Program.WriteScanStoreResult), after the companion step — not the import-shaped file here.
+                // ONE transaction per flush (TDA P3 on b4622f7): a failed flush re-queues the whole batch, so nothing of it may have committed
+                // — with per-5,000 batches the retry would under-count the committed batches' edges and their spills would be gone.
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
-                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, null, rootHints, artifacts, edges);
+                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, null, rootHints, artifacts, edges, batchSize: int.MaxValue);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Remeasured = r.Remeasured; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
-                report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed;
+                report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost;
                 report.StorePath = storePath;
             }
             catch (Exception ex)

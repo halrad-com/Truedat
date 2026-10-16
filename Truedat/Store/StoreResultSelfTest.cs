@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace Truedat.Store
@@ -29,6 +30,18 @@ namespace Truedat.Store
             try { TestMultiFlushTally(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.MultiFlush: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: a failed checkpoint keeps every tied payload — entry, artifact, edge fold — for the retry)");
+            try { TestCheckpointPayloadRetry(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.CheckpointPayload: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: a rollback after the writes leaves every pending file; a missing spill is a failed run, not a completed record)");
+            try { TestPayloadRollbackAndLostSpill(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.PayloadRollback: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ImportCommand.FailAfterEntriesForTest = 0; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: a scan refusal writes its own failed record with the sentence and a non-zero exit)");
+            try { TestRefuseScan(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.RefuseScan: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --edges-export records the generation the companion was stamped with)");
             try { TestEdgesExportGeneration(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -331,6 +344,157 @@ namespace Truedat.Store
                         $"the record says failed with the store reason even at exit 0 ({failed.Outcome}/{failed.ExitCode}/{failed.Reason})");
                 }
                 finally { ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            }
+        }
+
+        /// <summary>Keeper finding on b4622f7 (store-t11-b4622f7/checkpoint-payload-probe): a checkpoint that fails AFTER the edge spill was
+        /// consumed lost the fold — the spill file was deleted at read, before the transaction committed — so the retry wrote the entry and
+        /// the artifact but no edge rows, and the record said completed. Every tied payload must stay recoverable until its write commits.</summary>
+        static void TestCheckpointPayloadRetry(Action<bool, string> assert)
+        {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                var prevDir = ScanSink.StoreDirectory; ScanSink.StoreDirectory = d.Root;
+                try
+                {
+                    var sha = new string('7', 64);
+                    const string key = @"D:\music\payload.flac";
+                    var entry = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 100, Mfcc = new[] { 1.0, 2.0 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha };
+                    var settings = new global::Truedat.Edges.EdgeSettings();
+                    var fold = new global::Truedat.Edges.EdgeFoldResult { DurationMs = 240000, ProducerVersion = settings.ProducerVersion, Extractor = "output-x64.5" };
+                    fold.Head.Status = "ok"; fold.Head.StartMs = 0; fold.Head.EndMs = 30000; fold.Tail.Status = "ok"; fold.Tail.StartMs = 210000; fold.Tail.EndMs = 240000;
+                    fold.Head.Bpm = new global::Truedat.Edges.EdgeBpm { Value = 123.5, Beats = 60, Regularity = 0.9 };
+                    // The extractor core's order: main JSON stashed, the fold spilled, then Record ties both to the entry.
+                    ScanSink.StashMainJson(key, "{\"lowlevel\":{\"spectral_centroid\":{\"mean\":1.0}}}");
+                    ScanSink.StashEdges(key, fold);
+                    ScanSink.Record(key, entry, key);
+                    assert(ScanSink.Pending == 1 && ScanSink.PendingArtifacts == 1 && ScanSink.PendingEdges == 1, $"tied: 1 entry, 1 artifact, 1 edge spill pending ({ScanSink.Pending}/{ScanSink.PendingArtifacts}/{ScanSink.PendingEdges})");
+                    // The keeper's trigger: a CHECKPOINT whose artifact commit refuses the producer build AFTER the entry and the fold were consumed.
+                    var c = ScanSink.Flush(store, "bad/build", new[] { key }, final: false);
+                    assert(!c.Ok && ScanSink.Pending == 1 && ScanSink.PendingArtifacts == 1 && ScanSink.PendingEdges == 1 && ScanSink.Total.CheckpointFailures == 1,
+                        $"the failed checkpoint re-queued the entry WITH its artifact and its edge spill ({c.Ok}; {ScanSink.Pending}/{ScanSink.PendingArtifacts}/{ScanSink.PendingEdges}; {c.Error})");
+                    // The valid retry must commit ALL of it — entry, artifact AND the edge rows — or report a real failure; never complete having dropped the edges.
+                    var fin = ScanSink.Flush(store, "output-x64.5", new[] { key }, final: true);
+                    long content, artifacts, segments, values; global::Truedat.Edges.EdgeFoldResult? back;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
+                        content = os.Dal.Count("track_content"); artifacts = os.Dal.Count("artifact");
+                        segments = os.Dal.CountSegments(sha, settings.ProducerVersion); values = os.Dal.CountValues(sha, global::Truedat.Edges.EdgeStore.ProducerKey, settings.ProducerVersion);
+                        back = global::Truedat.Edges.EdgeStore.Read(os.Dal, sha, settings.ProducerVersion);
+                    }
+                    assert(fin.Ok && fin.Entries == 1 && fin.Edges == 1 && fin.EdgesFailed == 0, $"retry: ok, 1 entry, 1 edge result written ({fin.Ok}; entries {fin.Entries}, edges {fin.Edges}, failed {fin.EdgesFailed}; {fin.Error})");
+                    assert(content == 1 && artifacts == 1 && segments == 2 && values >= 5, $"retry committed the whole payload: content {content} (1), artifact {artifacts} (1), edge segments {segments} (2), edge value rows {values} (>= 5)");
+                    assert(back != null && back.Status == "ok" && back.DurationMs == 240000 && back.Extractor == "output-x64.5" && back.Head.Bpm != null && Math.Abs(back.Head.Bpm.Value - 123.5) < 1e-4 && back.Head.Bpm.Beats == 60 && back.Tail.StartMs == 210000,
+                        $"the edge rows read back as the fold that was spilled (status {back?.Status}, duration {back?.DurationMs}, extractor {back?.Extractor}, head bpm {back?.Head.Bpm?.Value}, tail start {back?.Tail.StartMs})");
+                    var rec = new StoreResultFile();
+                    var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started);
+                    var fin2 = StoreResult.FinishScan(0);
+                    assert(path != null && fin2 == path && StoreResult.TryRead(path!, out rec) && rec.Outcome == "completed" && rec.Detail != null && rec.Detail["entries"] == 1 && rec.Detail["edges"] == 1 && rec.Detail["checkpointFailures"] == 1,
+                        $"the record: completed only because ALL payload committed — entries {rec.Detail?["entries"]} (1), edges {rec.Detail?["edges"]} (1), checkpointFailures {rec.Detail?["checkpointFailures"]} (1)");
+                }
+                finally { ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            }
+        }
+
+        /// <summary>TDA regressions (2) and (3) on keeper 006: a rollback AFTER the artifact rows were written leaves every pending file where it
+        /// was and no row-less committed file; a spill that is missing at write time is a FAILED edges run and the record is not completed.</summary>
+        static void TestPayloadRollbackAndLostSpill(Action<bool, string> assert)
+        {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                var prevDir = ScanSink.StoreDirectory; ScanSink.StoreDirectory = d.Root;
+                try
+                {
+                    TrackEntry E(string sha) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 100, Mfcc = new[] { 1.0, 2.0 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha };
+                    var settings = new global::Truedat.Edges.EdgeSettings();
+                    global::Truedat.Edges.EdgeFoldResult Fold(double bpm)
+                    {
+                        var f = new global::Truedat.Edges.EdgeFoldResult { DurationMs = 240000, ProducerVersion = settings.ProducerVersion, Extractor = "output-x64.5" };
+                        f.Head.Status = "ok"; f.Head.EndMs = 30000; f.Tail.Status = "ok"; f.Tail.StartMs = 210000; f.Tail.EndMs = 240000;
+                        f.Head.Bpm = new global::Truedat.Edges.EdgeBpm { Value = bpm, Beats = 60, Regularity = 0.9 };
+                        return f;
+                    }
+                    string k1 = @"D:\music\rb1.flac", k2 = @"D:\music\rb2.flac"; string sha1 = new string('8', 64), sha2 = new string('9', 64);
+                    foreach (var (k, sha, bpm, json) in new[] { (k1, sha1, 111.0, "{\"a\":1}"), (k2, sha2, 112.0, "{\"a\":2}") })
+                    { ScanSink.StashMainJson(k, json); ScanSink.StashEdges(k, Fold(bpm)); ScanSink.Record(k, E(sha), k); }
+                    var pend1 = ScanSink.PendingArtifactFile(k1)!; var pend2 = ScanSink.PendingArtifactFile(k2)!; var spill1 = ScanSink.PendingEdgeFile(k1)!; var spill2 = ScanSink.PendingEdgeFile(k2)!;
+                    string PendSha(string f) { using var h = System.Security.Cryptography.SHA256.Create(); using var fs = File.OpenRead(f); return BitConverter.ToString(h.ComputeHash(fs)).Replace("-", "").ToLowerInvariant(); }
+                    var pendSha1 = PendSha(pend1);
+                    int CommittedFiles() => Directory.Exists(d.P("artifacts")) ? Directory.GetFiles(d.P("artifacts"), "*", SearchOption.AllDirectories).Count(f => !f.Contains(Path.DirectorySeparatorChar + "pending" + Path.DirectorySeparatorChar)) : 0;
+
+                    // (2) the transaction fails AFTER both entries (artifact rows + planned moves, edge rows) were written: rollback must leave the
+                    //     pending files intact and NOTHING committed on disk — no row-less artifact file.
+                    ImportCommand.FailAfterEntriesForTest = 2;
+                    var c = ScanSink.Flush(store, "output-x64.5", new[] { k1, k2 }, final: false);
+                    ImportCommand.FailAfterEntriesForTest = 0;
+                    assert(!c.Ok && ScanSink.Pending == 2 && ScanSink.PendingArtifacts == 2 && ScanSink.PendingEdges == 2, $"rollback after the writes: all re-queued ({c.Ok}; {ScanSink.Pending}/{ScanSink.PendingArtifacts}/{ScanSink.PendingEdges}; {c.Error})");
+                    assert(File.Exists(pend1) && File.Exists(pend2) && File.Exists(spill1) && File.Exists(spill2) && CommittedFiles() == 0,
+                        $"rollback after the writes: every pending file is still where the sink put it and no artifact file exists without its row (pending {File.Exists(pend1)}/{File.Exists(pend2)}, spills {File.Exists(spill1)}/{File.Exists(spill2)}, committed files {CommittedFiles()})");
+                    long rowsAfterRollback; using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) rowsAfterRollback = os.Dal.Count("artifact") + os.Dal.Count("track_content");
+                    assert(rowsAfterRollback == 0, $"rollback after the writes: no rows ({rowsAfterRollback})");
+                    // The retry commits all of it, and the committed artifact files ARE the pending ones (sha256 identity); the spills are gone after the commit.
+                    var fin = ScanSink.Flush(store, "output-x64.5", new[] { k1, k2 }, final: true);
+                    long arts, segs1, segs2; string? relSha1;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    { arts = os.Dal.Count("artifact"); segs1 = os.Dal.CountSegments(sha1, settings.ProducerVersion); segs2 = os.Dal.CountSegments(sha2, settings.ProducerVersion); relSha1 = os.Db.ExecScalar("SELECT sha256 FROM artifact WHERE content_hash = '" + sha1 + "';"); }
+                    var committed1 = Path.Combine(d.Root, ArtifactStore.RelativePathFor(sha1, "output-x64.5"));
+                    assert(fin.Ok && fin.Entries == 2 && fin.Edges == 2 && arts == 2 && segs1 == 2 && segs2 == 2 && CommittedFiles() == 2 && File.Exists(committed1) && PendSha(committed1) == pendSha1 && relSha1 == pendSha1 && !File.Exists(pend1) && !File.Exists(spill1) && !File.Exists(spill2),
+                        $"retry: 2 entries, 2 edge results, 2 artifact rows whose files are the pending ones (sha identity {relSha1 == pendSha1}), spills deleted after the commit (ok {fin.Ok}, edges {fin.Edges}, artifacts {arts}, segs {segs1}/{segs2}, files {CommittedFiles()})");
+
+                    // (3) a spill that is MISSING at write time: a failed edges run naming the reason, SpillsLost counted, the record failed — never "no fold" + completed.
+                    ScanSink.Reset(); StoreResult.ResetScanForTest();
+                    const string k3 = @"D:\music\rb3.flac"; var sha3 = new string('a', 64);
+                    ScanSink.StashEdges(k3, Fold(113)); ScanSink.Record(k3, E(sha3), k3);
+                    var spill3 = ScanSink.PendingEdgeFile(k3)!; File.Delete(spill3);
+                    var lost = ScanSink.Flush(store, "output-x64.5", new[] { k3 }, final: true);
+                    long failedRuns; using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) failedRuns = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND error_text LIKE '%spilled edge fold%';") ?? "0");
+                    assert(lost.Ok && lost.Entries == 1 && lost.Edges == 0 && lost.EdgesFailed == 1 && lost.SpillsLost == 1 && failedRuns == 1,
+                        $"a missing spill is a FAILED edges run naming the reason, counted as lost — never 'no fold' (edges {lost.Edges}, failed {lost.EdgesFailed}, lost {lost.SpillsLost}, failed runs naming it {failedRuns})");
+                    var rec = new StoreResultFile();
+                    var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started); StoreResult.FinishScan(0);
+                    assert(path != null && StoreResult.TryRead(path!, out rec) && rec.Outcome == "failed" && rec.ExitCode == 0 && rec.Reason != null && rec.Reason.StartsWith("store write lost 1 edge fold") && rec.Detail != null && rec.Detail["spillsLost"] == 1,
+                        $"the record is NOT completed when a fold was lost: {rec.Outcome} / {rec.Reason}");
+                }
+                finally { ImportCommand.FailAfterEntriesForTest = 0; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            }
+        }
+
+        /// <summary>Keeper P2-c/P2-d (TDA on keeper 007): every scan refusal after the store is resolved writes ITS OWN scan/failed record
+        /// with the exact sentence and a non-zero exit code — the previous verb's record is never left standing, and a refused scan is
+        /// never "completed".</summary>
+        static void TestRefuseScan(Action<bool, string> assert)
+        {
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                StoreResult.ResetScanForTest();
+                var resultPath = StoreResult.PathFor(store);
+                // The previous verb's record (a completed import) sits beside the store.
+                var prev = StoreResult.Begin("store-import"); prev.Store = new StoreResultStore { Path = store, SchemaVersion = 3, Generation = 0, TruedatVersion = "v" };
+                StoreResult.Write(store, prev, 0, StoreResult.OutcomeCompleted);
+                foreach (var (sentence, code, expectReason) in new[]
+                {
+                    ("Error: Folder not found: Q:\\absent", 1, "Folder not found: Q:\\absent"),
+                    ("Error: --folder is mutually exclusive with --file-list and --analyze-file.", 1, "--folder is mutually exclusive with --file-list and --analyze-file."),
+                    ("Error: iTunes library not found: Q:\\nope\\iTunes Music Library.xml (run --paths to see what resolved)", 2, "iTunes library not found: Q:\\nope\\iTunes Music Library.xml (run --paths to see what resolved)"),
+                })
+                {
+                    StoreResult.ResetScanForTest();
+                    int exit = Program.RefuseScan(store, sentence, code);
+                    var fin = StoreResult.FinishScan(exit);
+                    var rec = new StoreResultFile();
+                    assert(exit == code && fin == resultPath && StoreResult.TryRead(resultPath, out rec) && rec.Verb == "scan" && rec.Outcome == "failed" && rec.ExitCode == code && rec.Reason == expectReason,
+                        $"refusal '{sentence}': scan / failed / exit {code} / the sentence as the reason ({rec.Verb}/{rec.Outcome}/{rec.ExitCode}/{rec.Reason})");
+                }
+                // No store in force: nothing to write, no throw, the exit code still comes back.
+                StoreResult.ResetScanForTest();
+                assert(Program.RefuseScan(null, "Error: Folder not found: Q:\\x", 1) == 1 && StoreResult.FinishScan(1) == null, "refusal with no store: exit code returned, no record");
             }
         }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -52,27 +53,48 @@ namespace Truedat.Store
             return Path.Combine("artifacts", build.Replace(':', '_'), bucket, safe + Extension);
         }
 
-        /// <summary>Moves a pending file to its content-addressed place. When one already exists for the key the pending
-        /// copy is discarded (same audio, same build: the artifact is stored once). Returns the relative path, bytes, sha256
-        /// and whether this call created the file.</summary>
-        internal static (string RelPath, long Bytes, string Sha256, bool Created) Commit(string storeDir, string pendingPath, string contentKey, string build)
+        /// <summary>The artifact row's facts for a pending file — relative path, bytes, sha256 and whether the destination is new —
+        /// WITHOUT touching the file (keeper 006 / TDA rule: nothing moves before the transaction that references it commits). The
+        /// bytes and hash are the committed file's when one already exists for the key (same audio, same build: stored once), else
+        /// the pending file's, which <see cref="Finish"/> will move into place after the commit.</summary>
+        internal static (string RelPath, long Bytes, string Sha256, bool Created) Plan(string storeDir, string pendingPath, string contentKey, string build)
         {
             var rel = RelativePathFor(contentKey, build);
             var full = Path.Combine(storeDir, rel);
-            bool created = false;
-            if (File.Exists(full)) { try { File.Delete(pendingPath); } catch { } }
-            else
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-                File.Move(pendingPath, full);
-                created = true;
-            }
-            long bytes = new FileInfo(full).Length;
+            bool created = !File.Exists(full);
+            var measured = created ? pendingPath : full;
+            long bytes = new FileInfo(measured).Length;
             string sha;
             using (var h = SHA256.Create())
-            using (var fs = File.OpenRead(full))
+            using (var fs = File.OpenRead(measured))
                 sha = BitConverter.ToString(h.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
             return (rel, bytes, sha, created);
+        }
+
+        /// <summary>After the commit: move each planned pending file to its content-addressed place, or discard the pending copy when the
+        /// destination already exists. A pending file that is already gone (a Finish re-run after a crash between commit and move, when the
+        /// destination exists) is nothing to do.</summary>
+        internal static void Finish(List<(string Pending, string Full)> planned)
+        {
+            foreach (var (pending, full) in planned)
+            {
+                try
+                {
+                    if (File.Exists(full)) { if (File.Exists(pending)) File.Delete(pending); continue; }
+                    if (!File.Exists(pending)) { StoreLog.Warn($"artifact pending file missing after commit: {pending} (row names {full})"); continue; }
+                    Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                    File.Move(pending, full);
+                }
+                catch (Exception ex) { StoreLog.Warn($"artifact move after commit failed: {pending} -> {full}: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Plan + Finish in one step — for callers with no transaction to wait for (the self-tests).</summary>
+        internal static (string RelPath, long Bytes, string Sha256, bool Created) Commit(string storeDir, string pendingPath, string contentKey, string build)
+        {
+            var a = Plan(storeDir, pendingPath, contentKey, build);
+            Finish(new List<(string, string)> { (pendingPath, Path.Combine(storeDir, a.RelPath)) });
+            return a;
         }
 
         /// <summary>Inflates a committed artifact back to the extractor's JSON text (the re-fold entry point).</summary>

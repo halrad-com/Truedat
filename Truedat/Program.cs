@@ -2885,16 +2885,13 @@ namespace Truedat
             }
             if (folderMode && (fileListMode || analyzeFileMode))
             {
-                Console.Error.WriteLine("Error: --folder is mutually exclusive with --file-list and --analyze-file.");
-                Environment.ExitCode = 1;
+                Environment.ExitCode = RefuseScan(_storePath, "Error: --folder is mutually exclusive with --file-list and --analyze-file.", 1);
                 return;
             }
             if (folderMode && !Directory.Exists(folderPath!))
             {
-                Console.Error.WriteLine($"Error: Folder not found: {folderPath}");
                 var folderHint = PathCodepageHint(folderPath!, Directory.Exists);
-                if (folderHint != null) Console.Error.WriteLine(folderHint);
-                Environment.ExitCode = 1;
+                Environment.ExitCode = RefuseScan(_storePath, $"Error: Folder not found: {folderPath}" + (folderHint != null ? " — " + folderHint : ""), 1);
                 return;
             }
             // --folder reuses the --file-list worker code path entirely; the only
@@ -5140,11 +5137,21 @@ namespace Truedat
 
             // T11: from here on this is the library scan unless one of the four XML-using verbs below takes over — the scan's provisional
             // store-result.json begins now, so an XML / extractor refusal cannot leave the PREVIOUS verb's record in place (TDA review P2b).
-            if (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
+            bool libraryScan = !checkFilenames && !duplicatesMode && !migrateMode && !fixupMode;
+            bool xmlExplicit = !string.IsNullOrEmpty(xmlPath);
+            if (libraryScan) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             xmlPath = ResolveITunesXml(xmlPath);
 
             if (!File.Exists(xmlPath))
             {
+                // Keeper P2-d on b4622f7: this returned with exit 0 and (since the record now begins first) a scan record saying completed —
+                // a false success. A refusal is a refusal: exit 2 like the other not-found cases whenever the operator NAMED the library or a
+                // store is in force; only the bare "truedat" with nothing found and no store keeps the help page + exit 0 (a separate call).
+                if (libraryScan && (xmlExplicit || _storePath != null))
+                {
+                    Environment.ExitCode = RefuseScan(_storePath, $"Error: iTunes library not found: {xmlPath} (run --paths to see what resolved)", 2);
+                    return;
+                }
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
                 Console.WriteLine("Probed: exe-dir and its parent (bare and \\Library), each ancestor up to "
                     + LibrarySearchMaxAncestors + " levels, any folder holding " + LibraryMarkerName
@@ -10541,11 +10548,24 @@ namespace Truedat
         /// <summary>S2 C4: what <c>--edges</c> needs before a scan starts, checked once the extractor is resolved, in every scan
         /// mode. Returns a plain refusal (the caller exits 1) or null; prints the enabled line. Also stamps the run rows'
         /// extractor build for the per-file modes, which only the library scan did before.</summary>
+        /// <summary>T11: EVERY scan-mode refusal after the store is resolved goes through here (TDA on keeper 007): the scan's record begins
+        /// if it has not (so the previous verb's record is never left standing), the sentence becomes the record's failed outcome, stderr
+        /// gets it, and the exit code is returned for the caller to set — never 0 for a refusal. Pure apart from the record/stderr, so the
+        /// self-test can drive it with a fixture store.</summary>
+        internal static int RefuseScan(string? storePath, string sentence, int exitCode)
+        {
+            Console.Error.WriteLine(sentence);
+            global::Truedat.Store.StoreResult.BeginScan(storePath, _scanStartedUtc);
+            global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, sentence.StartsWith("Error: ", StringComparison.Ordinal) ? sentence.Substring(7) : sentence);
+            return exitCode;
+        }
+
         static string? EdgesPreflight(string essentiaExe, bool hasCatalogTarget = true)
         {
             // store-v3 T11: this is the one hook every scan mode passes once a store is in force — the scan's provisional
             // store-result.json begins here, so a refusal before the first flush still leaves a record at the boundary.
             global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
+            global::Truedat.Store.ScanSink.EdgeProducerVersion = _edgeSettings.ProducerVersion;   // a lost spill's failed run is recorded under the scan's version
             // The exe hash (~20 MB read) only when something consumes it: the store's run rows or the --edges build gate. The
             // autoscan plugin's frequent per-file calls run without either (review M9).
             if (_storePath != null || _stageOpts.Edges) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);

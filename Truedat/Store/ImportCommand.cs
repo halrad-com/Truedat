@@ -45,6 +45,9 @@ namespace Truedat.Store
         public int ContentRekeyed;
         /// <summary>S2 C4: edge rows written (an 'edges' run row + the packed rows) / folds that failed (a failed run row, no rows).</summary>
         public int Edges, EdgesFailed;
+        /// <summary>Edge spills that could not be read back at write time — counted in EdgesFailed too, and separately because they are a
+        /// store-side loss, not an audio condition.</summary>
+        public int SpillsLost;
         /// <summary>Entries where a stored NULL content column gained a value under the same producer — written as a fill, never a conflict (review #4).</summary>
         public int Filled;
         /// <summary>Entries whose description was replaced by a fresh measurement from the SAME producer/version (T01, F2): the
@@ -132,7 +135,7 @@ namespace Truedat.Store
         /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
         internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
             string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, string>? pendingEdges = null)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, string>? pendingEdges = null, int batchSize = 5000)
         {
             var sw = Stopwatch.StartNew();
             var r = new ImportReport { Entries = entries.Count, Catalog = source };
@@ -193,7 +196,7 @@ namespace Truedat.Store
                 }
             try
             {
-                ImportEntriesCore(dal, db, 5000, 0, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
+                ImportEntriesCore(dal, db, batchSize, FailAfterEntriesForTest, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
                     pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".", pendingEdges);
                 if (failures != null && failures.Count > 0)
                     using (var tx = db.BeginTransaction())
@@ -244,17 +247,26 @@ namespace Truedat.Store
             int processed = 0;
             for (int b = 0; b < keys.Count; b += Math.Max(1, batchSize))
             {
+                int end = (int)Math.Min(keys.Count, (long)b + Math.Max(1, batchSize));
+                // Keeper 006 / TDA rule: NO file is moved or deleted until the transaction that references it has committed. The artifact
+                // moves this batch wants are planned here and performed after tx.Complete(); the edge spills are deleted then too. A rollback
+                // leaves every pending file where the sink put it, so a re-queued retry finds its whole payload.
+                var deferred = new List<(string Pending, string Full)>();
                 using var tx = db.BeginTransaction();
-                for (int i = b; i < Math.Min(keys.Count, b + Math.Max(1, batchSize)); i++)
+                for (int i = b; i < end; i++)
                 {
                     string? pendingArtifact = null;
                     if (pendingArtifacts != null) pendingArtifacts.TryGetValue(keys[i], out pendingArtifact);
-                    // The fold was spilled to disk by the sink (review I3): read it here, one entry at a time, and the file goes.
+                    // The fold was spilled to disk by the sink (review I3): read it here, one entry at a time; the file stays until the commit.
                     global::Truedat.Edges.EdgeFoldResult? edges = null;
-                    if (pendingEdges != null && pendingEdges.TryGetValue(keys[i], out var edgesFile)) edges = ScanSink.ReadEdges(edgesFile);
+                    if (pendingEdges != null && pendingEdges.TryGetValue(keys[i], out var edgesFile))
+                    {
+                        edges = ScanSink.ReadEdges(edgesFile, out var lost);
+                        if (edges == null) { edges = ScanSink.LostFold(lost ?? $"spilled edge fold missing ({edgesFile})"); r.SpillsLost++; }   // a FAILED edges run, never "no fold"
+                    }
                     try
                     {
-                        ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
+                        ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges, deferred);
                     }
                     catch (UnstorableEntryException ex)
                     {
@@ -272,6 +284,10 @@ namespace Truedat.Store
                         throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
                 }
                 tx.Complete();
+                // Committed: now the files. A crash between the commit and these moves leaves the pending files recoverable (the row names a
+                // destination that the next Finish fills); nothing here can undo the commit.
+                ArtifactStore.Finish(deferred);
+                if (pendingEdges != null) for (int i = b; i < end; i++) if (pendingEdges.TryGetValue(keys[i], out var spill)) ScanSink.DeleteSpill(spill);
                 StoreLog.Debug($"batch committed: {processed}/{keys.Count}");
             }
         }
@@ -281,6 +297,10 @@ namespace Truedat.Store
         /// <summary>Self-test seam: runs right after the store opened (schema and generation known) and before any entry is written,
         /// so a test can fail the verb there and prove the record keeps the at-open facts and carries no counts. Null in production.</summary>
         internal static Action? AfterStoreOpened;
+
+        /// <summary>Self-test seam for the in-memory entry path: throw after N entries were processed inside the batch transaction, so a test can
+        /// prove a rollback leaves every pending file recoverable and no row-less artifact file behind. 0 in production.</summary>
+        internal static int FailAfterEntriesForTest;
 
         /// <summary>Fills <paramref name="r"/> as it goes (see <see cref="Run"/>); throws on failure with the facts so far in place.</summary>
         internal static void Execute(ImportOptions o, ImportReport r)
@@ -385,7 +405,7 @@ namespace Truedat.Store
 
         static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
             string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r, string? pendingArtifact = null, string? storeDir = null,
-            global::Truedat.Edges.EdgeFoldResult? edges = null)
+            global::Truedat.Edges.EdgeFoldResult? edges = null, List<(string Pending, string Full)>? deferredArtifacts = null)
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
@@ -457,9 +477,12 @@ namespace Truedat.Store
             // S2 C-A: the extractor's aggregate output, kept once per content key as a compressed file beside the store.
             if (pendingArtifact != null && storeDir != null)
             {
-                var a = ArtifactStore.Commit(storeDir, pendingArtifact, contentKey, producerVersion);
+                // The row is written in this transaction; the pending file is MOVED only after the commit (ArtifactStore.Finish, by the batch loop).
+                var a = ArtifactStore.Plan(storeDir, pendingArtifact, contentKey, producerVersion);
                 dal.InsertArtifact(contentKey, sha != null ? kind : "entity", runPerEntry ? runId : (long?)null, ArtifactStore.MainKind, producerVersion, a.RelPath, a.Bytes, a.Sha256, now);
                 if (a.Created) { r.Artifacts++; r.ArtifactBytes += a.Bytes; } else r.ArtifactsShared++;
+                if (deferredArtifacts != null) deferredArtifacts.Add((pendingArtifact, Path.Combine(storeDir, a.RelPath)));
+                else ArtifactStore.Finish(new List<(string, string)> { (pendingArtifact, Path.Combine(storeDir, a.RelPath)) });
             }
 
             // S2 C4: the edges producer's result for this entry — its own run row (who folded, how long: fold + PCM), and the

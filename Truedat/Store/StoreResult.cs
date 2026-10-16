@@ -186,9 +186,10 @@ namespace Truedat.Store
             {
                 ["entries"] = r.Entries, ["failures"] = r.Failures, ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift,
                 ["contentReplaced"] = r.ContentReplaced, ["entitiesCreated"] = r.EntitiesCreated, ["edges"] = r.Edges, ["edgesFailed"] = r.EdgesFailed,
-                ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs, ["checkpointFailures"] = r.CheckpointFailures,
+                ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs, ["checkpointFailures"] = r.CheckpointFailures, ["spillsLost"] = r.SpillsLost,
             };
             if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
+            else if (r.SpillsLost > 0) _scanStoreFailure = $"store write lost {r.SpillsLost} edge fold(s): the spilled fold could not be read back when writing (recorded as failed edges runs; --refresh re-analyses them)";
             // Exit code stays NULL here either way: the process has not finished; FinishScan writes the real one.
             var path = _scanStoreFailure == null
                 ? Write(fullStore, rec, null, OutcomeInterrupted, ProvisionalReason)
