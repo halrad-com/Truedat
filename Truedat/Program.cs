@@ -19662,6 +19662,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(strippedThis && node["bpmHistogram"] == null && node["bpm"] != null,
                     "fieldpolicy: --fixup strips the excluded field, keeps the rest");
 
+                // X1 (TDA T14 review): with NO schema file beside the exe, the built-in default must be exactly the committed
+                // schema's excluded set — read from the committed file itself (embedded at build), so the two cannot drift
+                // again. It had drifted: the default carried bpmHistogram only, so an install without the file emitted trackId.
+                {
+                    var committed = FieldPolicy.ParseExcluded(FieldPolicy.EmbeddedSchemaJson());
+                    var missingDir = Path.Combine(Path.GetTempPath(), "truedat-x1-" + Guid.NewGuid().ToString("N"));
+                    var fallback = FieldPolicy.LoadFrom(Path.Combine(missingDir, "mbxmoods-schema.json"));
+                    Assert(committed.Contains("trackId") && committed.Contains("bpmHistogram"),
+                        $"fieldpolicy X1: the committed schema excludes trackId and bpmHistogram ({string.Join(",", committed)})");
+                    Assert(fallback.SetEquals(committed),
+                        $"fieldpolicy X1: no schema file -> the built-in default equals the committed excluded set (got {string.Join(",", fallback)}; committed {string.Join(",", committed)})");
+                    Directory.CreateDirectory(missingDir);
+                    try
+                    {
+                        var corrupt = Path.Combine(missingDir, "mbxmoods-schema.json");
+                        File.WriteAllText(corrupt, "{ not json");
+                        Assert(FieldPolicy.LoadFrom(corrupt).SetEquals(committed), "fieldpolicy X1: a corrupt schema file -> the committed set too");
+                        File.WriteAllText(corrupt, "{\"excluded\":{\"fields\":{}}}");
+                        Assert(FieldPolicy.LoadFrom(corrupt).Count == 0, "fieldpolicy X1: a present, valid schema stays authoritative (empty = cut nothing)");
+                    }
+                    finally { try { Directory.Delete(missingDir, true); } catch { } }
+                    FieldPolicy.OverrideForTest(fallback);
+                    Assert(!Serialize().Contains("\"trackId\"") && !Serialize().Contains("bpmHistogram"),
+                        "fieldpolicy X1: under the built-in default the writer omits trackId and bpmHistogram");
+                }
+
                 FieldPolicy.OverrideForTest(savedExcluded);
             }
 

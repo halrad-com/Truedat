@@ -20,9 +20,9 @@ namespace Truedat
     /// </summary>
     internal static class FieldPolicy
     {
-        // Built-in default when no schema file is found — kept in sync with the committed
-        // mbxmoods-schema.json so the bpmHistogram cut still happens without the sidecar file.
-        static readonly string[] DefaultExcluded = { "bpmHistogram" };
+        // Built-in default when no schema file is found: the committed mbxmoods-schema.json itself, embedded at build, so the
+        // fallback cannot drift from the file (X1 — a hand-kept copy carried bpmHistogram only and let trackId back out).
+        static readonly string[] DefaultExcluded = new List<string>(ParseExcluded(EmbeddedSchemaJson())).ToArray();
 
         static HashSet<string>? _excluded;
         static readonly object _lock = new object();
@@ -46,38 +46,47 @@ namespace Truedat
         /// <summary>The excluded field names — the set --fixup strips from an existing entry.</summary>
         public static IReadOnlyCollection<string> ExcludedFieldNames => ExcludedSet;
 
-        static HashSet<string> Load()
+        static HashSet<string> Load() => LoadFrom(Path.Combine(AppContext.BaseDirectory, "mbxmoods-schema.json"));
+
+        /// <summary>The excluded set from the schema file at <paramref name="path"/>, or the built-in default when the file is
+        /// missing, unreadable or corrupt. A present, valid schema is authoritative — even an empty excluded block means "cut
+        /// nothing" (the operator un-cut a field on purpose).</summary>
+        internal static HashSet<string> LoadFrom(string path)
         {
-            var set = new HashSet<string>(StringComparer.Ordinal);
             try
             {
-                var path = Path.Combine(AppContext.BaseDirectory, "mbxmoods-schema.json");
-                if (!File.Exists(path))
-                {
-                    foreach (var f in DefaultExcluded) set.Add(f);
-                    return set;
-                }
-                using var doc = JsonDocument.Parse(
-                    File.ReadAllText(path),
-                    new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-                // Schema present is authoritative — even an empty excluded block means "cut
-                // nothing" (the operator un-cut a field on purpose). Only a MISSING file falls
-                // back to the built-in default.
-                if (doc.RootElement.TryGetProperty("excluded", out var exc)
-                    && exc.TryGetProperty("fields", out var fields)
-                    && fields.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var f in fields.EnumerateObject()) set.Add(f.Name);
-                }
+                if (File.Exists(path)) return ParseExcluded(File.ReadAllText(path));
             }
             catch
             {
                 // Unreadable/corrupt schema: fall back to the safe built-in default rather than
                 // silently emitting a field the operator meant to cut.
-                set.Clear();
-                foreach (var f in DefaultExcluded) set.Add(f);
+            }
+            return new HashSet<string>(DefaultExcluded, StringComparer.Ordinal);
+        }
+
+        /// <summary>The names under <c>excluded.fields</c> of a schema document (throws on invalid JSON).</summary>
+        internal static HashSet<string> ParseExcluded(string json)
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            using var doc = JsonDocument.Parse(json,
+                new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            if (doc.RootElement.TryGetProperty("excluded", out var exc)
+                && exc.TryGetProperty("fields", out var fields)
+                && fields.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var f in fields.EnumerateObject()) set.Add(f.Name);
             }
             return set;
+        }
+
+        /// <summary>The committed <c>mbxmoods-schema.json</c> as embedded in this exe at build time.</summary>
+        internal static string EmbeddedSchemaJson()
+        {
+            using var s = typeof(FieldPolicy).Assembly.GetManifestResourceStream("Truedat.mbxmoods-schema.json")
+                ?? throw new InvalidOperationException("the committed mbxmoods-schema.json is not embedded in this build");
+            using var r = new StreamReader(s);
+            return r.ReadToEnd();
         }
 
         /// <summary>Self-test seam: force a specific excluded set.</summary>

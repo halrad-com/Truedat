@@ -117,6 +117,8 @@ namespace Truedat { internal static class BuildInfo { internal const string Bran
     <EmbeddedResource Include="Store\Schema\v2.sql" LogicalName="Truedat.Store.Schema.v2.sql" />
     <EmbeddedResource Include="Store\Schema\v3.sql" LogicalName="Truedat.Store.Schema.v3.sql" />
     <EmbeddedResource Include="Store\Schema\v4.sql" LogicalName="Truedat.Store.Schema.v4.sql" />
+    <!-- The committed field-emission registry, embedded: FieldPolicy's built-in default when no schema file sits beside the exe. -->
+    <EmbeddedResource Include="..\mbxmoods-schema.json" LogicalName="Truedat.mbxmoods-schema.json" />
   </ItemGroup>
 
 </Project>
