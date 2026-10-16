@@ -166,10 +166,23 @@ namespace Truedat.Edges
                     $"sticky: a flag-off re-write of a track that holds arrays keeps the arrays and carries the new run ({os.Db.ExecScalar("SELECT count(arrays) || '/' || min(run_id) || '/' || max(run_id) FROM edge WHERE content_hash = '" + ShaDefault + "';")})");
                 assert(EdgeStore.ArraysCaptured(dal, ShaDefault, r.ProducerVersion) && !EdgeStore.ArraysCaptured(dal, ShaSilent, rs.ProducerVersion), "ArraysCaptured answers per track");
 
+                // Keeper 019 on 6721aa9: sticky is PER TRACK, not per producer version ("sticky per track. keep what we captured"). A track whose
+                // V1 row holds arrays, re-analysed under a NEW producer version with the flag off, must get its arrays at V2 — refreshed to V2's values,
+                // not V1's, and without the old row being discarded as a substitute.
+                const string ShaVer = "4444444444444444444444444444444444444444444444444444444444444444";
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaVer, ShaKind, null, r, captureArrays: true); tx.Complete(); }
+                var rV2 = SyntheticFold(dir); rV2.ProducerVersion = "edges@v3;e30;p10"; rV2.Head.MomentaryCentiDb[3] = -1234;   // a new fold rule, new values
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaVer, ShaKind, null, rV2, captureArrays: false); tx.Complete(); }
+                var backV2 = EdgeStore.Read(dal, ShaVer, rV2.ProducerVersion);
+                var backV1 = EdgeStore.Read(dal, ShaVer, r.ProducerVersion);
+                assert(EdgeStore.ArraysCaptured(dal, ShaVer, rV2.ProducerVersion) && backV2 != null && backV2.Head.MomentaryCentiDb.Length == 300 && backV2.Head.MomentaryCentiDb[3] == -1234,
+                    $"sticky across a producer-version change: the V2 default write keeps capturing, with V2's values (V2 arrays {EdgeStore.ArraysCaptured(dal, ShaVer, rV2.ProducerVersion)}, series {backV2?.Head.MomentaryCentiDb.Length}, [3] {(backV2 != null && backV2.Head.MomentaryCentiDb.Length > 3 ? backV2.Head.MomentaryCentiDb[3] : 0)} (-1234))");
+                assert(backV1 != null && backV1.Head.MomentaryCentiDb.Length == 300 && backV1.Head.MomentaryCentiDb[3] == -3827, "the V1 row is kept as it was (versions coexist; nothing discarded as a substitute)");
+
                 // The explicit discard verb: dry-run names what it would remove and changes nothing; the real run removes exactly those.
                 long withArrays = long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0");
                 var dry = EdgeStore.DropArrays(dal, dryRun: true);
-                assert(dry.Rows == withArrays && dry.Tracks == 2 && long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0") == withArrays,
+                assert(dry.Rows == withArrays && dry.Tracks == 3 && long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0") == withArrays,
                     $"--edge-arrays-drop --dry-run: names {dry.Rows} rows on {dry.Tracks} tracks and removes nothing ({os.Db.ExecScalar("SELECT count(arrays) FROM edge;")} still held)");
                 EdgeStore.DropArraysResult real;
                 using (var tx = os.Db.BeginTransaction()) { real = EdgeStore.DropArrays(dal, dryRun: false); tx.Complete(); }

@@ -71,7 +71,9 @@ namespace Truedat.Edges
                 Put(WholeTrack, "edges.headTail", null, null, F32Bytes(new[] { (float)(d.Loudness ?? double.NaN), (float)(d.Texture ?? double.NaN), (float)(d.Harmony ?? double.NaN) }), 3, "loudness,texture,harmony", "f32");
             }
             bool capture = captureArrays ?? CaptureArraysDefault;
-            bool sticky = !capture && ArraysCaptured(dal, contentKey, r.ProducerVersion);   // "keep what we captured"
+            // "sticky per track. keep what we captured" — per TRACK, not per producer version (keeper 019): a track whose rows hold arrays at ANY
+            // version keeps getting them when it is re-folded under a new one, with the new fold's values.
+            bool sticky = !capture && TrackHoldsArrays(dal, contentKey);
             var now = DateTime.UtcNow.ToString("o");
             foreach (var e in new[] { r.Head, r.Tail })
             {
@@ -114,7 +116,11 @@ namespace Truedat.Edges
                 hpcp, arrays, arrays == null ? null : ArraysDtype, now);
         }
 
-        /// <summary>True when any edge row of this content at this producer version holds the opt-in arrays (sticky capture).</summary>
+        /// <summary>True when any edge row of this content, at ANY producer version, holds the opt-in arrays — the sticky test (per track).</summary>
+        internal static bool TrackHoldsArrays(StoreDal dal, string contentKey)
+            => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND arrays IS NOT NULL;", contentKey) > 0;
+
+        /// <summary>True when any edge row of this content at this producer version holds the opt-in arrays.</summary>
         internal static bool ArraysCaptured(StoreDal dal, string contentKey, string producerVersion)
             => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;", contentKey, producerVersion) > 0;
 
