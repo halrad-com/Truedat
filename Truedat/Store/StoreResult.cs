@@ -22,7 +22,11 @@ namespace Truedat.Store
         /// <summary>scan | store-import | store-export | edges-export | fixup | remap | migrate | merge-moods | backfill | strip | prune | restore.</summary>
         public string Verb = "";
         public string StartedUtc = "";
-        public string FinishedUtc = "";
+        /// <summary>The process boundary's time — present iff <see cref="ExitCode"/> is; NULL on a provisional record (a finish that has
+        /// not happened is not observed; RBA 052: "last written" in a field named finished would be the stand-in the rule forbids).</summary>
+        public string? FinishedUtc;
+        /// <summary>When this record was written, every write, provisional or final — "how stale is this provisional record" (additive, RBA 052).</summary>
+        public string WrittenUtc = "";
         /// <summary>The process exit code the launcher also sees; the file is the tiebreak when the launcher saw none. NULL while
         /// the process has not finished (a provisional scan record): a file left behind by a killed process must not claim 0
         /// (TDA review of 368374a, P1).</summary>
@@ -215,7 +219,8 @@ namespace Truedat.Store
         internal static string? Write(string? storePath, StoreResultFile r, int? exitCode, string outcome, string? reason = null)
         {
             r.ExitCode = exitCode; r.Outcome = outcome; r.Reason = reason;
-            r.FinishedUtc = DateTime.UtcNow.ToString("o");
+            r.WrittenUtc = DateTime.UtcNow.ToString("o");
+            r.FinishedUtc = exitCode.HasValue ? r.WrittenUtc : null;   // the agreed rule: a finish that has not happened is null
             if (string.IsNullOrWhiteSpace(storePath)) { StoreLog.Warn("store-result.json not written: no store path"); return null; }
             string path;
             try { path = PathFor(storePath!); } catch (Exception ex) { StoreLog.Warn($"store-result.json not written: {ex.Message}"); return null; }
@@ -232,7 +237,8 @@ namespace Truedat.Store
                     w.WriteNumber("schemaVersion", StoreResultFile.SchemaVersionValue);
                     w.WriteString("verb", r.Verb);
                     w.WriteString("startedUtc", r.StartedUtc);
-                    w.WriteString("finishedUtc", r.FinishedUtc);
+                    if (r.FinishedUtc == null) w.WriteNull("finishedUtc"); else w.WriteString("finishedUtc", r.FinishedUtc);
+                    w.WriteString("writtenUtc", r.WrittenUtc);
                     if (r.ExitCode.HasValue) w.WriteNumber("exitCode", r.ExitCode.Value); else w.WriteNull("exitCode");
                     w.WriteString("outcome", r.Outcome);
                     if (r.Reason == null) w.WriteNull("reason"); else w.WriteString("reason", r.Reason);
@@ -315,7 +321,7 @@ namespace Truedat.Store
                 if (root.ValueKind != JsonValueKind.Object) return false;
                 if (!root.TryGetProperty("kind", out var k) || k.GetString() != StoreResultFile.KindValue) return false;
                 if (!root.TryGetProperty("schemaVersion", out var sv) || sv.GetInt32() != StoreResultFile.SchemaVersionValue) return false;
-                r.Verb = Str(root, "verb"); r.StartedUtc = Str(root, "startedUtc"); r.FinishedUtc = Str(root, "finishedUtc");
+                r.Verb = Str(root, "verb"); r.StartedUtc = Str(root, "startedUtc"); r.FinishedUtc = NullableStr(root, "finishedUtc"); r.WrittenUtc = Str(root, "writtenUtc");
                 r.ExitCode = root.TryGetProperty("exitCode", out var ec) && ec.ValueKind == JsonValueKind.Number ? ec.GetInt32() : (int?)null;
                 r.Outcome = Str(root, "outcome"); r.Reason = NullableStr(root, "reason");
                 if (root.TryGetProperty("store", out var s) && s.ValueKind == JsonValueKind.Object)

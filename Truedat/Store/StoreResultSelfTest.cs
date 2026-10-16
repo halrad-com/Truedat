@@ -66,8 +66,8 @@ namespace Truedat.Store
                 var bytes = File.ReadAllBytes(path!);
                 assert(bytes.Length > 2 && bytes[0] == (byte)'{', "Write: UTF-8 without BOM, one JSON object");
                 assert(StoreResult.TryRead(path!, out var back), "TryRead: the record reads back");
-                assert(back.Verb == "store-export" && back.ExitCode == 0 && back.Outcome == "completed" && back.Reason == null && back.StartedUtc.EndsWith("Z") && back.FinishedUtc.EndsWith("Z"),
-                    "round-trip: verb, exitCode, outcome, null reason, UTC stamps");
+                assert(back.Verb == "store-export" && back.ExitCode == 0 && back.Outcome == "completed" && back.Reason == null && back.StartedUtc.EndsWith("Z") && back.FinishedUtc != null && back.FinishedUtc.EndsWith("Z") && back.WrittenUtc == back.FinishedUtc,
+                    "round-trip: verb, exitCode, outcome, null reason, UTC stamps; a finished record's finishedUtc == writtenUtc");
                 assert(back.Store.Path == store && back.Store.SchemaVersion == 3 && back.Store.Generation == 7 && back.Store.TruedatVersion == "v-test", "round-trip: store block");
                 assert(back.Export.Performed && back.Export.Generation == 7 && back.Export.Catalog != null && back.Export.Catalog.Sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" && back.Export.Catalog.Bytes == 3
                        && back.Export.Sidecar == null && back.Export.Companion != null && back.Export.Companion.Sha256 == null,
@@ -186,6 +186,8 @@ namespace Truedat.Store
                 assert(StoreResult.TryRead(resultPath, out var begun) && begun.Verb == "scan" && begun.Outcome == "interrupted" && begun.ExitCode == null && begun.Reason == StoreResult.ProvisionalReason && begun.StartedUtc == started && begun.Store.Path == Path.GetFullPath(store),
                     $"BeginScan: provisional record (verb scan, interrupted, the provisional reason, NO exit code) replaces the previous verb's ({begun.Verb}/{begun.Outcome}/{begun.ExitCode}/{begun.Reason})");
                 assert(File.ReadAllText(resultPath).Contains("\"exitCode\": null"), "BeginScan: the bytes say exitCode null (the agreed pending-result rule), never 0");
+                assert(begun.FinishedUtc == null && File.ReadAllText(resultPath).Contains("\"finishedUtc\": null") && begun.WrittenUtc.EndsWith("Z"),
+                    $"BeginScan: finishedUtc null while provisional (a finish that has not happened is not observed), writtenUtc present ({begun.FinishedUtc}/{begun.WrittenUtc})");
                 // A store that does not exist yet (a scan refused before its first flush): schema/generation are NOT READ -> null, not 0.
                 using (var d0 = new Dir())
                 {
@@ -222,7 +224,7 @@ namespace Truedat.Store
                 var done = new StoreResultFile();
                 var fin = StoreResult.FinishScan(0);
                 assert(fin == resultPath && StoreResult.TryRead(resultPath, out done) && done.Outcome == "completed" && done.ExitCode == 0 && done.Reason == null
-                       && done.Detail != null && done.Detail["entries"] == 3 && done.Export.Companion != null && done.StartedUtc == started,
+                       && done.Detail != null && done.Detail["entries"] == 3 && done.Export.Companion != null && done.StartedUtc == started && done.FinishedUtc != null && done.FinishedUtc == done.WrittenUtc,
                     $"FinishScan(0): completed, null reason, the flush's facts preserved ({done.Outcome}/{done.ExitCode}/{done.Reason})");
                 var textAfterFinish = File.ReadAllText(resultPath);
                 assert(StoreResult.FinishScan(3) == null && File.ReadAllText(resultPath) == textAfterFinish, "FinishScan twice: the second call is a no-op — the record is sealed, the file unchanged");

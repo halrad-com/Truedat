@@ -201,9 +201,12 @@ namespace Truedat.Store
                     // the store for the run while the record said completed). A path the workers re-recorded meanwhile keeps the newer entry.
                     lock (_tieLock)
                     {
-                        foreach (var kv in entries) _entries.TryAdd(kv.Key, kv.Value);
-                        foreach (var kv in artifacts) if (!_artifacts.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
-                        foreach (var kv in edges) if (!_edges.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
+                        // A path the workers re-recorded meanwhile is SUPERSEDED: its newer entry stays, and the old batch's artifact and
+                        // edge stash files are deleted rather than re-attached to the newer entry (TDA re-review of b4622f7, not-blocking 2).
+                        var superseded = new HashSet<string>(PathComparer.Instance);
+                        foreach (var kv in entries) if (!_entries.TryAdd(kv.Key, kv.Value)) superseded.Add(kv.Key);
+                        foreach (var kv in artifacts) if (superseded.Contains(kv.Key) || !_artifacts.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
+                        foreach (var kv in edges) if (superseded.Contains(kv.Key) || !_edges.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
                     }
                     foreach (var f in failures) _failures.Enqueue(f);
                     StoreLog.Warn($"store checkpoint failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures kept for the final flush)");
