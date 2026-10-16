@@ -304,6 +304,99 @@ namespace Truedat.Store
         // store from JSON today; the rule is pinned so a future producer cannot create one by accident).
         static bool Near(double a, double b) => (double.IsNaN(a) && double.IsNaN(b)) || Math.Abs(a - b) <= Math.Max(NoiseAbsolute, NoiseRelative * Math.Max(Math.Abs(a), Math.Abs(b)));
 
+        // ---- copy facts an arrival observed (keeper 067/068). The catalog reader collapses an absent key into a default (trackId 0,
+        // bitDepth 0, empty text), so the row alone cannot tell "the catalog did not carry it" from an explicit zero. An entry read
+        // from a catalog for the store carries a mask of the copy keys it actually holds (present and not JSON null); a scan's
+        // entry carries none and observes every column, as before.
+        static readonly string[][] CopyJsonPath = BuildCopyJsonPath();
+        static string[][] BuildCopyJsonPath()
+        {
+            const string Fp = "fingerprint_v1_", Lame = "fingerprint_v1_mp3LameTag_";
+            var p = new string[CopyIdx.Length][];
+            for (int k = 0; k < CopyIdx.Length; k++)
+            {
+                var n = Cols[CopyIdx[k]].Name;
+                p[k] = n.StartsWith(Lame, StringComparison.Ordinal) ? new[] { "fingerprint.v1", "mp3LameTag", n.Substring(Lame.Length) }
+                     : n.StartsWith(Fp, StringComparison.Ordinal) ? new[] { "fingerprint.v1", n.Substring(Fp.Length) }
+                     : new[] { n };
+            }
+            return p;
+        }
+
+        /// <summary>Bit k set when the catalog entry carries copy column k (CopyIdx order): the key exists and is not JSON null. A
+        /// <c>smfm*</c> key also counts under its legacy <c>sensme*</c> name (the reader's fallback). Fingerprint columns count only
+        /// when the reader accepted the block (<paramref name="fingerprintParsed"/>): a block it refused yields no values to observe.</summary>
+        internal static ulong ObservedCopyMask(System.Text.Json.JsonElement track, bool fingerprintParsed)
+        {
+            ulong mask = 0;
+            for (int k = 0; k < CopyIdx.Length; k++)
+            {
+                var path = CopyJsonPath[k];
+                if (path.Length > 1 && !fingerprintParsed) continue;
+                bool present = Has(track, path);
+                if (!present && path.Length == 1 && path[0].StartsWith("smfm", StringComparison.Ordinal))
+                    present = Has(track, new[] { "sensme" + path[0].Substring(4) });
+                if (present) mask |= 1UL << k;
+            }
+            return mask;
+        }
+        static bool Has(System.Text.Json.JsonElement el, string[] path)
+        {
+            foreach (var key in path)
+            {
+                if (el.ValueKind != System.Text.Json.JsonValueKind.Object || !el.TryGetProperty(key, out el)) return false;
+            }
+            return el.ValueKind != System.Text.Json.JsonValueKind.Null;
+        }
+
+        /// <summary>The writer's decimal places for each copy column that is a Real (FieldPrecision Dp; -1 otherwise). The store keeps
+        /// analysisDuration and smfmBpm at StoreDp 6 while the catalog prints 1 and 3.</summary>
+        static readonly int[] CopyWrittenDp = BuildCopyWrittenDp();
+        static int[] BuildCopyWrittenDp()
+        {
+            var d = new int[CopyIdx.Length];
+            for (int k = 0; k < CopyIdx.Length; k++)
+                d[k] = Cols[CopyIdx[k]].Kind == Kind.Real && FieldPrecision.TryGet(Cols[CopyIdx[k]].Name, out var s) && s.Dp < s.StoreDp ? s.Dp : -1;
+            return d;
+        }
+
+        /// <summary>True when an arriving copy value is the stored one: exactly equal, or — only for a value from a CATALOG IMPORT
+        /// (<paramref name="catalogImport"/>), in a column the catalog prints at fewer places than the store keeps — equal to the stored
+        /// value as the writer prints it (<c>Math.Round(stored, Dp)</c>, the catalog writer's own expression): a 1-dp catalog duration
+        /// agreeing with a 6-dp stored one is the same observation. A scan's value is a fresh measurement at the store's precision,
+        /// so it is held to exact equality (keeper 070: a fresh 8.5 replaces a stored 8.54321).</summary>
+        static bool CopyAgrees(int k, object? stored, object? arriving, bool catalogImport)
+        {
+            if (ValueEqual(Cols[CopyIdx[k]].Kind, stored, arriving, exact: true)) return true;
+            return catalogImport && CopyWrittenDp[k] >= 0 && stored is double s && arriving is double a && a == Math.Round(s, CopyWrittenDp[k]);
+        }
+
+        /// <summary>The row an arriving entry's copy facts produce over the stored ones, or null when nothing changes. Per copy column:
+        /// not observed (<paramref name="observed"/> bit clear) or agreeing (<see cref="CopyAgrees"/>) keeps the STORED value — a
+        /// new copy row stores NULL for an unobserved column; anything else is the arrival. Copy facts describe the file, so an
+        /// observed difference is the newer observation and wins exactly. <paramref name="observed"/> null = every column observed
+        /// (a scan's entry). <paramref name="catalogImport"/> is the caller's explicit statement that the arrival is a catalog
+        /// import, the only arrival the written-precision equivalence applies to (keeper 070, TDA 054: a scan's value is a fresh
+        /// measurement and replaces exactly). <paramref name="firstDifference"/> names the first column written, for the log.</summary>
+        internal static object?[]? MergeCopy(object?[]? storedCopy, object?[] row, ulong? observed, bool catalogImport, out string? firstDifference)
+        {
+            firstDifference = storedCopy == null ? "no copy row yet" : null;
+            var merged = (object?[])row.Clone();
+            for (int k = 0; k < CopyIdx.Length; k++)
+            {
+                var stored = storedCopy?[k];
+                var arriving = row[CopyIdx[k]];
+                if ((observed is ulong m && (m & (1UL << k)) == 0) || (storedCopy != null && CopyAgrees(k, stored, arriving, catalogImport)))
+                {
+                    merged[CopyIdx[k]] = stored;
+                    continue;
+                }
+                if (firstDifference == null)
+                    firstDifference = $"{Cols[CopyIdx[k]].Name}: stored {Describe(stored)} vs arriving {Describe(arriving)}";
+            }
+            return firstDifference == null ? null : merged;
+        }
+
         /// <summary>A ToRow() row whose content columns are the STORED values except the given fills, which keep the arriving
         /// value — the row an UpsertContent writes when a null is filled under the same producer (review #4).</summary>
         internal static object?[] WithStoredContentExcept(object?[] row, object?[] storedContent, ICollection<int> fills)

@@ -532,7 +532,8 @@ namespace Truedat.Store
         /// differs BEYOND run-to-run noise under the SAME producer/version is a <c>value-drift</c> conflict (field, both values,
         /// both runs) and the stored description is left alone — that disagreement is the only part of an observation history
         /// that ever carried information. A different producer/version replaces the description (the old run stays as history).
-        /// Copy facts describe the file, so the newer observation wins, exactly. Equal arrivals write nothing at all.</summary>
+        /// Copy facts describe the file, so the newer observation wins, exactly — per column, for the columns the arrival observed
+        /// (<see cref="TrackEntryMapper.MergeCopy"/>). Equal arrivals write nothing at all.</summary>
         internal static void WriteDescriptionAndCopy(StoreDal dal, long locationId, string entityId, string contentKey, string contentKeyKind,
             long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r)
         {
@@ -626,12 +627,16 @@ namespace Truedat.Store
                 }
             }
 
+            // Keeper 067: a merge, not a whole-row replace. A copy fact the arriving catalog did not carry keeps the stored value (a
+            // catalog without trackId — the export cut — wrote 0 over every stored id), and a value equal to the stored one at the
+            // writer's precision is the same observation (a 1-dp catalog duration downgraded the store's 6-dp one on any rewrite).
             var existingCopy = dal.ReadCopyValues(locationId);
-            var copyDiff = existingCopy == null ? "no copy row yet" : TrackEntryMapper.FirstCopyDifference(existingCopy, row);
-            if (copyDiff != null)
+            bool catalogImport = string.Equals(producerKey, "import", StringComparison.Ordinal);   // a scan's arrival is a fresh measurement (keeper 070)
+            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, entry.CopyObserved, catalogImport, out var copyDiff);
+            if (copyRow != null)
             {
                 StoreLog.Debug($"copy facts written for {displayPath}: {copyDiff}");
-                dal.UpsertCopy(locationId, runId, row, now);
+                dal.UpsertCopy(locationId, runId, copyRow, now);
                 copyWritten = true;
             }
 

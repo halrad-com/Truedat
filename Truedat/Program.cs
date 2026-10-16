@@ -279,6 +279,9 @@ namespace Truedat
         public string? AudioStreamSha256;
         public string? AudioStreamSha256Source;   // "whole-file" (invariant bounds unavailable) | "flac-frames" (frame-anchored FLAC) | null = invariant
         public Program.FingerprintV1? FingerprintV1;
+        // Transient, never written (keeper 067): which copy facts the catalog entry actually carried, as a TrackEntryMapper copy-column
+        // bitmask — set only when a catalog is read for the store (LoadExistingMoodsForStore). Null = every column observed (a scan).
+        public ulong? CopyObserved;
     }
 
     class AudioDetails
@@ -22391,14 +22394,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         /// <summary>v2 store: the catalog reader, reachable from Truedat/Store. Additive shim; the reader
         /// is unchanged, so the store imports exactly what every other mode loads.</summary>
-        internal static int LoadExistingMoodsForStore(string path, ConcurrentDictionary<string, TrackEntry> allTracks) => LoadExistingMoods(path, allTracks);
+        /// <summary>The catalog read the store import uses: as <see cref="LoadExistingMoods"/>, plus each entry's
+        /// <see cref="TrackEntry.CopyObserved"/> mask, so a copy fact the catalog does not carry is never written as its default.</summary>
+        internal static int LoadExistingMoodsForStore(string path, ConcurrentDictionary<string, TrackEntry> allTracks) => LoadExistingMoods(path, allTracks, recordCopyObserved: true);
 
         /// <summary>
         /// Load moods file using JsonDocument — compact read-only DOM, much more
         /// memory-efficient than Newtonsoft's JObject tree. All data is extracted
         /// into allTracks before the document is disposed.
         /// </summary>
-        static int LoadExistingMoods(string path, ConcurrentDictionary<string, TrackEntry> allTracks)
+        static int LoadExistingMoods(string path, ConcurrentDictionary<string, TrackEntry> allTracks, bool recordCopyObserved = false)
         {
             // Single catalog present -> today's path (unchanged). INVARIANT: a catalog is EITHER a
             // single mbxmoods.json OR the numbered parts, so a present single file wins outright.
@@ -22414,7 +22419,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (!root.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Object)
                         return 0;
 
-                    MergeTracksElement(tracks, allTracks);
+                    MergeTracksElement(tracks, allTracks, recordCopyObserved);
                     return allTracks.Count;
                 }
                 catch (JsonException ex)
@@ -22444,7 +22449,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // No single file -> stitch numbered parts (mbxmoods.json.1, .2, …), if any.
             var parts = EnumerateCatalogParts(path);
             if (parts.Count == 0) return 0;
-            return LoadMoodsParts(parts, allTracks);
+            return LoadMoodsParts(parts, allTracks, recordCopyObserved);
         }
 
         /// <summary>
@@ -22452,7 +22457,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Shared by the single-file and multi-part loaders so both build TrackEntry identically.
         /// Returns the number of entries added.
         /// </summary>
-        static int MergeTracksElement(JsonElement tracks, ConcurrentDictionary<string, TrackEntry> allTracks)
+        static int MergeTracksElement(JsonElement tracks, ConcurrentDictionary<string, TrackEntry> allTracks, bool recordCopyObserved = false)
         {
             if (tracks.ValueKind != JsonValueKind.Object) return 0;
             int added = 0;
@@ -22483,6 +22488,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     AudioStreamSha256Source = GetStr(track, "audioStreamSha256Source") is var shaSrc && shaSrc.Length > 0 ? shaSrc : null,
                     FingerprintV1 = ParseFingerprintV1FromJson(track),
                 };
+                if (recordCopyObserved)
+                    allTracks[filePath].CopyObserved = Truedat.Store.TrackEntryMapper.ObservedCopyMask(track, allTracks[filePath].FingerprintV1 != null);
                 added++;
             }
             return added;
@@ -22495,7 +22502,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// indices contiguous 1..K and Σ(part trackCount) == totalTrackCount — and WARNS (never
         /// throws) when the set is incomplete, loading whatever is present.
         /// </summary>
-        static int LoadMoodsParts(List<KeyValuePair<int, string>> parts, ConcurrentDictionary<string, TrackEntry> allTracks)
+        static int LoadMoodsParts(List<KeyValuePair<int, string>> parts, ConcurrentDictionary<string, TrackEntry> allTracks, bool recordCopyObserved = false)
         {
             var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
             long summedTrackCount = 0;
@@ -22519,7 +22526,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         haveTotal = true;
                     }
                     if (root.TryGetProperty("tracks", out var tracks))
-                        MergeTracksElement(tracks, allTracks);
+                        MergeTracksElement(tracks, allTracks, recordCopyObserved);
                 }
                 catch (Exception ex)
                 {

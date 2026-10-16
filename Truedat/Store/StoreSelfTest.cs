@@ -50,6 +50,8 @@ namespace Truedat.Store
             Block(assert, "StoreLocation", () => TestStoreLocation(assert));
             Console.WriteLine("Store self-test (S2 C2: a differing value is a conflict, never an overwrite; equal re-imports write nothing)");
             Block(assert, "Drift", () => TestDrift(assert));
+            Console.WriteLine("Store self-test (keeper 067: a copy fact the arrival did not observe, or carries only at its written precision, keeps the stored value)");
+            Block(assert, "CopyMerge", () => TestCopyMerge(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
             Block(assert, "ScanSink", () => TestScanSink(assert));
             Console.WriteLine("Store self-test (S2 C-A: the extractor's aggregate output is kept, compressed, once per content)");
@@ -422,6 +424,139 @@ namespace Truedat.Store
         }
 
         // ---------------------------------------------------------------- S2 C0: store location
+        // ---------------------------------------------------------------- copy facts (keeper 067/068, TDA 052/053)
+        // An ordinary --store-import of a catalog without trackId (the export cut) wrote 0 over every stored copy's trackId, and
+        // a 1-dp catalog analysisDuration replaced the store's 6-dp value whenever the copy row was rewritten for any reason.
+        // A copy fact the arriving catalog does not carry (absent, or JSON null) is not observed and keeps the stored value; an
+        // explicit value (zero, empty, nonzero) is an observation and is written; a value equal to the stored one as the writer
+        // prints it (FieldPrecision Dp) is the same observation.
+        static void TestCopyMerge(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "copymerge-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var catDir = Path.Combine(dir, "lib"); Directory.CreateDirectory(catDir);
+            var store = Path.Combine(dir, "truedat.db");
+            var catalog = Path.Combine(catDir, "mbxmoods.json");
+            const string P = @"D:\Music\old\legacy.flac";
+            string Where = $"FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = '{P}'";
+            string? Copy(string col) { using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")); return os.Db.ExecScalar($"SELECT p.{col} {Where};"); }
+            string? IsNull(string col) { using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")); return os.Db.ExecScalar($"SELECT p.{col} IS NULL {Where};"); }
+            void Import() => ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+            // The writer's catalog (it honours the export cut: no trackId; omit-when-0 bitDepth), then an optional edit of P's entry.
+            void Write(Dictionary<string, TrackEntry> entries, Action<System.Text.Json.Nodes.JsonObject>? edit = null)
+            {
+                WriteCatalog(catalog, entries);
+                if (edit == null) return;
+                var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(catalog))!;
+                edit(root["tracks"]![P]!.AsObject());
+                File.WriteAllText(catalog, root.ToJsonString());
+            }
+            System.Text.Json.Nodes.JsonObject Fp(System.Text.Json.Nodes.JsonObject t) => t["fingerprint.v1"]!.AsObject();
+            assert(TrackEntryMapper.CopyColumnNames.Count <= 64, $"the copy columns fit TrackEntry.CopyObserved's 64-bit mask ({TrackEntryMapper.CopyColumnNames.Count})");
+            try
+            {
+                var entries = FixtureEntries(@"D:\Music");
+                entries[P].AnalysisDurationSecs = 8.5;
+                // A catalog that DOES carry every copy fact (a legacy v1 catalog has trackId; fileMd5 under --file-md5; SMFM when read).
+                Write(entries, t =>
+                {
+                    t["trackId"] = 7021; t["fileMd5"] = "0123456789abcdef0123456789abcdef";
+                    t["smfmScores"] = new System.Text.Json.Nodes.JsonArray(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); t["smfmChannel"] = 9;
+                    Fp(t)["bitDepth"] = 24; Fp(t)["encoder"] = "LAME3.100";
+                });
+                Import();
+                {
+                    using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"));
+                    var other = os.Db.ExecScalar("SELECT (p.trackId IS NULL) || '/' || (p.fileMd5 IS NULL) FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = '" + @"D:\Music\Tool\b.mp3" + "';");
+                    assert(other == "1/1", $"a NEW copy row stores NULL for a fact the catalog did not carry, never its default 0 (trackId/fileMd5 null: {other})");
+                }
+                assert(Copy("trackId") == "7021" && Copy("fileMd5") == "0123456789abcdef0123456789abcdef" && Copy("smfmChannel") == "9"
+                       && Copy("fingerprint_v1_bitDepth") == "24" && Copy("fingerprint_v1_encoder") == "LAME3.100",
+                    $"explicit copy facts are imported (trackId {Copy("trackId")}, fileMd5 {Copy("fileMd5")}, smfmChannel {Copy("smfmChannel")}, bitDepth {Copy("fingerprint_v1_bitDepth")}, encoder {Copy("fingerprint_v1_encoder")})");
+
+                // What a scan stores: the duration at the store's 6 places (FieldPrecision StoreDp); the catalog says 8.5, its 1-dp text.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    os.Db.Exec($"UPDATE track_copy SET analysisDuration = 8543210 WHERE location_id = (SELECT l.id FROM track_location l WHERE l.display_path = '{P}');");
+                var stamp = Copy("updated_utc");
+                System.Threading.Thread.Sleep(20);
+
+                // 1. The writer's own catalog: no trackId / fileMd5 / SMFM, a partial fingerprint (no bitDepth, no encoder), the agreeing
+                //    1-dp duration. Nothing it lacks is erased and nothing is written — twice, so the repeat import is pinned too.
+                for (int pass = 1; pass <= 2; pass++)
+                {
+                    Write(entries);
+                    Import();
+                    assert(Copy("trackId") == "7021", $"pass {pass}: a catalog that does not carry trackId leaves the stored one alone: absent is not zero (got {Copy("trackId")})");
+                    assert(Copy("fileMd5") == "0123456789abcdef0123456789abcdef" && Copy("smfmChannel") == "9",
+                        $"pass {pass}: omitted nullable copy facts keep their stored values (fileMd5 {Copy("fileMd5")}, smfmChannel {Copy("smfmChannel")})");
+                    assert(Copy("fingerprint_v1_bitDepth") == "24" && Copy("fingerprint_v1_encoder") == "LAME3.100",
+                        $"pass {pass}: fields a partial fingerprint omits keep their stored values (bitDepth {Copy("fingerprint_v1_bitDepth")}, encoder {Copy("fingerprint_v1_encoder")})");
+                    assert(Copy("analysisDuration") == "8543210", $"pass {pass}: a 1-dp duration equal to Round(stored, 1) is the same observation: the 6-dp value stays (got {Copy("analysisDuration")})");
+                    assert(Copy("updated_utc") == stamp, $"pass {pass}: an arrival that differs only by what it did not observe, or by its written precision, writes no copy row");
+                }
+
+                // 2. JSON null is not an observation either; a whole missing fingerprint keeps every stored fingerprint column.
+                Write(entries, t => { t["trackId"] = null; t.Remove("fingerprint.v1"); });
+                Import();
+                assert(Copy("trackId") == "7021" && Copy("fingerprint_v1_fileSize") == "1234" && Copy("fingerprint_v1_codec") == "flac" && Copy("fingerprint_v1_bitDepth") == "24",
+                    $"trackId: null and an absent fingerprint.v1 change nothing (trackId {Copy("trackId")}, fileSize {Copy("fingerprint_v1_fileSize")}, codec {Copy("fingerprint_v1_codec")}, bitDepth {Copy("fingerprint_v1_bitDepth")})");
+                assert(Copy("updated_utc") == stamp, "nothing observed changed: no copy row write");
+                // A fingerprint block the reader refuses (no audioHead64kMd5) yields no values: nothing in it is observed.
+                Write(entries, t => { Fp(t).Remove("audioHead64kMd5"); Fp(t)["bitDepth"] = 0; Fp(t)["fileSize"] = 1; });
+                Import();
+                assert(Copy("fingerprint_v1_fileSize") == "1234" && Copy("fingerprint_v1_bitDepth") == "24" && Copy("updated_utc") == stamp,
+                    $"a refused fingerprint block changes nothing (fileSize {Copy("fingerprint_v1_fileSize")}, bitDepth {Copy("fingerprint_v1_bitDepth")})");
+
+                // 3. A real copy-fact change rewrites the row; the merge keeps what the arrival did not observe or only rounded.
+                entries[P].Features!.Artist = "Renamed2";
+                Write(entries);
+                Import();
+                assert(Copy("artist") == "Renamed2", $"the changed copy fact is written ({Copy("artist")})");
+                assert(Copy("trackId") == "7021" && Copy("analysisDuration") == "8543210" && Copy("fileMd5") == "0123456789abcdef0123456789abcdef" && Copy("fingerprint_v1_bitDepth") == "24",
+                    $"a rewritten copy row keeps every unobserved and agreeing value (trackId {Copy("trackId")}, analysisDuration {Copy("analysisDuration")}, fileMd5 {Copy("fileMd5")}, bitDepth {Copy("fingerprint_v1_bitDepth")})");
+
+                // 3b. Keeper 070 — the pair to pass 1: the written-precision equivalence is for CATALOG reads only. Through the catalog
+                //     the agreeing 1-dp / 3-dp values keep the stored 6-dp ones; through the scan's own write path (ScanSink, producer
+                //     essentia — the shared WriteDescriptionAndCopy) the same numbers are fresh measurements and replace exactly.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    os.Db.Exec($"UPDATE track_copy SET smfmBpm = 123456789 WHERE location_id = (SELECT l.id FROM track_location l WHERE l.display_path = '{P}');");
+                var stamp3 = Copy("updated_utc");
+                System.Threading.Thread.Sleep(20);
+                Write(entries, t => t["smfmBpm"] = 123.457);
+                Import();
+                assert(Copy("smfmBpm") == "123456789" && Copy("analysisDuration") == "8543210" && Copy("updated_utc") == stamp3,
+                    $"catalog read: smfmBpm 123.457 == Round(123.456789, 3) and duration 8.5 == Round(8.54321, 1) keep the stored values, no write (smfmBpm {Copy("smfmBpm")}, analysisDuration {Copy("analysisDuration")})");
+                var runBeforeScan = Copy("run_id");
+                var fresh = FixtureEntries(@"D:\Music")[P];
+                fresh.Features!.Artist = "Renamed2"; fresh.AnalysisDurationSecs = 8.5; fresh.Features.SmfmBpm = 123.457;
+                ScanSink.Reset();
+                ScanSink.Record(P, fresh);
+                ScanSink.Flush(store, "output-x64.4", new[] { P });
+                assert(Copy("analysisDuration") == "8500000" && Copy("smfmBpm") == "123457000",
+                    $"fresh scan: 8.5 and 123.457 are new measurements and replace the stored 8.54321 / 123.456789 exactly (analysisDuration {Copy("analysisDuration")}, smfmBpm {Copy("smfmBpm")})");
+                {
+                    using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"));
+                    var producer = os.Db.ExecScalar($"SELECT r.producer_key || '@' || r.producer_version FROM run r WHERE r.id = (SELECT p.run_id {Where});");
+                    assert(Copy("run_id") != runBeforeScan && producer == "essentia@output-x64.4",
+                        $"the scan's copy row carries the scan's own run (run {runBeforeScan} -> {Copy("run_id")}, {producer})");
+                }
+                // Restore what the catalog cases below start from (a scan's own entry observes every column: its trackId 0 is written).
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    os.Db.Exec($"UPDATE track_copy SET analysisDuration = 8543210, trackId = 7021 WHERE location_id = (SELECT l.id FROM track_location l WHERE l.display_path = '{P}');");
+
+                // 4. Explicit values are observations and replace: zero, empty, a disagreeing duration — no blanket ignore-zero rule.
+                entries[P].AnalysisDurationSecs = 9.1;
+                Write(entries, t => { t["trackId"] = 0; t["artist"] = ""; t["fileMd5"] = ""; Fp(t)["bitDepth"] = 0; Fp(t)["encoder"] = ""; t["sensmeChannel"] = 5; });
+                Import();
+                assert(Copy("trackId") == "0", $"an explicit trackId 0 is written (got {Copy("trackId")})");
+                assert(Copy("fingerprint_v1_bitDepth") == "0", $"an explicit fingerprint bitDepth 0 is written (got {Copy("fingerprint_v1_bitDepth")})");
+                assert(Copy("artist") == "", $"an explicit empty artist is written (got '{Copy("artist")}', null {IsNull("artist")})");
+                assert(IsNull("fileMd5") == "1", $"an explicit empty fileMd5 clears it (the reader maps empty to none) (got '{Copy("fileMd5")}')");
+                assert(Copy("analysisDuration") == "9100000", $"a duration that disagrees at the written precision replaces (got {Copy("analysisDuration")})");
+                assert(Copy("smfmChannel") == "5", $"an SMFM fact under its legacy sensme* key is observed, as the reader's fallback reads it (got {Copy("smfmChannel")})");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         static void TestStoreLocation(Action<bool, string> assert)
         {
             var tmp = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "loc-" + Guid.NewGuid().ToString("N").Substring(0, 8));
