@@ -58,13 +58,21 @@ namespace Truedat.Store
         /// (keeper review of c89d48a, P1). Null in production.</summary>
         internal static Action? AfterEntriesRead;
 
+        /// <summary>Self-test seam: runs after the triple is published and before key-moves.json, so a test can fail the
+        /// verb AFTER publication and prove the record keeps the facts (keeper review of 9706c5b, P2). Null in production.</summary>
+        internal static Action? AfterPublished;
+
         internal static int Run(ExportOptions o)
         {
-            // store-v3 T11: store-result.json on EVERY exit path — the hub reads it, never stdout.
+            // store-v3 T11: store-result.json on EVERY exit path — the hub reads it, never stdout. The report is filled IN
+            // PLACE as Execute proceeds (store opened → schema/generation known → published → key moves), so a failure
+            // at any step still records everything established before it (keeper review of 9706c5b, P2: a key-moves.json
+            // failure after a generation-7 publication reported performed=false / schema 0 / generation 0).
             var result = StoreResult.Begin("store-export");
+            var r = new ExportReport();
             try
             {
-                var r = Execute(o);
+                Execute(o, r);
                 Console.WriteLine($"Exported {r.Entries} entries of root {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s"
                     + (r.Published ? $" (generation {r.Generation}: catalog + sidecar{(r.Companion ? " + mbxedges.v1.json" : "")} published together)" : ""));
                 if (r.KeyMovesPath != null) Console.WriteLine($"  {r.KeyMoves} content-hash key move(s) recorded in {r.KeyMovesPath}");
@@ -83,28 +91,40 @@ namespace Truedat.Store
             catch (StoreException ex)
             {
                 Console.Error.WriteLine("Error: " + ex.Message);
-                WriteFailed(o, result, ex.ExitCode, ex.Message);
+                WriteFailed(o, r, result, ex.ExitCode, ex.Message);
                 return ex.ExitCode;
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine("Error: export failed: " + ex.Message);
-                WriteFailed(o, result, 1, "export failed: " + ex.Message);
+                WriteFailed(o, r, result, 1, "export failed: " + ex.Message);
                 return 1;
             }
         }
 
-        /// <summary>The failure record: the store block names the store when a path was given, even if it could not be opened.</summary>
-        static void WriteFailed(ExportOptions o, StoreResultFile result, int exitCode, string reason)
+        /// <summary>The failure record: everything the attempt established stays — the store block names the store when a
+        /// path was given (schema and generation when it opened), and a publication that happened before the failing step
+        /// is recorded as performed, at its generation, with the files it left on disk named by hash. Only the outcome says
+        /// the VERB failed.</summary>
+        static void WriteFailed(ExportOptions o, ExportReport r, StoreResultFile result, int exitCode, string reason)
         {
-            string? storePath = null;
-            try { if (!string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
-            result.Store = new StoreResultStore { Path = storePath ?? "", TruedatVersion = VersionInfo.Display };
-            result.Export = new StoreResultExport { Performed = false };
+            string? storePath = r.StorePath.Length > 0 ? r.StorePath : null;
+            try { if (storePath == null && !string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
+            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+            result.Export = new StoreResultExport
+            {
+                Performed = r.Published, Generation = r.Published ? r.Generation : (long?)null,
+                Catalog = r.Published ? StoreResult.Describe(r.OutPath) : null,
+                Sidecar = r.Published ? StoreResult.Describe(r.SidecarPath) : null,
+                Companion = r.Published && r.Companion ? StoreResult.Describe(r.CompanionPath) : null,
+            };
             StoreResult.Write(storePath, result, exitCode, StoreResult.OutcomeFailed, reason);
         }
 
-        internal static ExportReport Execute(ExportOptions o)
+        internal static ExportReport Execute(ExportOptions o) { var r = new ExportReport(); Execute(o, r); return r; }
+
+        /// <summary>Fills <paramref name="r"/> as it goes (see <see cref="Run"/>); throws on failure with the facts so far in place.</summary>
+        internal static void Execute(ExportOptions o, ExportReport r)
         {
             var sw = Stopwatch.StartNew();
             StoreLog.SetVerbose(o.Audit);
@@ -119,6 +139,7 @@ namespace Truedat.Store
             // commit by another connection in between cannot label generation-N entries with N+1 (keeper review of
             // c89d48a, P1). A deferred read transaction: under WAL it blocks no writer and sees none.
             using var snapshot = os.Db.BeginRead();
+            r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(os.Db); r.Generation = os.Dal.Generation();
             var root = PickRoot(os.Dal, o.ExportRoot);
 
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -131,9 +152,12 @@ namespace Truedat.Store
             // an export re-emits it, it does not advance it (only mutations do).
             var origin = new CatalogOrigin
             {
-                Kind = "export", MachineId = os.Machine.Id, StoreSchema = SchemaMigrator.ReadVersion(os.Db),
-                Truedat = VersionInfo.Display, Generation = os.Dal.Generation(),
+                Kind = "export", MachineId = os.Machine.Id, StoreSchema = r.StoreSchema,
+                Truedat = VersionInfo.Display, Generation = r.Generation,
             };
+            r.Root = root.Path; r.OutPath = outFull; r.Entries = dict.Count;
+            r.SidecarPath = Path.ChangeExtension(outFull, ".mbxs");
+            r.CompanionPath = Path.Combine(outDir ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
             var producerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
             bool hasEdges = os.Dal.ContentKeysWithEdges(producerVersion).Count > 0;
             var build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
@@ -146,6 +170,8 @@ namespace Truedat.Store
             // writer produces the same bytes the scan would.
             PublicationResult? published = Program.SaveResultsPublished(outFull, dict, origin, companion);
             if (published != null) StoreLog.Info($"export: published generation {published.Generation} (sidecar {published.SidecarSha256.Substring(0, 12)}…, companion {(hasEdges ? "written" : "none — no edge rows at " + producerVersion)})");
+            r.Published = published != null; r.Companion = hasEdges && published != null;
+            AfterPublished?.Invoke();   // self-test seam: a failure after publication lands here
 
             var moves = ReadKeyMoves(os.Dal);
             string? movesPath = null;
@@ -157,14 +183,7 @@ namespace Truedat.Store
             }
             snapshot.Complete();
             sw.Stop();
-            return new ExportReport
-            {
-                Root = root.Path, OutPath = outFull, Entries = dict.Count, KeyMoves = moves.Count, KeyMovesPath = movesPath, ElapsedMs = sw.ElapsedMilliseconds,
-                Generation = origin.Generation, Published = published != null, Companion = hasEdges && published != null,
-                StorePath = os.Path, StoreSchema = origin.StoreSchema,
-                SidecarPath = Path.ChangeExtension(outFull, ".mbxs"),
-                CompanionPath = Path.Combine(outDir ?? ".", global::Truedat.Edges.EdgeCompanion.FileName),
-            };
+            r.KeyMoves = moves.Count; r.KeyMovesPath = movesPath; r.ElapsedMs = sw.ElapsedMilliseconds;
         }
 
         internal static int RunRoundtrip(string? storePath, string catalogPath, string? exportRoot, bool audit)

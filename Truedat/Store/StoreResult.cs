@@ -83,19 +83,80 @@ namespace Truedat.Store
     {
         internal const string OutcomeCompleted = "completed", OutcomeInterrupted = "interrupted", OutcomeFailed = "failed";
 
+        // ---- the scan's record: begun when the scan starts, enriched by the flush, FINISHED at the process boundary ----
+        //
+        // Keeper review of 9706c5b (P1, reproduced with the compiled exe): the flush wrote "completed / exit 0" from the
+        // sink report alone, so a --file-list run whose source volume was gone (process exit 3, nothing analysed) left a
+        // record saying it completed. Persistence success is not operation success: the exit code, source loss, analysis
+        // failures and Ctrl+C are all decided by the scan AFTER its flush. So the flush writes a PROVISIONAL record
+        // (outcome "interrupted" — true if the process dies before the boundary), the scan notes what it decides as it
+        // decides it (<see cref="NoteScanOutcome"/>), and <see cref="FinishScan"/> — called from Main's finally, on
+        // every exit path — writes the final outcome against the exit code the launcher sees.
+        static StoreResultFile? _scan;
+        static string? _scanStore;
+        static string? _scanStoreFailure;
+        static string? _scanOutcome, _scanReason;
+        internal const string ProvisionalReason = "the scan has not reported its outcome yet";
+
+        /// <summary>A scan with a store in force has begun: the previous verb's record is stale from here, so a
+        /// provisional one replaces it — a refusal before the first flush still leaves a record at the boundary.
+        /// Keyed on the STORE: the hooks re-enter on the per-file modes (same store → the same pending record), and a
+        /// different store starts a fresh one — the keeper's recovery finding (six scan-result failures): a record left
+        /// pending for a deleted fixture must never receive the next store's flush.</summary>
+        internal static void BeginScan(string? storePath, string startedUtc)
+        {
+            if (storePath == null) return;
+            string fullStore;
+            try { fullStore = Path.GetFullPath(storePath); } catch { fullStore = storePath; }
+            if (_scan != null && string.Equals(_scanStore, fullStore, StringComparison.OrdinalIgnoreCase)) return;
+            ResetScanForTest();
+            _scanStore = fullStore;
+            _scan = Begin("scan");
+            _scan.StartedUtc = startedUtc;
+            _scan.Store = new StoreResultStore { Path = fullStore, TruedatVersion = VersionInfo.Display };
+            _scan.Export = new StoreResultExport { Performed = false };
+            Write(fullStore, _scan, 0, OutcomeInterrupted, ProvisionalReason);
+        }
+
+        /// <summary>The scan decided something about its own outcome (source lost → interrupted; Ctrl+C → interrupted;
+        /// analysis failures → failed): recorded for <see cref="FinishScan"/>. Later notes replace earlier ones.</summary>
+        internal static void NoteScanOutcome(string outcome, string reason) { _scanOutcome = outcome; _scanReason = reason; }
+
+        /// <summary>The final write, from the process boundary — EXACTLY ONCE: the pending record is cleared on the way out,
+        /// so Main's finally after its crash catch is a no-op and cannot overwrite the CLR exit code with 0 (keeper recovery
+        /// packet, item 4). Precedence: a store write failure is a failed verb whatever the exit code (the catalog is complete;
+        /// the STORE verb is not); then what the scan noted; then the exit code — 0 is completed, anything else failed with a
+        /// plain sentence. Null when no scan record is pending.</summary>
+        internal static string? FinishScan(int exitCode)
+        {
+            var rec = _scan; var store = _scanStore;
+            if (rec == null || store == null) return null;
+            string outcome, reason;
+            if (_scanStoreFailure != null) { outcome = OutcomeFailed; reason = _scanStoreFailure; }
+            else if (_scanOutcome != null) { outcome = _scanOutcome; reason = _scanReason ?? ""; }
+            else if (exitCode == 0) { outcome = OutcomeCompleted; reason = ""; }
+            else { outcome = OutcomeFailed; reason = $"truedat exited {exitCode}; see the console output"; }
+            var path = Write(store, rec, exitCode, outcome, reason.Length == 0 ? null : reason);
+            ResetScanForTest();
+            return path;
+        }
+
+        /// <summary>Self-test only: forget a pending scan so one process can exercise several.</summary>
+        internal static void ResetScanForTest() { _scan = null; _scanStore = null; _scanStoreFailure = null; _scanOutcome = null; _scanReason = null; }
+
         /// <summary>
         /// The scan's record, from the end-of-run sink report. Written by <see cref="ScanSink.Flush"/> itself (so a flush is
         /// self-contained and names its record) and again by the scan after the companion step, with the companion named
-        /// by hash — latest wins. <c>export.performed</c> is false until T18 moves the scan's save onto the publisher: today
+        /// by hash — latest wins. Both are PROVISIONAL ("interrupted" until <see cref="FinishScan"/>); a failed store write is
+        /// final on its own. <c>export.performed</c> is false until T18 moves the scan's save onto the publisher: today
         /// the scan writes a v1 catalog. Never throws into the scan.
         /// </summary>
         internal static string? WriteScan(string? storePath, ScanSinkReport r, bool edgesOn, string? companionPath, string? startedUtc = null)
         {
             if (storePath == null) return null;
-            var rec = Begin("scan");
+            BeginScan(storePath, startedUtc ?? DateTime.UtcNow.ToString("o"));
+            var rec = _scan!; var fullStore = _scanStore!;
             if (startedUtc != null) rec.StartedUtc = startedUtc;
-            string fullStore;
-            try { fullStore = Path.GetFullPath(storePath); } catch { fullStore = storePath; }
             rec.Store = new StoreResultStore { Path = fullStore, TruedatVersion = VersionInfo.Display };
             try
             {
@@ -118,9 +179,10 @@ namespace Truedat.Store
                 ["contentReplaced"] = r.ContentReplaced, ["entitiesCreated"] = r.EntitiesCreated, ["edges"] = r.Edges, ["edgesFailed"] = r.EdgesFailed,
                 ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs,
             };
-            var path = r.Ok
-                ? Write(fullStore, rec, 0, OutcomeCompleted)
-                : Write(fullStore, rec, Environment.ExitCode, OutcomeFailed, "store write failed: " + (r.Error ?? "unknown"));
+            if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
+            var path = _scanStoreFailure == null
+                ? Write(fullStore, rec, 0, OutcomeInterrupted, ProvisionalReason)
+                : Write(fullStore, rec, Environment.ExitCode, OutcomeFailed, _scanStoreFailure);
             r.ResultPath = path;
             return path;
         }

@@ -350,6 +350,34 @@ namespace Truedat.Store
         /// <summary>Index of a copy column in CopyIdx order (what ReadCopyValues returns); -1 when unknown.</summary>
         internal static int CopyIndexOf(string name) { for (int k = 0; k < CopyIdx.Length; k++) if (Cols[CopyIdx[k]].Name == name) return k; return -1; }
 
+        /// <summary>The first column of a ToRow() row that the typed store CANNOT hold (a scalar beyond int64 at its scale, a vector
+        /// element beyond int32, a sparse vector longer than u16), with the reason — or null when the whole row is storable. Called
+        /// BEFORE any entry mutation (keeper partial-entry defect, T04): an entry is rejected whole or written whole, never a changed
+        /// content row beside an old copy row. Mirrors exactly what BindIdx would throw on.</summary>
+        internal static string? FirstUnstorable(object?[] row)
+        {
+            for (int i = 0; i < Cols.Length; i++)
+            {
+                var v = row[i]; if (v == null) continue;
+                switch (Cols[i].Kind)
+                {
+                    case Kind.Real when v is double d:
+                        if (!double.IsNaN(d) && !double.IsInfinity(d) && Math.Abs(d * ColScale[i]) > 9.0e15) return $"{Cols[i].Name}: {d:R} does not fit the store's scaled-integer column at {ColScale[i]} (|v × scale| > 9e15)";
+                        break;
+                    case Kind.VecF64 when v is double[] a:
+                        if (ColSparse[i] && a.Length > ushort.MaxValue) return $"{Cols[i].Name}: a {a.Length}-element vector exceeds the sparse layout's u16 length";
+                        for (int j = 0; j < a.Length; j++)
+                        {
+                            if (double.IsNaN(a[j]) || double.IsInfinity(a[j])) continue;
+                            double s = Math.Round(a[j] * ColScale[i]);
+                            if (s > int.MaxValue || s < int.MinValue) return $"{Cols[i].Name}: element {a[j]:R} does not fit the store's int32 ×{ColScale[i]} vector";
+                        }
+                        break;
+                }
+            }
+            return null;
+        }
+
         /// <summary>Names of the columns (ContentIdx or CopyIdx order) whose value carries more digits than the field's declared
         /// precision — what the v3 migration must canonicalise and therefore report (T04b). Parser output never appears here.</summary>
         internal static IEnumerable<string> ColumnsBeyondPrecision(object?[] values, bool content)

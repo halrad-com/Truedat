@@ -55,6 +55,9 @@ namespace Truedat.Store
         public long ArtifactBytes;
         public long StoreBytesBefore, StoreBytesAfter, ElapsedMs;
         public string ResultPath = "";
+        /// <summary>For the common store-result.json (T11): the store this import opened, its schema and the committed generation
+        /// when it finished — filled in place as Execute proceeds, so a failure keeps what was established before it.</summary>
+        public string StorePath = ""; public int StoreSchema; public long Generation;
     }
 
     /// <summary>--store-import: the catalog (via the UNCHANGED reader) and the ledgers beside it, into
@@ -67,9 +70,14 @@ namespace Truedat.Store
 
         internal static int Run(ImportOptions o)
         {
+            // store-v3 T11: the common store-result.json on EVERY exit path (the hub reads it, never stdout) — the same record
+            // every store verb writes; store-import-result.json beside it stays the verb's own detailed counts. The report is
+            // filled IN PLACE as Execute proceeds, so a failure still records the store facts established before it.
+            var result = StoreResult.Begin("store-import");
+            var r = new ImportReport();
             try
             {
-                var r = Execute(o);
+                Execute(o, r);
                 Console.WriteLine($"Imported {r.Entries} entries from {r.Catalog} into {o.StorePath}");
                 Console.WriteLine($"  roots: {string.Join(", ", r.Roots)}");
                 Console.WriteLine($"  entities: {r.EntitiesCreated} created, {r.MatchedHash} matched by sha, {r.MatchedPath} matched by path, {r.CreatedNoSha} created without a sha");
@@ -81,18 +89,40 @@ namespace Truedat.Store
                                   (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
                 if (r.Unrooted > 0) Console.WriteLine($"  WARNING: {r.Unrooted} entries were under none of the roots and were not imported (pass --library-root)");
+                result.Store = new StoreResultStore { Path = r.StorePath, SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+                result.Export = new StoreResultExport { Performed = false };   // an import publishes nothing; --store-export does
+                result.Detail = new Dictionary<string, long>
+                {
+                    ["entries"] = r.Entries, ["unrooted"] = r.Unrooted, ["entitiesCreated"] = r.EntitiesCreated, ["locations"] = r.Locations, ["locationsNew"] = r.LocationsNew,
+                    ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift, ["contentReplaced"] = r.ContentReplaced, ["contentRekeyed"] = r.ContentRekeyed,
+                    ["conflicts"] = r.Conflicts, ["failures"] = r.ErrorsRows, ["elapsedMs"] = r.ElapsedMs,
+                };
+                StoreResult.Write(r.StorePath, result, 0, StoreResult.OutcomeCompleted);
                 return 0;
             }
             catch (StoreException ex)
             {
                 Console.Error.WriteLine("Error: " + ex.Message);
+                WriteFailed(o, r, result, ex.ExitCode, ex.Message);
                 return ex.ExitCode;
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine("Error: import failed: " + ex.Message);
+                WriteFailed(o, r, result, 1, "import failed: " + ex.Message);
                 return 1;
             }
+        }
+
+        /// <summary>The failure record: the store block names the store when a path was given (schema and generation when it
+        /// opened); nothing is published by an import, so the export block is simply not performed.</summary>
+        static void WriteFailed(ImportOptions o, ImportReport r, StoreResultFile result, int exitCode, string reason)
+        {
+            string? storePath = r.StorePath.Length > 0 ? r.StorePath : null;
+            try { if (storePath == null && !string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
+            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+            result.Export = new StoreResultExport { Performed = false };
+            StoreResult.Write(storePath, result, exitCode, StoreResult.OutcomeFailed, reason);
         }
 
         /// <summary>S2 C3 — the in-memory entry: the same resolution, upsert, drift and run rules as a catalog import, over
@@ -197,6 +227,13 @@ namespace Truedat.Store
             return r;
         }
 
+        /// <summary>Thrown by ImportEntry's pre-mutation preflight only: the entry holds a value the typed store cannot represent. It is
+        /// the ONE failure the batch loop continues past, because nothing of the entry has been written when it is raised.</summary>
+        internal sealed class UnstorableEntryException : StoreException
+        {
+            public UnstorableEntryException(string message) : base(message) { }
+        }
+
         /// <summary>The batched entry loop shared by the file import and the in-memory entry.</summary>
         static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
             IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r,
@@ -218,12 +255,13 @@ namespace Truedat.Store
                     {
                         ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges);
                     }
-                    catch (StoreException ex)
+                    catch (UnstorableEntryException ex)
                     {
-                        // T04 review finding 3: a value the typed store cannot hold (a vector element beyond int32 ×10^dp, a scalar beyond
-                        // int64) fails THIS entry as a recorded failed run and the batch goes on — never a poison pill that aborts every
-                        // re-run of the whole import. The entity/location rows it may already have written stay (a real file with no
-                        // description, exactly like a failed extractor run).
+                        // T04 review finding 3 + keeper atomicity notes: ONLY the pre-mutation rejection continues the batch — it is thrown
+                        // before the entry has touched anything, so recording one failed run and going on leaves the store exactly as it
+                        // was for that entry (never a poison pill that aborts every re-run). Any OTHER StoreException after a write — an
+                        // artifact refusal, a DAL error — propagates as before and the whole batch transaction rolls back: a half-written
+                        // entry (new content beside an old copy, an ok run) must never survive.
                         dal.InsertRun(producerKey, producerVersion, null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", "store", "unrepresentable", $"{keys[i]}: {ex.Message}", source);
                         r.ErrorsRows++;
                         StoreLog.Warn($"{keys[i]}: not stored — {ex.Message}");
@@ -237,10 +275,12 @@ namespace Truedat.Store
             }
         }
 
-        internal static ImportReport Execute(ImportOptions o)
+        internal static ImportReport Execute(ImportOptions o) { var r = new ImportReport(); Execute(o, r); return r; }
+
+        /// <summary>Fills <paramref name="r"/> as it goes (see <see cref="Run"/>); throws on failure with the facts so far in place.</summary>
+        internal static void Execute(ImportOptions o, ImportReport r)
         {
             var sw = Stopwatch.StartNew();
-            var r = new ImportReport();
             StoreLog.SetVerbose(o.Audit);
             if (string.IsNullOrWhiteSpace(o.StorePath))
                 throw new StoreException("No store given. Pass --store <path\\truedat.db>. The store path is never guessed: a default beside a mirrored catalog would put SQLite on a network share.");
@@ -263,6 +303,7 @@ namespace Truedat.Store
             var now = DateTime.UtcNow.ToString("o");
             using var os = OpenStore.Open(o.StorePath, create: true, VersionInfo.Display, now);
             var dal = os.Dal; var db = os.Db;
+            r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(db); r.Generation = dal.Generation();
             // The machine this import writes AS: the store's own on its minting host; on another host a
             // refusal unless --machine-adopt, which finds-or-mints a machine row for THIS host (review #2).
             string writerMachine;
@@ -332,8 +373,8 @@ namespace Truedat.Store
             if (File.Exists(wal)) r.StoreBytesAfter += new FileInfo(wal).Length;
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
             WriteResult(r, os.Path, o.RootRole ?? "primary", "import@1");
+            r.Generation = dal.Generation();   // the committed generation after this import (advanced by T06/T18, not here)
             StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
-            return r;
         }
 
         static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
@@ -342,6 +383,11 @@ namespace Truedat.Store
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
+            // Keeper partial-entry defect (T04): every representation of this entry is validated BEFORE any mutation — entity, location,
+            // content, copy — so a value the typed store cannot hold rejects the entry whole (one failed run, nothing changed), never a
+            // changed content row beside an untouched copy row and an ok run. The throw is caught per entry by ImportEntriesCore.
+            if (TrackEntryMapper.FirstUnstorable(TrackEntryMapper.ToRow(entry)) is string unstorable)
+                throw new UnstorableEntryException(unstorable + "; the entry was not stored.");
             CanonicalPath.Split(rf.Value.Path, key, out var rel, out var canon);
             bool isFlac = key.EndsWith(".flac", StringComparison.OrdinalIgnoreCase);
             var sha = string.IsNullOrEmpty(entry.AudioStreamSha256) ? null : entry.AudioStreamSha256;

@@ -2300,8 +2300,20 @@ namespace Truedat
                 string.Equals(a, "--pause", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(a, "/pause", StringComparison.OrdinalIgnoreCase));
             try { MainCore(args); }
+            catch (Exception ex)
+            {
+                // An unhandled exception exits the process with the CLR's code, not Environment.ExitCode — the scan's
+                // record (below) must say so rather than "completed" or the provisional "interrupted".
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, "truedat stopped on an unexpected error: " + ex.Message);
+                global::Truedat.Store.StoreResult.FinishScan(unchecked((int)0xE0434352));
+                throw;
+            }
             finally
             {
+                // store-v3 T11: the scan's store-result.json gets its FINAL outcome here, against the exit code the launcher
+                // sees — persistence succeeded at the flush, but source loss, analysis failures and Ctrl+C are decided after
+                // it (keeper review of 9706c5b, P1). No-op when no scan with a store ran.
+                global::Truedat.Store.StoreResult.FinishScan(Environment.ExitCode);
                 // Idempotent — a mode that never asserted (read-only) or already released
                 // just no-ops here. Guarantees a finished run sitting at the pause prompt
                 // never pins the machine awake overnight.
@@ -3264,29 +3276,7 @@ namespace Truedat
             }
             if (edgesExportMode)
             {
-                // store-v3 T11: the verb's store-result.json — export.performed with the companion alone (catalog/sidecar null);
-                // an upgraded hub pairs it with its catalog by origin.generation or labels it behind.
-                var edgesResult = global::Truedat.Store.StoreResult.Begin("edges-export");
-                bool edgesOk = WriteEdgesCompanion(edgesExportPath, announce: true);
-                var companionOut = edgesExportPath ?? _edgesCompanionPath;
-                edgesResult.Store = new global::Truedat.Store.StoreResultStore { Path = _storePath == null ? "" : Path.GetFullPath(_storePath), TruedatVersion = VersionInfo.Display };
-                try
-                {
-                    if (edgesOk && _storePath != null)
-                        using (global::Truedat.Store.StoreLog.Quiet())
-                        using (var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
-                        { edgesResult.Store.SchemaVersion = global::Truedat.Store.SchemaMigrator.ReadVersion(os.Db); edgesResult.Store.Generation = os.Dal.Generation(); }
-                }
-                catch { }
-                edgesResult.Export = new global::Truedat.Store.StoreResultExport
-                {
-                    Performed = edgesOk, Generation = edgesOk ? edgesResult.Store.Generation : (long?)null,
-                    Companion = edgesOk ? global::Truedat.Store.StoreResult.Describe(companionOut) : null,
-                };
-                global::Truedat.Store.StoreResult.Write(_storePath, edgesResult, edgesOk ? 0 : 1,
-                    edgesOk ? global::Truedat.Store.StoreResult.OutcomeCompleted : global::Truedat.Store.StoreResult.OutcomeFailed,
-                    edgesOk ? null : "mbxedges.v1.json not written (see the console line above)");
-                Environment.ExitCode = edgesOk ? 0 : 1;
+                Environment.ExitCode = RunEdgesExport(_storePath, edgesExportPath ?? _edgesCompanionPath, _edgeSettings);
                 return;
             }
 
@@ -4161,6 +4151,7 @@ namespace Truedat
                     if (features == null)
                     {
                         Console.Error.WriteLine($"Error: {afResults.EssentiaError}");
+                        global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, "analysis failed: " + afResults.EssentiaError);
                         Environment.ExitCode = 3;
                         return;
                     }
@@ -5112,9 +5103,11 @@ namespace Truedat
                 {
                     Console.Error.WriteLine("INCOMPLETE: the source became unreachable — remaining paths were not examined.");
                     Console.Error.WriteLine($"  {flSourceLostDetail}");
+                    global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "the source became unreachable — remaining paths were not examined: " + flSourceLostDetail);
                     Environment.ExitCode = 3;
                     return;
                 }
+                if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 return;
             }
@@ -6380,7 +6373,10 @@ namespace Truedat
 
             Console.WriteLine();
             if (wasCancelled)
+            {
                 Console.WriteLine("=== Interrupted (Ctrl+C) - progress saved ===");
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "interrupted (Ctrl+C) — progress up to that point was saved");
+            }
             // A source-loss stop must never render as a completed scan. Everything analyzed
             // before the drop is real and was saved; everything after it was never looked at,
             // so the run is INCOMPLETE and says so — with a non-zero exit so a scheduled job
@@ -6390,6 +6386,7 @@ namespace Truedat
                 Console.WriteLine("=== INCOMPLETE - the library went away mid-scan; work up to that point was saved ===");
                 Console.WriteLine($"  {scanSourceLostDetail}");
                 Console.WriteLine("  Tracks after the drop were NOT recorded as missing. Re-run once it is back.");
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "the library went away mid-scan; work up to that point was saved: " + scanSourceLostDetail);
                 Environment.ExitCode = 3;
             }
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
@@ -6560,7 +6557,12 @@ namespace Truedat
             tee?.Dispose();
 
             if (failed > 0)
+            {
+                // Source loss (exit 3, noted above) and Ctrl+C outrank a failure count: those notes stay.
+                if (Volatile.Read(ref scanSourceLost) == 0 && !wasCancelled)
+                    global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{failed} track(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = 1;
+            }
 
             // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
             // catalog is a superset of what is on disk, holding entries for files that are
@@ -10429,24 +10431,62 @@ namespace Truedat
         /// without --moods skips the edges with a warning instead of refusing.</summary>
         static bool _storeFromConfig, _edgesFromConfig;
 
-        /// <summary>S2 C7: write mbxedges.v1.json from the store — to <paramref name="explicitPath"/>, else beside the catalog.
-        /// Returns false (and says why) when there is no store or no target; never throws into a scan.</summary>
-        static bool WriteEdgesCompanion(string? explicitPath, bool announce)
+        /// <summary>Self-test seam for <see cref="RunEdgesExport"/>: runs after the companion is on disk and before the record
+        /// is written, so a test can commit to the same store in between and prove the record carries the generation the
+        /// FILE was stamped with, not a later read (keeper review of 9706c5b, P2 edge). Null in production.</summary>
+        internal static Action? AfterEdgesCompanionWritten;
+
+        /// <summary>--edges-export: the companion alone, from the store, plus the verb's store-result.json (store-v3 T11) —
+        /// export.performed with catalog/sidecar null; an upgraded hub pairs the file with its catalog by origin.generation
+        /// or labels it behind. The record's generation is the one the file carries: both come out of the single read
+        /// snapshot <see cref="WriteEdgesCompanion"/> takes, never a second read of the store.</summary>
+        internal static int RunEdgesExport(string? storePath, string? target, global::Truedat.Edges.EdgeSettings settings)
         {
-            var target = explicitPath ?? _edgesCompanionPath;
-            if (_storePath == null) { Console.Error.WriteLine("Error: --edges-export reads the store; add --store."); return false; }
+            var result = global::Truedat.Store.StoreResult.Begin("edges-export");
+            bool ok = WriteEdgesCompanion(storePath, target, settings, announce: true, out long generation, out int schema);
+            AfterEdgesCompanionWritten?.Invoke();
+            result.Store = new global::Truedat.Store.StoreResultStore
+            {
+                Path = storePath == null ? "" : Path.GetFullPath(storePath), TruedatVersion = VersionInfo.Display,
+                SchemaVersion = ok ? schema : 0, Generation = ok ? generation : 0,
+            };
+            result.Export = new global::Truedat.Store.StoreResultExport
+            {
+                Performed = ok, Generation = ok ? generation : (long?)null,
+                Companion = ok ? global::Truedat.Store.StoreResult.Describe(target) : null,
+            };
+            global::Truedat.Store.StoreResult.Write(storePath, result, ok ? 0 : 1,
+                ok ? global::Truedat.Store.StoreResult.OutcomeCompleted : global::Truedat.Store.StoreResult.OutcomeFailed,
+                ok ? null : "mbxedges.v1.json not written (see the console line above)");
+            return ok ? 0 : 1;
+        }
+
+        /// <summary>S2 C7: write mbxedges.v1.json from the store to <paramref name="target"/> (the explicit --edges-export path,
+        /// else beside the catalog). <paramref name="generation"/> / <paramref name="schema"/> are what the file was stamped
+        /// with, read in the SAME snapshot as its rows. Returns false (and says why) when there is no store or no target;
+        /// never throws into a scan.</summary>
+        static bool WriteEdgesCompanion(string? storePath, string? target, global::Truedat.Edges.EdgeSettings settings, bool announce, out long generation, out int schema)
+        {
+            generation = 0; schema = 0;
+            if (storePath == null) { Console.Error.WriteLine("Error: --edges-export reads the store; add --store."); return false; }
             if (target == null) { Console.Error.WriteLine("Error: no catalog beside which to write mbxedges.v1.json; pass --edges-export <path> or --moods."); return false; }
             try
             {
                 var now = DateTime.UtcNow.ToString("o");
-                using var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, now);
+                using var os = global::Truedat.Store.OpenStore.Open(storePath, create: false, VersionInfo.Display, now);
+                // ONE read snapshot for the generation and the rows (keeper review of 9706c5b): a commit between them would
+                // stamp the file with N while the rows — or the record — describe N+1.
+                using var snapshot = os.Db.BeginRead();
+                generation = os.Dal.Generation();
+                schema = global::Truedat.Store.SchemaMigrator.ReadVersion(os.Db);
                 // The header names the extractor the frames came from. A scan resolved it; a bare --edges-export has not,
                 // so it reads the build the store's newest essentia run recorded (the frames depend on the build).
                 var build = global::Truedat.Store.ScanSink.ExtractorBuild;
                 if (build == "unknown") build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
-                // origin.generation = the store's current generation, so an upgraded hub can pair the file with its catalog
-                // (and label it behind when --edges-export ran alone after the store moved on: "run --store-export").
-                var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, _edgeSettings.ProducerVersion, "essentia_streaming_extractor_music " + build, os.Dal.Generation());
+                // origin.generation = the store's generation in this snapshot, so an upgraded hub can pair the file with its
+                // catalog (and label it behind when --edges-export ran alone after the store moved on: "run --store-export").
+                var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, settings.ProducerVersion, "essentia_streaming_extractor_music " + build, generation);
+                snapshot.Complete();
                 if (announce) Console.WriteLine($"  edges file: {rep.Tracks:N0} tracks, {rep.Bytes:N0} bytes{(rep.OmittedNoSha > 0 ? $", {rep.OmittedNoSha:N0} no-sha media omitted" : "")} -> {rep.Path}");
                 return true;
             }
@@ -10494,6 +10534,9 @@ namespace Truedat
         /// extractor build for the per-file modes, which only the library scan did before.</summary>
         static string? EdgesPreflight(string essentiaExe, bool hasCatalogTarget = true)
         {
+            // store-v3 T11: this is the one hook every scan mode passes once a store is in force — the scan's provisional
+            // store-result.json begins here, so a refusal before the first flush still leaves a record at the boundary.
+            global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             // The exe hash (~20 MB read) only when something consumes it: the store's run rows or the --edges build gate. The
             // autoscan plugin's frequent per-file calls run without either (review M9).
             if (_storePath != null || _stageOpts.Edges) global::Truedat.Store.ScanSink.ExtractorBuild = ExtractorBuildId(essentiaExe);
@@ -10545,7 +10588,7 @@ namespace Truedat
             {
                 Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Remeasured} remeasured, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
                 if (_stageOpts.Edges) Console.WriteLine($"  edges: {r.Edges} edge rows written, {r.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
-                if (_stageOpts.Edges && r.Edges > 0) companionWritten = WriteEdgesCompanion(null, announce: true);   // S2 C7: the companion file reflects the store after every run that added edges
+                if (_stageOpts.Edges && r.Edges > 0) companionWritten = WriteEdgesCompanion(_storePath, _edgesCompanionPath, _edgeSettings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
             }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");

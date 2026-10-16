@@ -1,11 +1,15 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.Json;
 
 namespace Truedat.Store
 {
-    /// <summary>Self-tests for <c>store-result.json</c> (store-v3 T11): the hub:H03d contract round-trips, every verb
-    /// exit path writes it, and the export's record names the published files by hash.</summary>
+    /// <summary>Self-tests for <c>store-result.json</c> (store-v3 T11): the hub:H03d contract round-trips, every verb exit path
+    /// writes it, the export's record names the published files by hash, and — the keeper's three compiled reproductions of
+    /// 9706c5b — the scan's record carries the verb's FINAL outcome (exit 3 is never "completed / 0"), an export failure after
+    /// publication keeps the publication facts, and an edges export records the generation its FILE was stamped with.</summary>
     internal static class StoreResultSelfTest
     {
         internal static void Run(Action<bool, string> assert)
@@ -13,12 +17,21 @@ namespace Truedat.Store
             Console.WriteLine("Store-result self-test (store-v3 T11: the hub:H03d record round-trips, temp + rename, no BOM)");
             try { TestRoundTrip(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.RoundTrip: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Store-result self-test (store-v3 T11: --store-export writes the record on success AND on failure)");
+            Console.WriteLine("Store-result self-test (store-v3 T11: --store-export writes the record on success AND on failure; facts survive a late failure)");
             try { TestExportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Export: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Store-result self-test (store-v3 T11: the scan's end-of-run record, ok and failed)");
+            finally { ExportCommand.AfterPublished = null; }
+            Console.WriteLine("Store-result self-test (store-v3 T11: the scan's record is provisional until the process boundary; outcome follows the verb)");
             try { TestScanRecord(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Scan: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: --edges-export records the generation the companion was stamped with)");
+            try { TestEdgesExportGeneration(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { Program.AfterEdgesCompanionWritten = null; }
+            Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
+            try { TestImportWritesIt(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
         }
 
         sealed class Dir : IDisposable
@@ -80,12 +93,27 @@ namespace Truedat.Store
                 [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = bpm, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('b', 64) },
             };
 
+        /// <summary>A store at a non-zero generation, so "generation 0" can never pass as "the generation was read".</summary>
+        static long AdvanceTo(string store, long generation)
+        {
+            using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+            while (os.Dal.Generation() < generation) os.Dal.AdvanceGeneration();
+            return os.Dal.Generation();
+        }
+
+        static int SchemaOf(string store)
+        {
+            using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+            return SchemaMigrator.ReadVersion(os.Db);
+        }
+
         static void TestExportWritesIt(Action<bool, string> assert)
         {
             using (var d = new Dir())
             {
                 var store = d.P("truedat.db");
                 ImportCommand.ExecuteEntries(store, Fixture(@"D:\music\r.flac", 120), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                long gen = AdvanceTo(store, 7); int schema = SchemaOf(store);
                 var outDir = d.P("out"); Directory.CreateDirectory(outDir);
                 var outPath = Path.Combine(outDir, "mbxmoods.json");
                 var resultPath = StoreResult.PathFor(store);
@@ -93,8 +121,8 @@ namespace Truedat.Store
                 int code = ExportCommand.Run(new ExportOptions { StorePath = store, OutPath = outPath });
                 assert(code == 0 && File.Exists(resultPath), "export success: exit 0 and store-result.json beside the store");
                 assert(StoreResult.TryRead(resultPath, out var ok) && ok.Verb == "store-export" && ok.Outcome == "completed" && ok.ExitCode == 0 && ok.Reason == null, "export success: verb/outcome/exitCode");
-                assert(ok.Store.Path == Path.GetFullPath(store) && ok.Store.SchemaVersion >= 3 && ok.Store.Generation == 0 && ok.Store.TruedatVersion == VersionInfo.Display, $"export success: store block (schema {ok.Store.SchemaVersion}, generation {ok.Store.Generation})");
-                assert(ok.Export.Performed && ok.Export.Generation == 0 && ok.Export.Catalog != null && ok.Export.Catalog.Path == outPath && ok.Export.Catalog.Sha256 == Publication.Sha256Hex(outPath),
+                assert(ok.Store.Path == Path.GetFullPath(store) && ok.Store.SchemaVersion == schema && ok.Store.Generation == gen && ok.Store.TruedatVersion == VersionInfo.Display, $"export success: store block (schema {ok.Store.SchemaVersion}, generation {ok.Store.Generation})");
+                assert(ok.Export.Performed && ok.Export.Generation == gen && ok.Export.Catalog != null && ok.Export.Catalog.Path == outPath && ok.Export.Catalog.Sha256 == Publication.Sha256Hex(outPath),
                     "export success: export.performed, catalog ref hashes the published catalog");
                 var sidecar = Path.ChangeExtension(outPath, ".mbxs");
                 assert(ok.Export.Sidecar != null && ok.Export.Sidecar.Sha256 == Publication.Sha256Hex(sidecar) && CatalogOrigin.TryRead(outPath, out var o) && o.SidecarSha256 == ok.Export.Sidecar.Sha256,
@@ -102,39 +130,207 @@ namespace Truedat.Store
                 assert(ok.Export.Companion == null, "export success: no edge rows -> companion null");
                 assert(ok.Detail != null && ok.Detail["entries"] == 1, "export success: detail.entries");
 
-                // Failure path: an unknown export root is refused by PickRoot (StoreException) — the record still lands.
+                // Keeper repro (P2, first half): an unknown export root is refused by PickRoot AFTER the store opened — the record still
+                // lands, and it keeps the schema and generation the store answered with (9706c5b wrote 0 / 0).
                 int code2 = ExportCommand.Run(new ExportOptions { StorePath = store, OutPath = outPath, ExportRoot = @"Z:\no-such-root" });
                 bool readBad = StoreResult.TryRead(resultPath, out var bad);
                 assert(code2 != 0 && readBad && bad.Verb == "store-export" && bad.Outcome == "failed" && bad.ExitCode == code2 && !string.IsNullOrEmpty(bad.Reason) && !bad.Export.Performed,
-                    $"export failure: non-zero exit, record says failed with the reason, export.performed false ({bad.Reason})");
-                assert(bad.Store.Path == Path.GetFullPath(store), "export failure: the store block still names the store");
+                    $"export failure before publication: non-zero exit, record says failed with the reason, export.performed false ({bad.Reason})");
+                assert(bad.Store.Path == Path.GetFullPath(store) && bad.Store.SchemaVersion == schema && bad.Store.Generation == gen,
+                    $"export failure before publication: the store block keeps the schema ({bad.Store.SchemaVersion}) and generation ({bad.Store.Generation}) the store answered with — never 0 / 0");
+
+                // Keeper repro (P2, second half): a failure AFTER the triple is published (their case: a directory sitting where key-moves.json
+                // goes) must not erase the publication — the files are on disk at generation N and the record says so.
+                ExportCommand.AfterPublished = () => throw new IOException("key-moves.json is a directory");
+                int code3;
+                try { code3 = ExportCommand.Run(new ExportOptions { StorePath = store, OutPath = outPath }); }
+                finally { ExportCommand.AfterPublished = null; }
+                bool readLate = StoreResult.TryRead(resultPath, out var late);
+                assert(code3 == 1 && readLate && late.Outcome == "failed" && late.ExitCode == 1 && late.Reason != null && late.Reason.Contains("key-moves.json is a directory"),
+                    $"export failure after publication: exit 1, failed, the reason names the late failure ({late.Reason})");
+                assert(late.Export.Performed && late.Export.Generation == gen && late.Store.SchemaVersion == schema && late.Store.Generation == gen,
+                    $"export failure after publication: export.performed TRUE at generation {late.Export.Generation} (schema {late.Store.SchemaVersion}) — the publication is a fact the failure does not erase");
+                assert(late.Export.Catalog != null && late.Export.Catalog.Sha256 == Publication.Sha256Hex(outPath) && late.Export.Sidecar != null && late.Export.Sidecar.Sha256 == Publication.Sha256Hex(sidecar)
+                       && CatalogOrigin.TryRead(outPath, out var o3) && o3.Generation == gen && o3.SidecarSha256 == late.Export.Sidecar.Sha256,
+                    "export failure after publication: catalog + sidecar refs hash the files actually on disk, and the catalog header binds that sidecar at that generation");
+
+                // No store path at all: the verb refuses and there is nowhere to put a record — no throw, non-zero exit.
+                int code4 = ExportCommand.Run(new ExportOptions { StorePath = null, OutPath = outPath });
+                assert(code4 != 0, "export with no store: refused without throwing");
             }
         }
 
+        static ScanSinkReport OkReport(string store) => new ScanSinkReport { Ok = true, Entries = 3, Failures = 1, Edges = 2, EdgesFailed = 0, Remeasured = 1, EntitiesCreated = 2, ElapsedMs = 42, StorePath = store };
+
         static void TestScanRecord(Action<bool, string> assert)
         {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            StoreResult.ResetScanForTest();
+            assert(StoreResult.FinishScan(0) == null, "FinishScan with nothing pending: null, writes nothing");
+            assert(StoreResult.WriteScan(null, OkReport(""), false, null, started) == null, "WriteScan with no store: null, no record");
+
             using (var d = new Dir())
             {
                 var store = d.P("truedat.db");
                 ImportCommand.ExecuteEntries(store, Fixture(@"D:\music\s.flac", 100), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
-                var rep = new ScanSinkReport { Ok = true, Entries = 3, Failures = 1, Edges = 2, EdgesFailed = 0, Remeasured = 1, EntitiesCreated = 2, ElapsedMs = 42, StorePath = store };
-                File.WriteAllText(d.P("mbxedges.v1.json"), "{\"contract\":\"mbxedges.v1\",\"tracks\":{}}");
-                var path = StoreResult.WriteScan(store, rep, edgesOn: true, companionPath: d.P("mbxedges.v1.json"), startedUtc: "2026-10-15T00:00:00.0000000Z");
-                StoreResultFile r = new StoreResultFile();
-                bool readOk = path != null && StoreResult.TryRead(path!, out r);
-                assert(readOk && r.Verb == "scan" && r.Outcome == "completed" && r.ExitCode == 0 && r.StartedUtc == "2026-10-15T00:00:00.0000000Z",
-                    "scan ok: verb scan, completed, the scan's start stamp");
-                assert(r.Store.Path == Path.GetFullPath(store) && r.Store.SchemaVersion >= 3 && r.Store.TruedatVersion == VersionInfo.Display, "scan ok: store block read from the store");
-                assert(!r.Export.Performed && r.Export.Catalog == null && r.Export.Companion != null && r.Export.Companion.Sha256 == Publication.Sha256Hex(d.P("mbxedges.v1.json")),
-                    "scan ok: export.performed false (the scan path publishes with T18); the companion this run wrote is named by hash");
-                assert(r.Capture != null && r.Capture.EdgeArrays == "off", "scan ok: capture block present (arrays off: the flag ships with T05)");
-                assert(r.Detail != null && r.Detail["entries"] == 3 && r.Detail["failures"] == 1 && r.Detail["edges"] == 2 && r.Detail["remeasured"] == 1, "scan ok: detail counters");
-                assert(rep.ResultPath == path, "scan ok: the sink report carries the record's path");
+                var resultPath = StoreResult.PathFor(store);
 
+                // 1. The scan begins: a provisional record replaces whatever verb wrote last — a refusal before the first flush still
+                //    leaves a record, and a process killed here reads as interrupted (true).
+                File.WriteAllText(resultPath, "{\"kind\":\"store-result\",\"schemaVersion\":1,\"verb\":\"store-export\",\"outcome\":\"completed\"}");
+                StoreResult.BeginScan(store, started);
+                assert(StoreResult.TryRead(resultPath, out var begun) && begun.Verb == "scan" && begun.Outcome == "interrupted" && begun.ExitCode == 0 && begun.Reason == StoreResult.ProvisionalReason && begun.StartedUtc == started && begun.Store.Path == Path.GetFullPath(store),
+                    $"BeginScan: provisional record (verb scan, interrupted, the provisional reason) replaces the previous verb's ({begun.Verb}/{begun.Outcome}/{begun.Reason})");
+
+                // 2. The flush writes its facts — still provisional. The keeper's P1 reproduction: 9706c5b wrote completed / 0 here.
+                File.WriteAllText(d.P("mbxedges.v1.json"), "{\"contract\":\"mbxedges.v1\",\"tracks\":{}}");
+                var path = StoreResult.WriteScan(store, OkReport(store), edgesOn: true, companionPath: d.P("mbxedges.v1.json"), startedUtc: started);
+                StoreResultFile r = new StoreResultFile();
+                bool readOk = path != null && path == resultPath && StoreResult.TryRead(path!, out r);
+                assert(readOk, $"WriteScan: a non-null record path, THIS store's ({path})");
+                assert(r.Verb == "scan" && r.Outcome == "interrupted" && r.ExitCode == 0 && r.Reason == StoreResult.ProvisionalReason && r.StartedUtc == started,
+                    $"WriteScan: persistence success is NOT operation success — the record stays provisional until the boundary ({r.Outcome}/{r.ExitCode}/{r.Reason})");
+                assert(r.Store.Path == Path.GetFullPath(store) && r.Store.SchemaVersion >= 3 && r.Store.TruedatVersion == VersionInfo.Display, "WriteScan: store block read from the store");
+                assert(!r.Export.Performed && r.Export.Catalog == null && r.Export.Companion != null && r.Export.Companion.Sha256 == Publication.Sha256Hex(d.P("mbxedges.v1.json")),
+                    "WriteScan: export.performed false (the scan path publishes with T18); the companion this run wrote is named by hash");
+                assert(r.Capture != null && r.Capture.EdgeArrays == "off", "WriteScan: capture block present (arrays off: the flag ships with T05)");
+                assert(r.Detail != null && r.Detail["entries"] == 3 && r.Detail["failures"] == 1 && r.Detail["edges"] == 2 && r.Detail["remeasured"] == 1, "WriteScan: detail counters");
+
+                // 3. The boundary, exit 0, nothing noted: completed, null reason, every fact from the flush preserved. Then EXACTLY ONCE.
+                var done = new StoreResultFile();
+                var fin = StoreResult.FinishScan(0);
+                assert(fin == resultPath && StoreResult.TryRead(resultPath, out done) && done.Outcome == "completed" && done.ExitCode == 0 && done.Reason == null
+                       && done.Detail != null && done.Detail["entries"] == 3 && done.Export.Companion != null && done.StartedUtc == started,
+                    $"FinishScan(0): completed, null reason, the flush's facts preserved ({done.Outcome}/{done.ExitCode}/{done.Reason})");
+                var textAfterFinish = File.ReadAllText(resultPath);
+                assert(StoreResult.FinishScan(3) == null && File.ReadAllText(resultPath) == textAfterFinish, "FinishScan twice: the second call is a no-op — the record is sealed, the file unchanged");
+
+                // 4. The keeper's P1 reproduction, exact shape: the flush reported Ok, the scan then found its source gone (process exit 3).
+                StoreResult.WriteScan(store, OkReport(store), edgesOn: false, companionPath: null, startedUtc: started);
+                StoreResult.NoteScanOutcome(StoreResult.OutcomeInterrupted, "the source became unreachable — remaining paths were not examined: D:\\ offline");
+                StoreResult.FinishScan(3);
+                assert(StoreResult.TryRead(resultPath, out var lost) && lost.Outcome == "interrupted" && lost.ExitCode == 3 && lost.Reason != null && lost.Reason.StartsWith("the source became unreachable"),
+                    $"source lost after a successful flush: interrupted / exit 3 / the sentence — never completed / 0 ({lost.Outcome}/{lost.ExitCode})");
+
+                // 5. Analysis failures (exit 1); Ctrl+C (exit 0 but interrupted — the note outranks the exit code); exit non-zero with no note.
+                StoreResult.WriteScan(store, OkReport(store), false, null, started);
+                StoreResult.NoteScanOutcome(StoreResult.OutcomeFailed, "2 file(s) failed analysis — see mbxmoods-errors.csv");
+                StoreResult.FinishScan(1);
+                assert(StoreResult.TryRead(resultPath, out var fl) && fl.Outcome == "failed" && fl.ExitCode == 1 && fl.Reason == "2 file(s) failed analysis — see mbxmoods-errors.csv", $"analysis failures: failed / exit 1 / the count ({fl.Outcome}/{fl.ExitCode})");
+                StoreResult.WriteScan(store, OkReport(store), false, null, started);
+                StoreResult.NoteScanOutcome(StoreResult.OutcomeInterrupted, "interrupted (Ctrl+C) — progress up to that point was saved");
+                StoreResult.FinishScan(0);
+                assert(StoreResult.TryRead(resultPath, out var cc) && cc.Outcome == "interrupted" && cc.ExitCode == 0 && cc.Reason != null && cc.Reason.StartsWith("interrupted (Ctrl+C)"), $"Ctrl+C: interrupted even at exit 0 ({cc.Outcome}/{cc.ExitCode})");
+                StoreResult.WriteScan(store, OkReport(store), false, null, started);
+                StoreResult.FinishScan(3);
+                assert(StoreResult.TryRead(resultPath, out var un) && un.Outcome == "failed" && un.ExitCode == 3 && un.Reason == "truedat exited 3; see the console output", $"non-zero exit with nothing noted: failed with a plain sentence ({un.Outcome}/{un.ExitCode}/{un.Reason})");
+
+                // 6. A store write failure is final on its own and outranks a later note or exit 0: the catalog is complete, the STORE verb is not.
                 var failed = new ScanSinkReport { Ok = false, Error = "unable to open database file", StorePath = store };
-                var path2 = StoreResult.WriteScan(store, failed, edgesOn: false, companionPath: null, startedUtc: "2026-10-15T00:00:00.0000000Z");
-                assert(path2 != null && StoreResult.TryRead(path2!, out var f) && f.Outcome == "failed" && f.Reason == "store write failed: unable to open database file" && f.Export.Companion == null,
-                    "scan failed: failed + the reason sentence, no companion");
+                var path2 = StoreResult.WriteScan(store, failed, edgesOn: false, companionPath: null, startedUtc: started);
+                assert(path2 == resultPath && StoreResult.TryRead(path2!, out var f) && f.Outcome == "failed" && f.Reason == "store write failed: unable to open database file" && f.Export.Companion == null,
+                    "store write failed: failed + the reason sentence at once, no companion");
+                StoreResult.NoteScanOutcome(StoreResult.OutcomeInterrupted, "interrupted (Ctrl+C)");
+                StoreResult.FinishScan(0);
+                assert(StoreResult.TryRead(resultPath, out var f2) && f2.Outcome == "failed" && f2.Reason == "store write failed: unable to open database file" && f2.ExitCode == 0, $"store write failed outranks the note and exit 0 ({f2.Outcome}/{f2.Reason})");
+
+                // 7. Crash finalization, once (packet item 4): Main's catch notes the error and finishes with the CLR code; its finally
+                //    then runs FinishScan(Environment.ExitCode == 0) — which must NOT overwrite the crash code.
+                StoreResult.WriteScan(store, OkReport(store), false, null, started);
+                StoreResult.NoteScanOutcome(StoreResult.OutcomeFailed, "truedat stopped on an unexpected error: boom");
+                var cr = new StoreResultFile();
+                var crashPath = StoreResult.FinishScan(unchecked((int)0xE0434352));
+                var afterCrash = StoreResult.FinishScan(0);
+                assert(crashPath == resultPath && afterCrash == null && StoreResult.TryRead(resultPath, out cr) && cr.Outcome == "failed" && cr.ExitCode == unchecked((int)0xE0434352) && cr.Reason == "truedat stopped on an unexpected error: boom",
+                    $"crash: the CLR exit code survives Main's finally ({cr.Outcome}/{cr.ExitCode})");
+
+                // 8. Lifecycle isolation (the keeper's six scan-result failures): a record left pending for THIS store, whose directory is
+                //    then deleted, must never receive the NEXT store's flush — the next flush gets its own record at its own path.
+                StoreResult.WriteScan(store, OkReport(store), false, null, started);   // pending, never finished
+                using (var d2 = new Dir())
+                {
+                    var store2 = d2.P("truedat.db");
+                    ImportCommand.ExecuteEntries(store2, Fixture(@"D:\music\t.flac", 90), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                    d.Dispose();   // the first fixture is gone, its record still pending
+                    var p3 = StoreResult.WriteScan(store2, OkReport(store2), false, null, started);
+                    assert(p3 != null && p3 == StoreResult.PathFor(store2) && File.Exists(p3) && StoreResult.TryRead(p3!, out var iso) && iso.Store.Path == Path.GetFullPath(store2),
+                        $"isolation: the next store's flush writes a non-null record at ITS path, not the deleted fixture's ({p3})");
+                    var p4 = StoreResult.FinishScan(0);
+                    assert(p4 == p3 && StoreResult.TryRead(p3!, out var iso2) && iso2.Outcome == "completed" && iso2.Store.Path == Path.GetFullPath(store2), "isolation: and finishes at that path");
+                }
+            }
+        }
+
+        static long CompanionGeneration(string companionPath)
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(companionPath));
+            return doc.RootElement.TryGetProperty("origin", out var o) && o.TryGetProperty("generation", out var g) ? g.GetInt64() : -1;
+        }
+
+        static void TestEdgesExportGeneration(Action<bool, string> assert)
+        {
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, Fixture(@"D:\music\e.flac", 110), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                long gen = AdvanceTo(store, 7); int schema = SchemaOf(store);
+                var companion = d.P("mbxedges.v1.json");
+                var resultPath = StoreResult.PathFor(store);
+                var settings = new global::Truedat.Edges.EdgeSettings();
+
+                // Plain: the record's generation is the file's.
+                var ok = new StoreResultFile();
+                int code = Program.RunEdgesExport(store, companion, settings);
+                assert(code == 0 && File.Exists(companion) && StoreResult.TryRead(resultPath, out ok) && ok.Verb == "edges-export" && ok.Outcome == "completed" && ok.ExitCode == 0,
+                    "edges-export: exit 0, companion written, record completed");
+                assert(ok.Export.Performed && ok.Export.Generation == gen && ok.Store.Generation == gen && ok.Store.SchemaVersion == schema && CompanionGeneration(companion) == gen
+                       && ok.Export.Companion != null && ok.Export.Companion.Sha256 == Publication.Sha256Hex(companion) && ok.Export.Catalog == null && ok.Export.Sidecar == null,
+                    $"edges-export: record generation {ok.Export.Generation} == file origin.generation {CompanionGeneration(companion)} == store {gen}; companion named by hash; no catalog/sidecar");
+
+                // Keeper repro (P2 edge): a commit by another connection lands between the companion write and the record — 9706c5b re-read
+                // the store and recorded 8 against a file stamped 7. The record must carry the generation the FILE was stamped with.
+                Program.AfterEdgesCompanionWritten = () => { using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")); os.Dal.AdvanceGeneration(); };
+                int code2;
+                try { code2 = Program.RunEdgesExport(store, companion, settings); }
+                finally { Program.AfterEdgesCompanionWritten = null; }
+                long storeNow;
+                using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) storeNow = os.Dal.Generation();
+                assert(code2 == 0 && storeNow == gen + 1, $"interleaving: the concurrent commit really advanced the store to {storeNow} (expected {gen + 1})");
+                assert(StoreResult.TryRead(resultPath, out var il) && il.Export.Generation == gen && il.Store.Generation == gen && CompanionGeneration(companion) == gen && il.Export.Companion != null && il.Export.Companion.Sha256 == Publication.Sha256Hex(companion),
+                    $"interleaving: record says {il.Export.Generation}, file says {CompanionGeneration(companion)}, store moved on to {storeNow} — the record describes the file, not a later read");
+
+                // Failure: no target → failed record with a reason, nothing performed.
+                var bad = new StoreResultFile();
+                int code3 = Program.RunEdgesExport(store, null, settings);
+                assert(code3 == 1 && StoreResult.TryRead(resultPath, out bad) && bad.Outcome == "failed" && bad.ExitCode == 1 && !bad.Export.Performed && bad.Reason != null && bad.Reason.Contains("not written"),
+                    $"edges-export with no target: exit 1, failed record ({bad.Reason})");
+            }
+        }
+
+        static void TestImportWritesIt(Action<bool, string> assert)
+        {
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                var catalog = d.P("mbxmoods.json");
+                var entries = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                foreach (var kv in Fixture(@"D:\music\i.flac", 95)) entries[kv.Key] = kv.Value;
+                Program.SaveResultsForStore(catalog, entries);
+                var resultPath = StoreResult.PathFor(store);
+
+                var ok = new StoreResultFile();
+                int code = ImportCommand.Run(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\music", RootRole = "primary" });
+                assert(code == 0 && File.Exists(resultPath) && StoreResult.TryRead(resultPath, out ok) && ok.Verb == "store-import" && ok.Outcome == "completed" && ok.ExitCode == 0 && ok.Reason == null,
+                    "import success: exit 0, the common record beside the store, completed");
+                assert(ok.Store.Path == Path.GetFullPath(store) && ok.Store.SchemaVersion == SchemaOf(store) && ok.Store.Generation == 0 && !ok.Export.Performed && ok.Detail != null && ok.Detail["entries"] == 1 && ok.Detail["entitiesCreated"] == 1,
+                    $"import success: store block from the opened store (schema {ok.Store.SchemaVersion}), nothing published, detail counters");
+                assert(File.Exists(Path.Combine(d.Root, ImportCommand.ResultFileName)), "import success: the verb's own store-import-result.json is still written beside it");
+
+                // Failure after the store opened (catalog missing): failed record, the store facts kept.
+                var bad = new StoreResultFile();
+                int code2 = ImportCommand.Run(new ImportOptions { StorePath = store, CatalogPath = d.P("no-such.json"), LibraryRoot = @"D:\music" });
+                assert(code2 != 0 && StoreResult.TryRead(resultPath, out bad) && bad.Verb == "store-import" && bad.Outcome == "failed" && bad.ExitCode == code2 && bad.Reason != null && bad.Reason.Contains("not found") && bad.Store.Path == Path.GetFullPath(store),
+                    $"import failure: non-zero exit, failed record with the reason, the store named ({bad.Reason})");
             }
         }
     }

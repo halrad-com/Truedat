@@ -197,7 +197,12 @@ namespace Truedat.Store
                 var r = ScanSink.Flush(store, "output-x64.4", entries.Keys);   // the whole catalog's keys are the root hint
                 assert(r.Ok && r.Entries == 2 && r.Failures == 1 && r.Error == null, $"flush writes 2 entries and 1 failure ({r.Ok}, {r.Entries}/{r.Failures}, {r.Error})");
                 assert(ScanSink.Pending == 0 && ScanSink.PendingFailures == 0, "flush consumes what it wrote");
-                assert(r.ResultPath != null && File.Exists(r.ResultPath) && File.ReadAllText(r.ResultPath).Contains("\"producer\": \"essentia\""), $"store-result.json is written beside the store and names the producer ({r.ResultPath})");
+                var srf = new StoreResultFile();
+                bool srfRead = r.ResultPath != null && StoreResult.TryRead(r.ResultPath, out srf);
+                long srfEntries = srf.Detail != null && srf.Detail.TryGetValue("entries", out var de) ? de : -1;
+                long srfFailures = srf.Detail != null && srf.Detail.TryGetValue("failures", out var df) ? df : -1;
+                assert(srfRead && srf.Verb == "scan" && srf.Store?.Path == Path.GetFullPath(store) && srfEntries == 2 && srfFailures == 1,
+                    $"store-result.json is written beside the store as the scan's record with the flush's counts ({r.ResultPath}: read {srfRead}, verb {srf.Verb}, store {srf.Store?.Path}, entries {srfEntries}, failures {srfFailures})");
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     assert(os.Dal.Count("track_content") == 2 && os.Dal.Count("track_copy") == 2, $"2 descriptions, 2 copies ({os.Dal.Count("track_content")}/{os.Dal.Count("track_copy")})");
@@ -1719,7 +1724,7 @@ namespace Truedat.Store
                 assert(r1.Ok && r1.Entries == 1, $"v3: the fixture entry is written ({r1.Entries} entries, {r1.Error})");
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a fresh store is schema v3 ({SchemaMigrator.ReadVersion(os.Db)})");
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a fresh store is schema v3 ({SchemaMigrator.ReadVersion(os.Db)})");   // T05 (schema v4) raises this to 4 with the stashed edge tests
                     string T(string col) => os.Db.ExecScalar($"SELECT typeof({col}) FROM track_content;") ?? "";
                     assert(T("bpm") == "integer" && T("spectralSpread") == "integer" && T("melKurtosis") == "integer" && T("spectralDecrease") == "integer" && T("danceability") == "integer" && T("dynamicRange") == "null",
                         $"fixed-dp fields are stored as scaled INTEGER (bpm {T("bpm")}, spread {T("spectralSpread")}, melKurtosis {T("melKurtosis")}, decrease {T("spectralDecrease")}, zero {T("danceability")}, null {T("dynamicRange")})");
@@ -1768,7 +1773,7 @@ namespace Truedat.Store
                 }
                 using (var os = OpenStore.Open(v2store, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a v2 store migrates to v3 on open ({SchemaMigrator.ReadVersion(os.Db)})");
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 3, $"a v2 store migrates to v3 on open ({SchemaMigrator.ReadVersion(os.Db)})");   // T05 (schema v4) raises this to 4 with the stashed edge tests
                     assert(os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "integer" && os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "52" && os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;") == "integer" && os.Db.ExecScalar("SELECT count(*) FROM track_content;") == "1" && os.Db.ExecScalar("SELECT count(*) FROM track_copy;") == "1",
                         $"migrated columns are typed and every row survived (bpm {os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;")}, mfcc {os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes, smfmBpm {os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;")}, rows {os.Db.ExecScalar("SELECT count(*) FROM track_content;")}/{os.Db.ExecScalar("SELECT count(*) FROM track_copy;")})");
                     var back = os.Dal.ReadContent("e1");
@@ -1929,6 +1934,45 @@ namespace Truedat.Store
                 ScanSink.Record(@"D:\Music\Tool\a.flac", uentries[@"D:\Music\Tool\a.flac"]);
                 var u2 = ScanSink.Flush(ustore, "output-x64.4", uentries.Keys);
                 assert(u1.Ok && u2.Ok && u2.Unchanged == 1 && u2.Remeasured == 0, $"a re-scan of a 1-ulp-family value is Unchanged, not a perpetual remeasure ({u2.Unchanged} unchanged, {u2.Remeasured} remeasured)");
+
+                // ---- (j) keeper partial-entry defect (executed on Release): a COPY value the store cannot hold, arriving AFTER a changed
+                // content value, must not leave the new content committed with the old copy, an ok run and Ok=true. Every representation
+                // is validated BEFORE any entry mutation: the entry fails whole, as one recorded failed run, and nothing of it changes.
+                var pstore = Path.Combine(dir, "partial", "truedat.db"); Directory.CreateDirectory(Path.GetDirectoryName(pstore)!);
+                var pentries = FixtureEntries(@"D:\Music");
+                var pe = pentries[@"D:\Music\Tool\a.flac"]; pe.Features!.Bpm = 120; pe.Features.SmfmBpm = 100; pe.Features.SmfmScores = new[] { 1, 2 }; pe.Features.SmfmChannel = 0;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", pe);
+                var p1 = ScanSink.Flush(pstore, "output-x64.4", pentries.Keys);
+                string okRunsBefore, contentRunBefore;
+                using (var os = OpenStore.Open(pstore, false, "selftest", DateTime.UtcNow.ToString("o")))
+                { okRunsBefore = os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok';") ?? "?"; contentRunBefore = os.Db.ExecScalar("SELECT run_id FROM track_content;") ?? "?"; }
+                var pe2 = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; pe2.Features!.Bpm = 150; pe2.Features.SmfmBpm = 1e10; pe2.Features.SmfmScores = new[] { 1, 2 }; pe2.Features.SmfmChannel = 0;   // 1e10 × 10^6 > int64 range for the copy column
+                ScanSink.Record(@"D:\Music\Tool\a.flac", pe2);
+                var p2 = ScanSink.Flush(pstore, "output-x64.4", pentries.Keys);
+                using (var os = OpenStore.Open(pstore, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(p1.Ok && p2.Ok && p2.Failures == 1 && p2.Remeasured == 0
+                        && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == "120"
+                        && os.Db.ExecScalar("SELECT smfmBpm FROM track_copy;") == "100000000"
+                        && os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok';") == okRunsBefore
+                        && os.Db.ExecScalar("SELECT run_id FROM track_content;") == contentRunBefore
+                        && os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed' AND error_text LIKE '%smfmBpm%';") == "1",
+                        $"a rejected copy value after changed content leaves NOTHING of the entry changed: bpm {StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} (120), smfmBpm {os.Db.ExecScalar("SELECT smfmBpm FROM track_copy;")} (100000000), ok runs {os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok';")} (was {okRunsBefore}), content run {os.Db.ExecScalar("SELECT run_id FROM track_content;")} (was {contentRunBefore}), failed run naming smfmBpm {os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed' AND error_text LIKE '%smfmBpm%';")}; flush ok {p2.Ok}, failures {p2.Failures}, remeasured {p2.Remeasured}");
+
+                // ---- (k) keeper's second repro: a StoreException AFTER a write (an artifact refusal on a bad producer build) must NOT be
+                // swallowed by the per-entry catch — the whole batch rolls back as before, and nothing of the entry (content, run) survives.
+                var pe3 = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; pe3.Features!.Bpm = 150; pe3.Features.SmfmBpm = 100; pe3.Features.SmfmScores = new[] { 1, 2 }; pe3.Features.SmfmChannel = 0;
+                // Order matters: the stash only exists under a StoreDirectory, and Record ties a stash to the entry only when it is
+                // already there under the analysed path — stash first, then Record(path, entry, analysedPath).
+                var prevStoreDir = ScanSink.StoreDirectory;
+                ScanSink.StoreDirectory = Path.GetDirectoryName(pstore);
+                ScanSink.StashMainJson(@"D:\Music\Tool\a.flac", "{\"lowlevel\":{\"spectral_centroid\":{\"mean\":1.0}}}");
+                ScanSink.Record(@"D:\Music\Tool\a.flac", pe3, @"D:\Music\Tool\a.flac");
+                var p3 = ScanSink.Flush(pstore, "bad/build", pentries.Keys);
+                ScanSink.StoreDirectory = prevStoreDir;
+                using (var os = OpenStore.Open(pstore, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(!p3.Ok && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == "120" && os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok';") == okRunsBefore && os.Db.ExecScalar("SELECT run_id FROM track_content;") == contentRunBefore,
+                        $"a post-write store failure (artifact refusal) rolls the batch back whole — flush ok {p3.Ok} (false), bpm {StoredText(os, @"D:\Music\Tool\a.flac", "bpm")} (120), ok runs {os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok';")} (was {okRunsBefore}), content run {os.Db.ExecScalar("SELECT run_id FROM track_content;")} (was {contentRunBefore}): {p3.Error}");
+                ScanSink.Reset();
 
                 // ---- (d) the migration's transaction rolls back whole when the data step fails after moving rows (same seam shape as v2)
                 var v2cdir = Path.Combine(dir, "v2c"); Directory.CreateDirectory(v2cdir);

@@ -4,7 +4,7 @@ using System.IO;
 namespace Truedat.Store
 {
     /// <summary>Thrown for store-level refusals that are not SQLite errors (schema newer than the exe, …).</summary>
-    internal sealed class StoreException : Exception
+    internal class StoreException : Exception
     {
         /// <summary>Process exit code for this refusal: 1 generic, StoreExitCodes.StoreUnavailable (4) when SQLite itself is missing or too old.</summary>
         public int ExitCode { get; }
