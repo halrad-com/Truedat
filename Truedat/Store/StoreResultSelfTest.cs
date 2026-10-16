@@ -46,6 +46,10 @@ namespace Truedat.Store
             try { TestFailureRowsSameTransaction(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.FailureRowsTx: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ImportCommand.FailBeforeCommitForTest = false; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: a failures-only flush commits its failed run in its own transaction)");
+            try { TestFailuresOnlyFlush(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.FailuresOnly: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --edges-export records the generation the companion was stamped with)");
             try { TestEdgesExportGeneration(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -555,6 +559,42 @@ namespace Truedat.Store
                         $"the clean retry commits entries, edges AND the failure row together, no lost fold: ok {fin.Ok}, entries {fin.Entries}, edges {fin.Edges}, lost {fin.SpillsLost}, failures {fin.Failures}, rows {rows}, failed runs {failRows}, record {rec.Outcome}");
                 }
                 finally { ImportCommand.FailBeforeCommitForTest = false; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            }
+        }
+
+        /// <summary>TDA Z1 on 76cf2da: a flush with ZERO entries and some failures (an --analyze-file / --file-list call whose only file failed)
+        /// takes ImportEntriesCore's own transaction for the failure rows — it must commit exactly one failed run (components + error) and the
+        /// record must say failures 1.</summary>
+        static void TestFailuresOnlyFlush(Action<bool, string> assert)
+        {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                var prevDir = ScanSink.StoreDirectory; ScanSink.StoreDirectory = d.Root;
+                try
+                {
+                    const string only = @"D:\music\only.flac";
+                    ScanSink.RecordFailure(only, "essentia", "essentia exit 1: decode error", 12.3);
+                    assert(ScanSink.Pending == 0 && ScanSink.PendingFailures == 1, "failures-only: nothing analysed, one failure pending");
+                    var fin = ScanSink.Flush(store, "output-x64.5", new[] { only }, final: true);
+                    long failedRuns, contentRows; string? components, error;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
+                        failedRuns = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'essentia' AND outcome = 'failed';") ?? "0");
+                        components = os.Db.ExecScalar("SELECT failed_components FROM run WHERE producer_key = 'essentia' AND outcome = 'failed';");
+                        error = os.Db.ExecScalar("SELECT error_text FROM run WHERE producer_key = 'essentia' AND outcome = 'failed';");
+                        contentRows = os.Dal.Count("track_content");
+                    }
+                    assert(fin.Ok && fin.Entries == 0 && fin.Failures == 1 && failedRuns == 1 && components == "essentia" && error == "essentia exit 1: decode error" && contentRows == 0 && ScanSink.PendingFailures == 0,
+                        $"a failures-only flush COMMITS exactly one failed run (ok {fin.Ok}, entries {fin.Entries}, failures {fin.Failures}; rows {failedRuns} '{components}' / '{error}'; content {contentRows}; pending failures {ScanSink.PendingFailures})");
+                    var rec = new StoreResultFile();
+                    var path = StoreResult.WriteScan(store, ScanSink.Total, false, null, started); StoreResult.FinishScan(1);
+                    assert(path != null && StoreResult.TryRead(path!, out rec) && rec.Detail != null && rec.Detail["failures"] == 1 && rec.Detail["entries"] == 0 && rec.Outcome == "failed" && rec.ExitCode == 1,
+                        $"the record says failures 1 / entries 0 ({rec.Detail?["failures"]}/{rec.Detail?["entries"]}, {rec.Outcome}/{rec.ExitCode})");
+                }
+                finally { ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             }
         }
 
