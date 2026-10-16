@@ -22703,14 +22703,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 HfEnergyMethod = GetStr(track, "hfEnergyMethod") is var hem && hem.Length > 0 ? hem : null,
                 HfSpectralStructure = ParseHfSpectralStructureFromJson(track),
                 // Read new smfm* keys; fall back to legacy sensme* for not-yet-migrated libraries.
-                SmfmScores = (track.TryGetProperty("smfmScores", out var ssEl) || track.TryGetProperty("sensmeScores", out ssEl)) && ssEl.ValueKind == JsonValueKind.Array
+                // One key rule for all four, shared with the store's observed-copy mask (SelectSmfmKey, keeper 073 / TDA 057).
+                SmfmScores = SelectSmfmKey(track, "smfmScores", out var ssEl) && ssEl.ValueKind == JsonValueKind.Array
                     ? ssEl.EnumerateArray().Select(e => e.GetInt32()).ToArray()
                     : null,
-                SmfmChannel     = GetNullableInt(track, "smfmChannel") ?? GetNullableInt(track, "sensmeChannel"),
-                SmfmChannelName = GetStr(track, "smfmChannelName") is var scn && scn.Length > 0 ? scn
-                                  : (GetStr(track, "sensmeChannelName") is var scnOld && scnOld.Length > 0 ? scnOld : null),
-                SmfmBpm         = GetNullableDbl(track, "smfmBpm") ?? GetNullableDbl(track, "sensmeBpm"),
+                SmfmChannel     = SelectSmfmKey(track, "smfmChannel", out var scEl) && scEl.ValueKind == JsonValueKind.Number ? scEl.GetInt32() : (int?)null,
+                SmfmChannelName = SelectSmfmKey(track, "smfmChannelName", out var snEl) && snEl.ValueKind == JsonValueKind.String && snEl.GetString() is string scn && scn.Length > 0 ? scn : null,
+                SmfmBpm         = SelectSmfmKey(track, "smfmBpm", out var sbEl) && sbEl.ValueKind == JsonValueKind.Number ? sbEl.GetDouble() : (double?)null,
             };
+        }
+
+        /// <summary>Which key an SMFM field is read from — ONE rule, used by the catalog reader above and by the store's observed-copy
+        /// mask (TrackEntryMapper.ObservedCopyMask), so the two can never disagree about what an entry carries (keeper 073: the
+        /// reader stopped at <c>"smfmScores": null</c> while the mask went on to a legacy <c>sensmeScores</c> array, and the import
+        /// wrote the reader's null over the stored scores). The modern <c>smfm*</c> key when present and not JSON null, else its
+        /// legacy <c>sensme*</c> name under the same rule — the precedence <c>--migrate</c>'s <c>SmfmScoresFromJson</c> already uses.</summary>
+        internal static bool SelectSmfmKey(JsonElement track, string modernKey, out JsonElement value)
+        {
+            if (track.TryGetProperty(modernKey, out value) && value.ValueKind != JsonValueKind.Null) return true;
+            if (track.TryGetProperty("sensme" + modernKey.Substring("smfm".Length), out value) && value.ValueKind != JsonValueKind.Null) return true;
+            value = default;
+            return false;
         }
 
         /// <summary>Read one profile's vote from the nested keyVotes block.

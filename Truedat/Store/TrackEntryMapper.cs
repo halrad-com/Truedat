@@ -323,8 +323,8 @@ namespace Truedat.Store
             return p;
         }
 
-        /// <summary>Bit k set when the catalog entry carries copy column k (CopyIdx order): the key exists and is not JSON null. A
-        /// <c>smfm*</c> key also counts under its legacy <c>sensme*</c> name (the reader's fallback). Fingerprint columns count only
+        /// <summary>Bit k set when the catalog entry carries copy column k (CopyIdx order): the key exists and is not JSON null. An
+        /// <c>smfm*</c> column is selected by the reader's own rule, <c>Program.SelectSmfmKey</c> (modern key, else legacy). Fingerprint columns count only
         /// when the reader accepted the block (<paramref name="fingerprintParsed"/>): a block it refused yields no values to observe.</summary>
         internal static ulong ObservedCopyMask(System.Text.Json.JsonElement track, bool fingerprintParsed)
         {
@@ -333,9 +333,10 @@ namespace Truedat.Store
             {
                 var path = CopyJsonPath[k];
                 if (path.Length > 1 && !fingerprintParsed) continue;
-                bool present = Has(track, path);
-                if (!present && path.Length == 1 && path[0].StartsWith("smfm", StringComparison.Ordinal))
-                    present = Has(track, new[] { "sensme" + path[0].Substring(4) });
+                // SMFM: the reader's own key rule (Program.SelectSmfmKey), never a second copy of it (keeper 073).
+                bool present = path.Length == 1 && path[0].StartsWith("smfm", StringComparison.Ordinal)
+                    ? track.ValueKind == System.Text.Json.JsonValueKind.Object && Program.SelectSmfmKey(track, path[0], out _)
+                    : Has(track, path);
                 if (present) mask |= 1UL << k;
             }
             return mask;

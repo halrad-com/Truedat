@@ -543,6 +543,42 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     os.Db.Exec($"UPDATE track_copy SET analysisDuration = 8543210, trackId = 7021 WHERE location_id = (SELECT l.id FROM track_location l WHERE l.display_path = '{P}');");
 
+                // 3c. Keeper 073 / TDA 057 — the mask must select the SAME key the reader reads. One rule, shared by both (Program.
+                //     SelectSmfmKey): the modern smfm* key when present and not JSON null, else the legacy sensme* key. 5524bcf's reader
+                //     stopped at a modern null while its mask went on to the legacy array, so the merge wrote the reader's null over the
+                //     stored scores. Controls: modern null + legacy array, null alone, the legacy key alone, the modern key alone, [].
+                string? CopyExpr(string expr) { using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")); return os.Db.ExecScalar($"SELECT {expr} {Where};"); }
+                Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));   // seed: 3b's scan cleared them
+                Import();
+                var scores0 = CopyExpr("hex(p.smfmScores)");
+                assert(!string.IsNullOrEmpty(scores0), $"seed: an explicit smfmScores array is stored ({scores0})");
+                Write(entries, t => { t["smfmScores"] = null; t["sensmeScores"] = new System.Text.Json.Nodes.JsonArray(10, 9, 8, 7, 6, 5, 4, 3, 2, 1); });
+                Import();
+                var scoresMixed = CopyExpr("hex(p.smfmScores)");
+                assert(!string.IsNullOrEmpty(scores0) && !string.IsNullOrEmpty(scoresMixed) && scoresMixed != scores0,
+                    $"smfmScores: null beside a legacy sensmeScores array: the reader and the mask both select the legacy array, which is written, never a cleared vector ({scoresMixed} vs {scores0})");
+                Write(entries, t => t["smfmScores"] = null);
+                Import();
+                assert(CopyExpr("hex(p.smfmScores)") == scoresMixed, $"smfmScores: null alone keeps the stored vector ({CopyExpr("hex(p.smfmScores)")})");
+                Write(entries, t => t["sensmeScores"] = new System.Text.Json.Nodes.JsonArray(2, 2, 2, 2, 2, 2, 2, 2, 2, 2));
+                Import();
+                var scoresLegacy = CopyExpr("hex(p.smfmScores)");
+                assert(!string.IsNullOrEmpty(scoresLegacy) && scoresLegacy != scoresMixed, $"the legacy sensmeScores key alone is read, so it is observed and written ({scoresLegacy})");
+                Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray(3, 3, 3, 3, 3, 3, 3, 3, 3, 3));
+                Import();
+                var scoresModern = CopyExpr("hex(p.smfmScores)");
+                assert(!string.IsNullOrEmpty(scoresModern) && scoresModern != scoresLegacy, $"the modern smfmScores key alone is read and written ({scoresModern})");
+                scoresLegacy = scoresModern;
+                Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray());
+                Import();
+                assert(CopyExpr("hex(p.smfmScores)") != scoresLegacy, $"an explicit empty smfmScores array is an observation and is written (got '{CopyExpr("hex(p.smfmScores)")}', null {CopyExpr("p.smfmScores IS NULL")})");
+
+                // The other three SMFM pairs under the same rule: a modern null falls through to the legacy value, which is written.
+                Write(entries, t => { t["smfmBpm"] = null; t["sensmeBpm"] = 99.5; t["smfmChannelName"] = null; t["sensmeChannelName"] = "legacy"; t["smfmChannel"] = null; t["sensmeChannel"] = 7; });
+                Import();
+                assert(Copy("smfmBpm") == "99500000" && Copy("smfmChannelName") == "legacy" && Copy("smfmChannel") == "7",
+                    $"smfmBpm / smfmChannelName / smfmChannel: a modern null beside a legacy value reads and writes the legacy value (bpm {Copy("smfmBpm")}, name {Copy("smfmChannelName")}, channel {Copy("smfmChannel")})");
+
                 // 4. Explicit values are observations and replace: zero, empty, a disagreeing duration — no blanket ignore-zero rule.
                 entries[P].AnalysisDurationSecs = 9.1;
                 Write(entries, t => { t["trackId"] = 0; t["artist"] = ""; t["fileMd5"] = ""; Fp(t)["bitDepth"] = 0; Fp(t)["encoder"] = ""; t["sensmeChannel"] = 5; });
