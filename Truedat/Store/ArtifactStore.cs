@@ -72,8 +72,9 @@ namespace Truedat.Store
         }
 
         /// <summary>After the commit: move each planned pending file to its content-addressed place, or discard the pending copy when the
-        /// destination already exists. A pending file that is already gone (a Finish re-run after a crash between commit and move, when the
-        /// destination exists) is nothing to do.</summary>
+        /// destination already exists. A failed move is logged, not thrown (the commit cannot be undone here); a crash between the commit and
+        /// this call leaves a row whose file is still pending, and nothing reconciles that today — see ISSUES I15 before re-enabling artifact
+        /// capture (no production producer since b9b27ec).</summary>
         internal static void Finish(List<(string Pending, string Full)> planned)
         {
             foreach (var (pending, full) in planned)

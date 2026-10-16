@@ -106,6 +106,11 @@ namespace Truedat.Store
         /// recorded under, since the file that carried the version is the thing that is missing.</summary>
         internal static string EdgeProducerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
 
+        /// <summary>The failed-components mark of a lost-spill edges run. A lost spill is a store-side loss, not an audio condition: the refresh
+        /// gate (<see cref="StoreDal.ContentKeysLackingEdges"/>) does NOT treat it as a recorded fold failure, so a plain --refresh re-folds
+        /// the track — as the record's sentence promises (TDA N1 on 3244dbe).</summary>
+        internal const string SpillLostComponent = "spill-lost";
+
         /// <summary>The fold result that stands in for a spill the store could not read back: a FAILED edges run naming the reason (TDA
         /// rule: a missing or unreadable stash is EdgesFailed, never "no fold").</summary>
         internal static global::Truedat.Edges.EdgeFoldResult LostFold(string reason)

@@ -42,6 +42,10 @@ namespace Truedat.Store
             try { TestRefuseScan(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.RefuseScan: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: the scan's failure rows commit with the entries — a failure there loses no payload)");
+            try { TestFailureRowsSameTransaction(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.FailureRowsTx: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ImportCommand.FailBeforeCommitForTest = false; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --edges-export records the generation the companion was stamped with)");
             try { TestEdgesExportGeneration(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -453,9 +457,18 @@ namespace Truedat.Store
                     ScanSink.StashEdges(k3, Fold(113)); ScanSink.Record(k3, E(sha3), k3);
                     var spill3 = ScanSink.PendingEdgeFile(k3)!; File.Delete(spill3);
                     var lost = ScanSink.Flush(store, "output-x64.5", new[] { k3 }, final: true);
-                    long failedRuns; using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) failedRuns = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND error_text LIKE '%spilled edge fold%';") ?? "0");
+                    long failedRuns; bool stillLacking; string? component;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
+                        failedRuns = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND error_text LIKE '%spilled edge fold%';") ?? "0");
+                        component = os.Db.ExecScalar("SELECT failed_components FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND error_text LIKE '%spilled edge fold%';");
+                        stillLacking = os.Dal.ContentKeysLackingEdges(global::Truedat.Edges.EdgeStore.ProducerKey, settings.ProducerVersion, includeFailed: false).Contains(sha3);
+                    }
                     assert(lost.Ok && lost.Entries == 1 && lost.Edges == 0 && lost.EdgesFailed == 1 && lost.SpillsLost == 1 && failedRuns == 1,
                         $"a missing spill is a FAILED edges run naming the reason, counted as lost — never 'no fold' (edges {lost.Edges}, failed {lost.EdgesFailed}, lost {lost.SpillsLost}, failed runs naming it {failedRuns})");
+                    // TDA N1: a lost spill is a STORE-side loss, so it must not park the track — the failed run is marked 'spill-lost' and a plain
+                    // --refresh (no --retry-errors) still lists the track as lacking edges, exactly as the record's sentence promises.
+                    assert(component == "spill-lost" && stillLacking, $"a lost spill does not park the track: run component '{component}' (spill-lost), still lacking edges for a plain --refresh = {stillLacking}");
                     var rec = new StoreResultFile();
                     var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started); StoreResult.FinishScan(0);
                     assert(path != null && StoreResult.TryRead(path!, out rec) && rec.Outcome == "failed" && rec.ExitCode == 0 && rec.Reason != null && rec.Reason.StartsWith("store write lost 1 edge fold") && rec.Detail != null && rec.Detail["spillsLost"] == 1,
@@ -495,6 +508,53 @@ namespace Truedat.Store
                 // No store in force: nothing to write, no throw, the exit code still comes back.
                 StoreResult.ResetScanForTest();
                 assert(Program.RefuseScan(null, "Error: Folder not found: Q:\\x", 1) == 1 && StoreResult.FinishScan(1) == null, "refusal with no store: exit code returned, no record");
+            }
+        }
+
+        /// <summary>TDA N2 on 3244dbe: the scan's failure rows were written in a SECOND transaction after the entries had committed, Finish had
+        /// moved the artifacts and the spills were deleted; a failure there re-queued the whole flush — committed entries with no spills — and the
+        /// retry recorded spurious lost folds. They must commit together.</summary>
+        static void TestFailureRowsSameTransaction(Action<bool, string> assert)
+        {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                var prevDir = ScanSink.StoreDirectory; ScanSink.StoreDirectory = d.Root;
+                try
+                {
+                    TrackEntry E(string sha) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 100, Mfcc = new[] { 1.0, 2.0 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha };
+                    var settings = new global::Truedat.Edges.EdgeSettings();
+                    global::Truedat.Edges.EdgeFoldResult Fold()
+                    {
+                        var f = new global::Truedat.Edges.EdgeFoldResult { DurationMs = 240000, ProducerVersion = settings.ProducerVersion, Extractor = "output-x64.5" };
+                        f.Head.Status = "ok"; f.Head.EndMs = 30000; f.Tail.Status = "ok"; f.Tail.StartMs = 210000; f.Tail.EndMs = 240000; return f;
+                    }
+                    string k1 = @"D:\music\ft1.flac", k2 = @"D:\music\ft2.flac";
+                    foreach (var (k, sha, json) in new[] { (k1, new string('c', 64), "{\"a\":1}"), (k2, new string('d', 64), "{\"a\":2}") })
+                    { ScanSink.StashMainJson(k, json); ScanSink.StashEdges(k, Fold()); ScanSink.Record(k, E(sha), k); }
+                    ScanSink.RecordFailure(@"D:\music\bad.flac", "essentia", "essentia exit 1: decode error", 12.3);
+                    var pend1 = ScanSink.PendingArtifactFile(k1)!; var spill1 = ScanSink.PendingEdgeFile(k1)!; var spill2 = ScanSink.PendingEdgeFile(k2)!;
+                    int CommittedFiles() => Directory.Exists(d.P("artifacts")) ? Directory.GetFiles(d.P("artifacts"), "*", SearchOption.AllDirectories).Count(f => !f.Contains(Path.DirectorySeparatorChar + "pending" + Path.DirectorySeparatorChar)) : 0;
+
+                    ImportCommand.FailBeforeCommitForTest = true;   // throws right after the failure rows were written, still inside the transaction
+                    var c = ScanSink.Flush(store, "output-x64.5", new[] { k1, k2 }, final: false);
+                    ImportCommand.FailBeforeCommitForTest = false;
+                    long rows, failRows;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    { rows = os.Dal.Count("track_content"); failRows = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed';") ?? "0"); }
+                    assert(!c.Ok && rows == 0 && failRows == 0 && File.Exists(pend1) && File.Exists(spill1) && File.Exists(spill2) && CommittedFiles() == 0 && ScanSink.Pending == 2 && ScanSink.PendingFailures == 1 && ScanSink.PendingEdges == 2,
+                        $"a failure while writing the failure rows commits NOTHING (rows {rows}, failed runs {failRows}), every pending file is present (artifact {File.Exists(pend1)}, spills {File.Exists(spill1)}/{File.Exists(spill2)}, committed files {CommittedFiles()}), everything re-queued ({ScanSink.Pending}/{ScanSink.PendingFailures}/{ScanSink.PendingEdges})");
+                    var fin = ScanSink.Flush(store, "output-x64.5", new[] { k1, k2 }, final: true);
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    { rows = os.Dal.Count("track_content"); failRows = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'failed';") ?? "0"); }
+                    var rec = new StoreResultFile();
+                    var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started); StoreResult.FinishScan(0);
+                    assert(fin.Ok && fin.Entries == 2 && fin.Edges == 2 && fin.SpillsLost == 0 && fin.Failures == 1 && rows == 2 && failRows == 1 && path != null && StoreResult.TryRead(path!, out rec) && rec.Outcome == "completed" && rec.Detail != null && rec.Detail["spillsLost"] == 0 && rec.Detail["failures"] == 1,
+                        $"the clean retry commits entries, edges AND the failure row together, no lost fold: ok {fin.Ok}, entries {fin.Entries}, edges {fin.Edges}, lost {fin.SpillsLost}, failures {fin.Failures}, rows {rows}, failed runs {failRows}, record {rec.Outcome}");
+                }
+                finally { ImportCommand.FailBeforeCommitForTest = false; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             }
         }
 
