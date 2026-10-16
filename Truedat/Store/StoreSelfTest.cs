@@ -52,6 +52,8 @@ namespace Truedat.Store
             Block(assert, "Drift", () => TestDrift(assert));
             Console.WriteLine("Store self-test (keeper 067: a copy fact the arrival did not observe, or carries only at its written precision, keeps the stored value)");
             Block(assert, "CopyMerge", () => TestCopyMerge(assert));
+            Console.WriteLine("Store self-test (keeper 083/084 N1: --refresh before an import says why no track is selected for edges, and names the import for this catalog/store)");
+            Block(assert, "EdgesRefreshNotice", () => TestEdgesRefreshNotice(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
             Block(assert, "ScanSink", () => TestScanSink(assert));
             Console.WriteLine("Store self-test (S2 C-A: the extractor's aggregate output is kept, compressed, once per content)");
@@ -424,6 +426,80 @@ namespace Truedat.Store
         }
 
         // ---------------------------------------------------------------- S2 C0: store location
+        // ---------------------------------------------------------------- --refresh before an import (keeper 083/084 / TDA 062/063, N1)
+        // With no store yet, `--store --edges --refresh` printed nothing about edges and wrote 0 edge rows, exit 0: the lacking-edges
+        // list comes from the store. The scan now says why and names the import that repairs THIS catalog/store pair, with explicit
+        // quoted paths (a bare --store-import can resolve a different catalog); exit code, record and track selection are unchanged.
+        static void TestEdgesRefreshNotice(Action<bool, string> assert)
+        {
+            const string Db = @"D:\My Lib\truedat.db", Cat = @"D:\My Lib\mbxmoods.json";
+            const string Cmd = "truedat --store-import --moods \"D:\\My Lib\\mbxmoods.json\" --store \"D:\\My Lib\\truedat.db\"";
+            var absent = Program.AbsentStoreEdgesNotice(refresh: true, storePath: Db, edges: true, storeExists: false, catalogPath: Cat);
+            assert(absent != null && absent.Contains("no store at \"D:\\My Lib\\truedat.db\" yet") && absent.Contains(Cmd)
+                   && absent.Contains("a track analysed for another reason still gets them"),
+                $"refresh + store path + edges + no store file: quoted store, the import for THIS catalog/store, no promise about other analysis ({absent})");
+            assert(Program.AbsentStoreEdgesNotice(false, Db, true, false, Cat) == null, "no --refresh: silent (not asking for edges backfill)");
+            assert(Program.AbsentStoreEdgesNotice(true, null, true, false, Cat) == null, "no store in force: silent (TDA 062's condition)");
+            assert(Program.AbsentStoreEdgesNotice(true, Db, false, false, Cat) == null, "no edges: silent");
+            assert(Program.AbsentStoreEdgesNotice(true, Db, true, true, Cat) == null, "the store exists: no absent-store sentence (the count line speaks)");
+
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "edgesnotice " + Guid.NewGuid().ToString("N").Substring(0, 8));   // a space, on purpose
+            var catDir = Path.Combine(dir, "lib"); Directory.CreateDirectory(catDir);
+            var store = Path.Combine(dir, "truedat.db");
+            var catalog = Path.Combine(catDir, "mbxmoods.json");
+            try
+            {
+                var all = FixtureEntries(@"D:\Music");
+                string a = @"D:\Music\Tool\a.flac", b = @"D:\Music\Tool\b.mp3", l = @"D:\Music\old\legacy.flac", n = @"D:\Music\odd\nosha.mp3";
+                string d1 = @"D:\Music\dup\d1.flac", d2 = @"D:\Music\dup\d2.flac";   // two catalog entries sharing ONE content hash
+                var scanned = new[] { all[a], all[b], all[l], all[n], all[d1], all[d2] };
+                HashSet<string> Held() { using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")); return os.Dal.ContentKeysHeld(); }
+                string? Notice() => Program.NotInStoreEdgesNotice(scanned, Held(), catalog, store);
+                void ImportOnly(params string[] keys)
+                {
+                    var sub = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var k in keys) sub[k] = all[k];
+                    WriteCatalog(catalog, sub);
+                    ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                }
+                var cmd = $"truedat --store-import --moods \"{Path.GetFullPath(catalog)}\" --store \"{Path.GetFullPath(store)}\"";
+
+                // 1 held, 2 absent among the three single-hash entries; d1/d2 share an ABSENT hash and count as two ENTRIES; nosha never.
+                ImportOnly(a);
+                var p1 = Notice();
+                assert(p1 != null && p1.Contains("4 catalog entries have a content hash the store does not hold") && p1.Contains(cmd),
+                    $"a held; b, legacy, d1, d2 absent -> 4 entries (per entry, not the 3 unique hashes); nosha outside the count; the command names this catalog and store ({p1})");
+
+                // The shared hash HELD (via d1 only): d2 shares it and does not count. a's content is held with NO edge rows (an import
+                // writes none) — held-without-edges is the lacking-edges list's business, not this count's.
+                ImportOnly(a, d1);
+                var p2 = Notice();
+                assert(p2 != null && p2.Contains("2 catalog entries have a content hash") ,
+                    $"a + d1 held: b and legacy absent -> 2; d2 shares d1's held hash and does not inflate it; held content without edges is not counted ({p2})");
+
+                // A failed edge fold recorded on held content changes nothing here either.
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var ent = os.Db.ExecScalar($"SELECT entity_id FROM track_location WHERE display_path = '{a}';");
+                    os.Dal.EnsureProducer(Truedat.Edges.EdgeStore.ProducerKey, "edges@v2;e30;p10", "analysis", needsAudio: true);   // as ImportCommand.cs:520 does for a failed fold
+                    os.Dal.InsertRun(Truedat.Edges.EdgeStore.ProducerKey, "edges@v2;e30;p10", ent, null, null, null, DateTime.UtcNow.ToString("o"), null, null, null, "failed", "fold", null, "selftest", null);
+                }
+                var p3 = Notice();
+                assert(p3 == p2, $"a failed fold on held content does not change the count ({p3})");
+
+                // One absent: the singular wording.
+                ImportOnly(a, d1, b);
+                var one = Notice();
+                assert(one != null && one.Contains("1 catalog entry has a content hash the store does not hold") && one.Contains(cmd), $"legacy alone absent: 1 entry, singular ({one})");
+
+                // The positive control: everything imported -> nothing to say; no store read -> nothing to say.
+                ImportOnly(a, b, l, n, d1, d2);
+                assert(Notice() == null, "every hashed entry held: no sentence");
+                assert(Program.NotInStoreEdgesNotice(scanned, null, catalog, store) == null, "no store read (refresh / store / edges off): no sentence");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         // ---------------------------------------------------------------- copy facts (keeper 067/068, TDA 052/053)
         // An ordinary --store-import of a catalog without trackId (the export cut) wrote 0 over every stored copy's trackId, and
         // a 1-dp catalog analysisDuration replaced the store's 6-dp value whenever the copy row was rewritten for any reason.

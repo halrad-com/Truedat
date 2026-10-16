@@ -2180,6 +2180,51 @@ namespace Truedat
         /// <summary>Content the store lists as lacking edge rows at the current producer version (loaded before a --refresh scan when a
         /// store and edges are in force; null otherwise). <see cref="HasCurrentEntry"/> treats those entries as stale.</summary>
         internal static HashSet<string>? _edgesStale;
+        /// <summary>Every hashed content key the store holds, loaded beside <see cref="_edgesStale"/> (null otherwise): the partial-store
+        /// half of keeper 083's N1 — catalog entries outside it are never on the lacking-edges list.</summary>
+        static HashSet<string>? _edgesHeld;
+        /// <summary>Set by <see cref="LoadEdgesStale"/>: --refresh + a store path + edges, and the store file does not exist yet.</summary>
+        static bool _edgesStoreAbsent;
+
+        /// <summary>The import that repairs THIS run's catalog/store pair — explicit, quoted paths (keeper 084: a bare --store-import can
+        /// resolve a different catalog beside the exe or in the cwd).</summary>
+        static string StoreImportCommandFor(string catalogPath, string storePath)
+            => $"truedat --store-import --moods \"{Path.GetFullPath(catalogPath)}\" --store \"{Path.GetFullPath(storePath)}\"";
+
+        /// <summary>N1 (keeper 083/084, TDA 062/063): the sentence for --refresh + a store path + edges when the store file does not exist
+        /// yet — null in every other case, so the other early returns of <see cref="LoadEdgesStale"/> stay silent. It promises nothing
+        /// about other analysis: a track re-analysed for another reason (a missing feature wave) still gets its edge rows.</summary>
+        internal static string? AbsentStoreEdgesNotice(bool refresh, string? storePath, bool edges, bool storeExists, string catalogPath)
+            => refresh && storePath != null && edges && !storeExists
+                ? $"  Edges:      no store at \"{Path.GetFullPath(storePath)}\" yet, so --refresh selects no track for re-analysis to add edge rows (a track analysed for another reason still gets them). Run {StoreImportCommandFor(catalogPath, storePath)}, then this command again."
+                : null;
+
+        /// <summary>N1, the partial store: the number of catalog ENTRIES that have a content hash the store does not hold — so --refresh
+        /// cannot select them for edge rows — as the sentence to print, or null when none, or when no store was read (<paramref name="held"/>
+        /// null). Counted per entry, not per unique hash; an entry whose hash IS held never counts (with or without edge rows or a failed
+        /// fold — those are the lacking-edges list's business); an entry with no hash is outside the count.</summary>
+        internal static string? NotInStoreEdgesNotice(IEnumerable<TrackEntry> catalog, HashSet<string>? held, string catalogPath, string storePath)
+        {
+            if (held == null) return null;
+            int n = 0;
+            foreach (var e in catalog) if (!string.IsNullOrEmpty(e?.AudioStreamSha256) && !held.Contains(e!.AudioStreamSha256!)) n++;
+            if (n == 0) return null;
+            var cmd = StoreImportCommandFor(catalogPath, storePath);
+            return n == 1
+                ? $"  Edges:      1 catalog entry has a content hash the store does not hold, so --refresh cannot select it for edge rows. Run {cmd} first to include it."
+                : $"  Edges:      {n:N0} catalog entries have a content hash the store does not hold, so --refresh cannot select them for edge rows. Run {cmd} first to include them.";
+        }
+
+        /// <summary>N1, printed once the scan has loaded its catalog (both --refresh call sites): the absent-store sentence, else the
+        /// partial-store count. Changes nothing the scan does — exit code, result record and track selection are as before.</summary>
+        static void ReportEdgesRefreshPrerequisites(string? catalogPath, IEnumerable<TrackEntry> catalog)
+        {
+            if (catalogPath == null || _storePath == null) return;
+            var notice = _edgesStoreAbsent
+                ? AbsentStoreEdgesNotice(_refreshFeatures, _storePath, _stageOpts.Edges, storeExists: false, catalogPath)
+                : NotInStoreEdgesNotice(catalog, _edgesHeld, catalogPath, _storePath);
+            if (notice != null) Console.WriteLine(notice);
+        }
 
         /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges.</summary>
         static bool HasCurrentEntry(TrackEntry? e)
@@ -4644,6 +4689,7 @@ namespace Truedat
                 var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                 if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
                     LoadExistingMoods(analyzeFileMoods!, flMoodsTracks);
+                ReportEdgesRefreshPrerequisites(analyzeFileMoods, flMoodsTracks.Values);   // keeper 083/084 N1, after the catalog load
 
                 // Cross-index for cache reuse — same shape as MoodsMode. Built once
                 // before the worker pool spins up. Plugin-driven workflows where this
@@ -5479,6 +5525,7 @@ namespace Truedat
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int existingCount = LoadExistingMoods(moodsPath, allTracks);
+            ReportEdgesRefreshPrerequisites(moodsPath, allTracks.Values);   // keeper 083/084 N1, after the catalog load
             Console.WriteLine($"Existing moods: {existingCount}");
 
             // Cross-index keyed by audioStreamSha256 — invariant-region hash, stable
@@ -10573,12 +10620,21 @@ namespace Truedat
         static void LoadEdgesStale(bool retryErrors)
         {
             _edgesStale = null;
+            _edgesHeld = null;
+            // Keeper 083/084, TDA 062/063 (N1): with no store yet, --refresh used to fall silent here and the scan reported "0 edge rows
+            // written", exit 0, with no hint. Noted only for refresh + a store path + edges + no store file — never for the other
+            // reasons this returns early (no refresh, no store, no edges), which are not asking for edges at all. Printed once the
+            // catalog is loaded (ReportEdgesRefreshPrerequisites), because the remedy names that catalog.
+            _edgesStoreAbsent = _refreshFeatures && _storePath != null && _stageOpts.Edges && !File.Exists(_storePath);
             if (!_refreshFeatures || _storePath == null || !_stageOpts.Edges || !File.Exists(_storePath)) return;
             try
             {
                 using (global::Truedat.Store.StoreLog.Quiet())
                 using (var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                {
                     _edgesStale = os.Dal.ContentKeysLackingEdges(global::Truedat.Edges.EdgeStore.ProducerKey, _edgeSettings.ProducerVersion, retryErrors);
+                    _edgesHeld = os.Dal.ContentKeysHeld();
+                }
                 Console.WriteLine($"  Edges:      {_edgesStale.Count:N0} tracks in the store lack edge rows at {_edgeSettings.ProducerVersion}; --refresh re-analyses them in this scan" +
                                   (retryErrors ? " (failed folds included: --retry-errors)" : ""));
             }

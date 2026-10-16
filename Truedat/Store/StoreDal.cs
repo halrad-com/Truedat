@@ -469,6 +469,17 @@ namespace Truedat.Store
             return set;
         }
 
+        /// <summary>Every hashed content key the store holds (the lacking-edges query's own <c>content_key_kind &lt;&gt; 'entity'</c> filter):
+        /// a catalog entry whose sha is not in this set is invisible to <see cref="ContentKeysLackingEdges"/>, so --refresh cannot
+        /// re-analyse it for edges (keeper 083 / TDA 062, N1 — the scan says so).</summary>
+        internal HashSet<string> ContentKeysHeld()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var st = Db.Prepare("SELECT content_key FROM track_content WHERE content_key_kind <> 'entity';");
+            while (st.Step()) { var k = st.GetString(0); if (!string.IsNullOrEmpty(k)) set.Add(k!); }
+            return set;
+        }
+
         /// <summary>The extractor build most of this version's edge rows record (review M4) — the companion header's source.</summary>
         internal string? EdgesExtractorBuild(string producerVersion)
             => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);
