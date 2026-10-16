@@ -547,37 +547,43 @@ namespace Truedat.Store
                 //     SelectSmfmKey): the modern smfm* key when present and not JSON null, else the legacy sensme* key. 5524bcf's reader
                 //     stopped at a modern null while its mask went on to the legacy array, so the merge wrote the reader's null over the
                 //     stored scores. Controls: modern null + legacy array, null alone, the legacy key alone, the modern key alone, [].
+                string Hex(params int[] v) => string.Concat(v.Select(x => BitConverter.ToString(BitConverter.GetBytes(x)).Replace("-", "")));   // int32 LE, as stored
+                int[] Ten(int first, int step) => Enumerable.Range(0, 10).Select(i => first + i * step).ToArray();
                 string? CopyExpr(string expr) { using var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")); return os.Db.ExecScalar($"SELECT {expr} {Where};"); }
                 Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));   // seed: 3b's scan cleared them
                 Import();
                 var scores0 = CopyExpr("hex(p.smfmScores)");
-                assert(!string.IsNullOrEmpty(scores0), $"seed: an explicit smfmScores array is stored ({scores0})");
+                assert(scores0 == Hex(Ten(1, 1)), $"seed: an explicit smfmScores array is stored exactly ({scores0})");
                 Write(entries, t => { t["smfmScores"] = null; t["sensmeScores"] = new System.Text.Json.Nodes.JsonArray(10, 9, 8, 7, 6, 5, 4, 3, 2, 1); });
                 Import();
                 var scoresMixed = CopyExpr("hex(p.smfmScores)");
-                assert(!string.IsNullOrEmpty(scores0) && !string.IsNullOrEmpty(scoresMixed) && scoresMixed != scores0,
+                assert(scoresMixed == Hex(Ten(10, -1)),
                     $"smfmScores: null beside a legacy sensmeScores array: the reader and the mask both select the legacy array, which is written, never a cleared vector ({scoresMixed} vs {scores0})");
                 Write(entries, t => t["smfmScores"] = null);
                 Import();
-                assert(CopyExpr("hex(p.smfmScores)") == scoresMixed, $"smfmScores: null alone keeps the stored vector ({CopyExpr("hex(p.smfmScores)")})");
+                assert(CopyExpr("hex(p.smfmScores)") == Hex(Ten(10, -1)), $"smfmScores: null alone keeps the stored vector exactly ({CopyExpr("hex(p.smfmScores)")})");
                 Write(entries, t => t["sensmeScores"] = new System.Text.Json.Nodes.JsonArray(2, 2, 2, 2, 2, 2, 2, 2, 2, 2));
                 Import();
                 var scoresLegacy = CopyExpr("hex(p.smfmScores)");
-                assert(!string.IsNullOrEmpty(scoresLegacy) && scoresLegacy != scoresMixed, $"the legacy sensmeScores key alone is read, so it is observed and written ({scoresLegacy})");
+                assert(scoresLegacy == Hex(Ten(2, 0)), $"the legacy sensmeScores key alone is read, so it is observed and written exactly ({scoresLegacy})");
                 Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray(3, 3, 3, 3, 3, 3, 3, 3, 3, 3));
                 Import();
                 var scoresModern = CopyExpr("hex(p.smfmScores)");
-                assert(!string.IsNullOrEmpty(scoresModern) && scoresModern != scoresLegacy, $"the modern smfmScores key alone is read and written ({scoresModern})");
-                scoresLegacy = scoresModern;
+                assert(scoresModern == Hex(Ten(3, 0)), $"the modern smfmScores key alone is read and written exactly ({scoresModern})");
                 Write(entries, t => t["smfmScores"] = new System.Text.Json.Nodes.JsonArray());
                 Import();
-                assert(CopyExpr("hex(p.smfmScores)") != scoresLegacy, $"an explicit empty smfmScores array is an observation and is written (got '{CopyExpr("hex(p.smfmScores)")}', null {CopyExpr("p.smfmScores IS NULL")})");
+                assert(CopyExpr("p.smfmScores IS NOT NULL AND length(p.smfmScores) = 0") == "1",
+                    $"an explicit empty smfmScores array is an observation and is written as an EMPTY blob, never NULL (null {CopyExpr("p.smfmScores IS NULL")}, length {CopyExpr("length(p.smfmScores)")}, type {CopyExpr("typeof(p.smfmScores)")})");
 
                 // The other three SMFM pairs under the same rule: a modern null falls through to the legacy value, which is written.
                 Write(entries, t => { t["smfmBpm"] = null; t["sensmeBpm"] = 99.5; t["smfmChannelName"] = null; t["sensmeChannelName"] = "legacy"; t["smfmChannel"] = null; t["sensmeChannel"] = 7; });
                 Import();
                 assert(Copy("smfmBpm") == "99500000" && Copy("smfmChannelName") == "legacy" && Copy("smfmChannel") == "7",
                     $"smfmBpm / smfmChannelName / smfmChannel: a modern null beside a legacy value reads and writes the legacy value (bpm {Copy("smfmBpm")}, name {Copy("smfmChannelName")}, channel {Copy("smfmChannel")})");
+                Write(entries, t => { t["smfmBpm"] = 88.25; t["sensmeBpm"] = 11.5; t["smfmChannelName"] = "modern"; t["sensmeChannelName"] = "legacy2"; t["smfmChannel"] = 4; t["sensmeChannel"] = 8; });
+                Import();
+                assert(Copy("smfmBpm") == "88250000" && Copy("smfmChannelName") == "modern" && Copy("smfmChannel") == "4",
+                    $"smfmBpm / smfmChannelName / smfmChannel: a valid modern value beats the legacy one (bpm {Copy("smfmBpm")}, name {Copy("smfmChannelName")}, channel {Copy("smfmChannel")})");
 
                 // 4. Explicit values are observations and replace: zero, empty, a disagreeing duration — no blanket ignore-zero rule.
                 entries[P].AnalysisDurationSecs = 9.1;
