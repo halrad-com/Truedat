@@ -1725,6 +1725,11 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     assert(SchemaMigrator.ReadVersion(os.Db) == 4, $"a fresh store is schema v4 — v3 types + the T05 edge table and value.dtype + the T19 verdict table ({SchemaMigrator.ReadVersion(os.Db)})");
+                    // TDA F10 (keeper's real MB3 migration: the transient WAL reached 101.5 MB on a 139.9 MB store, beside a 103.2 MB backup): the
+                    // free-space check must cover the backup AND a WAL about the store's size, plus margin — not the backup alone.
+                    long gb = 1L << 30;
+                    assert(SchemaMigrator.SpaceNeededForMigration(gb) == 2 * gb + gb / 10 && SchemaMigrator.SpaceNeededForMigration(0) == 0,
+                        $"migration space check = backup + WAL (~ the store each) + 10 % ({SchemaMigrator.SpaceNeededForMigration(gb)} for 1 GiB)");
                     string T(string col) => os.Db.ExecScalar($"SELECT typeof({col}) FROM track_content;") ?? "";
                     assert(T("bpm") == "integer" && T("spectralSpread") == "integer" && T("melKurtosis") == "integer" && T("spectralDecrease") == "integer" && T("danceability") == "integer" && T("dynamicRange") == "null",
                         $"fixed-dp fields are stored as scaled INTEGER (bpm {T("bpm")}, spread {T("spectralSpread")}, melKurtosis {T("melKurtosis")}, decrease {T("spectralDecrease")}, zero {T("danceability")}, null {T("dynamicRange")})");

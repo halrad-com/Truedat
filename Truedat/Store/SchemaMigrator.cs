@@ -74,8 +74,9 @@ namespace Truedat.Store
                     if (!string.IsNullOrEmpty(root))
                     {
                         long free = new DriveInfo(root!).AvailableFreeSpace;
-                        if (free < need + need / 10)
-                            throw new StoreException($"The store {db.Path} is schema v{current} and needs migrating to v{target}, which writes a backup copy first ({need / 1048576:N0} MB), but only {free / 1048576:N0} MB are free on {root}. Nothing was changed; free the space and open the store again.");
+                        long required = SpaceNeededForMigration(need);
+                        if (free < required)
+                            throw new StoreException($"The store {db.Path} is schema v{current} and needs migrating to v{target}, which writes a backup copy first and then rewrites the store through its write-ahead log ({required / 1048576:N0} MB needed: backup + log, about the store's size each, + 10 %), but only {free / 1048576:N0} MB are free on {root}. Nothing was changed; free the space and open the store again.");
                     }
                 }
                 catch (StoreException) { throw; }
@@ -111,6 +112,11 @@ namespace Truedat.Store
             finally { if (current > 0) db.Exec("PRAGMA foreign_keys=ON;"); }
             StoreLog.Info($"schema now v{StoreSchema.CurrentVersion}" + (backup != null ? $" (backup of the previous store: {backup})" : ""));
         }
+
+        /// <summary>Disk the migration needs beyond the store itself: the VACUUM INTO backup (about the store's size) AND the transaction's
+        /// write-ahead log, which a table rebuild grows to about the store's size too (keeper's real MB3 v3 -> v4: WAL 101.5 MB on a 139.9 MB
+        /// store), plus 10 % margin (TDA F10).</summary>
+        internal static long SpaceNeededForMigration(long storeBytes) => storeBytes * 2 + storeBytes / 10;
 
         static string LoadScript(int version)
         {
