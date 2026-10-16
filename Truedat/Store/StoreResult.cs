@@ -23,8 +23,10 @@ namespace Truedat.Store
         public string Verb = "";
         public string StartedUtc = "";
         public string FinishedUtc = "";
-        /// <summary>The process exit code the launcher also sees; the file is the tiebreak when the launcher saw none.</summary>
-        public int ExitCode;
+        /// <summary>The process exit code the launcher also sees; the file is the tiebreak when the launcher saw none. NULL while
+        /// the process has not finished (a provisional scan record): a file left behind by a killed process must not claim 0
+        /// (TDA review of 368374a, P1).</summary>
+        public int? ExitCode;
         /// <summary>completed | interrupted | failed.</summary>
         public string Outcome = StoreResult.OutcomeCompleted;
         /// <summary>A verbatim sentence the hub renders; null when completed.</summary>
@@ -42,9 +44,11 @@ namespace Truedat.Store
     internal sealed class StoreResultStore
     {
         public string Path = "";
-        public int SchemaVersion;
-        /// <summary>The COMMITTED generation after this verb (0 is valid: nothing has advanced it yet).</summary>
-        public long Generation;
+        /// <summary>NULL when the verb never read the store (it did not exist, or the verb refused before opening it) — 0 is a
+        /// store fact, null is "not read" (TDA review of 368374a, P3b).</summary>
+        public int? SchemaVersion;
+        /// <summary>The COMMITTED generation after this verb (0 is valid: nothing has advanced it yet); NULL when not read.</summary>
+        public long? Generation;
         public string TruedatVersion = "";
     }
 
@@ -115,7 +119,7 @@ namespace Truedat.Store
             _scan.StartedUtc = startedUtc;
             _scan.Store = new StoreResultStore { Path = fullStore, TruedatVersion = VersionInfo.Display };
             _scan.Export = new StoreResultExport { Performed = false };
-            Write(fullStore, _scan, 0, OutcomeInterrupted, ProvisionalReason);
+            Write(fullStore, _scan, null, OutcomeInterrupted, ProvisionalReason);
         }
 
         /// <summary>The scan decided something about its own outcome (source lost → interrupted; Ctrl+C → interrupted;
@@ -145,11 +149,12 @@ namespace Truedat.Store
         internal static void ResetScanForTest() { _scan = null; _scanStore = null; _scanStoreFailure = null; _scanOutcome = null; _scanReason = null; }
 
         /// <summary>
-        /// The scan's record, from the end-of-run sink report. Written by <see cref="ScanSink.Flush"/> itself (so a flush is
-        /// self-contained and names its record) and again by the scan after the companion step, with the companion named
-        /// by hash — latest wins. Both are PROVISIONAL ("interrupted" until <see cref="FinishScan"/>); a failed store write is
-        /// final on its own. <c>export.performed</c> is false until T18 moves the scan's save onto the publisher: today
-        /// the scan writes a v1 catalog. Never throws into the scan.
+        /// The scan's record, from the SCAN-WIDE sink tally (<see cref="ScanSink.Total"/>: every checkpoint flush and the final
+        /// one summed — a per-flush report would carry only the last flush's counts, TDA review P2a). Written by
+        /// <see cref="ScanSink.Flush"/> itself (so a flush is self-contained and names its record) and again by the scan after
+        /// the companion step, with the companion named by hash — latest wins. Both are PROVISIONAL ("interrupted", exit code
+        /// null, until <see cref="FinishScan"/>); a failed final store write is final on its own. <c>export.performed</c> is
+        /// false until T18 moves the scan's save onto the publisher: today the scan writes a v1 catalog. Never throws.
         /// </summary>
         internal static string? WriteScan(string? storePath, ScanSinkReport r, bool edgesOn, string? companionPath, string? startedUtc = null)
         {
@@ -177,12 +182,13 @@ namespace Truedat.Store
             {
                 ["entries"] = r.Entries, ["failures"] = r.Failures, ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift,
                 ["contentReplaced"] = r.ContentReplaced, ["entitiesCreated"] = r.EntitiesCreated, ["edges"] = r.Edges, ["edgesFailed"] = r.EdgesFailed,
-                ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs,
+                ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs, ["checkpointFailures"] = r.CheckpointFailures,
             };
             if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
+            // Exit code stays NULL here either way: the process has not finished; FinishScan writes the real one.
             var path = _scanStoreFailure == null
-                ? Write(fullStore, rec, 0, OutcomeInterrupted, ProvisionalReason)
-                : Write(fullStore, rec, Environment.ExitCode, OutcomeFailed, _scanStoreFailure);
+                ? Write(fullStore, rec, null, OutcomeInterrupted, ProvisionalReason)
+                : Write(fullStore, rec, null, OutcomeFailed, _scanStoreFailure);
             r.ResultPath = path;
             return path;
         }
@@ -206,7 +212,7 @@ namespace Truedat.Store
         /// record that cannot be written is logged, because the verb's own outcome must not become the record's.
         /// Returns the path written, or null.
         /// </summary>
-        internal static string? Write(string? storePath, StoreResultFile r, int exitCode, string outcome, string? reason = null)
+        internal static string? Write(string? storePath, StoreResultFile r, int? exitCode, string outcome, string? reason = null)
         {
             r.ExitCode = exitCode; r.Outcome = outcome; r.Reason = reason;
             r.FinishedUtc = DateTime.UtcNow.ToString("o");
@@ -227,13 +233,13 @@ namespace Truedat.Store
                     w.WriteString("verb", r.Verb);
                     w.WriteString("startedUtc", r.StartedUtc);
                     w.WriteString("finishedUtc", r.FinishedUtc);
-                    w.WriteNumber("exitCode", r.ExitCode);
+                    if (r.ExitCode.HasValue) w.WriteNumber("exitCode", r.ExitCode.Value); else w.WriteNull("exitCode");
                     w.WriteString("outcome", r.Outcome);
                     if (r.Reason == null) w.WriteNull("reason"); else w.WriteString("reason", r.Reason);
                     w.WriteStartObject("store");
                     w.WriteString("path", r.Store.Path);
-                    w.WriteNumber("schemaVersion", r.Store.SchemaVersion);
-                    w.WriteNumber("generation", r.Store.Generation);
+                    if (r.Store.SchemaVersion.HasValue) w.WriteNumber("schemaVersion", r.Store.SchemaVersion.Value); else w.WriteNull("schemaVersion");
+                    if (r.Store.Generation.HasValue) w.WriteNumber("generation", r.Store.Generation.Value); else w.WriteNull("generation");
                     w.WriteString("truedatVersion", r.Store.TruedatVersion);
                     w.WriteEndObject();
                     w.WriteStartObject("export");
@@ -310,10 +316,15 @@ namespace Truedat.Store
                 if (!root.TryGetProperty("kind", out var k) || k.GetString() != StoreResultFile.KindValue) return false;
                 if (!root.TryGetProperty("schemaVersion", out var sv) || sv.GetInt32() != StoreResultFile.SchemaVersionValue) return false;
                 r.Verb = Str(root, "verb"); r.StartedUtc = Str(root, "startedUtc"); r.FinishedUtc = Str(root, "finishedUtc");
-                r.ExitCode = root.TryGetProperty("exitCode", out var ec) ? ec.GetInt32() : 0;
+                r.ExitCode = root.TryGetProperty("exitCode", out var ec) && ec.ValueKind == JsonValueKind.Number ? ec.GetInt32() : (int?)null;
                 r.Outcome = Str(root, "outcome"); r.Reason = NullableStr(root, "reason");
                 if (root.TryGetProperty("store", out var s) && s.ValueKind == JsonValueKind.Object)
-                    r.Store = new StoreResultStore { Path = Str(s, "path"), SchemaVersion = s.TryGetProperty("schemaVersion", out var ssv) ? ssv.GetInt32() : 0, Generation = s.TryGetProperty("generation", out var g) ? g.GetInt64() : 0, TruedatVersion = Str(s, "truedatVersion") };
+                    r.Store = new StoreResultStore
+                    {
+                        Path = Str(s, "path"), TruedatVersion = Str(s, "truedatVersion"),
+                        SchemaVersion = s.TryGetProperty("schemaVersion", out var ssv) && ssv.ValueKind == JsonValueKind.Number ? ssv.GetInt32() : (int?)null,
+                        Generation = s.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt64() : (long?)null,
+                    };
                 if (root.TryGetProperty("export", out var e) && e.ValueKind == JsonValueKind.Object)
                 {
                     r.Export = new StoreResultExport

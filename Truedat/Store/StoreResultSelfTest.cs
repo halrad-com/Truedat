@@ -25,6 +25,10 @@ namespace Truedat.Store
             try { TestScanRecord(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Scan: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (store-v3 T11: a multi-flush scan — the record carries the tally; a failed checkpoint is re-queued, a failed final flush fails the record)");
+            try { TestMultiFlushTally(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.MultiFlush: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --edges-export records the generation the companion was stamped with)");
             try { TestEdgesExportGeneration(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -179,8 +183,21 @@ namespace Truedat.Store
                 //    leaves a record, and a process killed here reads as interrupted (true).
                 File.WriteAllText(resultPath, "{\"kind\":\"store-result\",\"schemaVersion\":1,\"verb\":\"store-export\",\"outcome\":\"completed\"}");
                 StoreResult.BeginScan(store, started);
-                assert(StoreResult.TryRead(resultPath, out var begun) && begun.Verb == "scan" && begun.Outcome == "interrupted" && begun.ExitCode == 0 && begun.Reason == StoreResult.ProvisionalReason && begun.StartedUtc == started && begun.Store.Path == Path.GetFullPath(store),
-                    $"BeginScan: provisional record (verb scan, interrupted, the provisional reason) replaces the previous verb's ({begun.Verb}/{begun.Outcome}/{begun.Reason})");
+                assert(StoreResult.TryRead(resultPath, out var begun) && begun.Verb == "scan" && begun.Outcome == "interrupted" && begun.ExitCode == null && begun.Reason == StoreResult.ProvisionalReason && begun.StartedUtc == started && begun.Store.Path == Path.GetFullPath(store),
+                    $"BeginScan: provisional record (verb scan, interrupted, the provisional reason, NO exit code) replaces the previous verb's ({begun.Verb}/{begun.Outcome}/{begun.ExitCode}/{begun.Reason})");
+                assert(File.ReadAllText(resultPath).Contains("\"exitCode\": null"), "BeginScan: the bytes say exitCode null (the agreed pending-result rule), never 0");
+                // A store that does not exist yet (a scan refused before its first flush): schema/generation are NOT READ -> null, not 0.
+                using (var d0 = new Dir())
+                {
+                    StoreResult.BeginScan(d0.P("truedat.db"), started);
+                    assert(StoreResult.TryRead(StoreResult.PathFor(d0.P("truedat.db")), out var none) && none.Store.SchemaVersion == null && none.Store.Generation == null && none.ExitCode == null,
+                        $"BeginScan over a store that does not exist: schema/generation null (not read), exit code null ({none.Store.SchemaVersion}/{none.Store.Generation}/{none.ExitCode})");
+                    var none2 = new StoreResultFile();
+                    var fin0 = StoreResult.FinishScan(2);
+                    assert(fin0 != null && StoreResult.TryRead(fin0!, out none2) && none2.ExitCode == 2 && none2.Outcome == "failed" && none2.Store.SchemaVersion == null,
+                        $"a refusal before any flush: finished with the real exit code, store still not read ({none2.ExitCode}/{none2.Outcome}/{none2.Store.SchemaVersion})");
+                }
+                StoreResult.BeginScan(store, started);
 
                 // 2. The flush writes its facts — still provisional. The keeper's P1 reproduction: 9706c5b wrote completed / 0 here.
                 File.WriteAllText(d.P("mbxedges.v1.json"), "{\"contract\":\"mbxedges.v1\",\"tracks\":{}}");
@@ -188,13 +205,18 @@ namespace Truedat.Store
                 StoreResultFile r = new StoreResultFile();
                 bool readOk = path != null && path == resultPath && StoreResult.TryRead(path!, out r);
                 assert(readOk, $"WriteScan: a non-null record path, THIS store's ({path})");
-                assert(r.Verb == "scan" && r.Outcome == "interrupted" && r.ExitCode == 0 && r.Reason == StoreResult.ProvisionalReason && r.StartedUtc == started,
+                assert(r.Verb == "scan" && r.Outcome == "interrupted" && r.ExitCode == null && r.Reason == StoreResult.ProvisionalReason && r.StartedUtc == started,
                     $"WriteScan: persistence success is NOT operation success — the record stays provisional until the boundary ({r.Outcome}/{r.ExitCode}/{r.Reason})");
                 assert(r.Store.Path == Path.GetFullPath(store) && r.Store.SchemaVersion >= 3 && r.Store.TruedatVersion == VersionInfo.Display, "WriteScan: store block read from the store");
                 assert(!r.Export.Performed && r.Export.Catalog == null && r.Export.Companion != null && r.Export.Companion.Sha256 == Publication.Sha256Hex(d.P("mbxedges.v1.json")),
                     "WriteScan: export.performed false (the scan path publishes with T18); the companion this run wrote is named by hash");
                 assert(r.Capture != null && r.Capture.EdgeArrays == "off", "WriteScan: capture block present (arrays off: the flag ships with T05)");
-                assert(r.Detail != null && r.Detail["entries"] == 3 && r.Detail["failures"] == 1 && r.Detail["edges"] == 2 && r.Detail["remeasured"] == 1, "WriteScan: detail counters");
+                assert(r.Detail != null && r.Detail["entries"] == 3 && r.Detail["failures"] == 1 && r.Detail["edges"] == 2 && r.Detail["remeasured"] == 1 && r.Detail["checkpointFailures"] == 0, "WriteScan: detail counters");
+                // "Killed after the first flush" (fixture-only, per the keeper): no FinishScan ever runs — the file on disk must still
+                // say interrupted with NO exit code, never completed / 0.
+                var killed = new StoreResultFile();
+                assert(StoreResult.TryRead(resultPath, out killed) && killed.Outcome == "interrupted" && killed.ExitCode == null && File.ReadAllText(resultPath).Contains("\"exitCode\": null"),
+                    $"process dies after a successful flush (no FinishScan): the record stays interrupted with exitCode null ({killed.Outcome}/{killed.ExitCode})");
 
                 // 3. The boundary, exit 0, nothing noted: completed, null reason, every fact from the flush preserved. Then EXACTLY ONCE.
                 var done = new StoreResultFile();
@@ -228,8 +250,8 @@ namespace Truedat.Store
                 // 6. A store write failure is final on its own and outranks a later note or exit 0: the catalog is complete, the STORE verb is not.
                 var failed = new ScanSinkReport { Ok = false, Error = "unable to open database file", StorePath = store };
                 var path2 = StoreResult.WriteScan(store, failed, edgesOn: false, companionPath: null, startedUtc: started);
-                assert(path2 == resultPath && StoreResult.TryRead(path2!, out var f) && f.Outcome == "failed" && f.Reason == "store write failed: unable to open database file" && f.Export.Companion == null,
-                    "store write failed: failed + the reason sentence at once, no companion");
+                assert(path2 == resultPath && StoreResult.TryRead(path2!, out var f) && f.Outcome == "failed" && f.Reason == "store write failed: unable to open database file" && f.Export.Companion == null && f.ExitCode == null,
+                    "store write failed: failed + the reason sentence at once, no companion, exit code still unknown");
                 StoreResult.NoteScanOutcome(StoreResult.OutcomeInterrupted, "interrupted (Ctrl+C)");
                 StoreResult.FinishScan(0);
                 assert(StoreResult.TryRead(resultPath, out var f2) && f2.Outcome == "failed" && f2.Reason == "store write failed: unable to open database file" && f2.ExitCode == 0, $"store write failed outranks the note and exit 0 ({f2.Outcome}/{f2.Reason})");
@@ -258,6 +280,55 @@ namespace Truedat.Store
                     var p4 = StoreResult.FinishScan(0);
                     assert(p4 == p3 && StoreResult.TryRead(p3!, out var iso2) && iso2.Outcome == "completed" && iso2.Store.Path == Path.GetFullPath(store2), "isolation: and finishes at that path");
                 }
+            }
+        }
+
+        static void TestMultiFlushTally(Action<bool, string> assert)
+        {
+            const string started = "2026-10-15T00:00:00.0000000Z";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                var prevDir = ScanSink.StoreDirectory; ScanSink.StoreDirectory = d.Root;
+                var badStore = d.P("bad"); Directory.CreateDirectory(badStore);   // a DIRECTORY where the store should be: SQLite cannot open it (a missing directory would just be created)
+                try
+                {
+                    TrackEntry E(string sha, double bpm) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = bpm, Mfcc = new[] { 1.0, 2.0 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha };
+                    var keys = new[] { @"D:\music\m1.flac", @"D:\music\m2.flac", @"D:\music\m3.flac" };
+                    // checkpoint 1: two entries; checkpoint 2 FAILS (a path whose directory does not exist: the batch is re-queued, not dropped); final: the
+                    // re-queued entry + one more. The tally is 4 entries over the scan, one checkpoint failure, Ok.
+                    ScanSink.Record(keys[0], E(new string('1', 64), 100)); ScanSink.Record(keys[1], E(new string('2', 64), 101));
+                    var c1 = ScanSink.Flush(store, "output-x64.5", keys, final: false);
+                    ScanSink.Record(keys[2], E(new string('3', 64), 102));
+                    var c2 = ScanSink.Flush(badStore, "output-x64.5", keys, final: false);
+                    assert(c1.Ok && c1.Entries == 2 && !c2.Ok && ScanSink.Pending == 1 && ScanSink.Total.CheckpointFailures == 1 && ScanSink.Total.Ok,
+                        $"a failed checkpoint re-queues its batch (pending {ScanSink.Pending}) and is counted ({ScanSink.Total.CheckpointFailures}); the tally is still ok ({ScanSink.Total.Ok}; c1 {c1.Ok}/{c1.Entries}, c2 {c2.Ok})");
+                    ScanSink.Record(@"D:\music\m4.flac", E(new string('4', 64), 103));
+                    var fin = ScanSink.Flush(store, "output-x64.5", keys, final: true);
+                    assert(fin.Ok && fin.Entries == 2 && ScanSink.Total.Entries == 4 && ScanSink.Total.Ok && ScanSink.Total.CheckpointFailures == 1,
+                        $"the final flush writes the re-queued entry too (this flush {fin.Entries}); the TALLY is 4 over the scan ({ScanSink.Total.Entries}), ok, 1 checkpoint failure");
+                    var rec = new StoreResultFile();
+                    var path = StoreResult.WriteScan(store, ScanSink.Total, false, null, started);
+                    assert(path != null && StoreResult.TryRead(path!, out rec) && rec.Detail != null && rec.Detail["entries"] == 4 && rec.Detail["checkpointFailures"] == 1 && rec.Outcome == "interrupted" && rec.ExitCode == null,
+                        $"the record carries the tally, not the last flush: entries {rec.Detail?["entries"]} (4), checkpointFailures {rec.Detail?["checkpointFailures"]} (1)");
+                    var done = StoreResult.FinishScan(0);
+                    assert(done != null && StoreResult.TryRead(done!, out var ok) && ok.Outcome == "completed" && ok.ExitCode == 0 && ok.Detail != null && ok.Detail["entries"] == 4, "finished: completed with the tally");
+                    long rows; using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) rows = os.Dal.Count("track_content");
+                    assert(rows == 4, $"every entry of the scan is in the store, including the re-queued one ({rows} content rows)");
+
+                    // A failed FINAL flush: the tally fails, the record says failed with the store reason, and FinishScan(0) keeps it failed.
+                    ScanSink.Reset(); StoreResult.ResetScanForTest();
+                    ScanSink.Record(@"D:\music\m5.flac", E(new string('5', 64), 104));
+                    var bad = ScanSink.Flush(badStore, "output-x64.5", keys, final: true);
+                    assert(!bad.Ok && !ScanSink.Total.Ok && ScanSink.Total.Error != null, $"a failed final flush fails the tally ({ScanSink.Total.Error})");
+                    var failed = new StoreResultFile();
+                    var p2 = StoreResult.WriteScan(store, ScanSink.Total, false, null, started);
+                    StoreResult.FinishScan(0);
+                    assert(p2 != null && StoreResult.TryRead(p2!, out failed) && failed.Outcome == "failed" && failed.ExitCode == 0 && failed.Reason != null && failed.Reason.StartsWith("store write failed:"),
+                        $"the record says failed with the store reason even at exit 0 ({failed.Outcome}/{failed.ExitCode}/{failed.Reason})");
+                }
+                finally { ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             }
         }
 
@@ -302,8 +373,8 @@ namespace Truedat.Store
                 // Failure: no target → failed record with a reason, nothing performed.
                 var bad = new StoreResultFile();
                 int code3 = Program.RunEdgesExport(store, null, settings);
-                assert(code3 == 1 && StoreResult.TryRead(resultPath, out bad) && bad.Outcome == "failed" && bad.ExitCode == 1 && !bad.Export.Performed && bad.Reason != null && bad.Reason.Contains("not written"),
-                    $"edges-export with no target: exit 1, failed record ({bad.Reason})");
+                assert(code3 == 1 && StoreResult.TryRead(resultPath, out bad) && bad.Outcome == "failed" && bad.ExitCode == 1 && !bad.Export.Performed && bad.Reason != null && bad.Reason.Contains("not written") && bad.Store.SchemaVersion == null && bad.Store.Generation == null,
+                    $"edges-export with no target: exit 1, failed record, store not read -> schema/generation null ({bad.Reason}; {bad.Store.SchemaVersion}/{bad.Store.Generation})");
             }
         }
 
@@ -329,8 +400,20 @@ namespace Truedat.Store
                 // Failure after the store opened (catalog missing): failed record, the store facts kept.
                 var bad = new StoreResultFile();
                 int code2 = ImportCommand.Run(new ImportOptions { StorePath = store, CatalogPath = d.P("no-such.json"), LibraryRoot = @"D:\music" });
-                assert(code2 != 0 && StoreResult.TryRead(resultPath, out bad) && bad.Verb == "store-import" && bad.Outcome == "failed" && bad.ExitCode == code2 && bad.Reason != null && bad.Reason.Contains("not found") && bad.Store.Path == Path.GetFullPath(store),
-                    $"import failure: non-zero exit, failed record with the reason, the store named ({bad.Reason})");
+                assert(code2 != 0 && StoreResult.TryRead(resultPath, out bad) && bad.Verb == "store-import" && bad.Outcome == "failed" && bad.ExitCode == code2 && bad.Reason != null && bad.Reason.Contains("not found") && bad.Store.Path == Path.GetFullPath(store)
+                       && bad.Store.SchemaVersion == null && bad.Store.Generation == null && bad.Detail == null,
+                    $"import failure before the store opened: failed record with the reason, the store named, schema/generation NOT READ -> null, no counts ({bad.Reason}; {bad.Store.SchemaVersion}/{bad.Store.Generation})");
+                // TDA coverage ask: a failure AFTER the store opened, through Run — the record keeps the at-open schema/generation and carries no
+                // counts from the rolled-back batch.
+                long genNow = AdvanceTo(store, 5);
+                var afterOpen = new StoreResultFile();
+                ImportCommand.AfterStoreOpened = () => throw new IOException("disk full after open");
+                int code3;
+                try { code3 = ImportCommand.Run(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\music", RootRole = "primary" }); }
+                finally { ImportCommand.AfterStoreOpened = null; }
+                assert(code3 == 1 && StoreResult.TryRead(resultPath, out afterOpen) && afterOpen.Outcome == "failed" && afterOpen.ExitCode == 1 && afterOpen.Reason != null && afterOpen.Reason.Contains("disk full after open")
+                       && afterOpen.Store.SchemaVersion == SchemaOf(store) && afterOpen.Store.Generation == genNow && afterOpen.Detail == null && !afterOpen.Export.Performed,
+                    $"import failure after open: failed/exit 1 with the reason, at-open schema {afterOpen.Store.SchemaVersion} and generation {afterOpen.Store.Generation} kept, no detail counts");
             }
         }
     }

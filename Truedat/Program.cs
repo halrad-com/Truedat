@@ -3846,6 +3846,7 @@ namespace Truedat
             // --analyze-file: single file Essentia analysis (no iTunes XML needed)
             if (analyzeFileMode)
             {
+                global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 // No path at all is a usage error and stays exit 1 — there is nothing to
                 // ledger and nothing the caller could have meant.
                 if (string.IsNullOrEmpty(analyzeFilePath))
@@ -3965,10 +3966,11 @@ namespace Truedat
                 if (afEssentiaExe == null)
                 {
                     Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
+                    global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, "essentia_streaming_extractor_music.exe not found — nothing was analysed");
                     Environment.ExitCode = 2;
                     return;
                 }
-                if (EdgesPreflight(afEssentiaExe, analyzeFileMoods != null) is string afEdgesRefusal) { Console.Error.WriteLine(afEdgesRefusal); Environment.ExitCode = 1; return; }
+                if (EdgesPreflight(afEssentiaExe, analyzeFileMoods != null) is string afEdgesRefusal) { Console.Error.WriteLine(afEdgesRefusal); global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, afEdgesRefusal); Environment.ExitCode = 1; return; }
 
                 Console.Error.WriteLine($"Analyzing: {analyzeFilePath}");
                 var afSw = System.Diagnostics.Stopwatch.StartNew();
@@ -4450,6 +4452,7 @@ namespace Truedat
             //   --file-list -       read paths from stdin (one per line, # comments)
             if (fileListMode)
             {
+                global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 List<string> filePaths;
 
                 // Phase 5.1 — skipped-CSV resolves like errors.csv would: next to the
@@ -4580,10 +4583,11 @@ namespace Truedat
                 if (flEssentiaExe == null)
                 {
                     Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found");
+                    global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, "essentia_streaming_extractor_music.exe not found — nothing was analysed");
                     Environment.ExitCode = 2;
                     return;
                 }
-                if (EdgesPreflight(flEssentiaExe, analyzeFileMoods != null) is string flEdgesRefusal) { Console.Error.WriteLine(flEdgesRefusal); Environment.ExitCode = 1; return; }
+                if (EdgesPreflight(flEssentiaExe, analyzeFileMoods != null) is string flEdgesRefusal) { Console.Error.WriteLine(flEdgesRefusal); global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, flEdgesRefusal); Environment.ExitCode = 1; return; }
 
                 var flProcessed = 0;
                 var flAnalyzed = 0;
@@ -5134,6 +5138,9 @@ namespace Truedat
                 return;
             }
 
+            // T11: from here on this is the library scan unless one of the four XML-using verbs below takes over — the scan's provisional
+            // store-result.json begins now, so an XML / extractor refusal cannot leave the PREVIOUS verb's record in place (TDA review P2b).
+            if (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             xmlPath = ResolveITunesXml(xmlPath);
 
             if (!File.Exists(xmlPath))
@@ -5242,6 +5249,7 @@ namespace Truedat
             {
                 Console.Error.WriteLine("Error: essentia_streaming_extractor_music.exe not found in any search directory.");
                 Console.Error.WriteLine("Download from: https://essentia.upf.edu/extractors/");
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, "essentia_streaming_extractor_music.exe not found in any search directory — nothing was analysed");
                 Environment.ExitCode = 2;
                 tee?.Dispose();
                 return;
@@ -5249,6 +5257,7 @@ namespace Truedat
             if (edgesRefusal != null)
             {
                 Console.Error.WriteLine(edgesRefusal);
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, edgesRefusal);
                 Environment.ExitCode = 1;
                 tee?.Dispose();
                 return;
@@ -10448,7 +10457,7 @@ namespace Truedat
             result.Store = new global::Truedat.Store.StoreResultStore
             {
                 Path = storePath == null ? "" : Path.GetFullPath(storePath), TruedatVersion = VersionInfo.Display,
-                SchemaVersion = ok ? schema : 0, Generation = ok ? generation : 0,
+                SchemaVersion = ok ? schema : (int?)null, Generation = ok ? generation : (long?)null,   // null = the store was not read
             };
             result.Export = new global::Truedat.Store.StoreResultExport
             {
@@ -10594,7 +10603,7 @@ namespace Truedat
                 Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
             // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
             // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
-            global::Truedat.Store.StoreResult.WriteScan(_storePath, r, _stageOpts.Edges, companionWritten ? _edgesCompanionPath : null, _scanStartedUtc);
+            global::Truedat.Store.StoreResult.WriteScan(_storePath, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, companionWritten ? _edgesCompanionPath : null, _scanStartedUtc);
         }
 
         /// <summary>When this process's scan began (ISO-8601 UTC) — the record's startedUtc.</summary>

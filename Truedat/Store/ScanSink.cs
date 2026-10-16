@@ -16,7 +16,16 @@ namespace Truedat.Store
         public long ArtifactBytes;
         /// <summary>S2 C4: edge rows written / edge folds that failed (a failed 'edges' run row, no partial row).</summary>
         public int Edges, EdgesFailed;
+        /// <summary>Checkpoint flushes (final: false) that failed this scan; their entries were re-queued for the final flush.</summary>
+        public int CheckpointFailures;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
+
+        internal void Add(ScanSinkReport r)
+        {
+            Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
+            Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
+            Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs;
+        }
     }
 
     /// <summary>S2 C3 — the scan writes the store. The scan paths call <see cref="Record"/> for every entry they
@@ -31,6 +40,10 @@ namespace Truedat.Store
 
         /// <summary>The extractor build the scan ran with (producer version of every run row); set at scan start.</summary>
         internal static string ExtractorBuild = "unknown";
+
+        /// <summary>The scan-wide tally: every flush's counts summed, the first failed checkpoint counted, the FINAL flush's failure
+        /// recorded. This — not the last flush's report — is what the scan's store-result.json carries (TDA review of 368374a, P2a).</summary>
+        internal static ScanSinkReport Total = new ScanSinkReport { Ok = true };
 
         /// <summary>The directory of the store in force (set when the store path is resolved); null = no store, keep nothing.
         /// The extractor core stashes its main JSON here (C-A) before the content key is known.</summary>
@@ -51,7 +64,7 @@ namespace Truedat.Store
         internal static int PendingArtifacts => _artifacts.Count;
         internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } }
+        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } Total = new ScanSinkReport { Ok = true }; }
 
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
         /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
@@ -164,6 +177,7 @@ namespace Truedat.Store
                 foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
             }
             while (_failures.TryDequeue(out var f)) failures.Add(f);
+            Total.StorePath = storePath;
             if (entries.Count == 0 && failures.Count == 0) { if (final) SweepLeftovers(); report.Ok = true; return report; }
             try
             {
@@ -181,14 +195,35 @@ namespace Truedat.Store
             catch (Exception ex)
             {
                 report.Ok = false; report.Error = ex.Message;
-                foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
-                foreach (var p in edges.Values) TryDelete(p);
-                StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them" +
-                               (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — the next --refresh re-analyses those tracks" : "") + ")");
+                if (!final)
+                {
+                    // A failed CHECKPOINT keeps its batch for the final flush (TDA review of 368374a, P2a: dropping it left the entries out of
+                    // the store for the run while the record said completed). A path the workers re-recorded meanwhile keeps the newer entry.
+                    lock (_tieLock)
+                    {
+                        foreach (var kv in entries) _entries.TryAdd(kv.Key, kv.Value);
+                        foreach (var kv in artifacts) if (!_artifacts.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
+                        foreach (var kv in edges) if (!_edges.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
+                    }
+                    foreach (var f in failures) _failures.Enqueue(f);
+                    StoreLog.Warn($"store checkpoint failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures kept for the final flush)");
+                }
+                else
+                {
+                    foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
+                    foreach (var p in edges.Values) TryDelete(p);
+                    StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them" +
+                                   (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — the next --refresh re-analyses those tracks" : "") + ")");
+                }
             }
+            // The scan-wide tally: a successful flush adds its counts; a failed checkpoint is counted (its batch is still pending);
+            // a failed FINAL flush fails the tally — those entries are not in the store for this run.
+            if (report.Ok) Total.Add(report);
+            else if (final) { Total.Ok = false; Total.Error = report.Error; }
+            else { Total.CheckpointFailures++; report.CheckpointFailures = Total.CheckpointFailures; }
             if (final) SweepLeftovers();
-            // store-v3 T11: the end-of-run record, on both outcomes (the scan re-writes it after the companion step).
-            if (final) StoreResult.WriteScan(storePath, report, edges.Count > 0 || report.Edges > 0, null);
+            // store-v3 T11: the end-of-run record from the TALLY, on both outcomes (the scan re-writes it after the companion step).
+            if (final) { StoreResult.WriteScan(storePath, Total, edges.Count > 0 || Total.Edges > 0, null); report.ResultPath = Total.ResultPath; }
             return report;
         }
 

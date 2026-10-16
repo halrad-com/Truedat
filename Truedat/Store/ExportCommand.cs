@@ -110,7 +110,8 @@ namespace Truedat.Store
         {
             string? storePath = r.StorePath.Length > 0 ? r.StorePath : null;
             try { if (storePath == null && !string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
-            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+            bool opened = r.StorePath.Length > 0;   // schema/generation are facts only once the store answered; null otherwise (TDA review P3b)
+            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = opened ? r.StoreSchema : (int?)null, Generation = opened ? r.Generation : (long?)null, TruedatVersion = VersionInfo.Display };
             result.Export = new StoreResultExport
             {
                 Performed = r.Published, Generation = r.Published ? r.Generation : (long?)null,

@@ -120,7 +120,8 @@ namespace Truedat.Store
         {
             string? storePath = r.StorePath.Length > 0 ? r.StorePath : null;
             try { if (storePath == null && !string.IsNullOrWhiteSpace(o.StorePath)) storePath = Path.GetFullPath(o.StorePath!); } catch { }
-            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
+            bool opened = r.StorePath.Length > 0;   // schema/generation are facts only once the store answered; null otherwise (TDA review P3b)
+            result.Store = new StoreResultStore { Path = storePath ?? "", SchemaVersion = opened ? r.StoreSchema : (int?)null, Generation = opened ? r.Generation : (long?)null, TruedatVersion = VersionInfo.Display };
             result.Export = new StoreResultExport { Performed = false };
             StoreResult.Write(storePath, result, exitCode, StoreResult.OutcomeFailed, reason);
         }
@@ -277,6 +278,10 @@ namespace Truedat.Store
 
         internal static ImportReport Execute(ImportOptions o) { var r = new ImportReport(); Execute(o, r); return r; }
 
+        /// <summary>Self-test seam: runs right after the store opened (schema and generation known) and before any entry is written,
+        /// so a test can fail the verb there and prove the record keeps the at-open facts and carries no counts. Null in production.</summary>
+        internal static Action? AfterStoreOpened;
+
         /// <summary>Fills <paramref name="r"/> as it goes (see <see cref="Run"/>); throws on failure with the facts so far in place.</summary>
         internal static void Execute(ImportOptions o, ImportReport r)
         {
@@ -304,6 +309,7 @@ namespace Truedat.Store
             using var os = OpenStore.Open(o.StorePath, create: true, VersionInfo.Display, now);
             var dal = os.Dal; var db = os.Db;
             r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(db); r.Generation = dal.Generation();
+            AfterStoreOpened?.Invoke();
             // The machine this import writes AS: the store's own on its minting host; on another host a
             // refusal unless --machine-adopt, which finds-or-mints a machine row for THIS host (review #2).
             string writerMachine;
