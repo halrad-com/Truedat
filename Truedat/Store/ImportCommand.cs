@@ -521,7 +521,10 @@ namespace Truedat.Store
             long edgesRun = dal.InsertRun(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, entityId, sha, sha != null ? contentKeyKind : null, locationId, now,
                 edges.FoldMs + edges.PcmMs, Environment.MachineName, VersionInfo.Display, failed ? "failed" : "ok", failed ? failedComponent : null, null, failed ? edges.Head.Error : null, source);
             if (failed) { StoreLog.Warn($"edges: fold failed for {displayPath}: {edges.Head.Error}"); return false; }
-            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges);
+            // Sticky per MEDIA (TDA F8): a media that holds arrays under any of its content hashes keeps capturing at the current one, so a key
+            // move does not drop to the default row. Otherwise the scan's flag decides (Write's own per-content sticky still applies).
+            bool media = global::Truedat.Edges.EdgeStore.MediaHoldsArrays(dal, entityId);
+            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null);
             return true;
         }
 

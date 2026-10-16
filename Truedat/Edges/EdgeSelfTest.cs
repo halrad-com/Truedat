@@ -30,6 +30,10 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (store-v3 T05: a v3 store's packed edge rows move into the typed edge table on open, arrays kept)");
             try { TestV4Migration(assert); }
             catch (Exception ex) { assert(false, $"V4Migration: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Edges self-test (store-v3 T05: sticky capture follows the MEDIA across a content-key move)");
+            try { TestKeyMoveSticky(assert); }
+            catch (Exception ex) { assert(false, $"KeyMoveSticky: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { EdgeStore.CaptureArraysDefault = false; Truedat.Store.ScanSink.Reset(); }
             Console.WriteLine("Edges self-test (S2 C4: through the scan sink — stash by analysed path, tie at Record, write at the flush)");
             try { TestSink(assert); }
             catch (Exception ex) { assert(false, $"Sink: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -315,6 +319,51 @@ namespace Truedat.Edges
                 assert(System.IO.Directory.GetFiles(dir, "truedat.db.bak.v3.*").Length == 1, "the v3 file was backed up before the migration");
             }
             finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>TDA F8 on 6721aa9 (a required test, not an operator question): "sticky per track" is per MEDIA. Capture arrays for a track at its
+        /// content hash S1; the same media re-keys to S2 (a new hash at the same location — the store's same-entity key move); the next fold at S2
+        /// is written with the flag OFF. The S2 edge must hold the arrays, with the new fold's values, and the companion must carry texture for it.</summary>
+        static void TestKeyMoveSticky(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ".truedat-selftest", "keymove-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            var prevDir = Truedat.Store.ScanSink.StoreDirectory;
+            try
+            {
+                var store = System.IO.Path.Combine(dir, "truedat.db");
+                Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = dir;
+                const string path = @"D:\music\keymove\a.mp3";
+                const string S1 = "1111111111111111111111111111111111111111111111111111111111111111", S2 = "2121212121212121212121212121212121212121212121212121212121212121";
+                TrackEntry E(string sha) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120, Key = "C", Mode = "major", Mfcc = new double[13] }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha };
+                var settings = new EdgeSettings();
+                // 1. captured at S1 (the flag ON for this scan)
+                EdgeStore.CaptureArraysDefault = true;
+                var f1 = SyntheticFold(dir);
+                Truedat.Store.ScanSink.StashEdges(path, f1); Truedat.Store.ScanSink.Record(path, E(S1), path);
+                var a = Truedat.Store.ScanSink.Flush(store, "output-x64.5", new[] { path }, final: true);
+                // 2. the media re-keys to S2; the next scan runs with the flag OFF and folds new values
+                EdgeStore.CaptureArraysDefault = false;
+                var f2 = SyntheticFold(dir); f2.Head.MomentaryCentiDb[3] = -2468;
+                Truedat.Store.ScanSink.StashEdges(path, f2); Truedat.Store.ScanSink.Record(path, E(S2), path);
+                var b = Truedat.Store.ScanSink.Flush(store, "output-x64.5", new[] { path }, final: true);
+                using (var os = Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                {
+                    long entities = os.Dal.Count("file_entity");
+                    string? key = os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = '" + path.Replace("'", "''") + "';");
+                    assert(a.Ok && b.Ok && entities == 1 && key == S2 && b.ContentRekeyed == 1, $"fixture: one media, re-keyed S1 -> S2 by the second scan ({entities} entities, key {key?.Substring(0, 8)}, rekeyed {b.ContentRekeyed})");
+                    var back = EdgeStore.Read(os.Dal, S2, settings.ProducerVersion);
+                    assert(EdgeStore.ArraysCaptured(os.Dal, S2, settings.ProducerVersion) && back != null && back.Head.MomentaryCentiDb.Length == 300 && back.Head.MomentaryCentiDb[3] == -2468,
+                        $"sticky across a key move: the re-keyed media's flag-off fold at S2 keeps its arrays, with the new values (arrays {EdgeStore.ArraysCaptured(os.Dal, S2, settings.ProducerVersion)}, series {back?.Head.MomentaryCentiDb.Length}, [3] {(back != null && back.Head.MomentaryCentiDb.Length > 3 ? back.Head.MomentaryCentiDb[3] : 0)})");
+                    var comp = System.IO.Path.Combine(dir, EdgeCompanion.FileName);
+                    EdgeCompanion.WriteFromStore(os.Dal, comp, settings.ProducerVersion, "x");
+                    using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllBytes(comp));
+                    var tr = doc.RootElement.GetProperty("tracks");
+                    assert(tr.TryGetProperty(S2, out var t2) && t2.GetProperty("head").GetProperty("texture").ValueKind == System.Text.Json.JsonValueKind.Object,
+                        $"the companion carries the re-keyed track's texture at S2 ({(tr.TryGetProperty(S2, out var t2b) ? t2b.GetProperty("head").GetProperty("texture").ValueKind.ToString() : "S2 absent")})");
+                }
+            }
+            finally { EdgeStore.CaptureArraysDefault = false; Truedat.Store.ScanSink.StoreDirectory = prevDir; Truedat.Store.ScanSink.Reset(); try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         static long LogicalBytes(Truedat.Store.SqliteDb db)

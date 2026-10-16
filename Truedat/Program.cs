@@ -854,7 +854,8 @@ namespace Truedat
             Console.WriteLine("                      With --store: write mbxedges.v1.json from the store (default: beside the catalog).");
             Console.WriteLine("  --edge-arrays       With --edges: also keep the edge arrays (series, beats, sub-windows, MFCC/spectral");
             Console.WriteLine("                      vectors) in the store. Off by default: the edge row is the scalars + HPCP. Sticky per");
-            Console.WriteLine("                      track — a track that holds arrays keeps them. Config key: edge-arrays.");
+            Console.WriteLine("                      track — a track that holds arrays keeps them. Config key: edge-arrays;");
+            Console.WriteLine("                      --no-edge-arrays overrides it for one run (tracks already captured keep theirs).");
             Console.WriteLine("  --edge-arrays-drop [--dry-run]");
             Console.WriteLine("                      With --store: remove captured edge arrays (the scalar rows stay); --dry-run names them.");
             Console.WriteLine();
@@ -959,7 +960,7 @@ namespace Truedat
             // --no-store / --no-edges are the one-run overrides of the config keys `store` / `edges`.
             "edges", "budget", "edges-export", "no-store", "no-edges",
             // store-v3 T05: the opt-in edge-array capture (config key `edge-arrays`, default off) and its explicit discard verb.
-            "edge-arrays", "edge-arrays-drop",
+            "edge-arrays", "edge-arrays-drop", "no-edge-arrays",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -2422,6 +2423,7 @@ namespace Truedat
             bool edgesExportMode = false;         // --edges-export [path]: mbxedges.v1.json from the store (default: beside the catalog)
             bool edgeArrays = false;              // T05 --edge-arrays / config edge-arrays: keep the edge arrays (opt-in capture); default = the scalar row
             bool edgeArraysDropMode = false;      // T05 --edge-arrays-drop [--dry-run]: the explicit discard of captured arrays
+            bool noEdgeArrays = false;            // TDA F5: the one-run override of config edge-arrays = true (sticky tracks still keep theirs)
             string? edgesExportPath = null;
             bool noStore = false, noEdges = false; // --no-store / --no-edges: one-run overrides of the config keys `store` / `edges`
             bool smfmOn = false;                  // --smfm: read Sony SMFM tags (off by default since 2026-10-14; see ResolveNoSmfm)
@@ -2714,6 +2716,7 @@ namespace Truedat
                 else if (canonical == "edges") _stageOpts.Edges = true;
                 else if (canonical == "no-edges") noEdges = true;
                 else if (canonical == "edge-arrays") edgeArrays = true;
+                else if (canonical == "no-edge-arrays") noEdgeArrays = true;
                 else if (canonical == "edge-arrays-drop") edgeArraysDropMode = true;
                 else if (canonical == "no-store") noStore = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
@@ -2814,7 +2817,7 @@ namespace Truedat
             // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
             if (noStore) { storePath = null; _storeFromConfig = false; }
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
-            global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
+            global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
@@ -10488,7 +10491,7 @@ namespace Truedat
                 using (var tx = os.Db.BeginTransaction()) { r = global::Truedat.Edges.EdgeStore.DropArrays(os.Dal, dryRun); tx.Complete(); }
                 Console.WriteLine(dryRun
                     ? $"--edge-arrays-drop --dry-run: would remove the captured arrays from {r.Rows:N0} edge rows on {r.Tracks:N0} tracks ({r.Bytes:N0} bytes); nothing changed. Their scalar rows stay."
-                    : $"--edge-arrays-drop: removed the captured arrays from {r.Rows:N0} edge rows on {r.Tracks:N0} tracks ({r.Bytes:N0} bytes). Their scalar rows stay; a later scan with --edge-arrays captures them again.");
+                    : $"--edge-arrays-drop: removed the captured arrays from {r.Rows:N0} edge rows on {r.Tracks:N0} tracks ({r.Bytes:N0} bytes of arrays; the file shrinks only after --store-vacuum). Their scalar rows stay; a later scan with --edge-arrays captures them again.");
                 result.Store = new global::Truedat.Store.StoreResultStore { Path = os.Path, SchemaVersion = global::Truedat.Store.SchemaMigrator.ReadVersion(os.Db), Generation = os.Dal.Generation(), TruedatVersion = VersionInfo.Display };
                 result.Detail = new Dictionary<string, long> { ["rows"] = r.Rows, ["tracks"] = r.Tracks, ["bytes"] = r.Bytes, ["dryRun"] = dryRun ? 1 : 0 };
                 global::Truedat.Store.StoreResult.Write(os.Path, result, 0, global::Truedat.Store.StoreResult.OutcomeCompleted);

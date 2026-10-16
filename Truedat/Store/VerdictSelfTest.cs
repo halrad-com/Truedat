@@ -103,11 +103,23 @@ namespace Truedat.Store
                 assert(compared == 3 && mismatches == 0, $"export parity: every exported truedat block equals its verdict row, absent == absent ({compared} paths, {mismatches} mismatches, first {firstMismatch})");
                 assert(absentBoth >= 1 && !rows.ContainsKey(PathC), $"row iff block: the copy that decides no axis has no block AND no row ({absentBoth} absent-both; C row {rows.ContainsKey(PathC)})");
 
+                // TDA F3: an equal re-import writes NO verdict row — updated_utc is "last change", and a no-op import must not look like a mutation.
+                string StampsOf()
+                {
+                    using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                    return os.Db.ExecScalar("SELECT group_concat(location_id || '=' || updated_utc, ';') FROM (SELECT location_id, updated_utc FROM verdict ORDER BY location_id);") ?? "";
+                }
+                var stampsBefore = StampsOf();
+                System.Threading.Thread.Sleep(20);   // a rewrite would carry a later timestamp
+                ImportCommand.ExecuteEntries(store, Fixture(), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                var stampsAfter = StampsOf();
+                assert(stampsBefore.Length > 0 && stampsAfter == stampsBefore, $"an equal re-import changes no verdict row (before {stampsBefore} / after {stampsAfter})");
+
                 // A content change re-derives EVERY copy: remeasure via copy A only (a different producer replaces the description) — B's row follows.
                 using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
                 {
                     long before = os.Dal.ScalarLong("SELECT count(*) FROM verdict;");
-                    os.Db.Exec("UPDATE verdict SET updated_utc = 'stale';");
+                    os.Db.Exec("UPDATE verdict SET updated_utc = 'stale', method = 'stale-method';");   // a real difference, so the re-derive must write
                     using (var tx = os.Db.BeginTransaction())
                     {
                         var ent = os.Dal.ScalarLong("SELECT count(*) FROM file_entity;");

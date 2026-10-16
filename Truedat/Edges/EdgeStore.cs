@@ -120,6 +120,12 @@ namespace Truedat.Edges
         internal static bool TrackHoldsArrays(StoreDal dal, string contentKey)
             => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND arrays IS NOT NULL;", contentKey) > 0;
 
+        /// <summary>True when any edge row of ANY content hash this media has had (its content-hash facets, current or superseded, and its
+        /// entity key) holds the opt-in arrays — "sticky per track" is per media, so a content-key move keeps the capture (TDA F8).</summary>
+        internal static bool MediaHoldsArrays(StoreDal dal, string entityId)
+            => dal.ScalarLong("SELECT count(*) FROM edge WHERE arrays IS NOT NULL AND (content_hash = 'entity:' || ?1 OR content_hash IN " +
+                              "(SELECT value FROM identity_facet WHERE entity_id = ?1 AND substr(kind, 1, 13) = 'content_hash:'));", entityId) > 0;
+
         /// <summary>True when any edge row of this content at this producer version holds the opt-in arrays.</summary>
         internal static bool ArraysCaptured(StoreDal dal, string contentKey, string producerVersion)
             => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;", contentKey, producerVersion) > 0;

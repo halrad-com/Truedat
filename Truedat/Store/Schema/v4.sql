@@ -43,7 +43,7 @@ ALTER TABLE value ADD COLUMN dtype TEXT;
 -- round-trip, no rounding). No run_id: derived, not measured. The two algorithm tags drive re-derivation (store_meta keys
 -- verdict.method / verdict.speechMethod record the build that derived the table).
 CREATE TABLE verdict (
-  location_id            INTEGER PRIMARY KEY REFERENCES track_location(id),
+  location_id            INTEGER PRIMARY KEY REFERENCES track_location(id) ON DELETE CASCADE,   -- TDA F6: a removed copy takes its verdict with it
   hires_genuine          TEXT NOT NULL,
   hires_confidence       REAL,
   lossy_transcode_likely TEXT NOT NULL,

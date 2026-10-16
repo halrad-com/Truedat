@@ -68,7 +68,11 @@ namespace Truedat.Store
             dal.ExecBound("INSERT INTO verdict(location_id, hires_genuine, hires_confidence, lossy_transcode_likely, lossy_confidence, speech_likely, speech_confidence, method, speech_method, prov, content, updated_utc) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(location_id) DO UPDATE SET hires_genuine = excluded.hires_genuine, hires_confidence = excluded.hires_confidence, " +
                 "lossy_transcode_likely = excluded.lossy_transcode_likely, lossy_confidence = excluded.lossy_confidence, speech_likely = excluded.speech_likely, speech_confidence = excluded.speech_confidence, " +
-                "method = excluded.method, speech_method = excluded.speech_method, prov = excluded.prov, content = excluded.content, updated_utc = excluded.updated_utc;",
+                "method = excluded.method, speech_method = excluded.speech_method, prov = excluded.prov, content = excluded.content, updated_utc = excluded.updated_utc " +
+                // TDA F3: an equal re-derive writes nothing — updated_utc means "last change", and a no-op import is no mutation (T06).
+                "WHERE hires_genuine IS NOT excluded.hires_genuine OR hires_confidence IS NOT excluded.hires_confidence OR lossy_transcode_likely IS NOT excluded.lossy_transcode_likely " +
+                "OR lossy_confidence IS NOT excluded.lossy_confidence OR speech_likely IS NOT excluded.speech_likely OR speech_confidence IS NOT excluded.speech_confidence " +
+                "OR method IS NOT excluded.method OR speech_method IS NOT excluded.speech_method OR prov IS NOT excluded.prov OR content IS NOT excluded.content;",
                 locationId, v.HiresGenuine, v.HiresConfidence, v.LossyTranscodeLikely, v.LossyTranscodeConfidence, v.SpeechLikely, v.SpeechConfidence,
                 MethodOverrideForTest ?? v.Method, SpeechMethodOverrideForTest ?? v.SpeechMethod, v.Prov ?? "", v.Content ?? "", nowUtc);
             return true;
