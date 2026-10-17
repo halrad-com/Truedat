@@ -10882,14 +10882,19 @@ namespace Truedat
         /// derived publication — will restate these). Derived from what the end actually wrote. No recovery verb is promised:
         /// <c>--store-import</c> is the legacy / partial-initialisation action, not ordinary recovery for an initialised store, and a
         /// same-path re-analysis that reached the catalog but not the store leaves the store holding the OLD values at that path.</summary>
-        internal static string SurvivorFacts(FinalWrites w, int sinceDurable)
+        internal static string SurvivorFacts(FinalWrites w, int sinceCatalogHalf, int sinceStoreHalf)
         {
-            bool cat = w.Catalog == FinalWrite.Written, store = w.Store == FinalWrite.Written;
-            if (cat && store) return "the catalog and the store were both written at the end and hold this run's analyses";
-            if (cat && w.Store == FinalWrite.NotAttempted) return "the catalog was written at the end and holds this run's analyses (no store in force)";
-            if (cat) return $"the catalog was written at the end and holds this run's analyses; the store was {Word(w.Store)} and keeps its previous values, including the OLD values at any path re-analysed this run";
-            if (store) return $"the store was written at the end and holds this run's analyses; the catalog was {Word(w.Catalog)} and keeps its previous contents";
-            return $"nothing was written at the end (catalog {Word(w.Catalog)}, store {Word(w.Store)}): the {sinceDurable} analyses completed since the last durable checkpoint are LOST";
+            // Keeper 136: per half, from what the end wrote AND each half's last successful checkpoint — an earlier checkpoint whose
+            // catalog save succeeded while its store flush failed still left those analyses in the catalog. The catalog half always
+            // runs first, so sinceCatalogHalf <= sinceStoreHalf and what is in NEITHER is the catalog's shortfall.
+            bool cat = w.Catalog == FinalWrite.Written, store = w.Store == FinalWrite.Written, storeOn = w.Store != FinalWrite.NotAttempted;
+            string catalogPart = cat ? "the catalog was written at the end and holds every analysis of this run"
+                : $"the catalog was {Word(w.Catalog)} at the end and holds this run's analyses up to its last successful checkpoint half; the last {sinceCatalogHalf} are absent there (or still carry their OLD values where a path was re-analysed)";
+            string storePart = !storeOn ? "no store in force"
+                : store ? "the store was written at the end and holds every analysis of this run"
+                : $"the store was {Word(w.Store)} at the end and holds this run's analyses up to its last durable checkpoint; the last {sinceStoreHalf} are absent there (or still carry their OLD values where a path was re-analysed)";
+            int inNeither = cat || store ? 0 : sinceCatalogHalf;
+            return $"{catalogPart}; {storePart}; analyses in NEITHER (lost): {inNeither}";
         }
 
         static string Word(FinalWrite f) => f == FinalWrite.Skipped ? "skipped" : f == FinalWrite.Failed ? "not written (failed)" : f == FinalWrite.NotAttempted ? "not in force" : "written";
@@ -10902,7 +10907,7 @@ namespace Truedat
                          $"{p.Attempts} checkpoint attempts this run, {p.Saves} durable; {p.SinceDurable} analyses completed since the last durable checkpoint; " +
                          $"{notStarted} tracks not started; the failed stage was not attempted again at the end; " +
                          $"final writes: catalog {Word(w.Catalog)}{(w.CatalogError != null ? " (" + CheckpointCause.Describe(w.CatalogError) + ")" : "")}, " +
-                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, p.SinceDurable)}";
+                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, p.SinceCatalogHalf, p.SinceDurable)}";
             Console.Error.WriteLine("=== FAILED - " + reason + " ===");
             global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
             if (Environment.ExitCode == 0) Environment.ExitCode = 1;

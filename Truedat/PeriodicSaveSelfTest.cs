@@ -22,6 +22,9 @@ namespace Truedat
                 TestStoreHalfFailedIsNotDurable(assert); TestThrowingSaveIsAFailure(assert);
                 TestCatalogFailureLeavesLiveIntact(assert);
                 TestFinalWritesFromActualOutcomes(assert);
+                TestRetryWaitsForTheDelay(assert);
+                TestHeldCatalogReleasedBeforeTheRetry(assert);
+                TestPriorCatalogHalfSurvives(assert);
             }
             catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -33,7 +36,7 @@ namespace Truedat
         static PeriodicSave Due(out System.Collections.Generic.List<string> log)
         {
             var l = new System.Collections.Generic.List<string>(); log = l;
-            return new PeriodicSave(Stopwatch.StartNew(), 0, m => { lock (l) l.Add(m); });
+            return new PeriodicSave(Stopwatch.StartNew(), 0, m => { lock (l) l.Add(m); }, retryDelaySecs: 0);
         }
 
         static void TestPeriod(Action<bool, string> assert)
@@ -186,25 +189,25 @@ namespace Truedat
 
                 // Catalog failed persistently, THEN the final store flush fails too: nothing survives — the old code said "the store was written".
                 var w1 = Program.RunFinalWrites(catalogFailed, true, save, () => { storeCalls++; return bad; });
-                var s1 = Program.SurvivorFacts(w1, 7);
-                assert(catalogCalls == 0 && storeCalls == 1 && w1.Catalog == Program.FinalWrite.Skipped && w1.Store == Program.FinalWrite.Failed && s1.Contains("LOST") && s1.Contains("7 analyses"),
+                var s1 = Program.SurvivorFacts(w1, 7, 7);
+                assert(catalogCalls == 0 && storeCalls == 1 && w1.Catalog == Program.FinalWrite.Skipped && w1.Store == Program.FinalWrite.Failed && s1.Contains("in NEITHER (lost): 7"),
                     $"catalog failed, then the final store flush failed: catalog never retried, store tried once, survivors = nothing, 7 lost ({s1})");
                 // Control: catalog failed, store flush succeeds -> the store holds them.
                 catalogCalls = storeCalls = 0;
                 var w2 = Program.RunFinalWrites(catalogFailed, true, save, () => { storeCalls++; return ok; });
-                assert(catalogCalls == 0 && storeCalls == 1 && w2.Store == Program.FinalWrite.Written && Program.SurvivorFacts(w2, 7).StartsWith("the store was written"),
+                assert(catalogCalls == 0 && storeCalls == 1 && w2.Store == Program.FinalWrite.Written && Program.SurvivorFacts(w2, 7, 7).Contains("the store was written at the end"),
                     "control: catalog failed, final store flush succeeds -> the store holds this run's analyses");
                 // Store failed persistently, catalog final save succeeds -> the catalog holds them; the store keeps OLD values at re-analysed paths.
                 catalogCalls = storeCalls = 0;
                 var w3 = Program.RunFinalWrites(storeFailed, true, save, () => { storeCalls++; return ok; });
-                var s3 = Program.SurvivorFacts(w3, 4);
-                assert(catalogCalls == 1 && storeCalls == 0 && w3.Store == Program.FinalWrite.Skipped && s3.StartsWith("the catalog was written") && s3.Contains("OLD values") && !s3.Contains("--store-import"),
+                var s3 = Program.SurvivorFacts(w3, 0, 4);
+                assert(catalogCalls == 1 && storeCalls == 0 && w3.Store == Program.FinalWrite.Skipped && s3.StartsWith("the catalog was written") && s3.Contains("the last 4 are absent there (or still carry their OLD values") && s3.Contains("(lost): 0") && !s3.Contains("--store-import"),
                     $"store failed persistently: store never retried, catalog written once; survivors name the stale same-path values and promise no recovery verb ({s3})");
                 // Store failed persistently, and the final catalog save throws -> nothing survives; the exception is recorded, not thrown.
                 catalogCalls = storeCalls = 0;
                 bool threw = false; Program.FinalWrites? w4 = null;
                 try { w4 = Program.RunFinalWrites(storeFailed, true, saveThrows, () => { storeCalls++; return ok; }); } catch { threw = true; }
-                assert(!threw && w4 != null && catalogCalls == 1 && storeCalls == 0 && w4.Catalog == Program.FinalWrite.Failed && w4.CatalogError != null && Program.SurvivorFacts(w4, 4).Contains("LOST"),
+                assert(!threw && w4 != null && catalogCalls == 1 && storeCalls == 0 && w4.Catalog == Program.FinalWrite.Failed && w4.CatalogError != null && Program.SurvivorFacts(w4, 4, 4).Contains("(lost): 4"),
                     "store failed persistently and the final catalog save throws: recorded (not thrown), nothing survives, 4 lost");
                 // An unknown-stage failure skips both halves (no blind retry of an unidentified failure).
                 catalogCalls = storeCalls = 0;
@@ -219,6 +222,99 @@ namespace Truedat
                     "no checkpoint failure: unchanged — both halves once, and a final catalog save that throws still propagates");
             }
             finally { Console.SetError(savedErr); }
+        }
+
+        /// <summary>TDA 123: the ONE retry is the first completion at least the retry delay after the failure — completions inside the delay
+        /// make no attempt (simulated clock: a 0.3 s delay stands in for 30 s).</summary>
+        static void TestRetryWaitsForTheDelay(Action<bool, string> assert)
+        {
+            var clock = Stopwatch.StartNew();
+            var p = new PeriodicSave(clock, 0, _ => { }, retryDelaySecs: 0.3);
+            int calls = 0;
+            p.AfterAnalysis(() => { calls++; return CheckpointOutcome.Failed("catalog", Win32(32, "in use")); });
+            var failedAt = clock.Elapsed.TotalSeconds;
+            for (int i = 0; i < 5; i++) { p.AfterAnalysis(() => { calls++; return CheckpointOutcome.Durable; }); Thread.Sleep(10); }
+            bool noneInsideDelay = calls == 1 && clock.Elapsed.TotalSeconds - failedAt < 0.3;
+            Wait(clock, failedAt + 0.35);
+            bool saved = p.AfterAnalysis(() => { calls++; return CheckpointOutcome.Durable; });
+            assert(noneInsideDelay && saved && calls == 2 && p.Saves == 1, $"completions inside the retry delay make no attempt; the first one after it retries once and saves (calls {calls})");
+            assert(PeriodicSave.DefaultRetryDelaySecs == 30, "the production retry delay is 30 s");
+        }
+
+        /// <summary>REAL held file (TDA 123's fixture): another handle holds the live catalog, the holder lets go after 0.4 s. With the retry
+        /// delay (0.6 s) the one retry lands after the release and succeeds; with no delay the retry fires while the file is still held and the
+        /// checkpoint goes persistent — the reason the delay exists.</summary>
+        static void TestHeldCatalogReleasedBeforeTheRetry(Action<bool, string> assert)
+        {
+            foreach (var delay in new[] { 0.6, 0.0 })
+            {
+                var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    var cat = Path.Combine(dir, "mbxmoods.json");
+                    var tracks = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    tracks[@"D:\music\a.flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "a", Bpm = 120, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                    Program.TrySaveCheckpointCatalog(cat, tracks);
+                    var clock = Stopwatch.StartNew();
+                    var p = new PeriodicSave(clock, 0, _ => { }, retryDelaySecs: delay);
+                    Func<CheckpointOutcome> save = () => Program.TrySaveCheckpointCatalog(cat, tracks) ?? CheckpointOutcome.Durable;
+                    var holder = new FileStream(cat, FileMode.Open, FileAccess.Read, FileShare.None);
+                    var release = Task.Run(() => { Thread.Sleep(400); holder.Dispose(); });
+                    p.AfterAnalysis(save);                                   // fails: held
+                    var until = Stopwatch.StartNew();
+                    while (until.Elapsed.TotalSeconds < 1.2 && p.Saves == 0 && p.PersistentFailure == null) { p.AfterAnalysis(save); Thread.Sleep(20); }   // completions every ~20 ms
+                    release.Wait();
+                    if (delay > 0)
+                        assert(p.Saves == 1 && p.Attempts == 2 && p.PersistentFailure == null,
+                            $"held catalog released after 0.4 s, retry delay {delay} s: the one retry lands after the release and is durable (attempts {p.Attempts}, saves {p.Saves})");
+                    else
+                        assert(p.Saves == 0 && p.Attempts == 2 && p.PersistentFailure != null,
+                            $"same fixture with NO retry delay: the retry fires while the file is still held and the checkpoint goes persistent (attempts {p.Attempts})");
+                }
+                finally { try { Directory.Delete(dir, true); } catch { } }
+            }
+        }
+
+        /// <summary>Keeper 136's trigger, REAL catalog file (the store half is simulated): checkpoint 1 writes the catalog and its store flush
+        /// fails BUSY; the one retry writes the catalog again (now with c) and the store fails again -> persistent. Then a completion re-analyses
+        /// a.flac with a NEW value and adds d; at the end the catalog swap fails on a held file and the store is skipped. The catalog file holds
+        /// a(old), b, c; the survivor text must say so (in neither: the last 1 completion), not "all lost" as 3178448 did.</summary>
+        static void TestPriorCatalogHalfSurvives(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var savedErr = Console.Error; Console.SetError(new StringWriter());
+            try
+            {
+                var cat = Path.Combine(dir, "mbxmoods.json");
+                var tracks = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                Func<string, double, TrackEntry> entry = (t, bpm) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = t, Bpm = bpm, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                var busy = new Store.ScanSinkReport { Ok = false, Error = "database is locked", ErrorException = new Store.SqliteException(5, "database is locked") };
+                Func<CheckpointOutcome> save = () => Program.TrySaveCheckpointCatalog(cat, tracks)
+                    ?? CheckpointOutcome.Failed("store", busy.ErrorException, "simulated store half: " + busy.Error);
+                var p = new PeriodicSave(Stopwatch.StartNew(), 0, _ => { }, retryDelaySecs: 0);
+                tracks[@"D:\music.flac"] = entry("a", 100); tracks[@"D:\music.flac"] = entry("b", 101);
+                p.AfterAnalysis(save);                                                   // catalog half OK (a, b), store BUSY -> one retry
+                tracks[@"D:\music\c.flac"] = entry("c", 102);
+                p.AfterAnalysis(save);                                                   // catalog half OK (a, b, c), store BUSY again -> persistent
+                tracks[@"D:\music.flac"] = entry("a", 200);                           // same path, NEW value
+                tracks[@"D:\music\d.flac"] = entry("d", 103);
+                p.AfterAnalysis(save);                                                   // persistent: no attempt
+                assert(p.PersistentFailure != null && p.PersistentFailure.Stage == "store" && p.Attempts == 2 && p.SinceCatalogHalf == 1 && p.SinceDurable == 3,
+                    $"store failed twice after successful catalog halves: persistent; catalog half 1 completion behind, durable 3 behind ({p.SinceCatalogHalf}/{p.SinceDurable})");
+                Program.FinalWrites w;
+                using (new FileStream(cat, FileMode.Open, FileAccess.Read, FileShare.None))
+                    w = Program.RunFinalWrites(p.PersistentFailure, true, () => { var f = Program.TrySaveCheckpointCatalog(cat, tracks); if (f != null) throw f.Error!; }, () => null);
+                var text = File.ReadAllText(cat);
+                assert(w.Catalog == Program.FinalWrite.Failed && w.Store == Program.FinalWrite.Skipped
+                       && text.Contains("c.flac") && !text.Contains("d.flac") && text.Contains("\"bpm\":100") && !text.Contains("\"bpm\":200"),
+                    "the real catalog after the run: a (OLD value 100), b, c from the last successful catalog half; d and a's new value absent");
+                var facts = Program.SurvivorFacts(w, p.SinceCatalogHalf, p.SinceDurable);
+                assert(facts.Contains("the last 1 are absent there (or still carry their OLD values") && facts.Contains("(lost): 1") && !facts.Contains("(lost): 3"),
+                    $"survivor facts count only the completion after the last catalog half as lost, and name the stale value ({facts})");
+            }
+            finally { Console.SetError(savedErr); try { Directory.Delete(dir, true); } catch { } }
         }
 
         static void TestThrowingSaveIsAFailure(Action<bool, string> assert)

@@ -11,7 +11,8 @@ namespace Truedat
     internal sealed class CheckpointOutcome
     {
         internal static readonly CheckpointOutcome Durable = new CheckpointOutcome(null, null, null);
-        /// <summary>Null when durable; otherwise where it failed: <c>catalog</c>, <c>store</c> or <c>checkpoint</c> (an exception from
+        /// <summary>Null when durable; otherwise where it failed: <c>catalog</c>, <c>store</c> (contract: only after the SAME attempt's catalog half
+        /// succeeded — keeper 136) or <c>checkpoint</c> (an exception from
         /// outside both halves).</summary>
         internal readonly string? Stage;
         internal readonly Exception? Error;
@@ -91,8 +92,8 @@ namespace Truedat
     /// <c>--folder</c> had none and could lose a whole run (T18 defect 1, TDA 112). TryEnter + skip, not lock (T1, 2026-07-30): a worker
     /// that finishes while a save is in flight goes back to analysis. The period is measured save-end to save-start.
     /// A failed checkpoint is classified (<see cref="CheckpointCause"/>) and logged with its stage and cause; a retryable cause gets ONE
-    /// retry (the next completion's checkpoint, no sleep loop); anything else, or a second consecutive failure, is PERSISTENT: no
-    /// further checkpoint is attempted (the analyses since the last durable one stay in memory for the scan's final save) and the
+    /// retry (the first completion at least <see cref="DefaultRetryDelaySecs"/> after the failure, no sleep loop); anything else, or a second consecutive failure, is PERSISTENT: no
+    /// further checkpoint and no new analysis (the failed stage is not attempted again at the end; the other half writes once) and the
     /// state is reported through <see cref="PersistentFailure"/>.
     /// </summary>
     internal sealed class PeriodicSave
@@ -101,15 +102,24 @@ namespace Truedat
         readonly long _periodTicks;
         readonly Action<string> _log;
         readonly object _lock = new object();
-        long _lastTicks;          // clock ticks at the end of the last DURABLE save (0 = the scan's start)
+        readonly long _retryDelayTicks;
+        long _dueTicks;           // clock ticks before which no attempt is made: a period after the last durable save (or the scan's start),
+                                  // or, after a retryable failure, the retry delay after that failure
         long _lastDurableUtcTicks;
-        int _saves, _attempts, _consecutiveFailures, _sinceDurable;
+        int _saves, _attempts, _consecutiveFailures, _sinceDurable, _sinceCatalogHalf;
         volatile CheckpointOutcome? _persistent;
 
-        internal PeriodicSave(Stopwatch clock, double periodSecs, Action<string>? log = null)
+        /// <summary>The minimum wait before the ONE retry (TDA 123): the next completion can come milliseconds after a failure — before a
+        /// holder (an indexer, a reader, another connection) can let go — so the retry is the first completion at least this long after
+        /// the failure. Still at a completion; never a sleep loop.</summary>
+        internal const double DefaultRetryDelaySecs = 30;
+
+        internal PeriodicSave(Stopwatch clock, double periodSecs, Action<string>? log = null, double retryDelaySecs = DefaultRetryDelaySecs)
         {
             _clock = clock;
             _periodTicks = (long)(periodSecs * Stopwatch.Frequency);
+            _retryDelayTicks = (long)(retryDelaySecs * Stopwatch.Frequency);
+            _dueTicks = _periodTicks;
             _log = log ?? (m => Console.Error.WriteLine(m));
             _lastDurableUtcTicks = DateTime.UtcNow.Ticks;
         }
@@ -120,6 +130,9 @@ namespace Truedat
         internal int Attempts => Volatile.Read(ref _attempts);
         /// <summary>Completed analyses since the last durable checkpoint (what a crash now would cost, beside the in-flight ones).</summary>
         internal int SinceDurable => Volatile.Read(ref _sinceDurable);
+        /// <summary>Completed analyses since the CATALOG half last succeeded (keeper 136): a checkpoint whose catalog save succeeded and whose
+        /// store flush failed is not durable, but the catalog does hold those analyses. Never more than <see cref="SinceDurable"/>.</summary>
+        internal int SinceCatalogHalf => Volatile.Read(ref _sinceCatalogHalf);
         /// <summary>Non-null once checkpoints have stopped on a persistent failure: the failure that stopped them.</summary>
         internal CheckpointOutcome? PersistentFailure => _persistent;
 
@@ -129,14 +142,15 @@ namespace Truedat
         internal bool AfterAnalysis(Func<CheckpointOutcome> save)
         {
             Interlocked.Increment(ref _sinceDurable);
+            Interlocked.Increment(ref _sinceCatalogHalf);
             if (_persistent != null) return false;
-            if (_clock.ElapsedTicks - Interlocked.Read(ref _lastTicks) < _periodTicks) return false;
+            if (_clock.ElapsedTicks < Interlocked.Read(ref _dueTicks)) return false;
             if (!Monitor.TryEnter(_lock)) return false;
             try
             {
-                if (_persistent != null || _clock.ElapsedTicks - Interlocked.Read(ref _lastTicks) < _periodTicks) return false;
+                if (_persistent != null || _clock.ElapsedTicks < Interlocked.Read(ref _dueTicks)) return false;
                 Interlocked.Increment(ref _attempts);
-                int pending = Volatile.Read(ref _sinceDurable);
+                int pending = Volatile.Read(ref _sinceDurable), pendingCatalog = Volatile.Read(ref _sinceCatalogHalf);
                 CheckpointOutcome outcome;
                 try { outcome = save() ?? CheckpointOutcome.Failed("checkpoint", null, "the save returned no outcome"); }
                 catch (Exception ex) { outcome = CheckpointOutcome.Failed("checkpoint", ex); }
@@ -145,23 +159,30 @@ namespace Truedat
                     _consecutiveFailures = 0;
                     Interlocked.Increment(ref _saves);
                     Interlocked.Add(ref _sinceDurable, -pending);
+                    Interlocked.Add(ref _sinceCatalogHalf, -pendingCatalog);
                     Interlocked.Exchange(ref _lastDurableUtcTicks, DateTime.UtcNow.Ticks);
-                    Interlocked.Exchange(ref _lastTicks, _clock.ElapsedTicks);
+                    Interlocked.Exchange(ref _dueTicks, _clock.ElapsedTicks + _periodTicks);   // period measured save-end to save-start
                     return true;
                 }
+                // The callers run the catalog half first and return a "store" outcome only after it succeeded, so a store-stage failure
+                // means the catalog DOES hold this checkpoint's analyses (keeper 136).
+                if (outcome.Stage == "store") Interlocked.Add(ref _sinceCatalogHalf, -pendingCatalog);
                 _consecutiveFailures++;
                 bool retry = _consecutiveFailures == 1 && CheckpointCause.IsRetryable(outcome.Error);
                 var since = new DateTime(Interlocked.Read(ref _lastDurableUtcTicks), DateTimeKind.Utc).ToString("o");
                 var facts = $"stage {outcome.Stage}; cause {CheckpointCause.Describe(outcome.Error)}{(outcome.Detail != null ? "; " + outcome.Detail : "")}; " +
                             $"attempt {_consecutiveFailures}; last durable checkpoint {since}; {pending} analyses completed since it";
                 if (retry)
-                    _log($"  WARNING: checkpoint failed ({facts}). Retryable cause: ONE retry at the next completed analysis.");
+                {
+                    Interlocked.Exchange(ref _dueTicks, _clock.ElapsedTicks + _retryDelayTicks);
+                    _log($"  WARNING: checkpoint failed ({facts}). Retryable cause: ONE retry at the first completed analysis at least {_retryDelayTicks / (double)Stopwatch.Frequency:0.#} s from now.");
+                }
                 else
                 {
                     _persistent = outcome;
                     _log($"  ERROR: checkpoint failed ({facts}). " +
                          (_consecutiveFailures > 1 ? "Second consecutive failure" : "Not a retryable cause") +
-                         ": no further checkpoints this run; the analyses since the last durable checkpoint are kept in memory for the final save.");
+                         ": no further checkpoints this run and no new analysis; the failed stage is not attempted again at the end.");
                 }
                 return false;
             }
