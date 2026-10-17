@@ -30,6 +30,11 @@ namespace Truedat.Store
         /// <summary>SHA-256 of the sidecar bytes written from the same generation: 64 lower-case
         /// hex characters. The encoding is a contract (same class as <c>ruleId</c>).</summary>
         internal string SidecarSha256 = "";
+        /// <summary>store-intent.md item (8): the root the export published — <c>library_root.path</c> byte for byte as STORED (no
+        /// normalisation) and that row's role. Null when absent (a legacy export, a scan-written catalog): the file binding never
+        /// depends on them; an absent root leaves the catalog unresolved for STORE selection only.</summary>
+        internal string? RootPath;
+        internal string? RootRole;
 
         /// <summary>Emit <c>"contract"</c> and <c>"origin"</c> into an open root object. Call it
         /// immediately after <c>trackCount</c> so both land inside the hub's bounded head read.</summary>
@@ -44,6 +49,9 @@ namespace Truedat.Store
             w.WriteString("exportedAt", o.ExportedAt);
             w.WriteNumber("generation", o.Generation);
             w.WriteString("sidecarSha256", o.SidecarSha256);
+            // store-intent.md item (8): flat, after sidecarSha256, so a bounded prefix reader takes them like generation.
+            if (o.RootPath != null) w.WriteString("rootPath", o.RootPath);
+            if (o.RootRole != null) w.WriteString("rootRole", o.RootRole);
             w.WriteEndObject();
         }
 
@@ -122,6 +130,8 @@ namespace Truedat.Store
                                 case "exportedAt": if (!Str(ref reader, out origin.ExportedAt)) return false; break;
                                 case "generation": if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt64(out origin.Generation)) return false; break;
                                 case "sidecarSha256": if (!Str(ref reader, out origin.SidecarSha256)) return false; break;
+                                case "rootPath": { if (!Str(ref reader, out var rp)) return false; origin.RootPath = rp; break; }
+                                case "rootRole": { if (!Str(ref reader, out var rr)) return false; origin.RootRole = rr; break; }
                                 default:   // an unknown origin key: skip its value, whatever shape
                                     if ((reader.TokenType == JsonTokenType.StartObject || reader.TokenType == JsonTokenType.StartArray) && !reader.TrySkip()) return false;
                                     break;

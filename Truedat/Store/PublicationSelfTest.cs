@@ -39,6 +39,117 @@ namespace Truedat.Store
             try { TestExportSnapshot(assert); }
             catch (Exception ex) { assert(false, $"Publication.ExportSnapshot: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ExportCommand.AfterEntriesRead = null; }
+            Console.WriteLine("Publication self-test (store-v3 T07 item 8: origin.rootPath/rootRole = the selected root's stored bytes + role, from the export's snapshot)");
+            try { TestOriginRoot(assert); }
+            catch (Exception ex) { assert(false, $"Publication.OriginRoot: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ExportCommand.BeforeRootPicked = null; }
+        }
+
+        static System.Collections.Generic.Dictionary<string, TrackEntry> One(string path, char sha, double bpm)
+            => new System.Collections.Generic.Dictionary<string, TrackEntry>(PathComparer.Instance)
+            {
+                [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = Path.GetFileName(path), Bpm = bpm, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string(sha, 64) },
+            };
+
+        static bool Refused(Func<ExportReport> export, out string why)
+        {
+            try { export(); why = ""; return false; }
+            catch (StoreException ex) { why = ex.Message; return true; }
+        }
+
+        /// <summary>store-intent.md item (8), agreed by RBA, the keeper and truedat:architect (2026-10-17): the export names the root it
+        /// published — <c>origin.rootPath</c> = <c>library_root.path</c> byte for byte as STORED (never the argument the operator typed,
+        /// never normalised) and <c>origin.rootRole</c> = that row's role — read inside the export's one snapshot. Keeper 122 / TDA 110:
+        /// the no/several-primary refusal is the DEFAULT selection's; an explicit <c>--export-root</c> must still select a named root, and
+        /// the two are tested separately. A catalog without the keys still reads (they are optional for the file binding).</summary>
+        static void TestOriginRoot(Action<bool, string> assert)
+        {
+            const string primary = @"D:\Müsic\Ä lib", mirror = @"E:\mirror";   // non-ASCII + a space: the JSON escape must round-trip the stored bytes
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, One(primary + @"\a.flac", 'a', 120), primary, "primary", true, "import", "1", "fixture", null, null);
+                ImportCommand.ExecuteEntries(store, One(mirror + @"\b.flac", 'b', 121), mirror, "mirror", true, "import", "1", "fixture", null, null);
+                Directory.CreateDirectory(d.P("o1")); Directory.CreateDirectory(d.P("o2"));
+
+                // Default selection: the single primary.
+                var out1 = Path.Combine(d.P("o1"), "mbxmoods.json");
+                var r1 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = out1 });
+                assert(r1.Published && CatalogOrigin.TryRead(out1, out var o1) && o1.RootPath == primary && o1.RootRole == "primary",
+                    $"default export: origin names the single primary, stored bytes + role ({(CatalogOrigin.TryRead(out1, out var x1) ? x1.RootPath + "/" + x1.RootRole : "unreadable")})");
+                var raw = File.ReadAllText(out1);
+                int rp = raw.IndexOf("\"rootPath\"", StringComparison.Ordinal), tr = raw.IndexOf("\"tracks\"", StringComparison.Ordinal), sc = raw.IndexOf("\"sidecarSha256\"", StringComparison.Ordinal);
+                assert(rp > sc && sc > 0 && rp < tr && raw.IndexOf("\"rootRole\"", StringComparison.Ordinal) > rp, "default export: rootPath and rootRole follow sidecarSha256 inside origin, before tracks (flat keys)");
+
+                // Explicit --export-root, typed differently from the stored path (case + trailing separator): the header carries the STORED bytes.
+                var out2 = Path.Combine(d.P("o2"), "mbxmoods.json");
+                var r2 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = out2, ExportRoot = @"e:\MIRROR\" });
+                assert(r2.Published && CatalogOrigin.TryRead(out2, out var o2) && o2.RootPath == mirror && o2.RootRole == "mirror",
+                    $"explicit --export-root: origin names the selected mirror as STORED, not as typed ({(CatalogOrigin.TryRead(out2, out var x2) ? x2.RootPath + "/" + x2.RootRole : "unreadable")})");
+
+                // The same root at a new generation: republish carries the same root and the new generation.
+                ImportCommand.ExecuteEntries(store, One(primary + @"\c.flac", 'c', 122), primary, "primary", true, "import", "1", "fixture", null, null);
+                var r3 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = out1 });
+                assert(r3.Published && CatalogOrigin.TryRead(out1, out var o3) && o3.RootPath == primary && o3.RootRole == "primary" && o3.Generation == r3.Generation && r3.Generation > r1.Generation,
+                    $"same root, new generation: rootPath/rootRole unchanged, generation advanced ({r1.Generation} -> {r3.Generation})");
+            }
+            // No primary: the DEFAULT refuses (no file), an explicit root still exports.
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, One(mirror + @"\b.flac", 'b', 121), mirror, "mirror", true, "import", "1", "fixture", null, null);
+                var outP = d.P("mbxmoods.json");
+                assert(Refused(() => ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP }), out var why0) && why0.Contains("no primary root") && !File.Exists(outP),
+                    $"no primary, default selection: refused, no file ({why0})");
+                var r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP, ExportRoot = mirror });
+                assert(r.Published && CatalogOrigin.TryRead(outP, out var o) && o.RootPath == mirror && o.RootRole == "mirror",
+                    "no primary, explicit --export-root: exports, origin names the mirror");
+            }
+            // Several primaries: the DEFAULT refuses, an explicit root still exports and names that root.
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, One(@"D:\one\a.flac", 'a', 120), @"D:\one", "primary", true, "import", "1", "fixture", null, null);
+                ImportCommand.ExecuteEntries(store, One(@"D:\two\b.flac", 'b', 121), @"D:\two", "primary", true, "import", "1", "fixture", null, null);
+                var outP = d.P("mbxmoods.json");
+                assert(Refused(() => ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP }), out var why2) && why2.Contains("2 primary roots") && !File.Exists(outP),
+                    $"several primaries, default selection: refused, no file ({why2})");
+                var r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP, ExportRoot = @"D:\two" });
+                assert(r.Published && CatalogOrigin.TryRead(outP, out var o) && o.RootPath == @"D:\two" && o.RootRole == "primary",
+                    "several primaries, explicit --export-root: exports, origin names the chosen one");
+            }
+            // The root is read inside the export's snapshot: a concurrent commit that adds a SECOND primary after the snapshot began
+            // and before the root is picked is invisible — the default pick still sees one primary (outside the snapshot it would refuse).
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, One(@"D:\one\a.flac", 'a', 120), @"D:\one", "primary", true, "import", "1", "fixture", null, null);
+                long g0;
+                using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) g0 = os.Dal.Generation();
+                int fired = 0;
+                ExportCommand.BeforeRootPicked = () =>
+                {
+                    fired++;
+                    ImportCommand.ExecuteEntries(store, One(@"D:\late\z.flac", 'z', 99), @"D:\late", "primary", true, "import", "1", "concurrent", null, null);
+                };
+                var outP = d.P("mbxmoods.json");
+                var r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP });
+                ExportCommand.BeforeRootPicked = null;
+                assert(fired == 1 && r.Published && CatalogOrigin.TryRead(outP, out var o) && o.RootPath == @"D:\one" && o.RootRole == "primary" && o.Generation == g0,
+                    $"snapshot: root, entries and generation from one snapshot — the concurrent second primary is not seen ({fired}/{r.Published}/gen {g0})");
+                using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    assert(os.Dal.ListRoots().Count == 2 && os.Dal.Generation() > g0, "snapshot: the concurrent commit did land (2 roots, generation advanced)");
+            }
+            // Reading: a catalog without the keys is not malformed (the file binding never depends on them); a wrong-typed rootPath is.
+            using (var d = new Dir())
+            {
+                var noKeys = d.P("nokeys.json");
+                Put(noKeys, "{\"version\":\"1.0\",\"trackCount\":0,\"contract\":\"mbxmoods.v2\",\"origin\":{\"kind\":\"export\",\"generation\":3,\"sidecarSha256\":\"" + new string('0', 64) + "\"},\"tracks\":{}}");
+                assert(CatalogOrigin.TryRead(noKeys, out var nk) && nk.Generation == 3 && nk.RootPath == null && nk.RootRole == null, "no root keys: reads, generation intact, rootPath/rootRole absent (null)");
+                var bad = d.P("bad.json");
+                Put(bad, "{\"version\":\"1.0\",\"trackCount\":0,\"contract\":\"mbxmoods.v2\",\"origin\":{\"generation\":3,\"rootPath\":7},\"tracks\":{}}");
+                assert(!CatalogOrigin.TryRead(bad, out _), "rootPath of the wrong type: malformed origin -> false, never a throw");
+            }
         }
 
         /// <summary>Keeper review of c89d48a, P1: a commit by another connection between the export's reads must not

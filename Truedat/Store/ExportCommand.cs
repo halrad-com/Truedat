@@ -59,6 +59,10 @@ namespace Truedat.Store
         /// (keeper review of c89d48a, P1). Null in production.</summary>
         internal static Action? AfterEntriesRead;
 
+        /// <summary>Self-test seam (store-intent.md item 8): fires inside the export's read snapshot, before the root is picked, so a
+        /// test can commit a second primary root in between and prove the published root comes from the snapshot. Null in production.</summary>
+        internal static Action? BeforeRootPicked;
+
         /// <summary>Self-test seam: runs after the triple is published and before key-moves.json, so a test can fail the
         /// verb AFTER publication and prove the record keeps the facts (keeper review of 9706c5b, P2). Null in production.</summary>
         internal static Action? AfterPublished;
@@ -146,6 +150,7 @@ namespace Truedat.Store
             // c89d48a, P1). A deferred read transaction: under WAL it blocks no writer and sees none.
             using var snapshot = os.Db.BeginRead();
             r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(os.Db); r.Generation = os.Dal.Generation();
+            BeforeRootPicked?.Invoke();   // self-test seam: a concurrent commit lands here, inside the snapshot (item 8)
             var root = PickRoot(os.Dal, o.ExportRoot);
 
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
@@ -161,6 +166,8 @@ namespace Truedat.Store
             {
                 Kind = "export", MachineId = os.Machine.Id, StoreSchema = r.StoreSchema,
                 Truedat = VersionInfo.Display, Generation = r.Generation,
+                // store-intent.md item (8): the selected row exactly as stored, read in this snapshot — never the typed --export-root.
+                RootPath = root.Path, RootRole = root.Role,
             };
             r.Root = root.Path; r.OutPath = outFull; r.Entries = dict.Count;
             r.SidecarPath = Path.ChangeExtension(outFull, ".mbxs");
