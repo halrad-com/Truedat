@@ -130,6 +130,33 @@ namespace Truedat.Edges
         internal static bool ArraysCaptured(StoreDal dal, string contentKey, string producerVersion)
             => dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;", contentKey, producerVersion) > 0;
 
+        /// <summary>hub:H02 (TDA 086, keeper 108, RBA 068/069): the store_meta row naming the store's SELECTED edge producer version — the
+        /// one version whose rows a store reader serves, exactly the version the companion is built with. It is the authoritative
+        /// selected/current version, NOT evidence that a companion file was published: it is committed before the publish, which can
+        /// still fail. The value is the producer_version string byte for byte (today 'edges@v2;e30;p10'), compared, never parsed.
+        /// Absent = no store-backed edges declared (the reader falls back to the companion, labelled).</summary>
+        internal const string SelectedVersionKey = "edges.selectedVersion";
+
+        /// <summary>The ONE stamp helper both publish sites (--store-export, --edges-export incl. the scan's rewrite) call with the very
+        /// value they then build the companion from, BEFORE opening their read snapshot — never nested inside BeginRead. It stamps
+        /// only a store that holds edge results at all (any version): a store that never captured edges stays unstamped, while a store
+        /// holding only older-version rows is restamped to the current version, so a reader serves exactly what that companion would
+        /// (nothing). A CHANGED value is written with a generation advance in one write transaction (a different version changes the
+        /// rows a reader serves — a visible mutation, T07); an unchanged value writes nothing. Returns true when it changed.</summary>
+        internal static bool StampSelectedVersion(StoreDal dal, string producerVersion)
+        {
+            if (!dal.HasAnyEdgeResults()) return false;
+            if (dal.MetaGet(SelectedVersionKey) == producerVersion) return false;
+            using var tx = dal.Db.BeginTransaction();
+            var before = dal.MetaGet(SelectedVersionKey);
+            if (before == producerVersion) return false;   // re-read under the write lock: another writer may have stamped it
+            dal.MetaSet(SelectedVersionKey, producerVersion);
+            long g = dal.AdvanceGeneration();
+            tx.Complete();
+            StoreLog.Info($"edges: selected version {(before == null ? "stamped" : $"changed from {before} to")} {producerVersion} (generation {g})");
+            return true;
+        }
+
         internal sealed class DropArraysResult { public long Rows, Tracks, Bytes; }
 
         /// <summary>The explicit discard verb: clears the opt-in arrays (and their dtype) from every edge row that holds them, keeping the

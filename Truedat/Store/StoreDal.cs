@@ -493,6 +493,10 @@ namespace Truedat.Store
             => Row("SELECT txt FROM value WHERE producer_key = 'edges' AND producer_version = ? AND segment_id = 0 AND field = 'edges.extractor' GROUP BY txt ORDER BY count(*) DESC LIMIT 1;", s => s.GetString(0), null, producerVersion);
 
         /// <summary>Every content key holding an edge row (the whole-track status word) at this producer version, in key order.</summary>
+        /// <summary>hub:H02: whether the store holds an edge result of ANY version (an 'edges.status' whole-track row) — the stamp's gate.</summary>
+        internal bool HasAnyEdgeResults()
+            => ScalarLong("SELECT EXISTS (SELECT 1 FROM value WHERE producer_key = 'edges' AND segment_id = 0 AND field = 'edges.status');") == 1;
+
         internal List<string> ContentKeysWithEdges(string producerVersion)
         {
             var list = new List<string>();

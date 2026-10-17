@@ -136,6 +136,10 @@ namespace Truedat.Store
             if (!string.IsNullOrEmpty(outDir)) Directory.CreateDirectory(outDir!);
 
             using var os = OpenStore.Open(o.StorePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+            // hub:H02: the selected edge version is stamped FIRST, in its own write transaction (advancing the generation only when it
+            // changes), from the same value the companion below is built with — never inside the read snapshot that follows.
+            var producerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
+            global::Truedat.Edges.EdgeStore.StampSelectedVersion(os.Dal, producerVersion);
             // ONE snapshot for everything the export reads — root, entries, generation, edge rows, key moves — so a
             // commit by another connection in between cannot label generation-N entries with N+1 (keeper review of
             // c89d48a, P1). A deferred read transaction: under WAL it blocks no writer and sees none.
@@ -150,7 +154,8 @@ namespace Truedat.Store
 
             // Store-v3 T07: --store-export means the TRIPLE — catalog (v2 header: contract + origin, the sidecar bound
             // by hash), sidecar and companion — published in the ruled order. The generation is the store's current one;
-            // an export re-emits it, it does not advance it (only mutations do).
+            // an export re-emits it, it does not advance it (only mutations do — the selected-version restamp above is one,
+            // committed before this snapshot).
             var origin = new CatalogOrigin
             {
                 Kind = "export", MachineId = os.Machine.Id, StoreSchema = r.StoreSchema,
@@ -159,7 +164,6 @@ namespace Truedat.Store
             r.Root = root.Path; r.OutPath = outFull; r.Entries = dict.Count;
             r.SidecarPath = Path.ChangeExtension(outFull, ".mbxs");
             r.CompanionPath = Path.Combine(outDir ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
-            var producerVersion = new global::Truedat.Edges.EdgeSettings().ProducerVersion;
             bool hasEdges = os.Dal.ContentKeysWithEdges(producerVersion).Count > 0;
             var build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
             Func<string, bool>? companion = !hasEdges ? null : tmp =>

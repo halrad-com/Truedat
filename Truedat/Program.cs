@@ -10599,6 +10599,9 @@ namespace Truedat
             {
                 var now = DateTime.UtcNow.ToString("o");
                 using var os = global::Truedat.Store.OpenStore.Open(storePath, create: false, VersionInfo.Display, now);
+                // hub:H02: stamp the selected edge version FIRST, in its own write transaction, from the same value the companion is
+                // built with below — never inside the read snapshot that follows.
+                global::Truedat.Edges.EdgeStore.StampSelectedVersion(os.Dal, settings.ProducerVersion);
                 // ONE read snapshot for the generation and the rows (keeper review of 9706c5b): a commit between them would
                 // stamp the file with N while the rows — or the record — describe N+1.
                 using var snapshot = os.Db.BeginRead();
@@ -14436,6 +14439,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.StoreResultSelfTest.Run(Assert);   // T11 store-result.json (architect-2)
             global::Truedat.Store.VerdictSelfTest.Run(Assert);       // T19 verdict projection (architect-2)
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
+            global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);
