@@ -2893,6 +2893,25 @@ namespace Truedat
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || edgesExportMode;
             // Store and edges are OFF unless the command line or the config file turns them on (operator 2026-10-13). The config's
             // Default is the value that runs; there is no second, hard-coded default here.
+            // A store that already exists is adopted even though nothing on this command line asked for
+            // one: the documented upgrade (--store-import, then --store --edges --refresh) otherwise leaves
+            // a populated store that the next plain `truedat` would not open, and with store-authoritative
+            // scans the catalog and the store then diverge silently.
+            bool storeAdopted = false;
+            if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, storeFileExists: false) || storePath == null)
+            {
+                var probeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out _);
+                if (probeCatalog != null)
+                {
+                    var probe = global::Truedat.Store.StoreLocation.Resolve(null, storeDir, probeCatalog, out _);
+                    if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, probe != null && File.Exists(probe)))
+                    {
+                        storePath = "";
+                        storeAdopted = true;
+                        if (ShouldAdoptEdgesWithStore(true, noEdges)) _stageOpts.Edges = true;
+                    }
+                }
+            }
             if (storeVerb || storePath != null)
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
@@ -2914,6 +2933,8 @@ namespace Truedat
                 }
                 else
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
+                if (storeAdopted && storePath != null)
+                    Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 if (storePath != null)
                 {
                     global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
@@ -16634,6 +16655,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // another bitrate estimate and 9% high. So the gate abstains instead of inventing a
                 // reference, which is what a 0 reference already means everywhere it is consumed.
                 Assert(FormatLacksRecordedDuration("sample-moon-white-petals.aac"), "adts: a raw .aac records no duration");
+            }
+
+            // --- a store that already exists is not optional ---
+            {
+                // Creating a store (and its artifacts) unasked is what stays off - that was the
+                // 2026-10-13 ruling after the footprint measurement. Ignoring one the operator
+                // deliberately built is a different act, and a silent one: the documented upgrade
+                // (--store-import, then --store --edges --refresh) leaves a populated store that the
+                // very next plain `truedat` would not open, so the catalog and the store diverge with
+                // nothing on screen saying so. With store-authoritative scans that is worse than a
+                // missing feature.
+                Assert(ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true),
+                    "adopt: a plain scan uses a store that already exists");
+                Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: false),
+                    "adopt: no store on disk means no store is created");
+                Assert(!ShouldAdoptExistingStore(noStore: true, storeAsked: false, storeVerb: false, storeFileExists: true),
+                    "adopt: --no-store still wins over an existing store");
+                Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: true, storeVerb: false, storeFileExists: true),
+                    "adopt: an explicit --store needs no adoption (it resolves on its own)");
+                Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: true, storeFileExists: true),
+                    "adopt: a store verb resolves its own path, never through adoption");
+                Assert(ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false), "adopt: edges come on with an adopted store");
+                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: true), "adopt: --no-edges still wins");
+                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: false, noEdges: false), "adopt: no adopted store means edges stay as they were");
                 Assert(FormatLacksRecordedDuration("X.AAC"), "adts: the check ignores case");
                 Assert(!FormatLacksRecordedDuration("x.m4a"), "adts: an .m4a container DOES record a duration");
                 Assert(!FormatLacksRecordedDuration("x.mp3"), "adts: .mp3 is not in this class");
@@ -21712,6 +21757,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         /// <summary>True when the file's format records no duration, so any reported length is an
         /// estimate rather than a fact.</summary>
+        /// <summary>True when a scan should adopt a store that already exists at the default
+        /// location even though nothing on this command line asked for one.</summary>
+        /// This is the surviving half of the old <c>StoreOnByDefault</c> rule, which read
+        /// <c>!explicitChoice &amp;&amp; (!catalogExists || storeExists)</c>. The <c>!catalogExists</c> arm
+        /// created a store (and its artifacts) on a fresh library and is what the 2026-10-13 footprint
+        /// ruling removed; the <c>storeExists</c> arm only ever used one that was already there, and was
+        /// removed with it in b9b27ec by mistake. Restored here, alone.
+        internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists)
+            => !noStore && !storeAsked && !storeVerb && storeFileExists;
+
+        /// <summary>Edges follow an adopted store: a store built by the documented upgrade holds edge
+        /// rows, and leaving edges off would let those go stale exactly as the store itself would.
+        /// --no-edges is still the one-run way past it.</summary>
+        internal static bool ShouldAdoptEdgesWithStore(bool storeAdopted, bool noEdges)
+            => storeAdopted && !noEdges;
+
         internal static bool FormatLacksRecordedDuration(string? path)
         {
             // Raw ADTS only. An .m4a/.mp4 AAC reports the same codec but DOES carry a sample

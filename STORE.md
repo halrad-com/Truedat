@@ -1,4 +1,4 @@
-# The truedat store (preview, v2)
+﻿# The truedat store (preview, v2)
 
 A SQLite database, `truedat.db`, that holds everything `mbxmoods.json` holds and more, keyed by
 identity rather than by path. `mbxmoods.json` stays exactly what MBXHub reads; the store is a second
@@ -13,9 +13,12 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- The store and edges are off unless `--store` / `--edges` or the `store` / `edges` config keys turn them
-  on. An existing catalog needs `--store-import` first, so a scan never builds a store holding only the
-  tracks it analysed. `--no-store` / `--no-edges` override a config key for one run. A config key never
+- The store and edges are off until there is a store, then they are on. Nothing creates one unasked:
+  `--store` / `--edges`, the `store` / `edges` config keys, or `--store-import` make the first one. **Once a
+  store exists at the resolved location a plain `truedat` uses it, with edges**, because a store the scan
+  ignores drifts out of step with the catalog it is supposed to be authoritative over. An existing catalog
+  still needs `--store-import` first, so a scan never builds a store holding only the tracks it analysed.
+  `--no-store` / `--no-edges` override for one run. A config key never
   makes a plain command refuse (a per-file mode without `--moods` skips the store, an extractor older
   than `.5` skips edges, each with a note).
 - Beside the store: `artifacts\pending\` (in-flight edge stashes, swept), `store-result.json`,

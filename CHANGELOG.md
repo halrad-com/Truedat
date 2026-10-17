@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat ships as stage tags on `main` — `DV` (design validation), `EV` (engineering
@@ -7,6 +7,26 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
 
+
+## [0.5.5.3-EV2.1] — 2026-10-17
+
+### Fixed
+
+- **A store that already exists is used again.** Nothing creates one unasked, but once a store is at the
+  resolved location a plain `truedat` opens it and turns edges on, and says so on the `Store:` line. The
+  documented upgrade (`--store-import`, then a refresh) previously left a populated store that the next
+  ordinary scan ignored, so the catalog and the store diverged with nothing on screen saying so. No config
+  step is needed any more; `--no-store` / `--no-edges` still override for one run.
+- **The stall watchdog no longer kills healthy work.** It counted only CPU time, and an extractor blocked on
+  IO accrues none while working normally — so the full-file md5/loudness pass read as a hang under a busy
+  scan. Read bytes now count as progress too and the idle window is 180 s. Measured: an 849 MB FLAC killed
+  at 85.7 s completed in 701 s untouched. If large files have been landing in `mbxmoods-errors.csv` as
+  stalled, re-run with `--retry-errors`.
+- **The decode-coverage gate stops inventing a length.** Raw ADTS (`.aac`) records no duration, so every
+  reported figure is file size over an assumed bitrate — one 159.8 s file was reported as 2023.3 s by
+  TagLib, 180.9 s by MusicBee, 174.2 s by ffprobe and 163 s by VLC. Four `.aac` files decoded in full and
+  were failed anyway as `decode-7%`, losing their catalog entries. A format that records no length now gets
+  no coverage verdict, and where two claims exist the smaller one is the reference.
 
 ## [0.5.5.3-DV2] — 2026-10-16
 
