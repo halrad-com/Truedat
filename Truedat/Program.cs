@@ -4292,8 +4292,8 @@ namespace Truedat
                     // analyzed but unidentifiable/short-decoded is a FAIL; do not write
                     // the entry. tagsOk via DurationMs (TagLib refusal => empty FileTags).
                     {
-                        double afClaimedSec = afTags.DurationMs > 0 ? afTags.DurationMs / 1000.0
-                            : (afFingerprintV1?.DurationMs ?? 0) / 1000.0;
+                        double afClaimedSec = GateCoverageReferenceSec(
+                            analyzeFilePath, afFingerprintV1?.DurationMs, afTags.DurationMs);
                         var (healthPass, healthFailed) = ClassifyTrackHealth(
                             essentiaOk: true,
                             decodedSec: features.AnalyzedLengthSec,
@@ -5081,8 +5081,8 @@ namespace Truedat
                         // yields an EMPTY FileTags, and readable audio always has a
                         // duration, so DurationMs==0 is the refusal signature.
                         {
-                            double flClaimedSec = tags.DurationMs > 0 ? tags.DurationMs / 1000.0
-                                : (fingerprintV1?.DurationMs ?? 0) / 1000.0;
+                            double flClaimedSec = GateCoverageReferenceSec(
+                                filePath, fingerprintV1?.DurationMs, tags.DurationMs);
                             var (healthPass, healthFailed) = ClassifyTrackHealth(
                                 essentiaOk: true,
                                 decodedSec: features.AnalyzedLengthSec,
@@ -6445,7 +6445,7 @@ namespace Truedat
                             var (healthPass, healthFailed) = ClassifyTrackHealth(
                                 essentiaOk: true,
                                 decodedSec: feat.AnalyzedLengthSec,
-                                claimedSec: GateClaimedSec(fingerprintV1?.DurationMs, t.TotalTimeMs),
+                                claimedSec: GateCoverageReferenceSec(t.Location, fingerprintV1?.DurationMs, t.TotalTimeMs),
                                 decodeMinFraction: DecodeCoverageMinFraction,
                                 fingerprintOk: fingerprintV1 != null,
                                 shaOk: !string.IsNullOrEmpty(audioStreamSha256),
@@ -6460,7 +6460,7 @@ namespace Truedat
                                     $"analysis incomplete: {comps}", sizeMb, analyzeDuration.TotalSeconds, comps, errorsCsvLock);
                                 AppendErrorLog(errorsLogPath, "scan", t.Location, comps,
                                     msResults.FingerprintError, null, feat.AnalyzedLengthSec,
-                                    GateClaimedSec(fingerprintV1?.DurationMs, t.TotalTimeMs), null, errorsCsvLock);
+                                    GateCoverageReferenceSec(t.Location, fingerprintV1?.DurationMs, t.TotalTimeMs), null, errorsCsvLock);
                                 Console.WriteLine($"  FAILED: {t.Artist} - {t.Name}: {comps}  [{Path.GetFileName(t.Location)}]");   // parallel workers: name the track on the line itself
                                 Interlocked.Increment(ref failed);
                                 trackClass = "skip·failed";
@@ -14507,9 +14507,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // decoded materially more, so a genuinely truncated source (whose transcode is
             // also short) still fails the gate downstream rather than being papered over.
             {
-                double refDurSec = knownDurationSec > 0
-                    ? knownDurationSec
-                    : (fingerprintTask.Result.fp?.DurationMs ?? 0) / 1000.0;
+                double refDurSec = FormatLacksRecordedDuration(src.SourcePath)
+                    ? 0.0   // no recorded length -> nothing to under-decode against
+                    : (knownDurationSec > 0
+                        ? knownDurationSec
+                        : (fingerprintTask.Result.fp?.DurationMs ?? 0) / 1000.0);
                 if (ShouldRetryUnderDecode(features?.AnalyzedLengthSec, refDurSec, DecodeCoverageMinFraction)
                     && _ffmpegPath.Value != null)
                 {
@@ -16615,6 +16617,35 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(GateClaimedSec(2023300, 180917) == 180.917, "gate-dur: raw-ADTS TagLib inflation loses to the smaller XML claim");
                 Assert(GateClaimedSec(180917, 2023300) == 180.917, "gate-dur: inflation on either side loses to the smaller claim");
                 Assert(GateClaimedSec(224400, 224400) == 224.4, "gate-dur: agreeing sources keep the truncation reference");
+            }
+
+            // --- scan health: a format that records no length has no coverage question to ask ---
+            {
+                // Raw ADTS (.aac) stores no duration ANYWHERE: there is no container box holding a
+                // sample count, so every reported length is file_size x 8 / an ASSUMED bitrate, and
+                // VBR content makes that assumption read low and the duration come out long.
+                // Measured 2026-10-17 on sample-moon-white-petals.aac (2,616,118 bytes; true length
+                // 159.82 s by full ffmpeg decode, i.e. 131 kbps average): TagLib said 2023.3 s
+                // (~10 kbps - a misread frame header, not a sampling error), MusicBee 180.9 s
+                // (~116 kbps), ffprobe 174.2 s (~120 kbps), VLC 163 s (~128 kbps). Essentia decoded
+                // 159.8 s - the WHOLE file - and the gate failed it as decode-7% against TagLib's
+                // number. All four .aac files in that set decoded to the decisecond; not one was
+                // short and not one was corrupt. ffprobe is no use as a tiebreak here because it is
+                // another bitrate estimate and 9% high. So the gate abstains instead of inventing a
+                // reference, which is what a 0 reference already means everywhere it is consumed.
+                Assert(FormatLacksRecordedDuration("sample-moon-white-petals.aac"), "adts: a raw .aac records no duration");
+                Assert(FormatLacksRecordedDuration("X.AAC"), "adts: the check ignores case");
+                Assert(!FormatLacksRecordedDuration("x.m4a"), "adts: an .m4a container DOES record a duration");
+                Assert(!FormatLacksRecordedDuration("x.mp3"), "adts: .mp3 is not in this class");
+                Assert(!FormatLacksRecordedDuration("x.flac"), "adts: .flac is not in this class");
+                Assert(GateCoverageReferenceSec("x.aac", 2023300, 180917) == 0.0, "adts: no recorded duration -> no coverage basis (the gate abstains)");
+                Assert(GateCoverageReferenceSec("x.m4a", 2023300, 180917) == 180.917, "adts: a container keeps the smaller-claim rule");
+                Assert(GateCoverageReferenceSec("x.flac", 224400, 224400) == 224.4, "adts: ordinary formats are unchanged");
+                // the abstention has to carry through to the two things that consumed the reference
+                var adtsRef = GateCoverageReferenceSec("x.aac", 2023300, 180917);
+                var (adtsPass, _) = ClassifyTrackHealth(true, 159.82, adtsRef, 0.95, true, true, false, true, false, true, false, true);
+                Assert(adtsPass, "adts: a fully-decoded raw .aac passes the health gate");
+                Assert(!ShouldRetryUnderDecode(159.82, adtsRef, 0.95), "adts: no reference -> no spurious transcode retry");
             }
 
             // --- scan health: the Essentia stall watchdog needs more than CPU to call a hang ---
@@ -21678,6 +21709,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// while working normally — so read bytes count as progress too.</summary>
         internal static bool EssentiaProgressed(TimeSpan cpu, TimeSpan lastCpu, ulong ioReadBytes, ulong lastIoReadBytes)
             => cpu > lastCpu || ioReadBytes > lastIoReadBytes;
+
+        /// <summary>True when the file's format records no duration, so any reported length is an
+        /// estimate rather than a fact.</summary>
+        internal static bool FormatLacksRecordedDuration(string? path)
+        {
+            // Raw ADTS only. An .m4a/.mp4 AAC reports the same codec but DOES carry a sample
+            // count in its container, so this keys on the format, never on the codec name.
+            var ext = Path.GetExtension(path ?? "");
+            return ext.Equals(".aac", StringComparison.OrdinalIgnoreCase)
+                || ext.Equals(".adts", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The decode-coverage reference: <see cref="GateClaimedSec"/>, except that a format
+        /// recording no duration yields 0 - "no basis to judge" - rather than an invented claim.</summary>
+        internal static double GateCoverageReferenceSec(string? path, int? fingerprintDurationMs, int xmlTotalTimeMs)
+            => FormatLacksRecordedDuration(path) ? 0.0 : GateClaimedSec(fingerprintDurationMs, xmlTotalTimeMs);
 
         internal static double GateClaimedSec(int? fingerprintDurationMs, int xmlTotalTimeMs)
         {
