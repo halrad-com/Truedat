@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Truedat.Store
 {
@@ -12,6 +13,8 @@ namespace Truedat.Store
     internal sealed class ScanSinkReport
     {
         public bool Ok; public string? Error;
+        /// <summary>T18: store locations retired by this flush (moved files' old paths) and cache-hit refreshes written as copy facts.</summary>
+        public int Retired, CopyOnly;
         /// <summary>The exception behind <see cref="Error"/> (T18, keeper 131 / TDA 119): the scan's checkpoint classifies the CAUSE from it
         /// (SQLite result code, Windows HResult) instead of a message string. Never serialised.</summary>
         public System.Exception? ErrorException;
@@ -33,6 +36,7 @@ namespace Truedat.Store
             Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
             Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
             Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost; StickyRowsRefreshed += r.StickyRowsRefreshed;
+            Retired += r.Retired; CopyOnly += r.CopyOnly;
         }
     }
 
@@ -45,6 +49,11 @@ namespace Truedat.Store
     {
         static readonly ConcurrentDictionary<string, TrackEntry> _entries = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
         static readonly ConcurrentQueue<ScanFailure> _failures = new ConcurrentQueue<ScanFailure>();
+        /// <summary>T18: paths whose recorded entry is a CACHE-HIT refresh (copy facts, a re-key) rather than a fresh measurement. Written under
+        /// the import producer's shared run, never as an Essentia observation (a cache hit measured nothing).</summary>
+        static readonly ConcurrentDictionary<string, byte> _copyOnly = new ConcurrentDictionary<string, byte>(PathComparer.Instance);
+        /// <summary>T18: catalog keys the scan removed (a moved file's old path): their store location is retired in the flush's transaction.</summary>
+        static readonly ConcurrentDictionary<string, byte> _retire = new ConcurrentDictionary<string, byte>(PathComparer.Instance);
 
         /// <summary>The extractor build the scan ran with (producer version of every run row); set at scan start.</summary>
         internal static string ExtractorBuild = "unknown";
@@ -72,7 +81,7 @@ namespace Truedat.Store
         internal static int PendingArtifacts => _artifacts.Count;
         internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } Total = new ScanSinkReport { Ok = true }; }
+        internal static void Reset() { _entries.Clear(); _copyOnly.Clear(); _retire.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } Total = new ScanSinkReport { Ok = true }; }
 
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
         /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
@@ -177,12 +186,41 @@ namespace Truedat.Store
             lock (_tieLock)
             {
                 _entries[path] = entry;
+                _copyOnly.TryRemove(path, out _);   // a fresh analysis supersedes a cache-hit refresh of the same path
+                _retire.TryRemove(path, out _);
                 if (analysedPath != null && _stashed.TryRemove(analysedPath, out var pending)) _artifacts[path] = pending;
                 if (analysedPath != null && _stashedEdges.TryRemove(analysedPath, out var edges)) _edges[path] = edges;
             }
         }
 
         static readonly object _tieLock = new object();
+
+        /// <summary>T18: the scan changed this catalog entry WITHOUT analysing it (a cache-hit tier rebuilt it: lastModified, fingerprint, tags,
+        /// a re-key). Under a store-authoritative scan the store must hold it too, as copy facts — written under the import producer, so it is
+        /// never recorded as a measurement.</summary>
+        internal static void RecordCacheHit(string path, TrackEntry entry)
+        {
+            lock (_tieLock)
+            {
+                if (_entries.ContainsKey(path) && !_copyOnly.ContainsKey(path)) return;   // a fresh analysis of this path is already pending: it wins
+                _entries[path] = entry;
+                _copyOnly[path] = 1;
+                _retire.TryRemove(path, out _);
+            }
+        }
+
+        /// <summary>T18: the scan removed this catalog key (a file moved; the old path is gone). Its store location is retired.</summary>
+        internal static void RecordRetire(string path)
+        {
+            lock (_tieLock)
+            {
+                _retire[path] = 1;
+                _entries.TryRemove(path, out _); _copyOnly.TryRemove(path, out _);
+            }
+        }
+
+        /// <summary>Entries recorded and not yet committed to the store (fresh analyses + cache-hit refreshes): what a store-side loss would cost.</summary>
+        internal static int PendingEntries => _entries.Count;
 
         internal static void RecordFailure(string path, string components, string error, double durationSec)
             => _failures.Enqueue(new ScanFailure { Path = path, Components = components, Error = error, DurationSec = durationSec });
@@ -203,14 +241,23 @@ namespace Truedat.Store
             var failures = new List<ScanFailure>();
             var artifacts = new Dictionary<string, string>(PathComparer.Instance);
             var edges = new Dictionary<string, string>(PathComparer.Instance);
+            var copyOnly = new HashSet<string>(PathComparer.Instance);
+            var retire = new List<string>();
             lock (_tieLock)
             {
                 foreach (var kv in _entries) entries[kv.Key] = kv.Value;
-                foreach (var k in entries.Keys) { _entries.TryRemove(k, out _); if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p; if (_edges.TryRemove(k, out var e)) edges[k] = e; }
+                foreach (var k in entries.Keys)
+                {
+                    _entries.TryRemove(k, out _);
+                    if (_copyOnly.TryRemove(k, out _)) copyOnly.Add(k);
+                    if (_artifacts.TryRemove(k, out var p)) artifacts[k] = p;
+                    if (_edges.TryRemove(k, out var e)) edges[k] = e;
+                }
+                foreach (var k in _retire.Keys.ToList()) if (_retire.TryRemove(k, out _)) retire.Add(k);
             }
             while (_failures.TryDequeue(out var f)) failures.Add(f);
             Total.StorePath = storePath;
-            if (entries.Count == 0 && failures.Count == 0) { if (final) SweepLeftovers(); report.Ok = true; return report; }
+            if (entries.Count == 0 && failures.Count == 0 && retire.Count == 0) { if (final) SweepLeftovers(); report.Ok = true; return report; }
             try
             {
                 // store-v3 T11: the scan's record (store-result.json, the hub:H03d shape) is written by the scan itself at the
@@ -218,13 +265,14 @@ namespace Truedat.Store
                 // ONE transaction per flush (TDA P3 on b4622f7): a failed flush re-queues the whole batch, so nothing of it may have committed
                 // — with per-5,000 batches the retry would under-count the committed batches' edges and their spills would be gone.
                 var r = ImportCommand.ExecuteEntries(storePath, entries, null, "primary", true, "essentia", extractorBuild,
-                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, null, rootHints, artifacts, edges, batchSize: int.MaxValue);
+                    $"scan:{Environment.MachineName}@{DateTime.UtcNow:o}", failures, null, rootHints, artifacts, edges, batchSize: int.MaxValue,
+                    copyOnlyKeys: copyOnly, retirePaths: retire);
                 report.Ok = true; report.Entries = r.Entries; report.Failures = r.ErrorsRows; report.Unchanged = r.Unchanged; report.Drift = r.Drift;
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Remeasured = r.Remeasured; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
                 report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost; report.StickyRowsRefreshed = r.StickyRowsRefreshed;
-                report.StorePath = storePath;
+                report.StorePath = storePath; report.Retired = r.Retired; report.CopyOnly = copyOnly.Count;
             }
             catch (Exception ex)
             {
@@ -238,7 +286,8 @@ namespace Truedat.Store
                         // A path the workers re-recorded meanwhile is SUPERSEDED: its newer entry stays, and the old batch's artifact and
                         // edge stash files are deleted rather than re-attached to the newer entry (TDA re-review of b4622f7, not-blocking 2).
                         var superseded = new HashSet<string>(PathComparer.Instance);
-                        foreach (var kv in entries) if (!_entries.TryAdd(kv.Key, kv.Value)) superseded.Add(kv.Key);
+                        foreach (var kv in entries) if (!_entries.TryAdd(kv.Key, kv.Value)) superseded.Add(kv.Key); else if (copyOnly.Contains(kv.Key)) _copyOnly[kv.Key] = 1;
+                        foreach (var k in retire) if (!_entries.ContainsKey(k)) _retire[k] = 1;
                         foreach (var kv in artifacts) if (superseded.Contains(kv.Key) || !_artifacts.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
                         foreach (var kv in edges) if (superseded.Contains(kv.Key) || !_edges.TryAdd(kv.Key, kv.Value)) TryDelete(kv.Value);
                     }

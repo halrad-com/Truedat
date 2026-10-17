@@ -29,6 +29,8 @@ namespace Truedat.Store
         public string Catalog = ""; public string CatalogSha256 = ""; public long CatalogBytes;
         public List<string> Roots = new List<string>();
         public int Entries, Unrooted, EntitiesCreated, MatchedHash, MatchedPath, CreatedNoSha, Locations, LocationsNew, LegacySha, LegacyShaUnrecoverable, Conflicts;
+        /// <summary>T18: store locations this write retired (a scan's moved files' old paths).</summary>
+        public int Retired;
         public int ErrorsRows, SkippedRows, ReviewRows, VerifyRows, ReceiptRows;
         /// <summary>Ledger rows whose path is under no root (stream URLs, videos outside the library) — counted, not imported.</summary>
         public int LedgerUnrooted;
@@ -143,7 +145,8 @@ namespace Truedat.Store
         /// import@1 for a catalog); a non-import producer gets one run row per entry carrying its analysisDuration.</summary>
         internal static ImportReport ExecuteEntries(string? storePath, IReadOnlyDictionary<string, TrackEntry> entries, string? libraryRoot, string role, bool machineAdopt,
             string producerKey, string producerVersion, string source, IReadOnlyList<ScanFailure>? failures, string? resultPath, IEnumerable<string>? rootHints = null,
-            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, string>? pendingEdges = null, int batchSize = 5000)
+            IReadOnlyDictionary<string, string>? pendingArtifacts = null, IReadOnlyDictionary<string, string>? pendingEdges = null, int batchSize = 5000,
+            IReadOnlyCollection<string>? copyOnlyKeys = null, IReadOnlyCollection<string>? retirePaths = null)
         {
             var sw = Stopwatch.StartNew();
             var r = new ImportReport { Entries = entries.Count, Catalog = source };
@@ -162,6 +165,7 @@ namespace Truedat.Store
             // any, never from the analysed subset alone: two files under D:\Music\Tool must not mint D:\Music\Tool.
             var allPaths = new List<string>(entries.Keys);
             if (failures != null) foreach (var f in failures) allPaths.Add(f.Path);
+            if (retirePaths != null) allPaths.AddRange(retirePaths);
             var rootIds = new List<(string Path, long Id)>();
             var roots = new List<string>();
             using (var tx = db.BeginTransaction())
@@ -202,6 +206,16 @@ namespace Truedat.Store
                     sharedRun = dal.InsertRun(producerKey, producerVersion, null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", null, null, "in progress", source);
                     tx.Complete();
                 }
+            // T18: a scan's CACHE-HIT refreshes (copy facts, a re-key) are written under the import producer's shared run — a cache hit
+            // measured nothing, so it must never appear as an Essentia observation.
+            long copyOnlyRun = 0;
+            bool anyCopyOnly = runPerEntry && copyOnlyKeys != null && copyOnlyKeys.Count > 0;
+            if (anyCopyOnly)
+                using (var tx = db.BeginTransaction())
+                {
+                    copyOnlyRun = dal.InsertRun("import", "1", null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", null, null, "in progress", "scan-cache:" + source);
+                    tx.Complete();
+                }
             try
             {
                 // TDA N2 on 3244dbe: the scan's failure rows commit in the SAME transaction as the entries. Written afterwards in a second
@@ -219,15 +233,34 @@ namespace Truedat.Store
                     }
                     if (FailBeforeCommitForTest) throw new InvalidOperationException("fail-before-commit seam fired after the failure rows");
                 };
+                // T18: a moved file's old path is retired in the SAME transaction as the entries (never a store that holds the new path
+                // committed and the old one still present, or the reverse).
+                Action<StoreDal>? beforeCommit = writeFailures;
+                if (retirePaths != null && retirePaths.Count > 0)
+                    beforeCommit = d =>
+                    {
+                        writeFailures?.Invoke(d);
+                        foreach (var path in retirePaths)
+                        {
+                            var rf = RootFor(rootIds, path);
+                            if (rf == null) continue;
+                            CanonicalPath.Split(rf.Value.Path, path, out _, out var canon);
+                            var loc = d.FindLocation(rf.Value.Id, canon, out _);
+                            if (loc != null && d.RetireLocation(loc.Value, now)) { r.Retired++; r.VisibleChanges++; }
+                        }
+                    };
                 ImportEntriesCore(dal, db, batchSize, FailAfterEntriesForTest, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
-                    pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".", pendingEdges, writeFailures);
+                    pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".", pendingEdges, beforeCommit, anyCopyOnly ? copyOnlyKeys : null, copyOnlyRun);
                 sw.Stop();
                 if (!runPerEntry)
                     using (var tx = db.BeginTransaction()) { dal.UpdateRunOutcome(sharedRun, "ok", sw.ElapsedMilliseconds, null); tx.Complete(); }
+                if (anyCopyOnly)
+                    using (var tx = db.BeginTransaction()) { dal.UpdateRunOutcome(copyOnlyRun, "ok", sw.ElapsedMilliseconds, null); tx.Complete(); }
             }
             catch (Exception ex)
             {
                 if (!runPerEntry) try { using var tx = db.BeginTransaction(); dal.UpdateRunOutcome(sharedRun, "failed", sw.ElapsedMilliseconds, ex.Message); tx.Complete(); } catch { }
+                if (anyCopyOnly) try { using var tx = db.BeginTransaction(); dal.UpdateRunOutcome(copyOnlyRun, "failed", sw.ElapsedMilliseconds, ex.Message); tx.Complete(); } catch { }
                 StoreLog.Error($"{producerKey} write failed after {r.Locations} entries: {ex.Message}");
                 throw;
             }
@@ -252,11 +285,18 @@ namespace Truedat.Store
         static void ImportEntriesCore(StoreDal dal, SqliteDb db, int batchSize, int failAfterEntries, List<(string Path, long Id)> rootIds, bool mirror,
             IReadOnlyDictionary<string, TrackEntry> tracks, long sharedRun, string producerKey, string producerVersion, bool runPerEntry, string source, string now, ImportReport r,
             IReadOnlyDictionary<string, string>? pendingArtifacts = null, string? storeDir = null, IReadOnlyDictionary<string, string>? pendingEdges = null,
-            Action<StoreDal>? beforeCommit = null)
+            Action<StoreDal>? beforeCommit = null, IReadOnlyCollection<string>? copyOnlyKeys = null, long copyOnlyRun = 0)
         {
+            var copyOnly = copyOnlyKeys == null ? null : new HashSet<string>(copyOnlyKeys, PathComparer.Instance);
             var keys = tracks.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
             int processed = 0;
-            if (keys.Count == 0 && beforeCommit != null) { using var tx0 = db.BeginTransaction(); beforeCommit(dal); tx0.Complete(); return; }   // failures only
+            if (keys.Count == 0 && beforeCommit != null)
+            {
+                // Failure rows and/or T18 retirements only: one transaction; a retirement is a consumer-visible change, so it advances (T07).
+                using var tx0 = db.BeginTransaction(); int v0 = r.VisibleChanges; beforeCommit(dal);
+                if (r.VisibleChanges > v0) dal.AdvanceGeneration();
+                tx0.Complete(); r.Generation = dal.Generation(); return;
+            }
             for (int b = 0; b < keys.Count; b += Math.Max(1, batchSize))
             {
                 int end = (int)Math.Min(keys.Count, (long)b + Math.Max(1, batchSize));
@@ -280,7 +320,10 @@ namespace Truedat.Store
                     }
                     try
                     {
-                        ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges, deferred, spillLost);
+                        if (copyOnly != null && copyOnly.Contains(keys[i]))
+                            ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], copyOnlyRun, "import", "1", false, "scan-cache:" + source, now, r, null, storeDir, null, deferred, false);
+                        else
+                            ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges, deferred, spillLost);
                     }
                     catch (UnstorableEntryException ex)
                     {

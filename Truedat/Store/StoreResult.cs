@@ -130,6 +130,23 @@ namespace Truedat.Store
         /// analysis failures → failed): recorded for <see cref="FinishScan"/>. Later notes replace earlier ones.</summary>
         internal static void NoteScanOutcome(string outcome, string reason) { _scanOutcome = outcome; _scanReason = reason; }
 
+        /// <summary>T18a-d: a store-authoritative scan published the triple derived from the store (at a checkpoint or at the end). The scan's
+        /// pending record carries what the LAST publication wrote; a failed publication says so (the store is ahead of the files, T07) and
+        /// names its cause. FinishScan writes it at the process boundary.</summary>
+        internal static void NoteScanExport(ExportReport rep, Exception? error)
+        {
+            if (_scan == null) return;
+            bool ok = error == null && rep.Published;
+            _scan.Export = new StoreResultExport
+            {
+                Performed = ok, Generation = ok ? rep.Generation : (long?)null,
+                Catalog = ok ? Describe(rep.OutPath) : null, Sidecar = ok ? Describe(rep.SidecarPath) : null,
+                Companion = ok && rep.Companion ? Describe(rep.CompanionPath) : null,
+            };
+            _scan.Messages.RemoveAll(m => m.Id == "publish-failed");
+            if (!ok) _scan.Messages.Add(new StoreResultMessage { Id = "publish-failed", Text = "the files were not published from the store: " + (error?.Message ?? "the export did not publish") + "; the store is ahead of the files", Action = "truedat --store-export" });
+        }
+
         /// <summary>The final write, from the process boundary — EXACTLY ONCE: the pending record is cleared on the way out,
         /// so Main's finally after its crash catch is a no-op and cannot overwrite the CLR exit code with 0 (keeper recovery
         /// packet, item 4). Precedence: a store write failure is a failed verb whatever the exit code (the catalog is complete;

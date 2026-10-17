@@ -185,6 +185,15 @@ namespace Truedat.Store
             return FindLocation(rootId, canonicalPath, out _) ?? throw new StoreException($"location vanished after upsert: {displayPath}");
         }
 
+        /// <summary>T18 / T06 D1: retire a location (the file moved away or the entry was removed) — its media, description, copy row
+        /// and history stay; the export and the hub read present locations only. Returns true when it was present.</summary>
+        internal bool RetireLocation(long locationId, string nowUtc)
+        {
+            bool present = Row("SELECT state FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId) == "present";
+            if (present) Exec("UPDATE track_location SET state = 'retired', last_seen_utc = ? WHERE id = ?;", nowUtc, locationId);
+            return present;
+        }
+
         internal string? LocationLastModified(long locationId)
             => Row("SELECT last_modified_utc FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId);
 
@@ -335,7 +344,7 @@ namespace Truedat.Store
         {
             using var st = Db.Prepare(
                 "SELECT l.display_path, l.last_modified_utc, " + TrackEntryMapper.SelectList +
-                " FROM track_copy p JOIN track_location l ON l.id = p.location_id JOIN track_content c ON c.entity_id = l.entity_id WHERE l.root_id = ? ORDER BY l.id;");
+                " FROM track_copy p JOIN track_location l ON l.id = p.location_id JOIN track_content c ON c.entity_id = l.entity_id WHERE l.root_id = ? AND l.state = 'present' ORDER BY l.id;");
             st.Bind(1, rootId);
             while (st.Step())
             {

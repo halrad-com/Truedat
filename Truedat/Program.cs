@@ -1287,6 +1287,8 @@ namespace Truedat
         // v2 store (S1, C7): --store / --export-root as seen by verbs that run deep in the scan path
         // (RunDuplicates(outputDir)) and cannot see Main's locals. Null = the JSON-backed path, unchanged.
         static string? _storePath;
+        /// <summary>T18: the store root a store-authoritative scan loaded from and publishes (store-intent item 8); null without a store.</summary>
+        static string? _storeRootPath;
         static string? _storeExportRoot;
 
         /// <summary>--audit-verdicts: also emit the per-signal verdict vote trace.
@@ -4052,7 +4054,15 @@ namespace Truedat
 
                 // Pre-load moods for cache check (only meaningful when --moods is set).
                 ConcurrentDictionary<string, TrackEntry>? afMoodsTracks = null;
-                if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
+                if (_storePath != null && !string.IsNullOrEmpty(analyzeFileMoods))
+                {
+                    afMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                    var afLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, afMoodsTracks);   // T18i
+                    if (afLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, afLoad.Refusal!, 2); return; }
+                    _storeRootPath = afLoad.RootPath;
+                    if (afLoad.Note != null) Console.Error.WriteLine($"  store: {afLoad.Note}");
+                }
+                else if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
                 {
                     afMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     LoadExistingMoods(analyzeFileMoods!, afMoodsTracks);
@@ -4324,8 +4334,14 @@ namespace Truedat
                 {
                     afMoodsTracks ??= new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     afMoodsTracks[afKey] = trackEntry;
-                    SaveResults(analyzeFileMoods!, afMoodsTracks);
-                    if (_storePath != null) { RecordPerFileScanEntry(afKey, trackEntry, afStagedSrc?.Path); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3/C-A
+                    if (_storePath != null)
+                    {
+                        // T18: store-authoritative — a cache hit is recorded as copy facts, a fresh analysis as a measurement; commit, then publish.
+                        if (afHitTag == "analyzed") RecordPerFileScanEntry(afKey, trackEntry, afStagedSrc?.Path); else RecordPerFileCacheHit(afKey, trackEntry);
+                        var afFinal = RunAuthoritativeFinal(null, analyzeFileMoods!, afMoodsTracks.Keys);
+                        if (afFinal.Store != FinalWrite.Written && Environment.ExitCode == 0) Environment.ExitCode = 1;
+                    }
+                    else SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                     // --analyze-file never consults the ledger, but its success still makes a
                     // review record for this file stale — clear it beside the catalog it wrote.
@@ -4697,7 +4713,14 @@ namespace Truedat
 
                 // Accumulate for moods file (optional)
                 var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
-                if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
+                if (_storePath != null && !string.IsNullOrEmpty(analyzeFileMoods))
+                {
+                    var flLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, flMoodsTracks);   // T18i
+                    if (flLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, flLoad.Refusal!, 2); return; }
+                    _storeRootPath = flLoad.RootPath;
+                    if (flLoad.Note != null) Console.Error.WriteLine($"  store: {flLoad.Note}");
+                }
+                else if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
                     LoadExistingMoods(analyzeFileMoods!, flMoodsTracks);
                 ReportEdgesRefreshPrerequisites(analyzeFileMoods, flMoodsTracks.Values);   // keeper 083/084 N1, after the catalog load
 
@@ -4864,6 +4887,7 @@ namespace Truedat
                                     var flMtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(flMtimeEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                     if (flMtimeSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flMtimeEntry;
+                                    if (_storePath != null) RecordPerFileCacheHit(fullPath, flMtimeEntry);   // T18
                                     ClearReviewRecord(filePath);
                                     Interlocked.Increment(ref flProcessed);
                                     Interlocked.Increment(ref flCachedByMtime);
@@ -4892,6 +4916,7 @@ namespace Truedat
                                         var flHeadSmfmTag = _refreshSmfm && ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flHeadSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flHeadEntry;
+                                        if (_storePath != null) RecordPerFileCacheHit(fullPath, flHeadEntry);   // T18
                                         ClearReviewRecord(filePath);
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByHeadPath);
@@ -4927,6 +4952,7 @@ namespace Truedat
                                         var flShaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
+                                        if (_storePath != null) RecordPerFileCacheHit(fullPath, flShaPathEntry);   // T18
                                         ClearReviewRecord(filePath);
                                         Interlocked.Increment(ref flProcessed);
                                         Interlocked.Increment(ref flCachedByShaPath);
@@ -4963,6 +4989,7 @@ namespace Truedat
                                     var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
+                                    if (_storePath != null) RecordPerFileCacheHit(fullPath, flCrossShaEntry);   // T18
                                     ClearReviewRecord(filePath);
                                     RemoveIfMoved(flMoodsTracks, xs.OldKey!);
                                     Interlocked.Increment(ref flProcessed);
@@ -5082,10 +5109,16 @@ namespace Truedat
                             flPeriodicSave.AfterAnalysis(() =>
                             {
                                 var saveSw = System.Diagnostics.Stopwatch.StartNew();
-                                var catalogFailure = TrySaveCheckpointCatalog(analyzeFileMoods!, flMoodsTracks);
-                                if (catalogFailure != null) return catalogFailure;
-                                var storeFailure = CheckpointStoreOutcome(FlushStoreSink(flMoodsTracks.Keys, final: false));
-                                if (storeFailure != null) return storeFailure;
+                                if (_storePath != null)
+                                {
+                                    var authFailure = AuthoritativeCheckpoint(analyzeFileMoods!, flMoodsTracks.Keys);   // T18
+                                    if (authFailure != null) return authFailure;
+                                }
+                                else
+                                {
+                                    var catalogFailure = TrySaveCheckpointCatalog(analyzeFileMoods!, flMoodsTracks);
+                                    if (catalogFailure != null) return catalogFailure;
+                                }
                                 saveSw.Stop();
                                 Console.Error.WriteLine($"  [Saved {flMoodsTracks.Count} entries in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(flSw.Elapsed)} elapsed]");
                                 return CheckpointOutcome.Durable;
@@ -5140,11 +5173,13 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
                 {
                     // Keeper 132: a persistently failed stage is not attempted again here; the other half still writes.
-                    flFinal = RunFinalWrites(flCheckpointFailure, true, () =>
-                    {
-                        SaveResults(analyzeFileMoods!, flMoodsTracks);
-                        Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
-                    }, () => FlushStoreSink(flMoodsTracks.Keys));   // S2 C3
+                    flFinal = _storePath != null
+                        ? RunAuthoritativeFinal(flCheckpointFailure, analyzeFileMoods!, flMoodsTracks.Keys)   // T18
+                        : RunFinalWrites(flCheckpointFailure, true, () =>
+                        {
+                            SaveResults(analyzeFileMoods!, flMoodsTracks);
+                            Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
+                        }, () => FlushStoreSink(flMoodsTracks.Keys));   // S2 C3
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
@@ -5212,7 +5247,8 @@ namespace Truedat
                 if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal,
-                    flFinal.Catalog == FinalWrite.Written || string.IsNullOrEmpty(analyzeFileMoods) ? 0 : NotInCatalogFile(analyzeFileMoods!, flMoodsTracks).Count);
+                    _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries
+                    : flFinal.Catalog == FinalWrite.Written || string.IsNullOrEmpty(analyzeFileMoods) ? 0 : NotInCatalogFile(analyzeFileMoods!, flMoodsTracks).Count);
                 return;
             }
 
@@ -5563,7 +5599,21 @@ namespace Truedat
             // Single in-memory dataset — loaded from disk once, updated by workers, streamed on save.
             // Eliminates the old pattern of re-reading/re-parsing the entire JSON on every save.
             var allTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            int existingCount = LoadExistingMoods(moodsPath, allTracks);
+            int existingCount;
+            if (_storePath != null)
+            {
+                // T18i: a store in force makes the scan STORE-AUTHORITATIVE — it loads from the store, after the provenance precondition.
+                var storeLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, moodsPath, allTracks);
+                if (storeLoad.Refused)
+                {
+                    Environment.ExitCode = RefuseScan(_storePath, storeLoad.Refusal!, 2);
+                    if (auditLog) { _tee = null; tee?.Dispose(); }
+                    return;
+                }
+                _storeRootPath = storeLoad.RootPath; existingCount = storeLoad.Loaded;
+                if (storeLoad.Note != null) Console.WriteLine($"  store: {storeLoad.Note}");
+            }
+            else existingCount = LoadExistingMoods(moodsPath, allTracks);
             ReportEdgesRefreshPrerequisites(moodsPath, allTracks.Values);   // keeper 083/084 N1, after the catalog load
             Console.WriteLine($"Existing moods: {existingCount}");
 
@@ -6040,6 +6090,7 @@ namespace Truedat
                                         var mtimeSmfmTag = _refreshSmfm && ApplySmfmInPlace(mtimeEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                         if (mtimeSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = mtimeEntry;
+                                        if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, mtimeEntry);   // T18: the store holds every catalog change
                                         ClearReviewRecord(t.Location);
                                         Interlocked.Increment(ref cachedCount);
                                         trackClass = "cached";
@@ -6075,6 +6126,7 @@ namespace Truedat
                                                 var headSmfmTag = _refreshSmfm && ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = headEntry;
+                                                if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, headEntry);   // T18: the store holds every catalog change
                                                 ClearReviewRecord(t.Location);
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByHeadPath);
@@ -6120,6 +6172,7 @@ namespace Truedat
                                                 var shaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
+                                                if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, shaPathEntry);   // T18: the store holds every catalog change
                                                 ClearReviewRecord(t.Location);
                                                 Interlocked.Increment(ref cachedCount);
                                                 Interlocked.Increment(ref cachedByShaPath);
@@ -6158,6 +6211,7 @@ namespace Truedat
                                                     var rekeySmfmTag = _refreshSmfm && ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                     if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                     allTracks[t.Location] = rekeyEntry;
+                                                    if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, rekeyEntry);   // T18: the store holds every catalog change
                                                     ClearReviewRecord(t.Location);
                                                     Interlocked.Increment(ref cachedCount);
                                                     Interlocked.Increment(ref flacRekeyed);
@@ -6215,6 +6269,7 @@ namespace Truedat
                                         var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
+                                        if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, crossShaEntry);   // T18: the store holds every catalog change
                                         ClearReviewRecord(t.Location);
                                         RemoveIfMoved(allTracks, xs.OldKey!);
                                         Interlocked.Increment(ref cachedByShaCross);
@@ -6407,12 +6462,17 @@ namespace Truedat
                         periodicSave.AfterAnalysis(() =>
                         {
                             var saveSw = Stopwatch.StartNew();
-                            var catalogFailure = TrySaveCheckpointCatalog(moodsPath, allTracks);
-                            if (catalogFailure != null) return catalogFailure;
-                            // The store rides the same checkpoint: without it, every description and edge row of a
-                            // multi-day --refresh sat in memory until the end, and a closed window cost them all.
-                            var storeFailure = CheckpointStoreOutcome(FlushStoreSink(allTracks.Keys, final: false));
-                            if (storeFailure != null) return storeFailure;
+                            if (_storePath != null)
+                            {
+                                // T18: store-authoritative — commit the store, then publish the files derived from it (no JSON-first sink).
+                                var authFailure = AuthoritativeCheckpoint(moodsPath, allTracks.Keys);
+                                if (authFailure != null) return authFailure;
+                            }
+                            else
+                            {
+                                var catalogFailure = TrySaveCheckpointCatalog(moodsPath, allTracks);
+                                if (catalogFailure != null) return catalogFailure;
+                            }
                             saveSw.Stop();
                             Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
                             Interlocked.Increment(ref _saveCount);
@@ -6480,7 +6540,9 @@ namespace Truedat
             var checkpointFailure = periodicSave.PersistentFailure;
             // Keeper 132: a persistently failed operation is not tried again at the end — only the half that did NOT fail is written.
             // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
-            var finalWrites = RunFinalWrites(checkpointFailure, true, () => { SaveResults(moodsPath, allTracks); finalSaveSw.Stop(); }, () => FlushStoreSink(allTracks.Keys));
+            var finalWrites = _storePath != null
+                ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys)
+                : RunFinalWrites(checkpointFailure, true, () => { SaveResults(moodsPath, allTracks); finalSaveSw.Stop(); }, () => FlushStoreSink(allTracks.Keys));
             finalSaveSw.Stop();
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
@@ -6677,7 +6739,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
             }
             if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites,
-                finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
+                _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries : finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
 
             // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
             // catalog is a superset of what is on disk, holding entries for files that are
@@ -7194,7 +7256,8 @@ namespace Truedat
             bool stillThere;
             try { stillThere = File.Exists(oldKey); }
             catch { stillThere = false; }   // unreadable path → treat as gone (old behavior)
-            if (!stillThere) dict.TryRemove(oldKey, out _);
+            if (!stillThere && dict.TryRemove(oldKey, out _) && _storePath != null)
+                global::Truedat.Store.ScanSink.RecordRetire(oldKey);   // T18: the store retires the old location in the same flush
         }
 
         static void RunDuplicates(string outputDir)
@@ -10799,7 +10862,8 @@ namespace Truedat
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
                 return r;
             }
-            FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, _edgeSettings, _scanStartedUtc);
+            // T18: the publication that follows writes the companion with the catalog and sidecar, so the store step does not write it too.
+            FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, null, _edgeSettings, _scanStartedUtc);
             return r;
         }
 
@@ -10816,6 +10880,36 @@ namespace Truedat
                 return CheckpointOutcome.Failed("catalog", ex,
                     $"catalog {moodsPath}" + (CheckpointCause.IsDiskFull(ex) ? "; DISK FULL: " + (CheckpointCause.VolumeNote(moodsPath) ?? "volume unreadable") : ""));
             }
+        }
+
+        /// <summary>
+        /// T18a-d: the STORE-AUTHORITATIVE checkpoint — commit the store (the durable step), then publish the catalog + sidecar + companion
+        /// derived from it. A failed commit is a failed checkpoint (stage <c>store</c>). A failed PUBLICATION is not: the store holds the
+        /// work, the files are behind it (accepted, T07) and the next publication repairs them — it is logged with its cause and noted in
+        /// the scan's record, and the checkpoint is durable.
+        /// </summary>
+        internal static CheckpointOutcome? AuthoritativeCheckpoint(string catalogPath, IEnumerable<string> keys)
+        {
+            var storeFailure = CheckpointStoreOutcome(FlushStoreSink(keys, final: false));
+            if (storeFailure != null) return storeFailure;
+            PublishFromStore(catalogPath, checkpoint: true);
+            return null;
+        }
+
+        /// <summary>T18a-d: publish the triple derived from the store (the --store-export publisher) and note it in the scan's record.</summary>
+        internal static bool PublishFromStore(string catalogPath, bool checkpoint)
+        {
+            if (_storePath == null) return false;
+            var ex = global::Truedat.Store.StoreScan.Publish(_storePath, catalogPath, _storeRootPath, out var rep);
+            global::Truedat.Store.StoreResult.NoteScanExport(rep, ex);
+            if (ex != null)
+            {
+                Console.Error.WriteLine($"  WARNING: {(checkpoint ? "checkpoint" : "final")} publication from the store failed ({CheckpointCause.Describe(ex)}); " +
+                                        "the store holds the work and is ahead of the files — the next publication (or --store-export) brings them level");
+                return false;
+            }
+            Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
+            return true;
         }
 
         /// <summary>The store half: null when no store is in force or the flush committed, else a failed outcome (stage <c>store</c>)
@@ -10915,6 +11009,24 @@ namespace Truedat
             return w;
         }
 
+        /// <summary>T18a-d: the store-authoritative END — the final store flush (unless the store stage failed persistently: keeper 132, not
+        /// attempted again), then ONE publication of the triple derived from the store. <c>Catalog</c> reports the publication.</summary>
+        internal static FinalWrites RunAuthoritativeFinal(CheckpointOutcome? failure, string catalogPath, IEnumerable<string> keys)
+        {
+            var w = new FinalWrites();
+            if (!FinalStageAllowed(failure, "store")) w.Store = FinalWrite.Skipped;
+            else
+            {
+                var r = FlushStoreSink(keys);
+                w.Store = r == null ? FinalWrite.NotAttempted : r.Ok ? FinalWrite.Written : FinalWrite.Failed;
+                if (r != null && !r.Ok) w.StoreError = CheckpointCause.Describe(r.ErrorException) + (r.ErrorException == null ? " (" + r.Error + ")" : "");
+            }
+            if (w.Store == FinalWrite.Written || w.Store == FinalWrite.Skipped)
+                w.Catalog = PublishFromStore(catalogPath, checkpoint: false) ? FinalWrite.Written : FinalWrite.Failed;
+            else w.Catalog = FinalWrite.Skipped;
+            return w;
+        }
+
         /// <summary>Survivor facts for the CURRENT staging (catalog saved before the store flush; T18's final order — store commit then
         /// derived publication — will restate these). Derived from what the end actually wrote. No recovery verb is promised:
         /// <c>--store-import</c> is the legacy / partial-initialisation action, not ordinary recovery for an initialised store, and a
@@ -10935,6 +11047,18 @@ namespace Truedat
             return $"{catalogPart}; {storePart}; analyses in NEITHER (lost): {inNeither}";
         }
 
+        /// <summary>T18: survivor facts for a STORE-AUTHORITATIVE scan. The store is the record: everything committed up to its last durable
+        /// checkpoint is safe; the entries recorded since and never committed are lost (exact: the sink's pending count, they existed only in
+        /// memory). The files are derived from the store, so a publication that did not land leaves them behind the store, not lossy.</summary>
+        internal static string AuthoritativeSurvivorFacts(FinalWrites w, int pendingUncommitted)
+        {
+            string files = w.Catalog == FinalWrite.Written ? "the files were published from the store at the end"
+                : $"the files were {Word(w.Catalog)} at the end and show the last publication (behind the store; --store-export brings them level)";
+            int lost = w.Store == FinalWrite.Written ? 0 : pendingUncommitted;
+            return $"the store holds every analysis committed up to its last durable checkpoint{(w.Store == FinalWrite.Written ? ", and the final commit landed" : "")}; {files}; " +
+                   $"analyses never committed to the store (lost): {lost}";
+        }
+
         static string Word(FinalWrite f) => f == FinalWrite.Skipped ? "skipped" : f == FinalWrite.Failed ? "not written (failed)" : f == FinalWrite.NotAttempted ? "not in force" : "written";
 
         /// <summary>The scan's outcome after a persistent checkpoint failure: the cause, the attempt counts, what the end actually wrote and
@@ -10945,7 +11069,8 @@ namespace Truedat
                          $"{p.Attempts} checkpoint attempts this run, {p.Saves} durable; {p.SinceDurable} analyses completed since the last durable checkpoint; " +
                          $"{notStarted} tracks not started; the failed stage was not attempted again at the end; " +
                          $"final writes: catalog {Word(w.Catalog)}{(w.CatalogError != null ? " (" + CheckpointCause.Describe(w.CatalogError) + ")" : "")}, " +
-                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, catalogMissing, p.SinceDurable)}";
+                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; " +
+                         (_storePath != null ? AuthoritativeSurvivorFacts(w, catalogMissing) : SurvivorFacts(w, catalogMissing, p.SinceDurable));
             Console.Error.WriteLine("=== FAILED - " + reason + " ===");
             global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
             if (Environment.ExitCode == 0) Environment.ExitCode = 1;
@@ -14666,6 +14791,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.PublicationSelfTest.Run(Assert);   // T07/T08 slice (architect-2, a98ded7)
             global::Truedat.Store.StoreResultSelfTest.Run(Assert);   // T11 store-result.json (architect-2)
             PeriodicSaveSelfTest.Run(Assert);   // T18 defect 1: the shared rescan-rule checkpoint (architect-2)
+            global::Truedat.Store.StoreScanSelfTest.Run(Assert);   // T18: store-authoritative load / cache hits / retire (architect-2)
             global::Truedat.Store.VerdictSelfTest.Run(Assert);       // T19 verdict projection (architect-2)
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
@@ -22424,6 +22550,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>The per-file scan modes' (--analyze-file, --file-list, --folder) hand-off to the store sink. They have no iTunes
         /// XML, so the entry's trackId is the default 0 that nobody observed: it is declared unobserved here, at the one hand-off, so
         /// the store keeps the XML id an iTunes-XML scan stored (keeper 099). Every other copy fact these modes read stays observed.</summary>
+        /// <summary>T18: a per-file mode's cache-hit rebuild, recorded into the store as copy facts (never as a measurement).</summary>
+        internal static void RecordPerFileCacheHit(string key, TrackEntry entry)
+        {
+            entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.PerFileScanCopyObserved;
+            global::Truedat.Store.ScanSink.RecordCacheHit(key, entry);
+        }
+
         internal static void RecordPerFileScanEntry(string key, TrackEntry entry, string? analysedPath)
         {
             entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.PerFileScanCopyObserved;
