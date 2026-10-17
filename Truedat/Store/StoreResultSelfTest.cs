@@ -75,6 +75,64 @@ namespace Truedat.Store
             Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
             try { TestImportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Store-result self-test (store-v3 T06 Step 0: the nine catalog-changing verbs refuse with a store in force — failed record, store never created; no store = no refusal)");
+            int savedExit = Environment.ExitCode;
+            try { TestRefuseCatalogVerb(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.RefuseCatalogVerb: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { Environment.ExitCode = savedExit; }
+        }
+
+        /// <summary>T06 Step 0 (TDA 103 / keeper 118). The predicate is the run's resolved store path, so the helper is driven with
+        /// a path and with null; the truth table over flags/config/--no-store and the nine real entry points is the CLI receipt
+        /// (the verbs dispatch inside MainCore). What this pins: the record (verb spelling the hub reads, failed, exit 1, the
+        /// sentence naming the store), that the refusal never opens or creates the store, and the --restore wording — a
+        /// catalog import is not a restore and never removes entries.</summary>
+        static void TestRefuseCatalogVerb(Action<bool, string> assert)
+        {
+            var nine = new[]
+            {
+                ("--fixup", "fixup"), ("--fixup --remap", "remap"), ("--verify --backfill", "backfill"), ("--merge-moods", "merge-moods"),
+                ("--migrate", "migrate"), ("--strip-smfm", "strip"), ("--prune-entry", "prune"), ("--prune-excluded", "prune"), ("--restore", "restore"),
+            };
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");   // never created: a config store on an instance that has not scanned yet
+                var resultPath = StoreResult.PathFor(store);
+                foreach (var (flag, verb) in nine)
+                {
+                    Environment.ExitCode = 0;
+                    var err = new StringWriter(); var savedErr = Console.Error; Console.SetError(err);
+                    bool refused;
+                    try { refused = Program.RefuseCatalogVerbWithStore(store, flag, verb); } finally { Console.SetError(savedErr); }
+                    var rec = new StoreResultFile();
+                    bool read = StoreResult.TryRead(resultPath, out rec);
+                    var said = err.ToString();
+                    assert(refused && Environment.ExitCode == 1 && read && rec.Verb == verb && rec.Outcome == "failed" && rec.ExitCode == 1
+                        && rec.Store.Path == Path.GetFullPath(store) && rec.Store.SchemaVersion == null && rec.Store.Generation == null && !rec.Export.Performed,
+                        $"{flag} with a store in force: refused, exit 1, record {verb}/failed/1, store facts unknown (never opened) ({refused}/{Environment.ExitCode}/{rec.Verb}/{rec.Outcome}/{rec.ExitCode}/{rec.Store.Path})");
+                    assert(said.StartsWith("Error: " + flag + " changes mbxmoods.json only", StringComparison.Ordinal) && said.Contains(Path.GetFullPath(store)) && said.Contains("--no-store")
+                        && rec.Reason != null && said.TrimEnd().EndsWith(rec.Reason, StringComparison.Ordinal),
+                        $"{flag}: the sentence names the verb, the store path and what to do, and is the record's reason ({said.Trim()})");
+                    assert(!File.Exists(store) && !File.Exists(store + "-wal") && Directory.GetFiles(d.Root).Length == 1,
+                        $"{flag}: the refusal never opened or created the store; the record is the only file written ({string.Join(", ", Directory.GetFiles(d.Root).Select(Path.GetFileName))})");
+                    File.Delete(resultPath);
+                }
+                // --restore: --store-import is named as seeding/extending, never as restoring the store.
+                {
+                    var err = new StringWriter(); var savedErr = Console.Error; Console.SetError(err);
+                    try { Program.RefuseCatalogVerbWithStore(store, "--restore", "restore"); } finally { Console.SetError(savedErr); }
+                    var said = err.ToString();
+                    assert(said.Contains("seeds or extends the store") && said.Contains("it does not restore the store") && said.Contains("never removes store entries")
+                        && !said.Contains("--store-import restores") && !said.Contains("restore the store with"),
+                        $"--restore wording: an import seeds or extends, it is not a restore and never deletes ({said.Trim()})");
+                    File.Delete(resultPath);
+                }
+                // No store in force (store off, or --no-store): no refusal, nothing written, exit code untouched.
+                Environment.ExitCode = 0;
+                foreach (var (flag, verb) in nine)
+                    assert(!Program.RefuseCatalogVerbWithStore(null, flag, verb) && Environment.ExitCode == 0 && Directory.GetFiles(d.Root).Length == 0,
+                        $"{flag} with no store in force: not refused, nothing written, exit code untouched");
+            }
         }
 
         sealed class Dir : IDisposable

@@ -3118,6 +3118,7 @@ namespace Truedat
             // or defaults to mbxmoods.json next to the XML if given, else cwd.
             if (verifyMode)
             {
+                if (verifyBackfill && RefuseCatalogVerbWithStore(_storePath, "--verify --backfill", "backfill")) return;   // store-v3 T06 Step 0; a plain --verify writes nothing
                 string? verifyPath = analyzeFileMoods;
                 if (string.IsNullOrEmpty(verifyPath))
                 {
@@ -3143,6 +3144,7 @@ namespace Truedat
             // before --snapshot because a run naming both should restore, not snapshot.
             if (restoreMode)
             {
+                if (RefuseCatalogVerbWithStore(_storePath, "--restore", "restore")) return;   // store-v3 T06 Step 0
                 // --restore OVERWRITES the destination catalog. Never let it pick that
                 // destination out of the current directory (see IsBareCwdCatalog).
                 if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
@@ -3552,6 +3554,7 @@ namespace Truedat
             // sidecar regenerated); --dry-run reports the counts and writes nothing.
             if (stripSmfmMode)
             {
+                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--strip-smfm", "strip")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 // Rewrites the catalog, so it takes the same anchor rule as --compact /
                 // --prune-excluded: refuse to act on whatever mbxmoods.json happens to
                 // be in the directory the operator is standing in.
@@ -3579,6 +3582,7 @@ namespace Truedat
             // mirror. Mutates (backup first); --dry-run reports and writes nothing.
             if (pruneEntryPaths.Count > 0)
             {
+                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--prune-entry", "prune")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--prune-entry", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
@@ -3605,6 +3609,7 @@ namespace Truedat
             // --dry-run reports the exact removal list and writes nothing.
             if (pruneExcludedMode)
             {
+                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--prune-excluded", "prune")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 // --prune-excluded REMOVES entries and rewrites the catalog. Same rule.
                 if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
@@ -3892,6 +3897,7 @@ namespace Truedat
             // --merge-moods is independent of the XML-based modes
             if (mergeMode)
             {
+                if (RefuseCatalogVerbWithStore(_storePath, "--merge-moods", "merge-moods")) return;   // store-v3 T06 Step 0
                 if (mergeSources.Count < 2)
                 {
                     Console.WriteLine("Error: --merge-moods requires at least 2 --merge-source <path> arguments");
@@ -5192,6 +5198,7 @@ namespace Truedat
             // right paths.
             if (fixupMode && !string.IsNullOrEmpty(remapPrefix))
             {
+                if (RefuseCatalogVerbWithStore(_storePath, "--fixup --remap", "remap")) return;   // store-v3 T06 Step 0
                 var parts = remapPrefix!.Split(new[] { '=' }, 2);
                 if (parts.Length != 2 || parts[0].Length == 0)
                 {
@@ -5206,6 +5213,10 @@ namespace Truedat
 
             // T11: from here on this is the library scan unless one of the four XML-using verbs below takes over — the scan's provisional
             // store-result.json begins now, so an XML / extractor refusal cannot leave the PREVIOUS verb's record in place (TDA review P2b).
+            // store-v3 T06 Step 0: --migrate / --fixup refuse before the XML is resolved or anything is touched (they dispatch
+            // below, after --check-filenames / --duplicates, which take precedence and stay as they are).
+            if (!checkFilenames && !duplicatesMode && (migrateMode || fixupMode)
+                && RefuseCatalogVerbWithStore(_storePath, migrateMode ? "--migrate" : "--fixup", migrateMode ? "migrate" : "fixup")) return;
             bool libraryScan = !checkFilenames && !duplicatesMode && !migrateMode && !fixupMode;
             bool xmlExplicit = !string.IsNullOrEmpty(xmlPath);
             if (libraryScan) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
@@ -10673,6 +10684,43 @@ namespace Truedat
         /// if it has not (so the previous verb's record is never left standing), the sentence becomes the record's failed outcome, stderr
         /// gets it, and the exit code is returned for the caller to set — never 0 for a refusal. Pure apart from the record/stderr, so the
         /// self-test can drive it with a fixture store.</summary>
+        /// <summary>
+        /// store-v3 T06 Step 0 (ISSUES I05). The nine catalog-changing verbs rewrite <c>mbxmoods.json</c> and never the store, so
+        /// with a store in force the two authorities would silently disagree — and a later store-authoritative scan would undo
+        /// the verb. Until each verb writes the store (T06a-i) it refuses: a sentence naming the store and what to do, exit 1, a
+        /// failed <c>store-result.json</c> beside the store, and nothing else written (the store is never opened, so a store that
+        /// does not exist yet is not created). "In force" is the run's RESOLVED store path — the predicate every other store path
+        /// uses: <c>--store</c> or config <c>store</c>, with <c>--no-store</c> winning. A store file that merely exists while the
+        /// store is off is NOT in force (store and edges are off unless turned on, operator 2026-10-13) and the verb runs as
+        /// before (TDA 103 / keeper 118). <paramref name="hubVerb"/> is the record's verb spelling the hub reads.
+        /// </summary>
+        internal static bool RefuseCatalogVerbWithStore(string? storePath, string flag, string hubVerb)
+        {
+            if (storePath == null) return false;
+            string full;
+            try { full = Path.GetFullPath(storePath); } catch (Exception) { full = storePath; }
+            string instead;
+            if (hubVerb == "restore")
+                instead = "A store cannot be restored from a catalog archive. To restore the catalog alone, run it again with --no-store; "
+                    + "to bring that catalog's entries into the store afterwards, run --store-import on it — that seeds or extends the "
+                    + "store from the catalog; it does not restore the store, and it never removes store entries the archive lacks.";
+            else if (hubVerb == "merge-moods")
+                instead = "Merging catalogs into a store is not supported yet. To merge the catalogs alone, run it again with --no-store; "
+                    + "to bring the merged catalog into a store afterwards, run --store-import on it (that seeds or extends the store; "
+                    + "it never removes store entries).";
+            else
+                instead = "This verb cannot apply its change to the store yet. To change the catalog alone, run it again with --no-store "
+                    + "(the store then no longer matches the catalog), or turn the store off in the config.";
+            var sentence = $"Error: {flag} changes mbxmoods.json only, and a store is in force for this run ({full}); the store would "
+                + $"not receive the change and the two would disagree, so nothing was written. {instead}";
+            Console.Error.WriteLine(sentence);
+            var rec = global::Truedat.Store.StoreResult.Begin(hubVerb);
+            rec.Store = new global::Truedat.Store.StoreResultStore { Path = full, TruedatVersion = VersionInfo.Display };
+            global::Truedat.Store.StoreResult.Write(storePath, rec, 1, global::Truedat.Store.StoreResult.OutcomeFailed, sentence.Substring("Error: ".Length));
+            Environment.ExitCode = 1;
+            return true;
+        }
+
         internal static int RefuseScan(string? storePath, string sentence, int exitCode)
         {
             Console.Error.WriteLine(sentence);
