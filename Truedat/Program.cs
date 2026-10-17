@@ -5211,7 +5211,8 @@ namespace Truedat
                 }
                 if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
-                if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal);
+                if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal,
+                    flFinal.Catalog == FinalWrite.Written || string.IsNullOrEmpty(analyzeFileMoods) ? 0 : NotInCatalogFile(analyzeFileMoods!, flMoodsTracks).Count);
                 return;
             }
 
@@ -6675,7 +6676,8 @@ namespace Truedat
                     global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{failed} track(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = 1;
             }
-            if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites);
+            if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites,
+                finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
 
             // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
             // catalog is a superset of what is on disk, holding entries for files that are
@@ -10841,6 +10843,41 @@ namespace Truedat
             return true;
         }
 
+        /// <summary>
+        /// Keeper 139 / TDA 128-129: the paths whose CURRENT entry the catalog file on disk does not hold — absent there, or serialising
+        /// to different bytes. Exact by construction: when the final catalog write did not land, the file on disk IS the last catalog
+        /// that was actually written (a checkpoint's catalog half, or the catalog as the scan found it), so this needs no counter read
+        /// before a save (a worker completing between the count and the snapshot is in the file) and no assumption that entries are
+        /// replaced rather than mutated in place (an in-place change serialises differently). Cache hits rebuild an EQUAL entry; equal
+        /// bytes are not a loss. Runs only at a persistent-failure end: it reads the whole catalog once.
+        /// </summary>
+        internal static List<string> NotInCatalogFile(string moodsPath, IEnumerable<KeyValuePair<string, TrackEntry>> current)
+        {
+            var onDisk = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+            if (File.Exists(moodsPath)) LoadExistingMoods(moodsPath, onDisk);
+            var missing = new List<string>();
+            foreach (var kv in current)
+                if (!onDisk.TryGetValue(kv.Key, out var w) || !EntryBytes(kv.Key, w).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
+                    missing.Add(kv.Key);
+            missing.Sort(StringComparer.OrdinalIgnoreCase);
+            return missing;
+        }
+
+        /// <summary>One entry exactly as the catalog writer emits it.</summary>
+        internal static byte[] EntryBytes(string path, TrackEntry entry)
+        {
+            using (var ms = new MemoryStream())
+            {
+                using (var jw = new Utf8JsonWriter(ms))
+                {
+                    jw.WriteStartObject();
+                    WriteTrackEntry(jw, path, entry);
+                    jw.WriteEndObject();
+                }
+                return ms.ToArray();
+            }
+        }
+
         /// <summary>What the scan's END actually did with each half (keeper 134 / TDA 122: survivor facts come from these, never from the
         /// stage that failed first).</summary>
         internal enum FinalWrite { NotAttempted, Written, Failed, Skipped }
@@ -10882,18 +10919,19 @@ namespace Truedat
         /// derived publication — will restate these). Derived from what the end actually wrote. No recovery verb is promised:
         /// <c>--store-import</c> is the legacy / partial-initialisation action, not ordinary recovery for an initialised store, and a
         /// same-path re-analysis that reached the catalog but not the store leaves the store holding the OLD values at that path.</summary>
-        internal static string SurvivorFacts(FinalWrites w, int sinceCatalogHalf, int sinceStoreHalf)
+        internal static string SurvivorFacts(FinalWrites w, int catalogMissing, int storeBehindAtMost)
         {
-            // Keeper 136: per half, from what the end wrote AND each half's last successful checkpoint — an earlier checkpoint whose
-            // catalog save succeeded while its store flush failed still left those analyses in the catalog. The catalog half always
-            // runs first, so sinceCatalogHalf <= sinceStoreHalf and what is in NEITHER is the catalog's shortfall.
+            // Keeper 136/139: per half. The catalog's shortfall is EXACT — from the catalog file the last write actually left
+            // (NotInCatalogFile). The store's is an UPPER BOUND — completions counted since its last durable checkpoint, read before
+            // that checkpoint's snapshot. Under the current catalog-first staging the store is never ahead of the catalog, so what is in
+            // NEITHER is the catalog's exact shortfall.
             bool cat = w.Catalog == FinalWrite.Written, store = w.Store == FinalWrite.Written, storeOn = w.Store != FinalWrite.NotAttempted;
             string catalogPart = cat ? "the catalog was written at the end and holds every analysis of this run"
-                : $"the catalog was {Word(w.Catalog)} at the end and holds this run's analyses up to its last successful checkpoint half; the last {sinceCatalogHalf} are absent there (or still carry their OLD values where a path was re-analysed)";
+                : $"the catalog was {Word(w.Catalog)} at the end; the file holds this run's analyses as of its last write, and {catalogMissing} paths' latest analyses are not in it (absent, or still their OLD values)";
             string storePart = !storeOn ? "no store in force"
                 : store ? "the store was written at the end and holds every analysis of this run"
-                : $"the store was {Word(w.Store)} at the end and holds this run's analyses up to its last durable checkpoint; the last {sinceStoreHalf} are absent there (or still carry their OLD values where a path was re-analysed)";
-            int inNeither = cat || store ? 0 : sinceCatalogHalf;
+                : $"the store was {Word(w.Store)} at the end; it holds this run's analyses as of its last durable checkpoint, at most {storeBehindAtMost} analyses behind (absent, or still their OLD values)";
+            int inNeither = cat || store ? 0 : catalogMissing;
             return $"{catalogPart}; {storePart}; analyses in NEITHER (lost): {inNeither}";
         }
 
@@ -10901,13 +10939,13 @@ namespace Truedat
 
         /// <summary>The scan's outcome after a persistent checkpoint failure: the cause, the attempt counts, what the end actually wrote and
         /// what that leaves (<see cref="SurvivorFacts"/>); exit non-zero; the record failed with all of it.</summary>
-        internal static void ReportPersistentCheckpointFailure(CheckpointOutcome f, PeriodicSave p, int notStarted, FinalWrites w)
+        internal static void ReportPersistentCheckpointFailure(CheckpointOutcome f, PeriodicSave p, int notStarted, FinalWrites w, int catalogMissing)
         {
             var reason = $"checkpoint failed persistently at stage {f.Stage}: {CheckpointCause.Describe(f.Error)}{(f.Detail != null ? " (" + f.Detail + ")" : "")}; " +
                          $"{p.Attempts} checkpoint attempts this run, {p.Saves} durable; {p.SinceDurable} analyses completed since the last durable checkpoint; " +
                          $"{notStarted} tracks not started; the failed stage was not attempted again at the end; " +
                          $"final writes: catalog {Word(w.Catalog)}{(w.CatalogError != null ? " (" + CheckpointCause.Describe(w.CatalogError) + ")" : "")}, " +
-                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, p.SinceCatalogHalf, p.SinceDurable)}";
+                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, catalogMissing, p.SinceDurable)}";
             Console.Error.WriteLine("=== FAILED - " + reason + " ===");
             global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
             if (Environment.ExitCode == 0) Environment.ExitCode = 1;

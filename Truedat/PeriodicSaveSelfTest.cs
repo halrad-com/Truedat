@@ -25,6 +25,8 @@ namespace Truedat
                 TestRetryWaitsForTheDelay(assert);
                 TestHeldCatalogReleasedBeforeTheRetry(assert);
                 TestPriorCatalogHalfSurvives(assert);
+                TestCompletionDuringSaveIsNotLost(assert);
+                TestInPlaceChangeIsCaught(assert);
             }
             catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -201,7 +203,7 @@ namespace Truedat
                 catalogCalls = storeCalls = 0;
                 var w3 = Program.RunFinalWrites(storeFailed, true, save, () => { storeCalls++; return ok; });
                 var s3 = Program.SurvivorFacts(w3, 0, 4);
-                assert(catalogCalls == 1 && storeCalls == 0 && w3.Store == Program.FinalWrite.Skipped && s3.StartsWith("the catalog was written") && s3.Contains("the last 4 are absent there (or still carry their OLD values") && s3.Contains("(lost): 0") && !s3.Contains("--store-import"),
+                assert(catalogCalls == 1 && storeCalls == 0 && w3.Store == Program.FinalWrite.Skipped && s3.StartsWith("the catalog was written") && s3.Contains("at most 4 analyses behind (absent, or still their OLD values)") && s3.Contains("(lost): 0") && !s3.Contains("--store-import"),
                     $"store failed persistently: store never retried, catalog written once; survivors name the stale same-path values and promise no recovery verb ({s3})");
                 // Store failed persistently, and the final catalog save throws -> nothing survives; the exception is recorded, not thrown.
                 catalogCalls = storeCalls = 0;
@@ -312,11 +314,84 @@ namespace Truedat
                 assert(w.Catalog == Program.FinalWrite.Failed && w.Store == Program.FinalWrite.Skipped
                        && text.Contains("c.flac") && !text.Contains("d.flac") && text.Contains("\"bpm\":100") && !text.Contains("\"bpm\":200"),
                     "the real catalog after the run: a (OLD value 100), b, c from the last successful catalog half; d and a's new value absent");
-                var facts = Program.SurvivorFacts(w, p.SinceCatalogHalf, p.SinceDurable);
-                assert(facts.Contains("the last 2 are absent there (or still carry their OLD values") && facts.Contains("(lost): 2") && !facts.Contains("(lost): 4"),
+                var missing = Program.NotInCatalogFile(cat, tracks);
+                assert(missing.Count == 2 && missing[0].EndsWith("a.flac") && missing[1].EndsWith("d.flac"),
+                    $"the exact shortfall, read from the catalog file: a.flac (new value not in it) and d.flac ({string.Join(", ", missing)})");
+                var facts = Program.SurvivorFacts(w, missing.Count, p.SinceDurable);
+                assert(facts.Contains("2 paths' latest analyses are not in it (absent, or still their OLD values)") && facts.Contains("(lost): 2") && !facts.Contains("(lost): 4"),
                     $"survivor facts count only the 2 analyses after the last catalog half as lost, and name the stale value ({facts})");
             }
             finally { Console.SetError(savedErr); try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>Keeper 139's interleaving, executed with a deterministic gate (REAL catalog file; store half simulated, failing SQLITE_FULL
+        /// so it is persistent at once): the checkpoint's counters are read, the save is held at a gate BEFORE its snapshot, a second worker
+        /// adds e.flac and completes, the gate opens, the snapshot (and the file) include e. Store fails; the final catalog swap fails on a held
+        /// file. The counter still says 1 unsaved (it was read before the snapshot); the exact shortfall from the file is 0, and that is what
+        /// is reported.</summary>
+        static void TestCompletionDuringSaveIsNotLost(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var savedErr = Console.Error; Console.SetError(new StringWriter());
+            try
+            {
+                var cat = Path.Combine(dir, "mbxmoods.json");
+                var tracks = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                Func<string, double, TrackEntry> entry = (t, bpm) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = t, Bpm = bpm, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                var full = new Store.SqliteException(13, "database or disk is full");
+                var p = new PeriodicSave(Stopwatch.StartNew(), 0, _ => { }, retryDelaySecs: 0);
+                using (var atGate = new ManualResetEventSlim(false))
+                using (var open = new ManualResetEventSlim(false))
+                {
+                    Func<CheckpointOutcome> gatedSave = () =>
+                    {
+                        atGate.Set(); open.Wait(5000);                                  // held BEFORE the snapshot
+                        return Program.TrySaveCheckpointCatalog(cat, tracks) ?? CheckpointOutcome.Failed("store", full, "simulated store half");
+                    };
+                    tracks[@"D:\music\d.flac"] = entry("d", 100);                                // worker 1's analysis
+                    var worker1 = Task.Run(() => p.AfterAnalysis(gatedSave));
+                    atGate.Wait(5000);
+                    tracks[@"D:\music\e.flac"] = entry("e", 101);                                // worker 2 adds + completes while worker 1 is at the gate
+                    bool w2 = p.AfterAnalysis(() => CheckpointOutcome.Durable);         // skips: worker 1 holds the checkpoint
+                    open.Set();
+                    worker1.Wait(5000);
+                    assert(!w2 && p.PersistentFailure != null && p.SinceCatalogHalf == 1,
+                        $"setup: worker 2 completed during worker 1's save; store failed persistently; the counter (read before the snapshot) still says {p.SinceCatalogHalf} unsaved");
+                }
+                Program.FinalWrites w;
+                using (new FileStream(cat, FileMode.Open, FileAccess.Read, FileShare.None))
+                    w = Program.RunFinalWrites(p.PersistentFailure, true, () => { var f = Program.TrySaveCheckpointCatalog(cat, tracks); if (f != null) throw f.Error!; }, () => null);
+                var text = File.ReadAllText(cat);
+                var missing = Program.NotInCatalogFile(cat, tracks);
+                var facts = Program.SurvivorFacts(w, missing.Count, p.SinceDurable);
+                assert(w.Catalog == Program.FinalWrite.Failed && text.Contains("e.flac") && missing.Count == 0 && facts.Contains("(lost): 0"),
+                    $"e.flac IS in the catalog file; the exact shortfall is 0 and the report says 0 lost, where the counter would have said 1 ({facts})");
+            }
+            finally { Console.SetError(savedErr); try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>TDA 129: an entry changed IN PLACE after its catalog half was written (same instance, new value) must count as not in the
+        /// catalog. Compared by the bytes the writer emits against the file on disk, so instance identity cannot hide it.</summary>
+        static void TestInPlaceChangeIsCaught(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var cat = Path.Combine(dir, "mbxmoods.json");
+                var tracks = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                var e = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "f", Bpm = 100, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                tracks[@"D:\music\f.flac"] = e;
+                tracks[@"D:\music\g.flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "g", Bpm = 90, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                assert(Program.TrySaveCheckpointCatalog(cat, tracks) == null && Program.NotInCatalogFile(cat, tracks).Count == 0, "fixture: written; nothing missing");
+                tracks[@"D:\music\g.flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "g", Bpm = 90, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                e.Features.Bpm = 150;                                                   // same instance, new value
+                var missing = Program.NotInCatalogFile(cat, tracks);
+                assert(missing.Count == 1 && missing[0].EndsWith("f.flac"),
+                    $"the in-place change counts as not in the catalog; an equal rebuilt entry (a cache hit) does not ({string.Join(", ", missing)})");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         static void TestThrowingSaveIsAFailure(Action<bool, string> assert)
