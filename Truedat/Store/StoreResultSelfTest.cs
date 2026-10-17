@@ -59,6 +59,10 @@ namespace Truedat.Store
             try { TestScanCaptureFacts(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Capture: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (keeper 109: stickyRowsRefreshed counts rows a write actually refreshed — never an unavailable or failed fold's untouched rows; once per committed refresh)");
+            try { TestStickyCountExact(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.StickyExact: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { ImportCommand.FailAfterEntriesForTest = 0; global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
             try { TestImportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -643,6 +647,87 @@ namespace Truedat.Store
                 var none = Scan(d.P("none.db"), d.Root, flagOn: false);
                 assert(none.Capture != null && none.Capture.EdgeArrays == "off" && none.Capture.StickyRowsRefreshed == 0,
                     $"a flag-OFF scan of a track with no arrays records 'off' and no sticky refreshes (got '{none.Capture?.EdgeArrays}', {none.Capture?.StickyRowsRefreshed})");
+            }
+        }
+
+        // Keeper 109 on a57e709: the count read every arrays-bearing row for the content/version AFTER the write, so an 'unavailable'
+        // fold — which returns after the whole-track rows and never touches an edge row — reported the two rows an earlier scan captured.
+        // The count must be what the write refreshed: 0 for unavailable and failed folds (rows, array bytes and run ids untouched), 2 for a
+        // real sticky refresh, once per COMMITTED refresh across a rolled-back checkpoint, and the scan-wide sum across checkpoints.
+        static void TestStickyCountExact(Action<bool, string> assert)
+        {
+            const string P = @"D:\music\verdict\a-lavc.mp3", Q = @"D:\music\verdict\b-lame.mp3";
+            var shaP = VerdictSelfTest.Fixture()[P].AudioStreamSha256!;
+            global::Truedat.Edges.EdgeFoldResult Fold(string dir, string status)
+            {
+                var f = global::Truedat.Edges.EdgeSelfTest.SyntheticFold(dir, 240, true);
+                if (status == "unavailable") f.Head.Status = f.Tail.Status = "unavailable";
+                if (status == "failed") { f.Head.Status = f.Tail.Status = "failed"; f.Head.Error = f.Tail.Error = "synthetic failure"; }
+                return f;
+            }
+            void Record(string dir, string path, global::Truedat.Edges.EdgeFoldResult fold)
+            {
+                var analysed = Path.Combine(dir, "staged-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".mp3");
+                ScanSink.StashEdges(analysed, fold);
+                ScanSink.Record(path, VerdictSelfTest.Fixture()[path], analysed);
+            }
+            void NewScan(string dir, bool flagOn) { ScanSink.Reset(); StoreResult.ResetScanForTest(); global::Truedat.Edges.EdgeStore.CaptureArraysDefault = flagOn; ScanSink.StoreDirectory = dir; }
+            int Sticky(string store) { var rec = new StoreResultFile(); StoreResult.TryRead(StoreResult.PathFor(store), out rec); return rec.Capture?.StickyRowsRefreshed ?? -1; }
+            string Rows(string store)
+            {
+                using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                using var st = os.Db.Prepare("SELECT kind, run_id, hex(arrays) FROM edge WHERE content_hash = ? ORDER BY kind;");
+                st.Bind(1, shaP);
+                var parts = new List<string>();
+                while (st.Step()) parts.Add(st.GetString(0) + ":" + (st.IsNull(1) ? "null" : st.GetInt64(1).ToString()) + ":" + (st.GetString(2) ?? "").GetHashCode().ToString("x"));
+                return string.Join(" | ", parts);
+            }
+            using (var d = new Dir())
+            {
+                // the keeper's trigger: a captured content/version, then an UNAVAILABLE fold with the flag off
+                var store = d.P("unavailable.db");
+                NewScan(d.Root, true); Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store, "output-x64.5", new[] { P });
+                var before = Rows(store);
+                NewScan(d.Root, false); Record(d.Root, P, Fold(d.Root, "unavailable")); ScanSink.Flush(store, "output-x64.5", new[] { P });
+                var after = Rows(store);
+                assert(Sticky(store) == 0, $"an UNAVAILABLE fold over captured rows refreshes nothing: stickyRowsRefreshed 0 (got {Sticky(store)})");
+                assert(before.Length > 0 && after == before, $"…and both edge rows keep their array bytes and run ids (before [{before}] after [{after}])");
+
+                // a FAILED fold over captured rows
+                var store2 = d.P("failed.db");
+                NewScan(d.Root, true); Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store2, "output-x64.5", new[] { P });
+                var before2 = Rows(store2);
+                NewScan(d.Root, false); Record(d.Root, P, Fold(d.Root, "failed")); ScanSink.Flush(store2, "output-x64.5", new[] { P });
+                assert(Sticky(store2) == 0 && Rows(store2) == before2, $"a FAILED fold refreshes nothing: 0, rows unchanged (got {Sticky(store2)})");
+
+                // a real sticky refresh: both rows rewritten with arrays, with the new fold's run
+                var store3 = d.P("refresh.db");
+                NewScan(d.Root, true); Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store3, "output-x64.5", new[] { P });
+                var before3 = Rows(store3);
+                NewScan(d.Root, false); Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store3, "output-x64.5", new[] { P });
+                assert(Sticky(store3) == 2 && Rows(store3) != before3, $"a successful sticky refresh counts the two rows it rewrote (got {Sticky(store3)}; rows changed {Rows(store3) != before3})");
+
+                // a checkpoint that rolls back, then the retry commits: the committed refresh is counted ONCE
+                var store4 = d.P("rollback.db");
+                NewScan(d.Root, true); Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store4, "output-x64.5", new[] { P });
+                NewScan(d.Root, false); Record(d.Root, P, Fold(d.Root, "ok"));
+                ImportCommand.FailAfterEntriesForTest = 1;
+                var cp = ScanSink.Flush(store4, "output-x64.5", new[] { P }, final: false);
+                ImportCommand.FailAfterEntriesForTest = 0;
+                var fin = ScanSink.Flush(store4, "output-x64.5", new[] { P });
+                assert(!cp.Ok && fin.Ok && Sticky(store4) == 2, $"a rolled-back checkpoint then a committed retry counts the refresh once (checkpoint ok {cp.Ok}, final ok {fin.Ok}; got {Sticky(store4)})");
+
+                // two successful checkpoints and an empty final flush: the scan-wide sum
+                var store5 = d.P("sum.db");
+                NewScan(d.Root, true); Record(d.Root, P, Fold(d.Root, "ok")); Record(d.Root, Q, Fold(d.Root, "ok")); ScanSink.Flush(store5, "output-x64.5", new[] { P, Q });
+                NewScan(d.Root, false);
+                Record(d.Root, P, Fold(d.Root, "ok")); ScanSink.Flush(store5, "output-x64.5", new[] { P, Q }, final: false);
+                Record(d.Root, Q, Fold(d.Root, "ok")); ScanSink.Flush(store5, "output-x64.5", new[] { P, Q }, final: false);
+                ScanSink.Flush(store5, "output-x64.5", new[] { P, Q });
+                // An EMPTY final flush returns before writing a record (ScanSink.Flush's early exit); the scan's own end-of-run write,
+                // Program.FlushStoreSink, then always writes it from the scan-wide tally — done here exactly as it does.
+                StoreResult.WriteScan(store5, ScanSink.Total, true, null);
+                assert(Sticky(store5) == 4, $"two committed checkpoints (2 + 2) and an empty final flush record the scan-wide total 4 (got {Sticky(store5)})");
             }
         }
 

@@ -542,12 +542,11 @@ namespace Truedat.Store
             // Sticky per MEDIA (TDA F8): a media that holds arrays under any of its content hashes keeps capturing at the current one, so a key
             // move does not drop to the default row. Otherwise the scan's flag decides (Write's own per-content sticky still applies).
             bool media = global::Truedat.Edges.EdgeStore.MediaHoldsArrays(dal, entityId);
-            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null);
-            // Keeper 099: with the flag OFF, arrays in the rows just written can only be the sticky rule's (the track already held
-            // them) — those are the record's capture.stickyRowsRefreshed. With the flag ON every row carries arrays by request.
-            if (r != null && !global::Truedat.Edges.EdgeStore.CaptureArraysDefault)
-                r.StickyRowsRefreshed += (int)dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;",
-                    contentKey, edges.ProducerVersion);
+            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null, out int arrayRows);
+            // Keeper 099/109: with the flag OFF, edge rows THIS write stored with arrays can only be the sticky rule's (the track already
+            // held them) — the record's capture.stickyRowsRefreshed. Counted from what Write wrote, never from what the table holds: an
+            // 'unavailable' fold writes no edge row and must count 0.
+            if (r != null && !global::Truedat.Edges.EdgeStore.CaptureArraysDefault) r.StickyRowsRefreshed += arrayRows;
             return true;
         }
 

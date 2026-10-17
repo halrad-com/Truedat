@@ -55,7 +55,13 @@ namespace Truedat.Edges
         /// <summary>Returns the number of rows written — whole-track value rows plus edge rows (0 for a failed result).
         /// <paramref name="captureArrays"/> null = <see cref="CaptureArraysDefault"/>. A row that already holds arrays keeps them (sticky).</summary>
         internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r, bool? captureArrays = null)
+            => Write(dal, contentKey, contentKeyKind, runId, r, captureArrays, out _);
+
+        /// <summary>As <see cref="Write(StoreDal, string, string, long?, EdgeFoldResult, bool?)"/>, also reporting the edge rows THIS call
+        /// wrote with arrays (keeper 109: a count of rows that merely exist overcounted an 'unavailable' fold, which never touches them).</summary>
+        internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r, bool? captureArrays, out int arrayRowsWritten)
         {
+            arrayRowsWritten = 0;
             if (r.Status == "failed") return 0;
             dal.EnsureProducer(ProducerKey, r.ProducerVersion, "analysis", needsAudio: true);
             int n = 0;
@@ -78,7 +84,9 @@ namespace Truedat.Edges
             foreach (var e in new[] { r.Head, r.Tail })
             {
                 dal.UpsertSegment(contentKey, contentKeyKind, r.ProducerVersion, e.Kind, 0, e.StartMs, e.EndMs);
-                UpsertEdgeRow(dal, contentKey, contentKeyKind, r.ProducerVersion, runId, e, capture || sticky ? PackEdge(e) : null, now);
+                var arrays = capture || sticky ? PackEdge(e) : null;
+                UpsertEdgeRow(dal, contentKey, contentKeyKind, r.ProducerVersion, runId, e, arrays, now);
+                if (arrays != null) arrayRowsWritten++;
                 n++;
             }
             return n;
