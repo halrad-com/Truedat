@@ -1869,6 +1869,15 @@ namespace Truedat
         /// relocated, because a hardlink must sit on the same volume as its source. That one
         /// relies on the two guards above, and is the reason they are not optional.
         /// </summary>
+        /// <summary>The orphan sweep for the per-file modes, whose stdout belongs to their result (--analyze-file prints JSON): its
+        /// messages go to stderr.</summary>
+        static void CleanupOrphanedFilesToStdErr()
+        {
+            var savedOut = Console.Out;
+            try { Console.SetOut(Console.Error); CleanupOrphanedFiles(); }
+            finally { Console.SetOut(savedOut); }
+        }
+
         static void CleanupOrphanedFiles()
         {
             int siblings = CountSiblingTruedatProcesses();
@@ -4052,6 +4061,10 @@ namespace Truedat
                 DateTime afCurrentLastMod = DateTime.MinValue;
                 try { afCurrentLastMod = afStat.LastWriteTimeUtc; } catch { }
 
+                // A crashed earlier run's staged copies / extractor output are swept here too, not only by a library scan (the autoscan
+                // plugin drives this mode). Same guards: never with another truedat running, only files older than OrphanMinAge.
+                // Its messages go to stderr: this mode's stdout is the JSON result.
+                CleanupOrphanedFilesToStdErr();
                 // Pre-load moods for cache check (only meaningful when --moods is set).
                 ConcurrentDictionary<string, TrackEntry>? afMoodsTracks = null;
                 if (_storePath != null && !string.IsNullOrEmpty(analyzeFileMoods))
@@ -4705,6 +4718,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
+                CleanupOrphanedFilesToStdErr();   // a crashed earlier run's staged copies / extractor output (same guards as the library scan)
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
                 // T18 defect 1 (TDA 112): the same rescan rule as the library scan — without it a long --folder / --file-list run
                 // saved only at the end and a crash cost the whole run.
@@ -20508,6 +20522,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 finally { try { Directory.Delete(scDir, true); } catch { } }
             }
+
+            // Every test deletes its own directory; the shared parent goes too once it is empty (a non-recursive delete: anything still
+            // in it is a leak to fix, not to hide).
+            try { Directory.Delete(Path.Combine(Path.GetTempPath(), ".truedat-selftest")); } catch { }
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."

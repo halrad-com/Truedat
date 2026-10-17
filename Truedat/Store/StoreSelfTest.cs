@@ -323,7 +323,10 @@ namespace Truedat.Store
 
                 // A store that cannot be opened: reported, never thrown.
                 ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
-                var bad = ScanSink.Flush(dir, "output-x64.4");   // a directory is not a database
+                // A directory is not a database. One INSIDE the test dir, so the failure record written beside it is deleted with the test dir
+                // (passing the test dir itself put store-result.json in the shared parent, where it stayed).
+                var notADb = Path.Combine(dir, "not-a-db"); Directory.CreateDirectory(notADb);
+                var bad = ScanSink.Flush(notADb, "output-x64.4");
                 assert(!bad.Ok && bad.Error != null, $"an unopenable store is a reported failure, not an exception ({bad.Error})");
                 ScanSink.Reset();
             }
@@ -1391,7 +1394,7 @@ namespace Truedat.Store
             try
             {
                 StoreLog.Sink = lines.Add; StoreLog.SetVerbose(false);
-                var dal = new StoreDal(db);
+                using var dal = new StoreDal(db);   // disposed before db: an undisposed DAL kept the file open and left the temp dir behind
                 var now = "2026-10-11T10:00:00.0000000Z";
                 var m1 = MachineIdentity.EnsureMinted(dal, "ATOM", now);
                 assert(m1.Id.Length == 36 && m1.Id[14] == '7', "first open mints a UUIDv7 machine id");
@@ -1431,7 +1434,7 @@ namespace Truedat.Store
             var db = FreshStore(out var dir);
             try
             {
-                var dal = new StoreDal(db);
+                using var dal = new StoreDal(db);   // disposed before db: an undisposed DAL kept the file open and left the temp dir behind
                 var now = "2026-10-11T10:00:00.0000000Z";
                 var m = MachineIdentity.EnsureMinted(dal, "ATOM", now);
                 long root = dal.EnsureRoot(m.Id, @"D:\Music", "primary", now);
