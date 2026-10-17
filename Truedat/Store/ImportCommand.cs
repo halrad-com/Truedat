@@ -299,6 +299,9 @@ namespace Truedat.Store
                 // transaction — a rollback takes the advance with it, and a batch of unchanged entries or failure rows is no mutation.
                 if (r.VisibleChanges > visibleBefore) dal.AdvanceGeneration();
                 tx.Complete();
+                // Keeper 104 / TDA 083: the report carries the COMMITTED generation after every batch, so a verb that fails in a later
+                // batch records the generation its earlier batches left the store at — not the one read at open.
+                r.Generation = dal.Generation();
                 // Committed: now the files. Nothing here can undo the commit. A crash between the commit and these moves leaves a row whose
                 // file is still a pending file — there is NO reconciliation for that today (TDA N3; artifacts have had no production producer
                 // since b9b27ec): re-enabling artifact capture needs row/file reconciliation at open, or a temp-in-destination-then-rename
@@ -489,7 +492,7 @@ namespace Truedat.Store
             var locBefore = existingLoc != null ? dal.LocationVisible(existingLoc.Value) : null;
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            if (isNewLocation || dal.LocationVisible(loc) != locBefore) r.VisibleChanges++;   // T07: the location is part of what an export shows
+            if (isNewLocation || !Nullable.Equals(dal.LocationVisible(loc), locBefore)) r.VisibleChanges++;   // T07: the location is part of what an export shows
             // A scan records one run per analysed entry (the observation: who measured, how long, on which copy);
             // an import shares one run for the whole catalog.
             long runId = runPerEntry

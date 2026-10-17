@@ -188,11 +188,13 @@ namespace Truedat.Store
         internal string? LocationLastModified(long locationId)
             => Row("SELECT last_modified_utc FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId);
 
-        /// <summary>T07: the columns of a location an export or a store reader can see (entity, display path, mtime, state), as one
-        /// comparable string — read before and after an upsert to tell a visible change from a last-seen stamp.</summary>
-        internal string? LocationVisible(long locationId)
-            => Row("SELECT entity_id || '|' || display_path || '|' || coalesce(last_modified_utc, '') || '|' || state FROM track_location WHERE id = ?;",
-                   s => s.GetString(0), null, locationId);
+        /// <summary>T07: the columns of a location an export or a store reader can see (entity, display path, mtime, state) — read
+        /// before and after an upsert to tell a visible change from a last-seen stamp. Four separate values, compared column by
+        /// column (TDA 082: a joined string could collide on a path containing the separator).</summary>
+        internal (string Entity, string Display, string? Modified, string State)? LocationVisible(long locationId)
+            => Row("SELECT entity_id, display_path, last_modified_utc, state FROM track_location WHERE id = ?;",
+                   s => ((string Entity, string Display, string? Modified, string State)?)(s.GetString(0)!, s.GetString(1)!, s.IsNull(2) ? null : s.GetString(2), s.GetString(3)!),   // NOT NULL columns but the mtime
+                   null, locationId);
 
         /// <summary>Display paths under a root whose location is NOT its media's primary (lowest-id) copy: the copies
         /// that export their media's single description rather than the values they were imported with.</summary>
