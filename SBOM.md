@@ -116,15 +116,33 @@ the recorded ones. (The extractor on that branch is **not** current — it is MD
 | `mbxmoods.<host>.json` | Output of `--chunk M/N` — hostname-suffixed shard. Each machine in a chunked scan writes its own shard; combine with `--merge-moods` for a unified file. |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. A file's row is removed when a later scan puts it in the catalog. |
 | `mbxmoods-review.json` | Review ledger: every file the catalog does not hold (excluded / skipped / failed), with the reason. A `tags` failure names what TagLib threw or returned. A file's record is removed when a later scan puts it in the catalog. Listed by `--list-review`. |
+| `mbxmoods.mbxs` | Binary sidecar written beside the catalog on every save — the same entries in a compact record layout, about 9× smaller. A player boots from this and falls back to the JSON. |
+| `mbxmoods-skipped.csv` | Every file a scan skipped and why (structural: missing / video / stream URL / non-audio / DSD / over `--max-duration`; or an `mbxmoods-exclude.json` rule). Suffixed per host under `--chunk`. |
 | `mbxmoods-verify.csv` | Output of `--verify` — per-entry integrity report (status: OK / DRIFT / MISSING / NO_HASH / ERROR). Tab-separated. Excludes OK rows to keep size small. |
+| `mbxmoods-verify[.<host>.<M>of<N>].receipt.json` | Coverage receipt per completed `--verify` pass: the slice walked and an order-independent XOR fold of those paths, so `--verify-coverage` can prove a sharded pass covered the catalog exactly once. |
 | `truedat.log` | Console output log (when `--audit` is used) |
+
+### Store and Edges (`--store`, `--edges` — preview)
+
+Written only when a store is in force. Nothing creates one unasked; once a store exists at the
+resolved location an ordinary scan uses it. See `STORE.md` for the schema and location rules.
+
+| File | Description |
+|------|-------------|
+| `truedat.db` | The v2 SQLite store (schema 4) beside the catalog, or under `%LOCALAPPDATA%	ruedat\<library-id>\` when the catalog folder is a share. With a store in force it is the authority: the scan records into it and the catalog and sidecar are published from it. |
+| `truedat.db-wal`, `truedat.db-shm` | SQLite write-ahead log and shared-memory index. A live store's committed state spans all three files, which is why `--snapshot` bundles a `VACUUM INTO` copy rather than a file copy. |
+| `mbxedges.v1.json` | Edge companion for a player's transition logic: per-track head and tail rows (key and its agreement, tempo, loudness and fade shape, centroid, dissonance, chroma, texture, and each edge's divergence from the whole track). About 1.8 KB per track. Rewritten after any scan that added edge rows, or by `--edges-export`. |
+| `store-result.json`, `store-import-result.json`, `store-info.json` | Machine-readable records of the last store write, import and info run — read by a launcher instead of scraping stdout. |
+| `artifacts\pending\` | In-flight edge stashes, swept on completion. |
+| `mbxmoods.json.bak.<ts>.zip` | Compressed rotated backup taken before any catalog-mutating verb (`--keep-backups N`, default 5). |
+| `mbxmoods-snapshot-<ts>.zip` | `--snapshot`: the catalog (and the store as a `VACUUM INTO` copy) plus a manifest carrying track count, schema, generation and SHA-256. `--restore` validates it opens and passes an integrity check before replacing anything. |
 
 ### Synthetic Library Mode (`--synthesize`)
 
 | File | Description |
 |------|-------------|
 | `{output}/**/*.mp3` | Stub MP3 files with real ID3 metadata (artist, album, genre, year, BPM) |
-| `{output}/mbxmoods.json` | Mood entries with 15 core Essentia features for all generated tracks (extended set only populated by live analysis) |
+| `{output}/mbxmoods.json` | Mood entries with the core Essentia features for all generated tracks (the later nullable waves are only populated by live analysis) |
 | `{output}/.synthetic-manifest.json` | Manifest for idempotent reruns (tracks generated, seed, settings) |
 
 ### Analyze Mode (`--analyze-file`, single-track)
@@ -180,7 +198,11 @@ Python dependencies for catalog-prep are listed in `src/requirements-catalog.txt
 
 - No network access at runtime
 - Reads audio files (read-only) and iTunes Music Library XML
-- Writes JSON output next to input XML file
+- Writes the JSON catalog and its binary sidecar next to the input XML file, and — when a store is
+  in force — a SQLite database beside them (or under `%LOCALAPPDATA%` when that folder is a share;
+  a network path is refused unless named explicitly, and then opened with exclusive locking)
+- SQLite comes from the OS (`winsqlite3.dll`) via P/Invoke; no database engine is shipped, and the
+  library is version-probed at open rather than assumed
 - No telemetry or external services
 - Child process arguments (ffmpeg, ffprobe, Essentia) are sanitized via `PathHelper.QuoteArg()` to prevent command injection from malicious file paths in the iTunes XML
 - iTunes XML parser uses `DtdProcessing.Ignore` to prevent XXE entity expansion
