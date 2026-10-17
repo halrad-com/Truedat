@@ -4690,6 +4690,10 @@ namespace Truedat
                     return;
                 }
                 var flSw = System.Diagnostics.Stopwatch.StartNew();
+                // T18 defect 1 (TDA 112): the same rescan rule as the library scan — without it a long --folder / --file-list run
+                // saved only at the end and a crash cost the whole run.
+                var flPeriodicSave = new PeriodicSave(flSw, SavePeriodSecs);
+                int flNotStartedAfterCheckpointFailure = 0;
 
                 // Accumulate for moods file (optional)
                 var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
@@ -4719,6 +4723,8 @@ namespace Truedat
                 Action<string> processFile = filePath =>
                 {
                     if (Volatile.Read(ref flSourceLost) != 0) return;
+                    // T18 (TDA 120 / keeper 132): no new file starts once checkpoints have failed persistently.
+                    if (flPeriodicSave.PersistentFailure != null) { Interlocked.Increment(ref flNotStartedAfterCheckpointFailure); return; }
                     // ONE metadata round trip for all three facts this path needs — exists,
                     // mtime, size — where it previously made three separate syscalls spread
                     // across eighty lines. Free on local NTFS out of the OS metadata cache,
@@ -5069,6 +5075,21 @@ namespace Truedat
                         Interlocked.Increment(ref flProcessed);
                         Interlocked.Increment(ref flAnalyzed);
                         Console.Error.WriteLine($"[OK{flOkSmfmTag}] {Path.GetFileName(filePath)}");
+                        // The analysis-completion path only (a cache hit returns earlier), as in MoodsMode.
+                        // A failed checkpoint is the checkpoint's failure, not this file's: PeriodicSave classifies and logs it and never
+                        // throws into this worker, so a file that analysed fine is never counted as a [FAIL].
+                        if (!string.IsNullOrEmpty(analyzeFileMoods))
+                            flPeriodicSave.AfterAnalysis(() =>
+                            {
+                                var saveSw = System.Diagnostics.Stopwatch.StartNew();
+                                var catalogFailure = TrySaveCheckpointCatalog(analyzeFileMoods!, flMoodsTracks);
+                                if (catalogFailure != null) return catalogFailure;
+                                var storeFailure = CheckpointStoreOutcome(FlushStoreSink(flMoodsTracks.Keys, final: false));
+                                if (storeFailure != null) return storeFailure;
+                                saveSw.Stop();
+                                Console.Error.WriteLine($"  [Saved {flMoodsTracks.Count} entries in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(flSw.Elapsed)} elapsed]");
+                                return CheckpointOutcome.Durable;
+                            });
                     }
                     catch (Exception ex)
                     {
@@ -5114,11 +5135,16 @@ namespace Truedat
                 flSw.Stop();
 
                 // Save moods file if --moods specified
+                var flCheckpointFailure = flPeriodicSave.PersistentFailure;
+                var flFinal = new FinalWrites();
                 if (!string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
                 {
-                    SaveResults(analyzeFileMoods!, flMoodsTracks);
-                    Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
-                    FlushStoreSink(flMoodsTracks.Keys);   // S2 C3
+                    // Keeper 132: a persistently failed stage is not attempted again here; the other half still writes.
+                    flFinal = RunFinalWrites(flCheckpointFailure, true, () =>
+                    {
+                        SaveResults(analyzeFileMoods!, flMoodsTracks);
+                        Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
+                    }, () => FlushStoreSink(flMoodsTracks.Keys));   // S2 C3
                 }
                 else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
@@ -5185,6 +5211,7 @@ namespace Truedat
                 }
                 if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
+                if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal);
                 return;
             }
 
@@ -5634,16 +5661,16 @@ namespace Truedat
             int timedOut = 0;
             int processed = 0;
             int total = tracks.Count;
-            long lastSaveElapsedTicks = 0;   // sw ticks at the end of the last periodic save
-            var saveLock = new object();
             // T1 (2026-07-30): errors-CSV appends get their own lock. They used to share
-            // saveLock, so a worker logging a failure blocked for the full multi-second
+            // the save lock, so a worker logging a failure blocked for the full multi-second
             // catalog serialization of any in-flight periodic save. Different files,
             // no shared state — sharing was incidental.
             var errorsCsvLock = new object();
 
             var startTime = DateTime.Now;
             var sw = Stopwatch.StartNew();
+            var periodicSave = new PeriodicSave(sw, SavePeriodSecs);   // the existing rescan rule (configured period; the bound is measured)
+            int notStartedAfterCheckpointFailure = 0;   // tracks not started once checkpoints failed persistently (TDA 120 / keeper 132)
 
             var cts = new CancellationTokenSource();
             var cancelRequested = 0;
@@ -5782,6 +5809,9 @@ namespace Truedat
                 {
                     pauseEvent.Wait();   // Ctrl+C prompt parks new-track starts here; in-flight tracks finish
                     if (cts.IsCancellationRequested || Volatile.Read(ref budgetStop) != 0) return;   // --budget: no new tracks once the time is up
+                    // T18 (TDA 120 / keeper 132): once a checkpoint has failed persistently nothing new can be made durable, so every
+                    // further analysis would only grow what a crash costs — no new track starts; in-flight ones finish.
+                    if (periodicSave.PersistentFailure != null) { Interlocked.Increment(ref notStartedAfterCheckpointFailure); return; }
                     var current = Interlocked.Increment(ref processed);
                     Interlocked.Increment(ref _inFlight);   // committed past the pause gate; drained by the Ctrl+C handler
                     // Outcome telemetry: thread-time + class per track, recorded in the
@@ -6371,41 +6401,24 @@ namespace Truedat
                         // analysis-completion path, so the "and something new was
                         // actually analyzed since the last save" condition is implicit —
                         // a pure cache-hit stretch never rewrites the catalog.
-                        long savePeriodTicks = (long)(SavePeriodSecs * Stopwatch.Frequency);
-                        if (sw.ElapsedTicks - Interlocked.Read(ref lastSaveElapsedTicks) >= savePeriodTicks)
+                        // T1 (2026-07-30): TryEnter + skip, not lock — the rule and its reasons live in PeriodicSave, now shared
+                        // with --file-list / --folder (T18 defect 1).
+                        periodicSave.AfterAnalysis(() =>
                         {
-                            // T1 (2026-07-30): TryEnter + skip, not lock. A save serializes
-                            // the whole catalog (multi-second on a 70k library); any worker
-                            // that finished a track in that window used to queue here doing
-                            // nothing — ~150 worker-seconds lost per save at 14 workers, and
-                            // the ess gauge dipped to P-1. If a save is in flight, this
-                            // worker just returns to analysis; the next completion retries.
-                            // Crash-resilience unchanged: the save still happens, workers
-                            // merely stop watching it happen.
-                            if (Monitor.TryEnter(saveLock))
-                            {
-                                try
-                                {
-                                    if (sw.ElapsedTicks - lastSaveElapsedTicks >= savePeriodTicks)
-                                    {
-                                        var saveSw = Stopwatch.StartNew();
-                                        SaveResults(moodsPath, allTracks);
-                                        // The store rides the same checkpoint: without it, every description and edge row of a
-                                        // multi-day --refresh sat in memory until the end, and a closed window cost them all.
-                                        FlushStoreSink(allTracks.Keys, final: false);
-                                        saveSw.Stop();
-                                        Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
-                                        Interlocked.Increment(ref _saveCount);
-                                        // Period measures save-end to save-start: a slow save
-                                        // must not eat its own next interval.
-                                        Interlocked.Exchange(ref lastSaveElapsedTicks, sw.ElapsedTicks);
-                                        Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
-                                        PrintAnalysisTimings();
-                                    }
-                                }
-                                finally { Monitor.Exit(saveLock); }
-                            }
-                        }
+                            var saveSw = Stopwatch.StartNew();
+                            var catalogFailure = TrySaveCheckpointCatalog(moodsPath, allTracks);
+                            if (catalogFailure != null) return catalogFailure;
+                            // The store rides the same checkpoint: without it, every description and edge row of a
+                            // multi-day --refresh sat in memory until the end, and a closed window cost them all.
+                            var storeFailure = CheckpointStoreOutcome(FlushStoreSink(allTracks.Keys, final: false));
+                            if (storeFailure != null) return storeFailure;
+                            saveSw.Stop();
+                            Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                            Interlocked.Increment(ref _saveCount);
+                            Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
+                            PrintAnalysisTimings();
+                            return CheckpointOutcome.Durable;
+                        });
                     }
                     catch (Exception ex)
                     {
@@ -6463,9 +6476,11 @@ namespace Truedat
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
 
             var finalSaveSw = Stopwatch.StartNew();
-            SaveResults(moodsPath, allTracks);
+            var checkpointFailure = periodicSave.PersistentFailure;
+            // Keeper 132: a persistently failed operation is not tried again at the end — only the half that did NOT fail is written.
+            // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
+            var finalWrites = RunFinalWrites(checkpointFailure, true, () => { SaveResults(moodsPath, allTracks); finalSaveSw.Stop(); }, () => FlushStoreSink(allTracks.Keys));
             finalSaveSw.Stop();
-            FlushStoreSink(allTracks.Keys);     // S2 C3: the store is a second sink, written after the catalog, never instead of it
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -6660,6 +6675,7 @@ namespace Truedat
                     global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{failed} track(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = 1;
             }
+            if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites);
 
             // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
             // catalog is a superset of what is on disk, holding entries for files that are
@@ -10770,18 +10786,126 @@ namespace Truedat
 
         /// <summary><paramref name="final"/> false = the periodic checkpoint beside the scan's catalog save (workers still running): files what is
         /// tied, one short line, no companion rewrite (that reads the whole store; it runs once, at the end).</summary>
-        static void FlushStoreSink(IEnumerable<string> catalogKeys, bool final = true)
+        static global::Truedat.Store.ScanSinkReport? FlushStoreSink(IEnumerable<string> catalogKeys, bool final = true)
         {
-            if (_storePath == null) return;
+            if (_storePath == null) return null;
             // The whole catalog's keys are the root hint: a root is never inferred from the analysed subset alone.
             var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys, final);
             if (!final)
             {
                 if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} tracks folded" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
-                return;
+                return r;
             }
             FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, _edgeSettings, _scanStartedUtc);
+            return r;
+        }
+
+        // ---- T18 checkpoint outcome (keeper 131/132, TDA 119/120): durable only when BOTH halves succeed --------------------------------
+
+        /// <summary>The catalog half of a checkpoint: null when saved, else a failed outcome (stage <c>catalog</c>) carrying the exception
+        /// and, for disk full, the volume and its free space (TDA 120). <c>SaveResults</c> writes a temp file and swaps it in atomically,
+        /// so a failure leaves the previous catalog intact — a retry cannot leave a partial or duplicated catalog behind.</summary>
+        internal static CheckpointOutcome? TrySaveCheckpointCatalog(string moodsPath, ConcurrentDictionary<string, TrackEntry> tracks)
+        {
+            try { SaveResults(moodsPath, tracks); return null; }
+            catch (Exception ex)
+            {
+                return CheckpointOutcome.Failed("catalog", ex,
+                    $"catalog {moodsPath}" + (CheckpointCause.IsDiskFull(ex) ? "; DISK FULL: " + (CheckpointCause.VolumeNote(moodsPath) ?? "volume unreadable") : ""));
+            }
+        }
+
+        /// <summary>The store half: null when no store is in force or the flush committed, else a failed outcome (stage <c>store</c>)
+        /// with the flush's exception. A failed checkpoint flush rolls its transaction back and re-queues its batch (ScanSink, TDA review
+        /// of 368374a), and entries are written by path, so a retry writes the same rows once — never a partial or duplicate commit.</summary>
+        internal static CheckpointOutcome? CheckpointStoreOutcome(global::Truedat.Store.ScanSinkReport? r)
+        {
+            if (r == null || r.Ok) return null;
+            return CheckpointOutcome.Failed("store", r.ErrorException,
+                $"store {_storePath} (no store commit; the batch is kept in memory for the final flush)" +
+                (CheckpointCause.IsDiskFull(r.ErrorException) ? "; DISK FULL: " + (CheckpointCause.VolumeNote(_storePath) ?? "volume unreadable") : ""));
+        }
+
+        /// <summary>Keeper 132: a persistently failed operation is not attempted again at the end of the scan; the OTHER half still
+        /// writes. An unknown stage (<c>checkpoint</c>: an exception outside both halves) skips both — repeating an unidentified
+        /// failure is the blind retry the operator ruled out.</summary>
+        internal static bool FinalStageAllowed(CheckpointOutcome? failure, string stage)
+        {
+            if (failure == null) return true;
+            if (failure.Stage == stage || failure.Stage == "checkpoint")
+            {
+                Console.Error.WriteLine($"  final {stage} write SKIPPED: the {failure.Stage} stage failed persistently this run ({CheckpointCause.Describe(failure.Error)}); it is not retried without a change of cause");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>What the scan's END actually did with each half (keeper 134 / TDA 122: survivor facts come from these, never from the
+        /// stage that failed first).</summary>
+        internal enum FinalWrite { NotAttempted, Written, Failed, Skipped }
+
+        internal sealed class FinalWrites
+        {
+            internal FinalWrite Catalog = FinalWrite.NotAttempted, Store = FinalWrite.NotAttempted;
+            internal Exception? CatalogError; internal string? StoreError;
+        }
+
+        /// <summary>The scan's final writes. A persistently failed stage is SKIPPED (keeper 132: not attempted again without a change of
+        /// cause); the other half runs once. With no checkpoint failure this is exactly the old sequence (a final catalog save that throws
+        /// still propagates, as before); after one, a throwing final catalog save is recorded instead, so the outcome can be reported.
+        /// <paramref name="flushStore"/> returns null when no store is in force.</summary>
+        internal static FinalWrites RunFinalWrites(CheckpointOutcome? failure, bool catalogDue, Action saveCatalog, Func<global::Truedat.Store.ScanSinkReport?> flushStore)
+        {
+            var w = new FinalWrites();
+            if (catalogDue)
+            {
+                if (!FinalStageAllowed(failure, "catalog")) w.Catalog = FinalWrite.Skipped;
+                else if (failure == null) { saveCatalog(); w.Catalog = FinalWrite.Written; }
+                else
+                {
+                    try { saveCatalog(); w.Catalog = FinalWrite.Written; }
+                    catch (Exception ex) { w.Catalog = FinalWrite.Failed; w.CatalogError = ex; Console.Error.WriteLine($"  final catalog write FAILED: {CheckpointCause.Describe(ex)}"); }
+                }
+            }
+            if (!FinalStageAllowed(failure, "store")) w.Store = FinalWrite.Skipped;
+            else
+            {
+                var r = flushStore();
+                w.Store = r == null ? FinalWrite.NotAttempted : r.Ok ? FinalWrite.Written : FinalWrite.Failed;
+                if (r != null && !r.Ok) w.StoreError = CheckpointCause.Describe(r.ErrorException) + (r.ErrorException == null ? " (" + r.Error + ")" : "");
+            }
+            return w;
+        }
+
+        /// <summary>Survivor facts for the CURRENT staging (catalog saved before the store flush; T18's final order — store commit then
+        /// derived publication — will restate these). Derived from what the end actually wrote. No recovery verb is promised:
+        /// <c>--store-import</c> is the legacy / partial-initialisation action, not ordinary recovery for an initialised store, and a
+        /// same-path re-analysis that reached the catalog but not the store leaves the store holding the OLD values at that path.</summary>
+        internal static string SurvivorFacts(FinalWrites w, int sinceDurable)
+        {
+            bool cat = w.Catalog == FinalWrite.Written, store = w.Store == FinalWrite.Written;
+            if (cat && store) return "the catalog and the store were both written at the end and hold this run's analyses";
+            if (cat && w.Store == FinalWrite.NotAttempted) return "the catalog was written at the end and holds this run's analyses (no store in force)";
+            if (cat) return $"the catalog was written at the end and holds this run's analyses; the store was {Word(w.Store)} and keeps its previous values, including the OLD values at any path re-analysed this run";
+            if (store) return $"the store was written at the end and holds this run's analyses; the catalog was {Word(w.Catalog)} and keeps its previous contents";
+            return $"nothing was written at the end (catalog {Word(w.Catalog)}, store {Word(w.Store)}): the {sinceDurable} analyses completed since the last durable checkpoint are LOST";
+        }
+
+        static string Word(FinalWrite f) => f == FinalWrite.Skipped ? "skipped" : f == FinalWrite.Failed ? "not written (failed)" : f == FinalWrite.NotAttempted ? "not in force" : "written";
+
+        /// <summary>The scan's outcome after a persistent checkpoint failure: the cause, the attempt counts, what the end actually wrote and
+        /// what that leaves (<see cref="SurvivorFacts"/>); exit non-zero; the record failed with all of it.</summary>
+        internal static void ReportPersistentCheckpointFailure(CheckpointOutcome f, PeriodicSave p, int notStarted, FinalWrites w)
+        {
+            var reason = $"checkpoint failed persistently at stage {f.Stage}: {CheckpointCause.Describe(f.Error)}{(f.Detail != null ? " (" + f.Detail + ")" : "")}; " +
+                         $"{p.Attempts} checkpoint attempts this run, {p.Saves} durable; {p.SinceDurable} analyses completed since the last durable checkpoint; " +
+                         $"{notStarted} tracks not started; the failed stage was not attempted again at the end; " +
+                         $"final writes: catalog {Word(w.Catalog)}{(w.CatalogError != null ? " (" + CheckpointCause.Describe(w.CatalogError) + ")" : "")}, " +
+                         $"store {Word(w.Store)}{(w.StoreError != null ? " (" + w.StoreError + ")" : "")}; {SurvivorFacts(w, p.SinceDurable)}";
+            Console.Error.WriteLine("=== FAILED - " + reason + " ===");
+            global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
+            if (Environment.ExitCode == 0) Environment.ExitCode = 1;
         }
 
         /// <summary>The scan's final store step after its final flush (<paramref name="final"/>): the summary lines, the companion
@@ -14498,6 +14622,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Edges.EdgeSelfTest.Run(Assert);
             global::Truedat.Store.PublicationSelfTest.Run(Assert);   // T07/T08 slice (architect-2, a98ded7)
             global::Truedat.Store.StoreResultSelfTest.Run(Assert);   // T11 store-result.json (architect-2)
+            PeriodicSaveSelfTest.Run(Assert);   // T18 defect 1: the shared rescan-rule checkpoint (architect-2)
             global::Truedat.Store.VerdictSelfTest.Run(Assert);       // T19 verdict projection (architect-2)
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
@@ -21633,7 +21758,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // leaves a stale .bak that the next save's pre-delete clears — and at that point the
                 // live file is already the new good catalog, so the leftover is redundant.
                 try { File.Delete(bakPath); } catch { }
-                AtomicReplace(tmpPath, moodsPath, bakPath);
+                // T18 (TDA 121): a swap that fails (another process holds the live catalog, disk full) must leave nothing beside the
+                // catalog — the live file is untouched by a failed replace, and the complete-but-unswapped temp is removed here
+                // rather than left for the next save's pre-delete (a retry rewrites it from memory). Measured: a held catalog left
+                // mbxmoods.json.tmp behind before this.
+                try { AtomicReplace(tmpPath, moodsPath, bakPath); }
+                catch { try { File.Delete(tmpPath); } catch { } throw; }
                 try { File.Delete(bakPath); } catch { }
 
                 // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both —

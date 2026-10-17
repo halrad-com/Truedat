@@ -12,6 +12,9 @@ namespace Truedat.Store
     internal sealed class ScanSinkReport
     {
         public bool Ok; public string? Error;
+        /// <summary>The exception behind <see cref="Error"/> (T18, keeper 131 / TDA 119): the scan's checkpoint classifies the CAUSE from it
+        /// (SQLite result code, Windows HResult) instead of a message string. Never serialised.</summary>
+        public System.Exception? ErrorException;
         public int Entries, Failures, Unchanged, Drift, ContentReplaced, ContentRekeyed, Remeasured, Stale, EntitiesCreated, Artifacts, ArtifactsShared;
         public long ArtifactBytes;
         /// <summary>S2 C4: edge rows written / edge folds that failed (a failed 'edges' run row, no partial row).</summary>
@@ -225,7 +228,7 @@ namespace Truedat.Store
             }
             catch (Exception ex)
             {
-                report.Ok = false; report.Error = ex.Message;
+                report.Ok = false; report.Error = ex.Message; report.ErrorException = ex;
                 if (!final)
                 {
                     // A failed CHECKPOINT keeps its batch for the final flush (TDA review of 368374a, P2a: dropping it left the entries out of

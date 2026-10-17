@@ -1,0 +1,233 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Truedat
+{
+    /// <summary>Self-tests for <see cref="PeriodicSave"/> — the existing rescan rule's checkpoint, shared by the library scan and
+    /// <c>--file-list</c> / <c>--folder</c> (T18 defect 1), and its failure handling (keeper 131 / TDA 119-120): durable only when both
+    /// halves succeed, the cause classified and logged, ONE retry for a named retryable class, anything else or a second failure
+    /// persistent (no further attempts). A short period stands in for 300 s; the CLI receipts measure the real route.</summary>
+    internal static class PeriodicSaveSelfTest
+    {
+        internal static void Run(Action<bool, string> assert)
+        {
+            Console.WriteLine("Periodic-save self-test (T18 defect 1: the rescan rule — once per period, TryEnter + skip; durable = both halves; one retry for a named cause, else persistent)");
+            try
+            {
+                TestPeriod(assert); TestSkipWhileSaving(assert); TestClassification(assert);
+                TestRetryableOnceThenDurable(assert); TestPersistentDiskFull(assert); TestRetryableTwiceIsPersistent(assert);
+                TestStoreHalfFailedIsNotDurable(assert); TestThrowingSaveIsAFailure(assert);
+                TestCatalogFailureLeavesLiveIntact(assert);
+                TestFinalWritesFromActualOutcomes(assert);
+            }
+            catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        static void Wait(Stopwatch clock, double secs) { while (clock.Elapsed.TotalSeconds < secs) Thread.Sleep(5); }
+        static IOException Win32(int code, string msg) { var e = new IOException(msg); SetHResult(e, unchecked((int)0x80070000) | code); return e; }
+        static void SetHResult(Exception e, int hr) => typeof(Exception).GetProperty("HResult")!.GetSetMethod(true)!.Invoke(e, new object[] { hr });
+        /// <summary>A save that is always due: period 0.</summary>
+        static PeriodicSave Due(out System.Collections.Generic.List<string> log)
+        {
+            var l = new System.Collections.Generic.List<string>(); log = l;
+            return new PeriodicSave(Stopwatch.StartNew(), 0, m => { lock (l) l.Add(m); });
+        }
+
+        static void TestPeriod(Action<bool, string> assert)
+        {
+            var clock = Stopwatch.StartNew();
+            var p = new PeriodicSave(clock, 0.2, _ => { });
+            int n = 0;
+            Func<CheckpointOutcome> save = () => { n++; return CheckpointOutcome.Durable; };
+            assert(!p.AfterAnalysis(save) && n == 0, "before the first period: no save (a scan does not save at its first completion)");
+            Wait(clock, 0.25);
+            assert(p.AfterAnalysis(save) && n == 1 && p.Saves == 1 && p.SinceDurable == 0, "a completion after one period saves once; nothing is pending after it");
+            assert(!p.AfterAnalysis(save) && n == 1 && p.SinceDurable == 1, "the next completion right after a save does not save again (the period restarts at the save's end); it is pending");
+            var after = clock.Elapsed.TotalSeconds;
+            Wait(clock, after + 0.25);
+            assert(p.AfterAnalysis(save) && n == 2 && p.Saves == 2, "one more period later, the next completion saves again");
+        }
+
+        static void TestSkipWhileSaving(Action<bool, string> assert)
+        {
+            var clock = Stopwatch.StartNew();
+            var p = new PeriodicSave(clock, 0.05, _ => { });
+            Wait(clock, 0.1);
+            using (var inSave = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                var saver = Task.Run(() => p.AfterAnalysis(() => { inSave.Set(); release.Wait(5000); return CheckpointOutcome.Durable; }));
+                inSave.Wait(5000);
+                var sw = Stopwatch.StartNew();
+                bool second = p.AfterAnalysis(() => CheckpointOutcome.Durable);
+                long waitedMs = sw.ElapsedMilliseconds;
+                release.Set();
+                bool first = saver.Result;
+                assert(first && !second && waitedMs < 1000 && p.Saves == 1,
+                    $"a completion while another worker is saving skips at once instead of queueing (first {first}, second {second}, waited {waitedMs} ms)");
+            }
+        }
+
+        static void TestClassification(Action<bool, string> assert)
+        {
+            assert(CheckpointCause.IsRetryable(new Store.SqliteException(5, "database is locked")) && CheckpointCause.IsRetryable(new Store.SqliteException(6, "locked"))
+                   && CheckpointCause.IsRetryable(new Store.SqliteException(517, "busy snapshot (extended 5)")),
+                "retryable: SQLite BUSY 5 / LOCKED 6 (extended codes by their primary)");
+            assert(CheckpointCause.IsRetryable(Win32(32, "sharing violation")) && CheckpointCause.IsRetryable(Win32(33, "lock violation"))
+                   && CheckpointCause.IsRetryable(new InvalidOperationException("wrapper", Win32(32, "inner sharing violation"))),
+                "retryable: Windows sharing 32 / lock 33, also when wrapped");
+            assert(!CheckpointCause.IsRetryable(Win32(112, "disk full")) && !CheckpointCause.IsRetryable(new Store.SqliteException(13, "database or disk is full"))
+                   && !CheckpointCause.IsRetryable(new UnauthorizedAccessException("denied")) && !CheckpointCause.IsRetryable(new Store.SqliteException(11, "corrupt"))
+                   && !CheckpointCause.IsRetryable(new Store.SqliteException(10, "ioerr")) && !CheckpointCause.IsRetryable(new Exception("unknown")) && !CheckpointCause.IsRetryable(null),
+                "not retryable: disk full (112 / SQLite 13), access denied, CORRUPT, IOERR, an unknown exception, no exception");
+            assert(CheckpointCause.IsDiskFull(Win32(112, "There is not enough space on the disk.")) && CheckpointCause.IsDiskFull(new Store.SqliteException(13, "full"))
+                   && CheckpointCause.IsDiskFull(Win32(39, "handle disk full")) && !CheckpointCause.IsDiskFull(Win32(32, "sharing")),
+                "disk full is recognised (ERROR_DISK_FULL 112, ERROR_HANDLE_DISK_FULL 39, SQLITE_FULL 13) so its message can name the volume");
+            var d = CheckpointCause.Describe(new InvalidOperationException("outer", new Store.SqliteException(13, "database or disk is full")));
+            assert(d.Contains("InvalidOperationException") && d.Contains("SQLite rc 13") && d.Contains("database or disk is full"), $"Describe names every level and the native code ({d})");
+        }
+
+        static void TestRetryableOnceThenDurable(Action<bool, string> assert)
+        {
+            var p = Due(out var log);
+            int calls = 0;
+            bool first = p.AfterAnalysis(() => { calls++; return CheckpointOutcome.Failed("catalog", Win32(32, "the file is in use")); });
+            bool second = p.AfterAnalysis(() => { calls++; return CheckpointOutcome.Durable; });
+            assert(!first && second && calls == 2 && p.Saves == 1 && p.PersistentFailure == null && p.SinceDurable == 0,
+                $"a sharing violation gets ONE retry at the next completion, which succeeds (calls {calls}, saves {p.Saves})");
+            assert(log.Count == 1 && log[0].Contains("stage catalog") && log[0].Contains("HResult 0x80070020") && log[0].Contains("ONE retry"),
+                $"the failure is logged with stage + native code + the retry decision ({string.Join(" | ", log)})");
+        }
+
+        static void TestPersistentDiskFull(Action<bool, string> assert)
+        {
+            var p = Due(out var log);
+            int calls = 0;
+            Func<CheckpointOutcome> fail = () => { calls++; return CheckpointOutcome.Failed("catalog", Win32(112, "There is not enough space on the disk."), "volume X:\\ 0 bytes free"); };
+            for (int i = 0; i < 5; i++) p.AfterAnalysis(fail);
+            assert(calls == 1 && p.Attempts == 1 && p.Saves == 0 && p.PersistentFailure != null && p.PersistentFailure.Stage == "catalog",
+                $"a persistent disk-full failure: exactly ONE attempt, then no further checkpoints across later completions (calls {calls})");
+            assert(p.SinceDurable == 5, $"the five completions since the last durable checkpoint are counted as at risk ({p.SinceDurable})");
+            assert(log.Count == 1 && log[0].Contains("ERROR") && log[0].Contains("Not a retryable cause") && log[0].Contains("HResult 0x80070070") && log[0].Contains("0 bytes free"),
+                $"logged once, as persistent, with the code and the volume note ({string.Join(" | ", log)})");
+        }
+
+        static void TestRetryableTwiceIsPersistent(Action<bool, string> assert)
+        {
+            var p = Due(out var log);
+            int calls = 0;
+            Func<CheckpointOutcome> busy = () => { calls++; return CheckpointOutcome.Failed("store", new Store.SqliteException(5, "database is locked")); };
+            for (int i = 0; i < 6; i++) p.AfterAnalysis(busy);
+            assert(calls == 2 && p.PersistentFailure != null && log.Count == 2 && log[1].Contains("Second consecutive failure"),
+                $"a retryable cause that fails again: exactly TWO attempts (one retry), then persistent (calls {calls}; {string.Join(" | ", log)})");
+        }
+
+        static void TestStoreHalfFailedIsNotDurable(Action<bool, string> assert)
+        {
+            var p = Due(out var log);
+            bool saved = p.AfterAnalysis(() => CheckpointOutcome.Failed("store", null, "store checkpoint not written: unable to open database file"));
+            assert(!saved && p.Saves == 0 && p.SinceDurable == 1 && p.PersistentFailure != null,
+                "the catalog half succeeded but the store half failed: NOT durable, not counted, the completion stays at risk (no exception = not a retryable class)");
+        }
+
+        /// <summary>REAL failure, not simulated (TDA 121: before any retry, prove the failed attempt left no partial result): another
+        /// handle holds the live catalog exclusively while the checkpoint's catalog half runs. The live bytes must be unchanged and no
+        /// temp file left; the actual exception, HResult and its classification are reported as observed, not assumed.</summary>
+        static void TestCatalogFailureLeavesLiveIntact(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var cat = Path.Combine(dir, "mbxmoods.json");
+                var tracks = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+                tracks[@"D:\music\a.flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "a", Bpm = 120, Mfcc = new[] { 1.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                assert(Program.TrySaveCheckpointCatalog(cat, tracks) == null && File.Exists(cat), "fixture: the first checkpoint's catalog half saves");
+                var before = File.ReadAllBytes(cat);
+                var sidecar = Path.ChangeExtension(cat, ".mbxs");
+                var sidecarBefore = File.Exists(sidecar) ? File.ReadAllBytes(sidecar) : new byte[0];
+                tracks[@"D:\music\b.flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "B", Title = "b", Bpm = 121, Mfcc = new[] { 2.5 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
+                CheckpointOutcome? failed;
+                using (new FileStream(cat, FileMode.Open, FileAccess.Read, FileShare.None))
+                    failed = Program.TrySaveCheckpointCatalog(cat, tracks);
+                var after = File.ReadAllBytes(cat);
+                var leftovers = Directory.GetFiles(dir);
+                assert(failed != null && failed.Stage == "catalog" && failed.Error != null,
+                    $"a held live catalog fails the catalog half: observed {CheckpointCause.Describe(failed?.Error)}; retryable by the named classes: {CheckpointCause.IsRetryable(failed?.Error)}");
+                assert(System.Linq.Enumerable.SequenceEqual(before, after), "the failed attempt left the live catalog byte-identical");
+                var sidecarAfter = File.Exists(sidecar) ? File.ReadAllBytes(sidecar) : new byte[0];
+                assert(System.Linq.Enumerable.SequenceEqual(sidecarBefore, sidecarAfter), "the failed attempt left the sidecar byte-identical (it is written only after a successful swap)");
+                var names = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(leftovers, f => Path.GetFileName(f)));
+                assert(!System.Linq.Enumerable.Any(names, n => n.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) || n.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)),
+                    $"the failed attempt left no temp or backup beside the catalog ({string.Join(", ", names)})");
+                assert(Program.TrySaveCheckpointCatalog(cat, tracks) == null && File.ReadAllText(cat).Contains("b.flac"),
+                    "once the holder lets go, the same save succeeds and carries both entries (the retry writes the whole catalog once)");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>Keeper 134 / TDA 122: the end-of-scan survivor facts come from what the final writes ACTUALLY did, never from the
+        /// stage that failed first; keeper 132: the persistently failed stage is never invoked again. Simulated halves (delegates), not a
+        /// process run — the CLI receipts carry the real-route cases.</summary>
+        static void TestFinalWritesFromActualOutcomes(Action<bool, string> assert)
+        {
+            var savedErr = Console.Error; Console.SetError(new StringWriter());
+            try
+            {
+                var catalogFailed = CheckpointOutcome.Failed("catalog", Win32(112, "There is not enough space on the disk."));
+                var storeFailed = CheckpointOutcome.Failed("store", new Store.SqliteException(13, "database or disk is full"));
+                Store.ScanSinkReport ok = new Store.ScanSinkReport { Ok = true }, bad = new Store.ScanSinkReport { Ok = false, Error = "unable to open database file", ErrorException = new Store.SqliteException(14, "unable to open database file") };
+                int catalogCalls = 0, storeCalls = 0;
+                Action save = () => catalogCalls++;
+                Action saveThrows = () => { catalogCalls++; throw Win32(112, "There is not enough space on the disk."); };
+
+                // Catalog failed persistently, THEN the final store flush fails too: nothing survives — the old code said "the store was written".
+                var w1 = Program.RunFinalWrites(catalogFailed, true, save, () => { storeCalls++; return bad; });
+                var s1 = Program.SurvivorFacts(w1, 7);
+                assert(catalogCalls == 0 && storeCalls == 1 && w1.Catalog == Program.FinalWrite.Skipped && w1.Store == Program.FinalWrite.Failed && s1.Contains("LOST") && s1.Contains("7 analyses"),
+                    $"catalog failed, then the final store flush failed: catalog never retried, store tried once, survivors = nothing, 7 lost ({s1})");
+                // Control: catalog failed, store flush succeeds -> the store holds them.
+                catalogCalls = storeCalls = 0;
+                var w2 = Program.RunFinalWrites(catalogFailed, true, save, () => { storeCalls++; return ok; });
+                assert(catalogCalls == 0 && storeCalls == 1 && w2.Store == Program.FinalWrite.Written && Program.SurvivorFacts(w2, 7).StartsWith("the store was written"),
+                    "control: catalog failed, final store flush succeeds -> the store holds this run's analyses");
+                // Store failed persistently, catalog final save succeeds -> the catalog holds them; the store keeps OLD values at re-analysed paths.
+                catalogCalls = storeCalls = 0;
+                var w3 = Program.RunFinalWrites(storeFailed, true, save, () => { storeCalls++; return ok; });
+                var s3 = Program.SurvivorFacts(w3, 4);
+                assert(catalogCalls == 1 && storeCalls == 0 && w3.Store == Program.FinalWrite.Skipped && s3.StartsWith("the catalog was written") && s3.Contains("OLD values") && !s3.Contains("--store-import"),
+                    $"store failed persistently: store never retried, catalog written once; survivors name the stale same-path values and promise no recovery verb ({s3})");
+                // Store failed persistently, and the final catalog save throws -> nothing survives; the exception is recorded, not thrown.
+                catalogCalls = storeCalls = 0;
+                bool threw = false; Program.FinalWrites? w4 = null;
+                try { w4 = Program.RunFinalWrites(storeFailed, true, saveThrows, () => { storeCalls++; return ok; }); } catch { threw = true; }
+                assert(!threw && w4 != null && catalogCalls == 1 && storeCalls == 0 && w4.Catalog == Program.FinalWrite.Failed && w4.CatalogError != null && Program.SurvivorFacts(w4, 4).Contains("LOST"),
+                    "store failed persistently and the final catalog save throws: recorded (not thrown), nothing survives, 4 lost");
+                // An unknown-stage failure skips both halves (no blind retry of an unidentified failure).
+                catalogCalls = storeCalls = 0;
+                var w5 = Program.RunFinalWrites(CheckpointOutcome.Failed("checkpoint", new Exception("?")), true, save, () => { storeCalls++; return ok; });
+                assert(catalogCalls == 0 && storeCalls == 0 && w5.Catalog == Program.FinalWrite.Skipped && w5.Store == Program.FinalWrite.Skipped, "an unknown-stage failure: neither half is attempted again");
+                // No checkpoint failure: the old sequence, both written once; a throwing catalog save still propagates as before.
+                catalogCalls = storeCalls = 0;
+                var w6 = Program.RunFinalWrites(null, true, save, () => { storeCalls++; return ok; });
+                bool propagated = false;
+                try { Program.RunFinalWrites(null, true, saveThrows, () => ok); } catch (IOException) { propagated = true; }
+                assert(catalogCalls == 2 && storeCalls == 1 && w6.Catalog == Program.FinalWrite.Written && w6.Store == Program.FinalWrite.Written && propagated,
+                    "no checkpoint failure: unchanged — both halves once, and a final catalog save that throws still propagates");
+            }
+            finally { Console.SetError(savedErr); }
+        }
+
+        static void TestThrowingSaveIsAFailure(Action<bool, string> assert)
+        {
+            var p = Due(out var log);
+            bool threw = false, saved = true;
+            try { saved = p.AfterAnalysis(() => throw new UnauthorizedAccessException("Access to the path is denied.")); } catch { threw = true; }
+            assert(!threw && !saved && p.PersistentFailure != null && p.PersistentFailure.Stage == "checkpoint" && log.Count == 1 && log[0].Contains("UnauthorizedAccessException"),
+                "a save that throws never escapes into the worker: a failed checkpoint (stage checkpoint), classified and logged");
+        }
+    }
+}
