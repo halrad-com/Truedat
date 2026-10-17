@@ -1,11 +1,11 @@
-# Truedat - Software Bill of Materials (SBOM)
+﻿# Truedat - Software Bill of Materials (SBOM)
 
 ## Project
 
 | Field | Value |
 |-------|-------|
 | Name | Truedat (Music Mood Extractor & Fingerprinter) |
-| Version | 1.0.0 (assembly); release v0.5.5.2 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.2` |
+| Version | 1.0.0 (assembly); release v0.5.5.3-EV2.1 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.3-EV2.1` |
 | License | MIT |
 | Framework | .NET Framework 4.8 |
 | Output | `truedat.exe` (single file, ILRepack merged) |
@@ -20,6 +20,7 @@
 | .NET Framework | 4.8 | MIT | Runtime (ships with Windows 10/11) |
 | System.Security.Cryptography | 4.8 (BCL) | MIT | MD5 and SHA-256 used by file-MD5, audio-head MD5 (`fingerprint.v1`), and audio-stream SHA-256 (`audioStreamSha256`); SHA-NI hardware-accelerated on supported CPUs (framework assembly reference) |
 | System.Text.Json | 8.0.5 | MIT | JSON serialization (merged into exe via ILRepack) |
+| winsqlite3.dll | OS-provided (Windows 10 1803+) | Public Domain (SQLite) | The v2 store, via `DllImport("winsqlite3.dll")` — no SQLite binary is shipped or built, and no NuGet provider is used. Probed at store open; a missing or too-old library refuses with a message instead of crashing (minimum 3.40). Measured 3.51.1 on Windows 10 and 11; compile options differ per OS build, so optional features are probed, never assumed |
 | TagLibSharp | 2.3.0 | LGPL-2.1 | ID3 tag writing for synthetic library generation; audio-property parsing and `InvariantStartPosition/EndPosition` locator for Phase 2 identity signals (merged into exe via ILRepack) |
 
 **Build tools:**
@@ -65,9 +66,17 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 
 ### Built Tools
 
-| File | Architecture | Source |
-|------|-------------|--------|
-| `essentia_streaming_extractor_music.exe` | x64 | Built from `essentia-build/` — mood analysis |
+| File | Architecture | Build | Source |
+|------|-------------|-------|--------|
+| `essentia_streaming_extractor_music.exe` | x64 | `output-x64.5` | Built from `essentia-build/` — mood analysis. `.5` adds a binary frame-level output (`--frames-bin`, `framesInclude`) that `--edges` folds, and a build id in the output; the 2/3-argument invocations are unchanged from `.4` |
+
+The running build is identified by MD5 and named in `truedat --version` / the scan's tool check
+(`KnownExtractors` in `Truedat/Program.cs`); `--edges` refuses an older one rather than silently
+skipping the fold.
+
+| File | MD5 | SHA-256 |
+|------|-----|---------|
+| `essentia_streaming_extractor_music.exe` (`output-x64.5`) | `6f47bdfcaadfd4f510c5e1621c07945d` | `5114426816ef64f11cb3b8c53844dc324cf420272ba9d757e148bc7edf224a98` |
 
 Place it in the same folder as `truedat.exe`.
 
@@ -89,6 +98,14 @@ Source: [FFmpeg](https://ffmpeg.org/)
 | `ffmpeg.exe` | `9c6b03ec0c5b5efc6c471ec81d3bdc99b50d88c0cdefbfe0cb6e1b55e28cd331` |
 | `ffprobe.exe` | `307a1f169d1e3c0c099aa3eb384a5de53b1a489ccb9b9a4c2d3082b8bf1d2188` |
 
+The copies in `dist/truedat/` hash differently from the `truedat-deps` records above, so the two
+are not the same files; whichever is authoritative, they need reconciling:
+
+| File (as shipped in `dist/truedat/`) | SHA-256 |
+|------|---------|
+| `ffmpeg.exe` | `59c8a17f012f148bdce12b93f8cba2d37f281a3e0e856d505608ca5eaa4520ed` |
+| `ffprobe.exe` | `2fac541ccf404a600c62c9f7be14600dd98ae5679defb31f5ed2fe71e3a388a8` |
+
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
 **Note:** FFmpeg is an optional external dependency. Without it, multi-channel audio files are skipped with a warning and the bitUsage / HF-analysis fields are omitted. Truedat itself (MIT) does not link against FFmpeg — it invokes the executables as subprocesses.
@@ -99,7 +116,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| `mbxmoods.json` | Mood vectors and 55 raw Essentia features per track (15 core + 40 extended, all nullable for back-compat), plus identity fields `fileMd5` (maintained only with `--file-md5`), `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). Legacy `audioMd5` / `chromaprint` keys from old scans are ignored on read and stripped by `--migrate`. |
+| `mbxmoods.json` | Mood vectors and the raw Essentia feature set per track (core always present, later waves nullable for back-compat; README's *Feature set* section carries the exact counts and how to re-measure them), plus identity fields `fileMd5` (maintained only with `--file-md5`), `fingerprint.v1`, `audioStreamSha256` (each nullable, omitted when missing); all hashes run concurrently with Essentia per track and are pure-managed (no subprocess). Legacy `audioMd5` / `chromaprint` keys from old scans are ignored on read and stripped by `--migrate`. |
 | `mbxmoods.<host>.json` | Output of `--chunk M/N` — hostname-suffixed shard. Each machine in a chunked scan writes its own shard; combine with `--merge-moods` for a unified file. |
 | `mbxmoods-errors.csv` | Failed tracks with error reasons (mood analysis). Suffixed `mbxmoods-errors.<host>.csv` under `--chunk`. A file's row is removed when a later scan puts it in the catalog. |
 | `mbxmoods-review.json` | Review ledger: every file the catalog does not hold (excluded / skipped / failed), with the reason. A `tags` failure names what TagLib threw or returned. A file's record is removed when a later scan puts it in the catalog. Listed by `--list-review`. |
@@ -118,7 +135,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | File | Description |
 |------|-------------|
-| stdout (JSON) | Single track's 55 Essentia features as JSON (15 core + 40 extended, nullable; consumed by MBXHub ScanWorker) |
+| stdout (JSON) | Single track's Essentia feature set as JSON (nullable beyond the core; counts in README's *Feature set* section) |
 
 ### Batch Mode (`--file-list`)
 
