@@ -10733,18 +10733,30 @@ namespace Truedat
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
                 return;
             }
-            bool companionWritten = false;
-            if (r.Ok)
-            {
-                Console.WriteLine($"  store: {r.Entries} analysed entries written ({r.EntitiesCreated} new media, {r.Unchanged} unchanged, {r.Remeasured} remeasured, {r.Drift} drift, {r.ContentReplaced} replaced), {r.Failures} failures recorded, {r.ElapsedMs / 1000.0:F1} s -> {r.StorePath}");
-                if (_stageOpts.Edges) Console.WriteLine($"  edges: {r.Edges} edge rows written, {r.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
-                if (_stageOpts.Edges && r.Edges > 0) companionWritten = WriteEdgesCompanion(_storePath, _edgesCompanionPath, _edgeSettings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
-            }
-            else
-                Console.Error.WriteLine($"  WARNING: store not written ({r.Error}); the catalog is complete and unaffected");
+            bool companionWritten = FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, _edgeSettings);
             // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
             // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
             global::Truedat.Store.StoreResult.WriteScan(_storePath, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, companionWritten ? _edgesCompanionPath : null, _scanStartedUtc);
+        }
+
+        /// <summary>The scan's final store step after its final flush (<paramref name="final"/>): the summary lines and the companion
+        /// rewrite. <paramref name="total"/> is the scan-wide tally over every flush. Returns whether the companion was written.</summary>
+        internal static bool FinishScanStore(string storePath, global::Truedat.Store.ScanSinkReport final, global::Truedat.Store.ScanSinkReport total,
+            bool edgesOn, string? companionPath, global::Truedat.Edges.EdgeSettings settings)
+        {
+            bool companionWritten = false;
+            if (final.Ok)
+            {
+                // TDA 092: the RUN's totals — checkpoints included. Gating on the final flush alone left the companion behind the store
+                // whenever the checkpoints had already committed every edge row (a long --store --edges scan) and the final flush was empty.
+                var t = total;
+                Console.WriteLine($"  store: {t.Entries} analysed entries written ({t.EntitiesCreated} new media, {t.Unchanged} unchanged, {t.Remeasured} remeasured, {t.Drift} drift, {t.ContentReplaced} replaced), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}");
+                if (edgesOn) Console.WriteLine($"  edges: {t.Edges} edge rows written, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
+                if (edgesOn && t.Edges > 0) companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
+            }
+            else
+                Console.Error.WriteLine($"  WARNING: store not written ({final.Error}); the catalog is complete and unaffected");
+            return companionWritten;
         }
 
         /// <summary>When this process's scan began (ISO-8601 UTC) — the record's startedUtc.</summary>

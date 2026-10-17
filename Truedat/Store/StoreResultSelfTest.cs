@@ -63,6 +63,11 @@ namespace Truedat.Store
             try { TestStickyCountExact(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.StickyExact: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ImportCommand.FailAfterEntriesForTest = 0; global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (TDA 092: the scan's final store step rewrites the companion when the RUN added edges — checkpoints included — and prints scan-wide totals)");
+            var savedOut = Console.Out;
+            try { TestFinishScanStoreCompanion(assert); }
+            catch (Exception ex) { Console.SetOut(savedOut); assert(false, $"StoreResult.FinishCompanion: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { Console.SetOut(savedOut); global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
             try { TestImportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -728,6 +733,47 @@ namespace Truedat.Store
                 // Program.FlushStoreSink, then always writes it from the scan-wide tally — done here exactly as it does.
                 StoreResult.WriteScan(store5, ScanSink.Total, true, null);
                 assert(Sticky(store5) == 4, $"two committed checkpoints (2 + 2) and an empty final flush record the scan-wide total 4 (got {Sticky(store5)})");
+            }
+        }
+
+        // TDA 092 (my finding on dd27ebd): the final store step gated the companion rewrite on the FINAL flush's edge count, so a long
+        // --store --edges scan whose checkpoints committed every edge row and whose final flush was empty left mbxedges.v1.json behind the
+        // store. Two edge-bearing checkpoints and an empty final flush, through the real sink and Program.FinishScanStore.
+        static void TestFinishScanStoreCompanion(Action<bool, string> assert)
+        {
+            const string P = @"D:\music\verdict\a-lavc.mp3", Q = @"D:\music\verdict\b-lame.mp3";
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                global::Truedat.Edges.EdgeStore.CaptureArraysDefault = false; ScanSink.StoreDirectory = d.Root;
+                void Record(string path)
+                {
+                    var analysed = Path.Combine(d.Root, "staged-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".mp3");
+                    ScanSink.StashEdges(analysed, global::Truedat.Edges.EdgeSelfTest.SyntheticFold(d.Root, 240, true));
+                    ScanSink.Record(path, VerdictSelfTest.Fixture()[path], analysed);
+                }
+                Record(P); var cp1 = ScanSink.Flush(store, "output-x64.5", new[] { P, Q }, final: false);
+                Record(Q); var cp2 = ScanSink.Flush(store, "output-x64.5", new[] { P, Q }, final: false);
+                var fin = ScanSink.Flush(store, "output-x64.5", new[] { P, Q });
+                assert(cp1.Ok && cp2.Ok && cp1.Edges + cp2.Edges == 2 && fin.Ok && fin.Edges == 0,
+                    $"setup: two checkpoints committed the run's edges and the final flush was empty (checkpoint edges {cp1.Edges} + {cp2.Edges}, final {fin.Edges})");
+
+                var companion = d.P(global::Truedat.Edges.EdgeCompanion.FileName);
+                var captured = new StringWriter(); var saved = Console.Out; Console.SetOut(captured);
+                bool written;
+                try { written = Program.FinishScanStore(store, fin, ScanSink.Total, true, companion, new global::Truedat.Edges.EdgeSettings()); }
+                finally { Console.SetOut(saved); }
+                var tracks = new List<string>();
+                if (File.Exists(companion))
+                    using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(companion)))
+                        foreach (var t in doc.RootElement.GetProperty("tracks").EnumerateObject()) tracks.Add(t.Name);
+                var sha = VerdictSelfTest.Fixture()[P].AudioStreamSha256!;
+                assert(written && File.Exists(companion) && tracks.Contains(sha),
+                    $"the companion IS rewritten after a run whose edges all landed at checkpoints, and holds the run's rows (written {written}; file {File.Exists(companion)}; tracks {tracks.Count})");
+                var printed = captured.ToString();
+                assert(printed.Contains("edges: 2 edge rows written"),
+                    $"the summary prints the scan-wide edge total, not the final flush's (printed: {printed.Replace(Environment.NewLine, " | ").Trim()})");
             }
         }
 
