@@ -5247,7 +5247,7 @@ namespace Truedat
                 if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
                 if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal,
-                    _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries
+                    _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries + flFinal.StoreLost
                     : flFinal.Catalog == FinalWrite.Written || string.IsNullOrEmpty(analyzeFileMoods) ? 0 : NotInCatalogFile(analyzeFileMoods!, flMoodsTracks).Count);
                 return;
             }
@@ -6739,7 +6739,7 @@ namespace Truedat
                 Environment.ExitCode = 1;
             }
             if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites,
-                _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries : finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
+                _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries + finalWrites.StoreLost : finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
 
             // A scan only ever ADDS and UPDATES — it never removes — so after every scan the
             // catalog is a superset of what is on disk, holding entries for files that are
@@ -10859,7 +10859,7 @@ namespace Truedat
             if (!final)
             {
                 if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} tracks folded" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
-                else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
+                else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); its entries stay queued for the next commit");
                 return r;
             }
             // T18: the publication that follows writes the companion with the catalog and sidecar, so the store step does not write it too.
@@ -10980,6 +10980,8 @@ namespace Truedat
         {
             internal FinalWrite Catalog = FinalWrite.NotAttempted, Store = FinalWrite.NotAttempted;
             internal Exception? CatalogError; internal string? StoreError;
+            /// <summary>T18: entries a failed final store flush did not write (exact; they existed only in memory).</summary>
+            internal int StoreLost;
         }
 
         /// <summary>The scan's final writes. A persistently failed stage is SKIPPED (keeper 132: not attempted again without a change of
@@ -11019,7 +11021,7 @@ namespace Truedat
             {
                 var r = FlushStoreSink(keys);
                 w.Store = r == null ? FinalWrite.NotAttempted : r.Ok ? FinalWrite.Written : FinalWrite.Failed;
-                if (r != null && !r.Ok) w.StoreError = CheckpointCause.Describe(r.ErrorException) + (r.ErrorException == null ? " (" + r.Error + ")" : "");
+                if (r != null && !r.Ok) { w.StoreError = CheckpointCause.Describe(r.ErrorException) + (r.ErrorException == null ? " (" + r.Error + ")" : ""); w.StoreLost = r.LostEntries; }
             }
             if (w.Store == FinalWrite.Written || w.Store == FinalWrite.Skipped)
                 w.Catalog = PublishFromStore(catalogPath, checkpoint: false) ? FinalWrite.Written : FinalWrite.Failed;
@@ -11093,7 +11095,7 @@ namespace Truedat
                 if (edgesOn && t.Edges > 0) companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
             }
             else
-                Console.Error.WriteLine($"  WARNING: store not written ({final.Error}); the catalog is complete and unaffected");
+                Console.Error.WriteLine($"  WARNING: store not written ({final.Error}); {final.LostEntries} entries were not committed and are lost (the files show the store's last publication)");
             // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
             // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
             global::Truedat.Store.StoreResult.WriteScan(storePath, total, edgesOn, companionWritten ? companionPath : null, startedUtc);

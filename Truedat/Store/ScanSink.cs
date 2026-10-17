@@ -15,6 +15,9 @@ namespace Truedat.Store
         public bool Ok; public string? Error;
         /// <summary>T18: store locations retired by this flush (moved files' old paths) and cache-hit refreshes written as copy facts.</summary>
         public int Retired, CopyOnly;
+        /// <summary>T18: entries a FAILED FINAL flush did not write — under a store-authoritative scan they existed only in memory, so they are
+        /// lost (exact). A failed checkpoint re-queues instead and counts nothing here.</summary>
+        public int LostEntries;
         /// <summary>The exception behind <see cref="Error"/> (T18, keeper 131 / TDA 119): the scan's checkpoint classifies the CAUSE from it
         /// (SQLite result code, Windows HResult) instead of a message string. Never serialised.</summary>
         public System.Exception? ErrorException;
@@ -298,7 +301,10 @@ namespace Truedat.Store
                 {
                     foreach (var p in artifacts.Values) { try { System.IO.File.Delete(p); } catch { } }
                     foreach (var p in edges.Values) TryDelete(p);
-                    StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries, {failures.Count} failures not written; the catalog has them" +
+                    report.LostEntries = entries.Count;
+                    // T18: the scan is store-authoritative — the catalog is derived from the store, so these entries are in neither (exact count).
+                    StoreLog.Error($"store write failed: {ex.Message} ({entries.Count} entries and {failures.Count} failure rows not written: lost, the store is the record and " +
+                                   "the files show its last publication" +
                                    (edges.Count > 0 ? $"; {edges.Count} edge fold(s) dropped — the next --refresh re-analyses those tracks" : "") + ")");
                 }
             }
