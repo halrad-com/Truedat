@@ -35,20 +35,44 @@ One row of file facts per copy, one audio description per media:
 | `track_copy` | copy | tags as found in the copy, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` |
 | `run` | attempt | producer + version, entity, content hash, location, outcome, duration, failed components, reason, source |
 | `producer` | producer | key, current version, kind |
-| `value`, `segment` | content key (+ segment) | the edge rows (below); any future measurement that is a function of the audio |
+| `edge` | (content key, producer version, head / tail) | the typed edge row (below): scalars + the edge's HPCP; the opt-in arrays when captured |
+| `value`, `segment` | content key (+ segment) | the edge's whole-track words (status, duration, extractor, head-vs-tail divergence) and windows; any future measurement that is a function of the audio |
+| `verdict` | copy | the catalog's `truedat` block, derived from the stored rows (below) — a row iff the catalog writes the block |
 | `artifact` | (content key, build) | where the compressed extractor output sits, bytes, sha |
 | `work_item` | (entity, producer) | review records imported from the scan ledgers (review state, attempts) |
 | `conflict`, `check_result` | event | drift between runs, sha collisions, split disagreements; checks |
 
-Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql`, `v2.sql`); a v1 store migrates
-to v2 on first open by a v2 build, and an older build refuses a newer store.
+Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql` … `v4.sql`); an older store migrates
+forward on first open by a newer build (backup first), and an older build refuses a newer store.
 
-**Precision.** Every floating-point feature enters the store, and leaves it on export, at **six
-significant figures**, written exactly (no trailing zeros, no exponent). Essentia computes in float32,
-which carries at most seven significant decimal digits and guarantees six, so nothing past the sixth
-figure is measurement. The scan's own catalog writer is untouched (its bytes are the hub's contract);
-the rule applies to the store, `--store-export` and `--store-roundtrip` only. Rounding a REAL saves
-nothing in SQLite (eight bytes regardless); the savings are in the exported text.
+**Edges and verdicts (schema v4, 2026-10-16).** The edge is a typed `edge` row per edge. By default it holds
+the scalars the readers use — status, window, key name / scale / code / strength / agreement / votes, bpm with
+beats and regularity, start / end / mean LUFS, fade, silence and its source, RMS crest and transition, the
+edge's three divergences, spectral centroid and dissonance — plus the edge's whole-summary HPCP (36 × float32);
+values are the fold's float32 widened to `REAL`, nothing rounded on the way in. `--edge-arrays` (config key
+`edge-arrays`, off by default) also keeps the arrays — the EBU series, beats, the 10 s sub-window summaries
+and the MFCC / spectral vectors — in the row's `arrays` column as the `edge-row/1` blob (`arrays_dtype`).
+Capture is sticky per track: a row that holds arrays keeps getting them on every later write whatever the
+flag says, and only `--edge-arrays-drop [--dry-run]` removes them (the scalar row stays). The `verdict` table
+is the catalog's `truedat` block, keyed per copy (the verdict reads the copy's codec, bit depth, sample rate
+and LAME tag as well as the media's description), computed by the same function the catalog writer uses from
+the rows as stored; the build's two algorithm tags are kept in `store_meta`, and when either differs at open
+every row is re-derived, no audio read. A v3 store migrates on open: each packed `edge.row` becomes a typed
+row with its blob kept as the arrays (a v3 store captured them), and the verdicts are derived.
+
+**Precision and types (schema v3, 2026-10-15).** Every numeric field has one declared precision
+(`FieldPrecision`: the decimal places the catalog writer renders), and the store holds it exactly at
+that precision: a fixed-decimal scalar as a scaled `INTEGER` (`round(value × 10^dp)`, read back as the
+double `Math.Round(value, dp)` produced), a fixed-decimal vector as an int32 `×10^dp` blob, and
+`bpmHistogram` — about 94 % zeros — as a self-describing sparse blob (length, count, then bin + value per
+non-zero). Integers stay integers. Nothing is rounded a second time: the former six-significant-figure
+rule is gone, and `--store-export` writes the same bytes the scan writer would, so
+`--store-roundtrip` is a byte comparison of the same writer on both sides. Two fields are held finer
+than the writer renders them, because a scan sets them from an unrounded source: `analysisDuration`
+(six places in the store, one in the catalog) and `smfmBpm` (six and three). A v2 store migrates on
+first open by a v3 build — backup first (`truedat.db.bak.v2.<stamp>`, via `VACUUM INTO`, after a
+free-space check), every value preserved exactly; a v2 value the typed column could not hold exactly
+makes the migration refuse and roll back, naming the column, rather than round it.
 
 ## Verbs
 
@@ -56,9 +80,12 @@ nothing in SQLite (eight bytes regardless); the savings are in the exported text
 |---|---|
 | `--store-import` with `--moods <catalog>` | loads the catalog and the ledgers beside it (errors, skipped, review, verify, receipts), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
 | a scan with `--store` | writes the entries it analysed this run (never cache hits) after the catalog is saved, as producer `essentia@<build>`, one run row per entry; failures become failed runs |
-| `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer, numbers at the store's precision; `key-moves.json` beside it when a content hash was superseded |
-| `--store-roundtrip <catalog>` | per-entry equality of store against catalog at the store's precision; exit 1 on any difference; `--audit` prints where the first difference is |
-| `--store-info` | bytes per track and the 156k projection, analysis speed, failure rate by component, coverage by wave, shared content, key moves, conflicts by kind, edges coverage and the work queue; `store-info.json` beside the store |
+| `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
+| `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
+| `--store-info` | bytes per track and the 156k projection, analysis speed, failure rate by component, coverage by wave, shared content, key moves, conflicts by kind, edges coverage and the work queue — plus the **state**: the store's generation, the generation the published catalog carries, whether the files are behind it and why, how many descriptions hold the opt-in edge arrays, and the one command that closes the gap; `store-info.json` beside the store carries the same under `state` |
+| `--snapshot [path]` with a store | the catalog, the manifest, the exclusion file **and the store** in one restorable ZIP — the store as a `VACUUM INTO` copy, so it is consistent even while a scan reads it |
+| `--restore <archive>` with a store | restores the **store** from a snapshot that carries one, then republishes the catalog, sidecar and companion from it at a new generation; an archive without a store still refuses |
+| `--merge-moods` with a store | merges catalogs **and other stores** (a `--chunk` shard's `truedat.db`), writes the merged result into the store exactly and republishes the files from it |
 | `--store-vacuum [--page-size N]` | repacks the file (16 KB pages by default) |
 | `--stats --store`, `--duplicates --store` | the existing reports answering from the store instead of the catalog |
 
@@ -70,9 +97,11 @@ output (`--frames-bin`, a curated descriptor list; the file is deleted after the
 EBU momentary and short-term loudness series at 10 per second (int16 centi-dB), the beats inside the
 window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
 Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
-from a short ffmpeg PCM pass the RMS crest and the transition into silence. One packed binary row per
-edge (`edge-row/v1`, documented in `Truedat/Edges/EdgeStore.cs`), about 6.4 KB per track, with an
-`edges` run row carrying the fold and PCM time. Producer version `edges@v2;e30;p10` carries the
+from a short ffmpeg PCM pass the RMS crest and the transition into silence. The fold computes all of
+it; the store keeps the typed default row (scalars + HPCP; measured about 1.6 KB per track in a vacuumed
+store) and, only with `--edge-arrays`, the arrays as well (`edge-row/1`, documented in
+`Truedat/Edges/EdgeStore.cs`; about 11.5 KB per track with the scalar row), with an `edges` run row
+carrying the fold and PCM time. Producer version `edges@v2;e30;p10` carries the
 algorithm generation and the settings; a fold-rule change is a new version and old rows stay
 attributable.
 
@@ -85,8 +114,43 @@ attributable.
   library scan cleanly (save and exit) once that long has passed; run it again to continue.
 - `mbxedges.v1.json` beside `mbxmoods.json`: the hub-facing companion, keyed by `audioStreamSha256`,
   scalars only (status, window, key, bpm, loudness, texture, divergences, rms), about 1.8 KB per track,
-  compact. Rewritten after any `--edges` scan that added rows, and on demand by
+  compact. `texture` is written only for a track whose arrays were captured; a default-row track writes
+  `texture: null`, which the v1 reader accepts. Rewritten after any `--edges` scan that added rows, and on demand by
   `--edges-export [path]`. Media without a sha are counted and omitted. Absent means not yet.
+
+## Snapshot, transfer, restore
+
+The catalog is derived; the store is the authority. So archiving the catalog and archiving the store
+are different acts, and only the second one is a backup of the thing the files come from.
+
+- **Never copy a live store as a file.** Under WAL the committed state lives across `truedat.db`,
+  `truedat.db-wal` and `truedat.db-shm`; copying the first alone captures a torn read of whatever was
+  in flight. Every copy truedat makes — the snapshot member, the pre-restore backup, the pre-migration
+  backup — goes through SQLite's `VACUUM INTO`, which runs against a read snapshot and writes one
+  consistent, already-compacted database. Use the same thing by hand:
+  `sqlite3 -readonly truedat.db "VACUUM INTO 'truedat-copy.db';"`.
+- **`--snapshot` with a store in force** puts that copy into the archive as `truedat.db` and records
+  its schema, generation, live-location count and SHA-256 in `manifest.json` — so a transfer between
+  machines is verifiable by hash the way the catalog already was. A store that cannot be copied
+  consistently fails the whole snapshot rather than quietly producing a catalog-only archive under a
+  store snapshot's name.
+- **`--restore <archive>` with a store in force** restores the store when the archive carries one. It
+  refuses *before* replacing anything if the extracted store does not open, fails
+  `PRAGMA quick_check`, or comes from a newer schema than this build reads. The store being replaced
+  is itself snapshotted first (`truedat.db.bak.<ts>.db`, rotated by `--keep-backups`), so undoing a
+  restore is the same command. The replaced store's stale WAL pair is removed with it.
+- **The generation advances on a restore.** A restore is a consumer-visible mutation even when the
+  restored bytes are older than what the hub cached, so the catalog, sidecar and companion are
+  republished from the restored store at a new generation through the one publication path — never
+  installed from the archive.
+- **An archive with no store cannot restore one.** That case still refuses, and names the archive that
+  would have worked. To put a catalog's entries into a store, `--store-import` seeds or extends it;
+  that is not a restore and it never removes store entries the catalog lacks.
+- **Merging across machines** works on stores as well as catalogs: a `--chunk` shard's `truedat.db` can
+  be a `--merge-source`. Its live entries are read across *every* root — a shard store minted on
+  another machine names its own, and reading only the primary root would drop exactly that shard's
+  share — and rendered through the same catalog writer, so a store source and a catalog source merge
+  identically.
 
 ## Looking inside
 
@@ -123,8 +187,8 @@ SELECT s.kind, s.start_ms, s.end_ms, length(v.vec) AS bytes FROM segment s JOIN 
 SELECT kind, count(*) FROM conflict WHERE state = 'open' GROUP BY kind;
 ```
 
-The edge rows' binary layout is `edge-row/v1`; the SQL above shows their presence and size, truedat's
-`--edges-export` renders their scalars.
+The edge rows' scalars are plain columns of `edge`; the opt-in arrays' binary layout is `edge-row/1`
+(`arrays_dtype`), and `--edges-export` renders the scalars.
 
 ## What stays frozen
 

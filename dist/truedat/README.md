@@ -5,7 +5,7 @@ Truedat is a Windows .NET CLI that extracts **per-track mood** across a music li
 **Mood is the core job, and truedat captures it two independent ways:**
 
 - **Essentia** — when [Essentia](https://essentia.upf.edu/) is present, truedat calls it to extract the per-track acoustic feature set (see [Extracted Features](#extracted-features) for the exact counts). The primary mood read. Truedat writes features, not an interpretation: the valence/arousal mapping is made downstream by the consumer (MBXHub/AutoQ) from these fields. truedat provides a custom x64 build (see [Essentia Builds](#essentia-builds)) that handles large files better, but doesn't bundle it — it's a separate AGPL tool, invoked if found.
-- **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). MBXHub projects these to a **second (valence, arousal) opinion** on the same AutoQ mood map — an independent take alongside Essentia, most useful exactly where the two disagree.
+- **SMFM (Sony 12 TONE / SensMe)** — truedat doesn't add this; it reads Sony's own analysis when it's already embedded in a file — the SMFM block — yielding 10 STMO mood scores + BPM (the `smfm*` fields). **Off by default**: it is read only with `--smfm` (or `truedat --config smfm true`), because nothing picks or matches on it today and nothing yet decodes what the slots mean.
 
 Everything below is built **on top of** that mood signal — identity, authenticity, and library-scale plumbing:
 
@@ -69,6 +69,19 @@ catalog — the format is auto-detected, so older plain-copy backups restore too
 up whatever it's about to overwrite first, so a restore is itself reversible. (The live
 `mbxmoods.json` MBXHub reads stays plain JSON; only backups and snapshots are compressed.)
 
+**With a store in force, the snapshot carries the store too** — the catalog is derived, the store
+is the authority, so archiving only the catalog backs up the wrong half. The store rides along as a
+`VACUUM INTO` copy (consistent even while a scan reads it; a plain file copy of `truedat.db` alone
+is a torn read, because a live WAL store's committed state spans three files), and the manifest
+records its schema, generation, live-location count and SHA-256 — so a transfer between machines is
+verifiable by hash the way the catalog already was. `--restore` of such an archive restores the
+**store**: it refuses before replacing anything if the extracted store will not open, fails
+`PRAGMA quick_check`, or comes from a newer schema than the running build reads; it snapshots the
+store it replaces (`truedat.db.bak.<ts>.db`, same `--keep-backups` rotation); and it then republishes
+`mbxmoods.json`, the sidecar and `mbxedges.v1.json` from the restored store at a **new generation**,
+because a restore is a change the hub must notice even when the restored bytes are older than what it
+cached. An archive carrying no store still refuses, and says which archive would have worked.
+
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
@@ -81,7 +94,7 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 ### Store (preview, v2) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
 
 **`STORE.md` is the reference** for the store: what the tables hold, where the file lives, the edges
-layer (`--edges`, `--edges-export`), the six-significant-figure precision rule, and how to open
+layer (`--edges`, `--edges-export`), the typed columns (every field at its declared precision; schema v3), and how to open
 the file with DB Browser for SQLite or `sqlite3`. This section is the summary.
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
@@ -148,17 +161,19 @@ truedat.exe --duplicates "X:\Library\iTunes Music Library.xml" --store "D:\trued
 
 **Edges (`--edges`, preview, v2 S2).** On a scan run with `--store`, `--edges` asks the extractor for a
 small binary frames file per analysed track (build `output-x64.5` is required; the run refuses on an
-older one and names what it found) and folds the first and last 30 s into one packed *edge row* per
-edge in the store: the EBU momentary and short-term loudness series at 10/s, the beats inside the
-window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
+older one and names what it found) and folds the first and last 30 s of each analysed track: the EBU
+momentary and short-term loudness series at 10/s, the beats inside the window, tempo from their intervals, a key vote per edge and per 10 s sub-window (the extractor's own
 Key algorithm over the window's chroma), MFCC and spectral means and spreads, fade and silence, and
 from a short ffmpeg PCM pass over the two windows the RMS crest and the transition into silence
 (null without ffmpeg, never approximated). Each track also gets an `edges` run row carrying the fold
 and PCM time, and a fold that fails is a failed run naming the reason and no rows. The frames file and
 the profile live beside the extractor's temp output in the stage directory and are deleted with it;
 nothing is written to `mbxmoods.json`, and a cache hit folds nothing, so `--edges` populates the tracks
-a scan actually analyses. Measured on a local library: about 6.3 KB per track in the store and
-roughly 0.2 s of fold plus PCM per track beside the analysis. `--store-info` reports the coverage
+a scan actually analyses. The store keeps a typed *edge row* per edge — by default the scalars and the
+edge's HPCP (about 1.6 KB per track); with `--edge-arrays` (config `edge-arrays`, off by default) also the
+series, beats, sub-window summaries and MFCC/spectral vectors. Captured arrays are sticky per track and
+leave only through `--edge-arrays-drop [--dry-run]`. Roughly 0.2 s of fold plus PCM per track beside the
+analysis. `--store-info` reports the coverage
 (eligible, captured, missing), bytes per track, median time and the work queue by state. In
 `--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
 catalog entry.
@@ -171,8 +186,9 @@ in hand, save and exit once that long has passed; run the same command again to 
 
 **The companion file (`mbxedges.v1.json`).** The hub reads edges from a small JSON file beside
 `mbxmoods.json`, keyed by `audioStreamSha256`, carrying per edge the status word, window, key vote,
-bpm, loudness scalars, texture means and spreads, divergences and the PCM `rms` block, and per track the
-head-vs-tail divergence; the 10/s series, beats, HPCP and sub-window summaries stay in the store. It is
+bpm, loudness scalars, texture means and spreads (when the arrays were captured; `null` otherwise),
+divergences and the PCM `rms` block, and per track the head-vs-tail divergence; the 10/s series, beats,
+HPCP and sub-window summaries stay in the store. It is
 written from the store, compactly (about 1.8 KB per track), after any `--edges` scan
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
@@ -226,7 +242,9 @@ cached track is never re-analysed, which is why `--refresh` is the step that fil
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
-store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`
+store has several roots), `--store-roundtrip <catalog>`, `--store-info` (measurements **and** state:
+generation, whether the published files are at that generation, edge-array capture, the next command),
+`--store-vacuum`
 (`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
 row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own. Measured on a 72,477-track
 catalog: import 25 s, export 7 s, round-trip EQUAL, store 3,651 bytes per distinct track (0.95× the
@@ -360,9 +378,9 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           and that count is wildly library-dependent (~2% of one library,
                           93% of another) so it is reported as a count, never a share you
                           have to remember. Add --dry-run to report and write nothing.
-                          SMFM is READ from the file's Sony tag and never computed, so a
-                          later analysis of a file still carrying the block puts it back —
-                          scan with --no-smfm if the removal is meant to stay.
+                          SMFM is READ from the file's Sony tag and never computed, and it
+                          is off by default, so the removal stays unless a later scan runs
+                          with --smfm on a file still carrying the block.
   --prune-excluded [path] Remove catalog entries that an exclusion rule now covers — the
                           ones scanned before the rule existed, which exclusions otherwise
                           only ever keep out of FUTURE scans. Rules are the sole authority:
@@ -408,12 +426,17 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --snapshot [path]       Read-only: bundle the current catalog into a restorable, double-
                           clickable ZIP — mbxmoods.json + a manifest (trackCount, content
                           SHA-256, byte size) + mbxmoods-exclude.json when present. Default
-                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog.
+                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog. With a
+                          store in force the store rides along as a consistent VACUUM INTO
+                          copy, so the archive restores the authority and not just the files.
   --restore <archive>     Rebuild mbxmoods.json from a snapshot, a compressed backup, a .gz,
                           or a plain catalog (format is auto-detected). Backs up any existing
                           catalog first, then atomically swaps. Restores the catalog only — a
                           bundled exclusion file is left in the archive (extract it by hand to
-                          roll policy back too).
+                          roll policy back too). With a store in force and an archive that
+                          carries one, restores the STORE instead (snapshotting the one it
+                          replaces) and republishes the catalog, sidecar and companion from it
+                          at a new generation.
   --compact [path]        Re-format an existing catalog to minimal JSON in place — the format
                           every save already writes. Lossless: a JSON-level round-trip that
                           preserves every field byte-for-byte in value, including keys truedat
@@ -475,15 +498,15 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --budget <time>         Library scan: after 90s / 30m / 2h / 1h30m, finish the tracks in hand, save and
                           exit. Run the same command again to continue.
   --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
-  --no-smfm               Suppress every Sony SMFM (12-TONE) read — the cache-miss fan-out
-                          and the --refresh-smfm backfill alike (omits the smfm* fields).
-                          Unlike its two siblings above this saves no meaningful time: SMFM
-                          is read from the file's tag, never computed. It exists to make a
-                          --strip-smfm durable, because without it the next cache MISS on
-                          any file still carrying the Sony block puts the data straight
-                          back. Refuses to run alongside --refresh-smfm: one forces the
-                          re-read the other suppresses, and a silent no-op is worse than a
-                          refusal.
+  --smfm                  Read Sony SMFM (12-TONE) tags. OFF by default (2026-10-14): nothing
+                          picks or matches on SMFM today. Config key `smfm` makes it the
+                          instance default; --refresh-smfm also turns it on. Blocks already
+                          in the catalog are kept either way (cache hits carry them forward).
+  --no-smfm               Suppress every SMFM read, overriding --smfm and config `smfm` —
+                          the cache-miss fan-out and the --refresh-smfm backfill alike. A
+                          typed --smfm still beats a config `no-smfm`. Refuses to run
+                          alongside --refresh-smfm: one forces the re-read the other
+                          suppresses, and a silent no-op is worse than a refusal.
   --file-md5              Maintain the whole-file fileMd5 field (default off). Off means it is
                           never written: fresh analysis omits it, cache-tier refreshes drop it,
                           the --backfill fileMd5 fill is skipped, and --migrate strips stored
@@ -577,7 +600,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
 - **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
 - **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
-- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
+- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`, which takes a shard's **store** (`truedat.db`) as a source as readily as its catalog — a store source is read across every root, since a shard store names its own. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
 - **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches disk, writing `mbxmoods-verify.csv` and exiting 1 on any drift / missing / error (CI-friendly). FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`); FLACs whose tags were rewritten *before* upgrading are re-keyed automatically during a normal scan (props-gated, reported as `FLAC re-key`), or by `--verify --backfill --accept-flac-tag-drift` without a scan. `--backfill` repairs missing fields in place with no Essentia re-run: the identity tier (TagLib-driven, fast) and the features tier (ffmpeg-driven, ~30 s per applicable lossless 24-bit track) both run by default — narrow with `--backfill-level identity|features`. Every tier is gated by the drift check, so drifted entries are flagged `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - The progress line shows estimated completion, running average per track, and live throughput as `Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.
@@ -1286,9 +1309,11 @@ For MP3 entries, `fingerprint.v1` also carries a nested `mp3LameTag` block when 
 
 ### Sony SMFM (12-TONE)
 
-When the source file carries a Sony SMFM block (embedded by Sony Music Center) truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant slot index) and `smfmBpm`. Slot *names* never appear: a 2026-06-27 device test refuted the slot→name mapping (Sony's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so `smfmChannelName` is kept as a back-compat property, held permanently null, and omitted from the JSON. Any mood label is derived downstream by MBXHub. Renamed from `sensme*` on 2026-06-28 — the reader still accepts the old keys and `--migrate` converts them.
+**Off by default** (2026-10-14): SMFM is read only with `--smfm`, config `smfm`, or `--refresh-smfm`; `--no-smfm` overrides all three. Blocks already in a catalog are kept — cache hits carry them forward — so turning it off removes nothing.
 
-truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, made durable by `--no-smfm`. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
+When the source file carries a Sony SMFM block (embedded by Sony Music Center) and SMFM is on, truedat reads it header-only and emits `smfmScores` (10 raw STMO slot scores, 0–255), `smfmChannel` (the dominant slot index) and `smfmBpm`. Slot *names* never appear: a 2026-06-27 device test refuted the slot→name mapping (Sony's mood channels are 2-D arousal×valence regions, not 1:1 with STMO slots), so `smfmChannelName` is kept as a back-compat property, held permanently null, and omitted from the JSON. Any mood label is derived downstream by MBXHub. Renamed from `sensme*` on 2026-06-28 — the reader still accepts the old keys and `--migrate` converts them.
+
+truedat only ever *reads* SMFM, never writes it, so a missing block means the file has not been through Sony's tagger and no rescan can close that gap. Reporting is `--list-smfm` (every entry, one row, three states — `data`, `no-data`, `no-smfm`) and the narrower `--list-missing-smfm`; removal is `--strip-smfm`, which stays removed because SMFM is off by default. See [Options](#options) for each, and [`smfm-tools/`](smfm-tools/) for the format itself.
 
 ### `fingerprint.v1.codec` — two buckets that refuse to guess
 
