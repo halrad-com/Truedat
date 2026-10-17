@@ -54,7 +54,15 @@ namespace Truedat.Store
             string? m = dal.MetaGet(MethodKey), sm = dal.MetaGet(SpeechMethodKey);
             if (m == CurrentMethod && sm == CurrentSpeechMethod) return false;
             int rows;
-            using (var tx = db.BeginTransaction()) { rows = DeriveAll(dal, nowUtc); tx.Complete(); }
+            using (var tx = db.BeginTransaction())
+            {
+                long before = dal.ScalarLong("SELECT count(*) FROM verdict;");
+                rows = DeriveAll(dal, nowUtc);
+                // T07: re-deriving under a changed tag rewrites every row a reader sees (the method column at least); over an empty
+                // table with nothing derived it changed nothing a consumer can see, so it is no mutation.
+                if (before > 0 || rows > 0) dal.AdvanceGeneration();
+                tx.Complete();
+            }
             StoreLog.Info(m == null && sm == null
                 ? $"verdicts derived for the store: {rows} rows (method {CurrentMethod}, speech {CurrentSpeechMethod})"
                 : $"verdict algorithm changed (method {m} -> {CurrentMethod}, speech {sm} -> {CurrentSpeechMethod}): {rows} rows re-derived from the stored rows, no audio read");

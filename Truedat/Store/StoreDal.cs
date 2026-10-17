@@ -188,6 +188,12 @@ namespace Truedat.Store
         internal string? LocationLastModified(long locationId)
             => Row("SELECT last_modified_utc FROM track_location WHERE id = ?;", s => s.GetString(0), null, locationId);
 
+        /// <summary>T07: the columns of a location an export or a store reader can see (entity, display path, mtime, state), as one
+        /// comparable string — read before and after an upsert to tell a visible change from a last-seen stamp.</summary>
+        internal string? LocationVisible(long locationId)
+            => Row("SELECT entity_id || '|' || display_path || '|' || coalesce(last_modified_utc, '') || '|' || state FROM track_location WHERE id = ?;",
+                   s => s.GetString(0), null, locationId);
+
         /// <summary>Display paths under a root whose location is NOT its media's primary (lowest-id) copy: the copies
         /// that export their media's single description rather than the values they were imported with.</summary>
         internal HashSet<string> NonPrimaryCopyPaths(long rootId)

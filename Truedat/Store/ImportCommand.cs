@@ -37,6 +37,11 @@ namespace Truedat.Store
         /// <summary>Entries that arrived with a content value differing beyond noise from the stored description under the SAME
         /// producer — recorded as value-drift conflicts, the stored description untouched (S2 C2).</summary>
         public int Drift;
+        /// <summary>store-v3 T07 (keeper 099): entries whose write changed something an export or a store reader can see — a new or
+        /// changed location (entity, display path, mtime, state), a description or copy fact written, a drift conflict, edge rows,
+        /// an artifact row. Run rows, last-seen stamps and failure rows are bookkeeping and do not count. The batch loop advances
+        /// the generation once inside each committed transaction this grew in.</summary>
+        public int VisibleChanges;
         /// <summary>Entries that wrote nothing: description and copy facts already equal (within noise) — no row churn (S2 C2).</summary>
         public int Unchanged;
         /// <summary>Entries whose description was replaced because it arrived from a DIFFERENT producer/version (the old run stays as history).</summary>
@@ -256,6 +261,7 @@ namespace Truedat.Store
                 // moves this batch wants are planned here and performed after tx.Complete(); the edge spills are deleted then too. A rollback
                 // leaves every pending file where the sink put it, so a re-queued retry finds its whole payload.
                 var deferred = new List<(string Pending, string Full)>();
+                int visibleBefore = r.VisibleChanges;
                 using var tx = db.BeginTransaction();
                 for (int i = b; i < end; i++)
                 {
@@ -289,6 +295,9 @@ namespace Truedat.Store
                         throw new InvalidOperationException($"fail-after seam fired at entry {processed}");
                 }
                 if (beforeCommit != null && end == keys.Count) beforeCommit(dal);   // the scan's failure rows, in this same transaction (TDA N2)
+                // T07 (keeper 099): one advance per committed transaction that changed something a consumer can see, written in THAT
+                // transaction — a rollback takes the advance with it, and a batch of unchanged entries or failure rows is no mutation.
+                if (r.VisibleChanges > visibleBefore) dal.AdvanceGeneration();
                 tx.Complete();
                 // Committed: now the files. Nothing here can undo the commit. A crash between the commit and these moves leaves a row whose
                 // file is still a pending file — there is NO reconciliation for that today (TDA N3; artifacts have had no production producer
@@ -412,7 +421,7 @@ namespace Truedat.Store
             if (File.Exists(wal)) r.StoreBytesAfter += new FileInfo(wal).Length;
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
             WriteResult(r, os.Path, o.RootRole ?? "primary", "import@1");
-            r.Generation = dal.Generation();   // the committed generation after this import (advanced by T06/T18, not here)
+            r.Generation = dal.Generation();   // the committed generation after this import (each visible batch advanced it, T07)
             StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
         }
 
@@ -477,8 +486,10 @@ namespace Truedat.Store
                 }
             }
 
+            var locBefore = existingLoc != null ? dal.LocationVisible(existingLoc.Value) : null;
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
+            if (isNewLocation || dal.LocationVisible(loc) != locBefore) r.VisibleChanges++;   // T07: the location is part of what an export shows
             // A scan records one run per analysed entry (the observation: who measured, how long, on which copy);
             // an import shares one run for the whole catalog.
             long runId = runPerEntry
@@ -496,6 +507,7 @@ namespace Truedat.Store
                 var a = ArtifactStore.Plan(storeDir, pendingArtifact, contentKey, producerVersion);
                 dal.InsertArtifact(contentKey, sha != null ? kind : "entity", runPerEntry ? runId : (long?)null, ArtifactStore.MainKind, producerVersion, a.RelPath, a.Bytes, a.Sha256, now);
                 if (a.Created) { r.Artifacts++; r.ArtifactBytes += a.Bytes; } else r.ArtifactsShared++;
+                r.VisibleChanges++;
                 if (deferredArtifacts != null) deferredArtifacts.Add((pendingArtifact, Path.Combine(storeDir, a.RelPath)));
                 else ArtifactStore.Finish(new List<(string, string)> { (pendingArtifact, Path.Combine(storeDir, a.RelPath)) });
             }
@@ -506,7 +518,7 @@ namespace Truedat.Store
             if (edges != null)
             {
                 // A lost spill is a store-side loss: its failed run is marked 'spill-lost' so the refresh gate still lists the track (TDA N1).
-                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges")) r.Edges++; else r.EdgesFailed++;
+                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges")) { r.Edges++; r.VisibleChanges++; } else r.EdgesFailed++;
             }
         }
 
@@ -641,6 +653,7 @@ namespace Truedat.Store
             }
 
             if (!contentWritten && !copyWritten && !drifted) r.Unchanged++;
+            else r.VisibleChanges++;   // T07: a description, copy fact or drift record a reader can see
         }
 
         /// <summary>True when both are the same producer and both versions are known extractor builds (<c>output-x64.N</c>) with

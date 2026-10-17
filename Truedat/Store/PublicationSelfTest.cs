@@ -56,7 +56,8 @@ namespace Truedat.Store
                     [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "Snap", Bpm = 120, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) },
                 };
                 ImportCommand.ExecuteEntries(store, entries, @"D:\music", "primary", true, "import", "1", "fixture", null, null);
-                using (var os = OpenStore.Open(store, false, VersionInfo.Display, now)) { os.Dal.AdvanceGeneration(); assert(os.Dal.Generation() == 1, "snapshot setup: store at generation 1"); }
+                // T07: the import's own committed batch advanced the generation (it no longer needs a hand-advance here).
+                using (var os = OpenStore.Open(store, false, VersionInfo.Display, now)) assert(os.Dal.Generation() == 1, $"snapshot setup: the import's commit put the store at generation 1 (got {os.Dal.Generation()})");
 
                 var outDir = d.P("out"); Directory.CreateDirectory(outDir);
                 var outPath = Path.Combine(outDir, "mbxmoods.json");
@@ -69,8 +70,7 @@ namespace Truedat.Store
                     {
                         [path] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "Snap", Bpm = 150, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 2, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) },
                     };
-                    ImportCommand.ExecuteEntries(store, changed, @"D:\music", "primary", true, "essentia", "x", "concurrent", null, null);
-                    using (var os2 = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) os2.Dal.AdvanceGeneration();
+                    ImportCommand.ExecuteEntries(store, changed, @"D:\music", "primary", true, "essentia", "x", "concurrent", null, null);   // its commit advances 1 -> 2 (T07)
                 };
                 var rep = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath });
                 ExportCommand.AfterEntriesRead = null;

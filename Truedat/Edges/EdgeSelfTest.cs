@@ -63,7 +63,7 @@ namespace Truedat.Edges
         const string Sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         const string ShaKind = "content_hash:audio-stream-sha256";
 
-        static EdgeFoldResult SyntheticFold(string dir, double duration = 240, bool withPcm = true)
+        internal static EdgeFoldResult SyntheticFold(string dir, double duration = 240, bool withPcm = true)
         {
             EdgeFoldResult r;
             using (var f = EspbFile.Open(BuildSyntheticFrames(dir, duration))) r = EdgeFold.Fold(f, duration, new EdgeSettings());

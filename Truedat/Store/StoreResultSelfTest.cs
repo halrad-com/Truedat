@@ -659,8 +659,9 @@ namespace Truedat.Store
                 int code = ImportCommand.Run(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\music", RootRole = "primary" });
                 assert(code == 0 && File.Exists(resultPath) && StoreResult.TryRead(resultPath, out ok) && ok.Verb == "store-import" && ok.Outcome == "completed" && ok.ExitCode == 0 && ok.Reason == null,
                     "import success: exit 0, the common record beside the store, completed");
-                assert(ok.Store.Path == Path.GetFullPath(store) && ok.Store.SchemaVersion == SchemaOf(store) && ok.Store.Generation == 0 && !ok.Export.Performed && ok.Detail != null && ok.Detail["entries"] == 1 && ok.Detail["entitiesCreated"] == 1,
-                    $"import success: store block from the opened store (schema {ok.Store.SchemaVersion}), nothing published, detail counters");
+                // T07: the import's one committed batch created an entry a reader can see, so the committed generation is 1.
+                assert(ok.Store.Path == Path.GetFullPath(store) && ok.Store.SchemaVersion == SchemaOf(store) && ok.Store.Generation == 1 && !ok.Export.Performed && ok.Detail != null && ok.Detail["entries"] == 1 && ok.Detail["entitiesCreated"] == 1,
+                    $"import success: store block from the opened store (schema {ok.Store.SchemaVersion}, committed generation {ok.Store.Generation}), nothing published, detail counters");
                 assert(File.Exists(Path.Combine(d.Root, ImportCommand.ResultFileName)), "import success: the verb's own store-import-result.json is still written beside it");
 
                 // Failure after the store opened (catalog missing): failed record, the store facts kept.

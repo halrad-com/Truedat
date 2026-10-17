@@ -10538,7 +10538,12 @@ namespace Truedat
             {
                 using var os = global::Truedat.Store.OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
                 global::Truedat.Edges.EdgeStore.DropArraysResult r;
-                using (var tx = os.Db.BeginTransaction()) { r = global::Truedat.Edges.EdgeStore.DropArrays(os.Dal, dryRun); tx.Complete(); }
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    r = global::Truedat.Edges.EdgeStore.DropArrays(os.Dal, dryRun);
+                    if (!dryRun && r.Rows > 0) os.Dal.AdvanceGeneration();   // T07: a real discard changed what the companion shows; a dry run or an empty drop did not
+                    tx.Complete();
+                }
                 Console.WriteLine(dryRun
                     ? $"--edge-arrays-drop --dry-run: would remove the captured arrays from {r.Rows:N0} edge rows on {r.Tracks:N0} tracks ({r.Bytes:N0} bytes); nothing changed. Their scalar rows stay."
                     : $"--edge-arrays-drop: removed the captured arrays from {r.Rows:N0} edge rows on {r.Tracks:N0} tracks ({r.Bytes:N0} bytes of arrays; the file shrinks only after --store-vacuum). Their scalar rows stay; a later scan with --edge-arrays captures them again.");
@@ -14430,6 +14435,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.PublicationSelfTest.Run(Assert);   // T07/T08 slice (architect-2, a98ded7)
             global::Truedat.Store.StoreResultSelfTest.Run(Assert);   // T11 store-result.json (architect-2)
             global::Truedat.Store.VerdictSelfTest.Run(Assert);       // T19 verdict projection (architect-2)
+            global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);

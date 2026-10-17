@@ -1011,7 +1011,7 @@ namespace Truedat.Store
             return e;
         }
 
-        static void WriteCatalog(string path, IEnumerable<KeyValuePair<string, TrackEntry>> entries)
+        internal static void WriteCatalog(string path, IEnumerable<KeyValuePair<string, TrackEntry>> entries)
         {
             using var fs = File.Create(path);
             using var jw = new System.Text.Json.Utf8JsonWriter(fs);
