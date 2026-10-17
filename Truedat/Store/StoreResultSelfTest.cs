@@ -68,6 +68,10 @@ namespace Truedat.Store
             try { TestFinishScanStoreCompanion(assert); }
             catch (Exception ex) { Console.SetOut(savedOut); assert(false, $"StoreResult.FinishCompanion: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { Console.SetOut(savedOut); global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (keeper 113: the keeper's exact trigger — BPM 111 published, a checkpoint commits 222, an empty final flush — plus no-new-edges and a failed final flush)");
+            try { TestCompanionKeeperTrigger(assert); }
+            catch (Exception ex) { Console.SetOut(savedOut); assert(false, $"StoreResult.KeeperTrigger: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { Console.SetOut(savedOut); ImportCommand.FailAfterEntriesForTest = 0; global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
             try { TestImportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -774,6 +778,86 @@ namespace Truedat.Store
                 var printed = captured.ToString();
                 assert(printed.Contains("edges: 2 tracks folded"),
                     $"the summary prints the scan-wide edge total, not the final flush's (printed: {printed.Replace(Environment.NewLine, " | ").Trim()})");
+            }
+        }
+
+        // Keeper 113 / TDA 095: the keeper's exact trigger, reproduced on dd27ebd (companion stayed BPM 111 / generation 2 while the store
+        // held 222 / generation 3). Through the real sink and Program.FinishScanStore — which now also writes the scan's record, as the
+        // scan does. Four runs on one store: (A) a prior run publishes BPM 111; (B) a checkpoint commits BPM 222, the final flush is empty;
+        // (C) a run that adds no edges; (D) a run whose final flush FAILS.
+        static void TestCompanionKeeperTrigger(Action<bool, string> assert)
+        {
+            const string P = @"D:\music\verdict\a-lavc.mp3";
+            var sha = VerdictSelfTest.Fixture()[P].AudioStreamSha256!;
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db"); var companion = d.P(global::Truedat.Edges.EdgeCompanion.FileName);
+                var settings = new global::Truedat.Edges.EdgeSettings();
+                void NewScan() { ScanSink.Reset(); StoreResult.ResetScanForTest(); global::Truedat.Edges.EdgeStore.CaptureArraysDefault = false; ScanSink.StoreDirectory = d.Root; }
+                void Record(double? bpm)
+                {
+                    if (bpm == null) { ScanSink.Record(P, VerdictSelfTest.Fixture()[P]); return; }
+                    var fold = global::Truedat.Edges.EdgeSelfTest.SyntheticFold(d.Root, 240, true);
+                    fold.Head.Bpm!.Value = bpm.Value;
+                    var analysed = Path.Combine(d.Root, "staged-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".mp3");
+                    ScanSink.StashEdges(analysed, fold);
+                    ScanSink.Record(P, VerdictSelfTest.Fixture()[P], analysed);
+                }
+                bool Finish(ScanSinkReport fin)
+                {
+                    var saved = Console.Out; Console.SetOut(new StringWriter());
+                    try { return Program.FinishScanStore(store, fin, ScanSink.Total, true, companion, settings, DateTime.UtcNow.ToString("o")); }
+                    finally { Console.SetOut(saved); }
+                }
+                (double? HeadBpm, long? Gen, string Sha) Comp()
+                {
+                    if (!File.Exists(companion)) return (null, null, "");
+                    using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(companion));
+                    var root = doc.RootElement;
+                    double? bpm = root.GetProperty("tracks").TryGetProperty(sha, out var t) && t.GetProperty("head").GetProperty("bpm").ValueKind == System.Text.Json.JsonValueKind.Object
+                        ? t.GetProperty("head").GetProperty("bpm").GetProperty("value").GetDouble() : (double?)null;
+                    long? gen = root.TryGetProperty("origin", out var o) ? o.GetProperty("generation").GetInt64() : (long?)null;
+                    return (bpm, gen, Publication.Sha256Hex(companion));
+                }
+                long StoreGen() { using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")); return os.Dal.Generation(); }
+                StoreResultFile Rec() { var rec = new StoreResultFile(); StoreResult.TryRead(StoreResult.PathFor(store), out rec); return rec; }
+
+                // (A) a prior run: BPM 111 published
+                NewScan(); Record(111); var finA = ScanSink.Flush(store, "output-x64.5", new[] { P }); Finish(finA);
+                var a = Comp();
+                assert(a.HeadBpm == 111 && a.Gen == StoreGen(), $"setup (A): the prior run published BPM 111 at the store's generation (bpm {a.HeadBpm}, companion gen {a.Gen}, store {StoreGen()})");
+
+                // (B) the keeper's trigger: a checkpoint commits BPM 222, the final flush is empty
+                NewScan(); Record(222);
+                var cp = ScanSink.Flush(store, "output-x64.5", new[] { P }, final: false);
+                long afterCheckpoint = StoreGen();
+                var finB = ScanSink.Flush(store, "output-x64.5", new[] { P });
+                assert(cp.Ok && cp.Edges == 1 && finB.Ok && finB.Entries == 0 && afterCheckpoint > a.Gen,
+                    $"setup (B): the checkpoint committed the changed fold (store {a.Gen} -> {afterCheckpoint}) and the final flush was empty");
+                bool written = Finish(finB);
+                var b = Comp(); var recB = Rec();
+                assert(written && b.HeadBpm == 222, $"(B) the companion is rewritten and carries the COMMITTED fold, BPM 222 (written {written}; bpm {b.HeadBpm})");
+                assert(b.Gen == StoreGen(), $"(B) the companion's origin.generation equals the store's generation after publication (companion {b.Gen}, store {StoreGen()})");
+                assert(recB.Export?.Companion != null && recB.Export.Companion.Sha256 == b.Sha,
+                    $"(B) store-result.json names the companion by its actual hash (record {recB.Export?.Companion?.Sha256 ?? "null"}, file {b.Sha})");
+
+                // (C) a run that adds no edges: the companion is not rewritten
+                NewScan(); Record(null); var finC = ScanSink.Flush(store, "output-x64.5", new[] { P });
+                bool writtenC = Finish(finC);
+                var c = Comp(); var recC = Rec();
+                assert(!writtenC && c.Sha == b.Sha && recC.Export?.Companion == null,
+                    $"(C) a run with no new edges does not rewrite the companion, and the record names none (written {writtenC}; file unchanged {c.Sha == b.Sha}; record companion {recC.Export?.Companion?.Sha256 ?? "null"})");
+
+                // (D) a run whose final flush FAILS: nothing published, the record says failed
+                NewScan(); Record(333);
+                ImportCommand.FailAfterEntriesForTest = 1;
+                ScanSinkReport finD;
+                try { finD = ScanSink.Flush(store, "output-x64.5", new[] { P }); }
+                finally { ImportCommand.FailAfterEntriesForTest = 0; }
+                bool writtenD = Finish(finD);
+                var dd = Comp(); var recD = Rec();
+                assert(!finD.Ok && !writtenD && dd.Sha == b.Sha && dd.HeadBpm == 222 && recD.Outcome == "failed" && recD.Export?.Companion == null,
+                    $"(D) a failed final flush publishes nothing: companion unchanged (BPM {dd.HeadBpm}), record failed with no companion (ok {finD.Ok}; written {writtenD}; outcome {recD.Outcome})");
             }
         }
 

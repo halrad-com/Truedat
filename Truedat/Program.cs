@@ -10733,16 +10733,14 @@ namespace Truedat
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
                 return;
             }
-            bool companionWritten = FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, _edgeSettings);
-            // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
-            // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
-            global::Truedat.Store.StoreResult.WriteScan(_storePath, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, companionWritten ? _edgesCompanionPath : null, _scanStartedUtc);
+            FinishScanStore(_storePath, r, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, _edgeSettings, _scanStartedUtc);
         }
 
-        /// <summary>The scan's final store step after its final flush (<paramref name="final"/>): the summary lines and the companion
-        /// rewrite. <paramref name="total"/> is the scan-wide tally over every flush. Returns whether the companion was written.</summary>
+        /// <summary>The scan's final store step after its final flush (<paramref name="final"/>): the summary lines, the companion
+        /// rewrite and the scan's record. <paramref name="total"/> is the scan-wide tally over every flush. Returns whether the
+        /// companion was written.</summary>
         internal static bool FinishScanStore(string storePath, global::Truedat.Store.ScanSinkReport final, global::Truedat.Store.ScanSinkReport total,
-            bool edgesOn, string? companionPath, global::Truedat.Edges.EdgeSettings settings)
+            bool edgesOn, string? companionPath, global::Truedat.Edges.EdgeSettings settings, string? startedUtc = null)
         {
             bool companionWritten = false;
             if (final.Ok)
@@ -10756,6 +10754,9 @@ namespace Truedat
             }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({final.Error}); the catalog is complete and unaffected");
+            // store-v3 T11: the scan's store-result.json (Flush wrote a first record; this one adds the companion by hash and
+            // the scan's real start stamp — latest wins). The hub reads it after the launched process exits.
+            global::Truedat.Store.StoreResult.WriteScan(storePath, total, edgesOn, companionWritten ? companionPath : null, startedUtc);
             return companionWritten;
         }
 
