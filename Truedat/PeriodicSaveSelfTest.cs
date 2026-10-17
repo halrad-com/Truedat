@@ -279,7 +279,7 @@ namespace Truedat
         /// <summary>Keeper 136's trigger, REAL catalog file (the store half is simulated): checkpoint 1 writes the catalog and its store flush
         /// fails BUSY; the one retry writes the catalog again (now with c) and the store fails again -> persistent. Then a completion re-analyses
         /// a.flac with a NEW value and adds d; at the end the catalog swap fails on a held file and the store is skipped. The catalog file holds
-        /// a(old), b, c; the survivor text must say so (in neither: the last 1 completion), not "all lost" as 3178448 did.</summary>
+        /// a(old), b, c; the survivor text must say so (in neither: the 2 analyses after the last catalog half), not 4 as 3178448 would.</summary>
         static void TestPriorCatalogHalfSurvives(Action<bool, string> assert)
         {
             var dir = Path.Combine(Path.GetTempPath(), "truedat-periodic-selftest-" + Guid.NewGuid().ToString("N"));
@@ -294,15 +294,17 @@ namespace Truedat
                 Func<CheckpointOutcome> save = () => Program.TrySaveCheckpointCatalog(cat, tracks)
                     ?? CheckpointOutcome.Failed("store", busy.ErrorException, "simulated store half: " + busy.Error);
                 var p = new PeriodicSave(Stopwatch.StartNew(), 0, _ => { }, retryDelaySecs: 0);
-                tracks[@"D:\music.flac"] = entry("a", 100); tracks[@"D:\music.flac"] = entry("b", 101);
+                tracks[@"D:\music\a.flac"] = entry("a", 100);                           // already in the catalog before this run (no analysis)
+                tracks[@"D:\music\b.flac"] = entry("b", 101);                           // analysis 1 completes
                 p.AfterAnalysis(save);                                                   // catalog half OK (a, b), store BUSY -> one retry
-                tracks[@"D:\music\c.flac"] = entry("c", 102);
+                tracks[@"D:\music\c.flac"] = entry("c", 102);                           // analysis 2
                 p.AfterAnalysis(save);                                                   // catalog half OK (a, b, c), store BUSY again -> persistent
-                tracks[@"D:\music.flac"] = entry("a", 200);                           // same path, NEW value
-                tracks[@"D:\music\d.flac"] = entry("d", 103);
+                tracks[@"D:\music\a.flac"] = entry("a", 200);                           // analysis 3: same path, NEW value
                 p.AfterAnalysis(save);                                                   // persistent: no attempt
-                assert(p.PersistentFailure != null && p.PersistentFailure.Stage == "store" && p.Attempts == 2 && p.SinceCatalogHalf == 1 && p.SinceDurable == 3,
-                    $"store failed twice after successful catalog halves: persistent; catalog half 1 completion behind, durable 3 behind ({p.SinceCatalogHalf}/{p.SinceDurable})");
+                tracks[@"D:\music\d.flac"] = entry("d", 103);                           // analysis 4: a new path
+                p.AfterAnalysis(save);                                                   // persistent: no attempt
+                assert(p.PersistentFailure != null && p.PersistentFailure.Stage == "store" && p.Attempts == 2 && p.SinceCatalogHalf == 2 && p.SinceDurable == 4,
+                    $"store failed twice after successful catalog halves: persistent; catalog half 2 analyses behind, durable 4 behind ({p.SinceCatalogHalf}/{p.SinceDurable})");
                 Program.FinalWrites w;
                 using (new FileStream(cat, FileMode.Open, FileAccess.Read, FileShare.None))
                     w = Program.RunFinalWrites(p.PersistentFailure, true, () => { var f = Program.TrySaveCheckpointCatalog(cat, tracks); if (f != null) throw f.Error!; }, () => null);
@@ -311,8 +313,8 @@ namespace Truedat
                        && text.Contains("c.flac") && !text.Contains("d.flac") && text.Contains("\"bpm\":100") && !text.Contains("\"bpm\":200"),
                     "the real catalog after the run: a (OLD value 100), b, c from the last successful catalog half; d and a's new value absent");
                 var facts = Program.SurvivorFacts(w, p.SinceCatalogHalf, p.SinceDurable);
-                assert(facts.Contains("the last 1 are absent there (or still carry their OLD values") && facts.Contains("(lost): 1") && !facts.Contains("(lost): 3"),
-                    $"survivor facts count only the completion after the last catalog half as lost, and name the stale value ({facts})");
+                assert(facts.Contains("the last 2 are absent there (or still carry their OLD values") && facts.Contains("(lost): 2") && !facts.Contains("(lost): 4"),
+                    $"survivor facts count only the 2 analyses after the last catalog half as lost, and name the stale value ({facts})");
             }
             finally { Console.SetError(savedErr); try { Directory.Delete(dir, true); } catch { } }
         }
