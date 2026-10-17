@@ -3118,7 +3118,7 @@ namespace Truedat
             // or defaults to mbxmoods.json next to the XML if given, else cwd.
             if (verifyMode)
             {
-                if (verifyBackfill && RefuseCatalogVerbWithStore(_storePath, "--verify --backfill", "backfill")) return;   // store-v3 T06 Step 0; a plain --verify writes nothing
+                if (verifyBackfill && RefuseCatalogVerbWithStore(_storePath, "--verify --backfill", "backfill")) return;   // store-v3 T06 Step 0; a plain --verify changes neither the catalog nor the store (it writes only its own CSV + coverage receipt)
                 string? verifyPath = analyzeFileMoods;
                 if (string.IsNullOrEmpty(verifyPath))
                 {
