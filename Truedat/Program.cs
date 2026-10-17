@@ -16604,6 +16604,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(GateClaimedSec(0, 224400) == 224.4, "gate-dur: zero fingerprint falls back to XML");
                 // neither available -> 0 so the caller's decode gate can't fire
                 Assert(GateClaimedSec(null, 0) == 0.0, "gate-dur: no duration at all -> 0 (gate cannot fire)");
+                // Either source can be INFLATED, so the usable coverage reference is the SMALLER
+                // of the two. Raw ADTS .aac carries no container duration, so TagLib estimates it
+                // from the bitrate and lands ~11x high: measured 2026-10-17 on
+                // sample-moon-white-petals.aac, TagLib 2023.3 s vs the XML's 180.9 s vs ffprobe's
+                // real 174.2 s. The gate took TagLib's, scored the decode at 7%, and cost the file
+                // its catalog entry. The truncation case that motivated the gate survives, because a
+                // header that overstates its length overstates it in BOTH sources (they agree, so
+                // the minimum is still the overstated value and the gate still fires).
+                Assert(GateClaimedSec(2023300, 180917) == 180.917, "gate-dur: raw-ADTS TagLib inflation loses to the smaller XML claim");
+                Assert(GateClaimedSec(180917, 2023300) == 180.917, "gate-dur: inflation on either side loses to the smaller claim");
+                Assert(GateClaimedSec(224400, 224400) == 224.4, "gate-dur: agreeing sources keep the truncation reference");
+            }
+
+            // --- scan health: the Essentia stall watchdog needs more than CPU to call a hang ---
+            {
+                var t1 = TimeSpan.FromSeconds(1);
+                var t2 = TimeSpan.FromSeconds(2);
+                Assert(EssentiaProgressed(t2, t1, 0, 0), "watchdog: advancing CPU is alive");
+                // The proven false positive: the md5/codec/length/EBU pass reads the whole file, so
+                // on a contended box it is IO-bound and accrues NO cpu for a minute at a time while
+                // being perfectly healthy. Measured 2026-10-17: an 849 MB / 1.35 h FLAC was killed at
+                // 85.7 s by the cpu-only rule, then completed standalone in 701 s (6.9x realtime)
+                // WITH the 20-worker scan still running. Read bytes advancing is the liveness signal
+                // that survives that stage.
+                Assert(EssentiaProgressed(t1, t1, 900000000UL, 400000000UL), "watchdog: advancing read bytes with flat CPU is alive");
+                Assert(!EssentiaProgressed(t1, t1, 400000000UL, 400000000UL), "watchdog: neither advancing is idle");
+                // GetProcessIoCounters can fail (returns 0); the rule must then behave exactly as it
+                // did before, never treat an unavailable counter as a hang.
+                Assert(EssentiaProgressed(TimeSpan.FromSeconds(1.5), t1, 0, 0), "watchdog: unavailable IO counters fall back to CPU");
+                Assert(EssentiaStallIdlePolls * EssentiaPollSeconds >= 120, "watchdog: the idle window is at least two minutes");
             }
 
             // --- SMFM is carried across cache hits (so it needn't be re-read from the file) ---
@@ -21614,11 +21644,48 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// preserved for the case that motivated the gate — a file whose header still claims
         /// the full length while only part decodes (ABBA: 62s of a claimed 224s) — because the
         /// fingerprint reads that same overstated header.</summary>
+        /// <summary>Poll interval and idle window for the Essentia stall watchdog.</summary>
+        internal const int EssentiaPollSeconds = 5;
+        internal const int EssentiaStallIdlePolls = 36;   // 180 s
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetProcessIoCounters(IntPtr hProcess, out IO_COUNTERS counters);
+
+        /// <summary>Bytes the process has read so far, or 0 when the counter cannot be read (the
+        /// process already exited, the call failed, access was denied). Returning 0 is deliberate:
+        /// it can never look like progress, so an unavailable counter leaves the watchdog exactly as
+        /// it behaved before — CPU-only — rather than making it blind to a real hang.</summary>
+        static ulong TryReadProcessReadBytes(Process proc)
+        {
+            try { return GetProcessIoCounters(proc.Handle, out var c) ? c.ReadTransferCount : 0UL; }
+            catch { return 0UL; }
+        }
+
+        /// <summary>Liveness for the stall watchdog: has the extractor made ANY observable progress
+        /// since the last poll? CPU time alone is not enough — a process blocked on IO accrues none
+        /// while working normally — so read bytes count as progress too.</summary>
+        internal static bool EssentiaProgressed(TimeSpan cpu, TimeSpan lastCpu, ulong ioReadBytes, ulong lastIoReadBytes)
+            => cpu > lastCpu || ioReadBytes > lastIoReadBytes;
+
         internal static double GateClaimedSec(int? fingerprintDurationMs, int xmlTotalTimeMs)
         {
-            if (fingerprintDurationMs.HasValue && fingerprintDurationMs.Value > 0)
-                return fingerprintDurationMs.Value / 1000.0;
-            return xmlTotalTimeMs > 0 ? xmlTotalTimeMs / 1000.0 : 0.0;
+            double fp = fingerprintDurationMs.HasValue && fingerprintDurationMs.Value > 0
+                ? fingerprintDurationMs.Value / 1000.0 : 0.0;
+            double xml = xmlTotalTimeMs > 0 ? xmlTotalTimeMs / 1000.0 : 0.0;
+            if (fp > 0 && xml > 0) return Math.Min(fp, xml);
+            return fp > 0 ? fp : xml;
         }
 
         /// <summary>True when Essentia's decoded length falls short of the reference duration by
@@ -23691,9 +23758,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var stdoutDrainTask = proc.StandardOutput.ReadToEndAsync();
 
                 // CPU activity monitoring — kill the subprocess if it stops burning CPU
-                const int pollMs = 5000;
-                const int maxIdlePolls = 12; // 60s of no CPU activity
+                const int pollMs = EssentiaPollSeconds * 1000;
+                const int maxIdlePolls = EssentiaStallIdlePolls;
                 var lastCpu = TimeSpan.Zero;
+                ulong lastIoReadBytes = 0;
                 int idleCount = 0;
 
                 while (!proc.WaitForExit(pollMs))
@@ -23707,9 +23775,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     {
                         proc.Refresh();
                         var cpu = proc.TotalProcessorTime;
-                        if (cpu > lastCpu)
+                        var ioReadBytes = TryReadProcessReadBytes(proc);
+                        if (EssentiaProgressed(cpu, lastCpu, ioReadBytes, lastIoReadBytes))
                         {
-                            lastCpu = cpu;
+                            if (cpu > lastCpu) lastCpu = cpu;
+                            if (ioReadBytes > lastIoReadBytes) lastIoReadBytes = ioReadBytes;
                             idleCount = 0;
                         }
                         else
