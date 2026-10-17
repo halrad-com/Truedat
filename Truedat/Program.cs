@@ -3129,7 +3129,6 @@ namespace Truedat
             // or defaults to mbxmoods.json next to the XML if given, else cwd.
             if (verifyMode)
             {
-                if (verifyBackfill && RefuseCatalogVerbWithStore(_storePath, "--verify --backfill", "backfill")) return;   // store-v3 T06 Step 0; a plain --verify changes neither the catalog nor the store (it writes only its own CSV + coverage receipt)
                 string? verifyPath = analyzeFileMoods;
                 if (string.IsNullOrEmpty(verifyPath))
                 {
@@ -3145,7 +3144,11 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel, chunkIndex, chunkTotal);
+                if (_storePath != null && verifyBackfill)
+                    Environment.ExitCode = RunStoreBackedVerb("backfill", "--verify --backfill", verifyPath!,
+                        () => RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel, chunkIndex, chunkTotal));   // store-v3 T06
+                else
+                    Environment.ExitCode = RunVerify(verifyPath!, parallelism, verifyBackfill, backfillLevel, chunkIndex, chunkTotal);
                 return;
             }
 
@@ -3565,7 +3568,6 @@ namespace Truedat
             // sidecar regenerated); --dry-run reports the counts and writes nothing.
             if (stripSmfmMode)
             {
-                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--strip-smfm", "strip")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 // Rewrites the catalog, so it takes the same anchor rule as --compact /
                 // --prune-excluded: refuse to act on whatever mbxmoods.json happens to
                 // be in the directory the operator is standing in.
@@ -3583,7 +3585,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                RunStripSmfm(stripPath!, dryRun);
+                if (_storePath != null && !dryRun) Environment.ExitCode = RunStoreBackedVerb("strip", "--strip-smfm", stripPath!, () => { RunStripSmfm(stripPath!, dryRun); return Environment.ExitCode; });   // store-v3 T06
+                else RunStripSmfm(stripPath!, dryRun);
                 return;
             }
 
@@ -3593,7 +3596,6 @@ namespace Truedat
             // mirror. Mutates (backup first); --dry-run reports and writes nothing.
             if (pruneEntryPaths.Count > 0)
             {
-                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--prune-entry", "prune")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
                     Console.Error.WriteLine(BareCwdRefusal("--prune-entry", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
@@ -3608,7 +3610,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                RunPruneEntry(peCatalog!, pruneEntryPaths, dryRun);
+                if (_storePath != null && !dryRun) Environment.ExitCode = RunStoreBackedVerb("prune", "--prune-entry", peCatalog!, () => { RunPruneEntry(peCatalog!, pruneEntryPaths, dryRun); return Environment.ExitCode; });   // store-v3 T06
+                else RunPruneEntry(peCatalog!, pruneEntryPaths, dryRun);
                 return;
             }
 
@@ -3620,7 +3623,6 @@ namespace Truedat
             // --dry-run reports the exact removal list and writes nothing.
             if (pruneExcludedMode)
             {
-                if (!dryRun && RefuseCatalogVerbWithStore(_storePath, "--prune-excluded", "prune")) return;   // store-v3 T06 Step 0; --dry-run writes nothing
                 // --prune-excluded REMOVES entries and rewrites the catalog. Same rule.
                 if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog()))
                 {
@@ -3636,7 +3638,8 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                RunPruneExcluded(prunePath!, dryRun);
+                if (_storePath != null && !dryRun) Environment.ExitCode = RunStoreBackedVerb("prune", "--prune-excluded", prunePath!, () => { RunPruneExcluded(prunePath!, dryRun); return Environment.ExitCode; });   // store-v3 T06
+                else RunPruneExcluded(prunePath!, dryRun);
                 return;
             }
 
@@ -5276,7 +5279,6 @@ namespace Truedat
             // right paths.
             if (fixupMode && !string.IsNullOrEmpty(remapPrefix))
             {
-                if (RefuseCatalogVerbWithStore(_storePath, "--fixup --remap", "remap")) return;   // store-v3 T06 Step 0
                 var parts = remapPrefix!.Split(new[] { '=' }, 2);
                 if (parts.Length != 2 || parts[0].Length == 0)
                 {
@@ -5285,16 +5287,15 @@ namespace Truedat
                     return;
                 }
                 var moodsForRemap = xmlPath ?? "mbxmoods.json";
-                RunFixupRemap(moodsForRemap, parts[0], parts[1]);
+                if (_storePath != null)
+                    Environment.ExitCode = RunStoreBackedVerb("remap", "--fixup --remap", moodsForRemap, () => { RunFixupRemap(moodsForRemap, parts[0], parts[1]); return Environment.ExitCode; },
+                        remapOld: parts[0], remapNew: parts[1]);   // store-v3 T06
+                else RunFixupRemap(moodsForRemap, parts[0], parts[1]);
                 return;
             }
 
             // T11: from here on this is the library scan unless one of the four XML-using verbs below takes over — the scan's provisional
             // store-result.json begins now, so an XML / extractor refusal cannot leave the PREVIOUS verb's record in place (TDA review P2b).
-            // store-v3 T06 Step 0: --migrate / --fixup refuse before the XML is resolved or anything is touched (they dispatch
-            // below, after --check-filenames / --duplicates, which take precedence and stay as they are).
-            if (!checkFilenames && !duplicatesMode && (migrateMode || fixupMode)
-                && RefuseCatalogVerbWithStore(_storePath, migrateMode ? "--migrate" : "--fixup", migrateMode ? "migrate" : "fixup")) return;
             bool libraryScan = !checkFilenames && !duplicatesMode && !migrateMode && !fixupMode;
             bool xmlExplicit = !string.IsNullOrEmpty(xmlPath);
             if (libraryScan) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
@@ -5365,8 +5366,18 @@ namespace Truedat
 
             if (checkFilenames) { RunCheckFilenames(xmlPath, outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
             if (duplicatesMode) { RunDuplicates(outputDir); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
-            if (migrateMode) { RunMigrate(moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
-            if (fixupMode) { RunFixup(xmlPath, moodsPath); if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return; }
+            if (migrateMode)
+            {
+                if (_storePath != null) Environment.ExitCode = RunStoreBackedVerb("migrate", "--migrate", moodsPath, () => { RunMigrate(moodsPath); return Environment.ExitCode; });   // store-v3 T06
+                else RunMigrate(moodsPath);
+                if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return;
+            }
+            if (fixupMode)
+            {
+                if (_storePath != null) Environment.ExitCode = RunStoreBackedVerb("fixup", "--fixup", moodsPath, () => { RunFixup(xmlPath, moodsPath); return Environment.ExitCode; });   // store-v3 T06
+                else RunFixup(xmlPath, moodsPath);
+                if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return;
+            }
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var essentiaExe = FindTool("essentia_streaming_extractor_music.exe", baseDir, outputDir, Environment.CurrentDirectory);
@@ -10797,6 +10808,106 @@ namespace Truedat
         /// store is off is NOT in force (store and edges are off unless turned on, operator 2026-10-13) and the verb runs as
         /// before (TDA 103 / keeper 118). <paramref name="hubVerb"/> is the record's verb spelling the hub reads.
         /// </summary>
+        /// <summary>
+        /// store-v3 T06: the ONE write path for a catalog-changing verb with a store in force. The verb's own logic runs unchanged:
+        /// (1) the store-authoritative precondition (T18i) — a store and catalog that disagree refuse, as a scan does; (2) the files are
+        /// published from the store, so the verb reads the store's state; (3) the verb runs exactly as without a store (its backup, its
+        /// side outputs, its exit code); (4) its result is read back and the DIFFERENCE is written to the store in ONE transaction —
+        /// removed paths retired, added or changed entries written EXACTLY (a clear is a clear), under one shared import run whose source
+        /// names the verb, the generation advancing once iff something visible changed; (5) the files are published from the store again,
+        /// ALWAYS — after a failed store write that re-publishes the unchanged store, so the files never show a change the store does not
+        /// hold; (6) the record (the hub's verb spelling, the committed generation, what was published). A remap whose old prefix IS the
+        /// store's root moves the root row instead (locations, copies and history keep their ids).
+        /// </summary>
+        internal static int RunStoreBackedVerb(string hubVerb, string flag, string catalogPath, Func<int> runVerb, string? remapOld = null, string? remapNew = null)
+        {
+            var store = _storePath!;
+            var rec = global::Truedat.Store.StoreResult.Begin(hubVerb);
+            rec.Store = new global::Truedat.Store.StoreResultStore { Path = Path.GetFullPath(store), TruedatVersion = VersionInfo.Display };
+            int Fail(string sentence, int exit)
+            {
+                Console.Error.WriteLine(sentence);
+                global::Truedat.Store.StoreResult.Write(store, rec, exit, global::Truedat.Store.StoreResult.OutcomeFailed, sentence.StartsWith("Error: ", StringComparison.Ordinal) ? sentence.Substring(7) : sentence);
+                return exit;
+            }
+
+            // (1) precondition + the store's entries
+            var before = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+            var load = global::Truedat.Store.StoreScan.LoadAuthoritative(store, catalogPath, before);
+            if (load.Refused) return Fail(load.Refusal!.Replace("Nothing was scanned.", $"{flag} changed nothing."), 2);
+            if (load.Case == "fresh") return Fail($"Error: {flag} with a store in force, but neither the store nor the catalog holds anything: nothing to change.", 1);
+            _storeRootPath = load.RootPath;
+
+            // (2) the verb reads the store's state
+            var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, load.RootPath, out _);
+            if (pubEx != null) return Fail($"Error: {flag} could not publish the store's state before running ({CheckpointCause.Describe(pubEx)}); nothing was changed.", 1);
+
+            // (3) the verb, unchanged
+            int verbExit = runVerb();
+
+            // (4) its result -> the store, one transaction
+            var after = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+            if (File.Exists(catalogPath) || File.Exists(catalogPath + ".1")) LoadExistingMoods(catalogPath, after);
+            var removed = before.Keys.Where(k => !after.ContainsKey(k)).ToList();
+            var changed = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+            foreach (var kv in after)
+                if (!before.TryGetValue(kv.Key, out var b) || !EntryBytes(kv.Key, b).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
+                { kv.Value.CopyObserved = null; changed[kv.Key] = kv.Value; }   // null = every copy column observed: the verb's result is exact
+
+            string? storeError = null; int moved = 0;
+            long generationBefore = load.Generation;
+            try
+            {
+                if (remapOld != null && remapNew != null && load.RootPath != null
+                    && string.Equals(remapOld.Replace('/', '\\').TrimEnd('\\'), load.RootPath.Replace('/', '\\').TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                {
+                    // The remap moves the whole root: one transaction, the root row and every display path under it.
+                    using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                    using var tx = os.Db.BeginTransaction();
+                    var rootId = os.Dal.ListRoots().First(x => string.Equals(x.Path, load.RootPath, StringComparison.Ordinal)).Id;
+                    moved = os.Dal.MoveRoot(rootId, load.RootPath, remapNew.Replace('/', '\\').TrimEnd('\\'));
+                    if (moved > 0) os.Dal.AdvanceGeneration();
+                    _storeRootPath = remapNew.Replace('/', '\\').TrimEnd('\\');   // the publication below exports the MOVED root
+                    tx.Complete();
+                    removed.Clear(); changed.Clear();
+                }
+                if (removed.Count + changed.Count > 0)
+                {
+                    global::Truedat.Store.ImportCommand.ExactArrival = true;
+                    try
+                    {
+                        global::Truedat.Store.ImportCommand.ExecuteEntries(store, changed, null, "primary", true, "import", "1",
+                            $"verb:{hubVerb}:{Environment.MachineName}@{DateTime.UtcNow:o}", null, null, after.Keys, batchSize: int.MaxValue, retirePaths: removed);
+                    }
+                    finally { global::Truedat.Store.ImportCommand.ExactArrival = false; }
+                }
+            }
+            catch (Exception ex) { storeError = CheckpointCause.Describe(ex); }
+
+            // (5) the files from the store, always
+            var pub2 = global::Truedat.Store.StoreScan.Publish(store, catalogPath, _storeRootPath, out var rep2);
+            rec.Export = new global::Truedat.Store.StoreResultExport
+            {
+                Performed = pub2 == null && rep2.Published, Generation = pub2 == null ? rep2.Generation : (long?)null,
+                Catalog = pub2 == null ? global::Truedat.Store.StoreResult.Describe(rep2.OutPath) : null,
+                Sidecar = pub2 == null ? global::Truedat.Store.StoreResult.Describe(rep2.SidecarPath) : null,
+                Companion = pub2 == null && rep2.Companion ? global::Truedat.Store.StoreResult.Describe(rep2.CompanionPath) : null,
+            };
+            rec.Store.SchemaVersion = rep2.StoreSchema > 0 ? rep2.StoreSchema : (int?)null;
+            rec.Store.Generation = pub2 == null ? rep2.Generation : (long?)null;
+            rec.Detail = new Dictionary<string, long> { ["retired"] = removed.Count, ["written"] = changed.Count, ["rootMoved"] = moved, ["generationBefore"] = generationBefore };
+
+            if (storeError != null)
+                return Fail($"Error: {flag} could not write its change to the store ({storeError}); the store is unchanged and the files were re-published from it" +
+                            (pub2 != null ? $" — but that publication ALSO failed ({CheckpointCause.Describe(pub2)}): the catalog on disk may show the verb's change; run --store-export" : "") + ".", 1);
+            if (pub2 != null)
+                return Fail($"Error: {flag} wrote its change to the store but publishing the files failed ({CheckpointCause.Describe(pub2)}); the store is ahead of the files — run --store-export.", 1);
+            Console.WriteLine($"  store: {flag} — {changed.Count} entr{(changed.Count == 1 ? "y" : "ies")} written, {removed.Count} retired{(moved > 0 ? $", root moved ({moved} locations)" : "")}; published at generation {rep2.Generation}");
+            global::Truedat.Store.StoreResult.Write(store, rec, verbExit, verbExit == 0 ? global::Truedat.Store.StoreResult.OutcomeCompleted : global::Truedat.Store.StoreResult.OutcomeFailed,
+                verbExit == 0 ? null : $"{flag} exited {verbExit}; whatever it changed was written to the store and published");
+            return verbExit;
+        }
+
         internal static bool RefuseCatalogVerbWithStore(string? storePath, string flag, string hubVerb)
         {
             if (storePath == null) return false;

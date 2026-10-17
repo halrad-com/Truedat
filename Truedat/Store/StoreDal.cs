@@ -185,6 +185,17 @@ namespace Truedat.Store
             return FindLocation(rootId, canonicalPath, out _) ?? throw new StoreException($"location vanished after upsert: {displayPath}");
         }
 
+        /// <summary>T06 (--fixup --remap whose old prefix IS the root): move the root row and every location's display path under it, in
+        /// the caller's transaction. Locations keep their ids, entities, copies and history — a re-key, not a delete-and-add. Returns the
+        /// number of locations whose display path changed.</summary>
+        internal int MoveRoot(long rootId, string oldRootPath, string newRootPath)
+        {
+            Exec("UPDATE library_root SET path = ? WHERE id = ?;", newRootPath, rootId);
+            Exec("UPDATE track_location SET display_path = ? || substr(display_path, ?) WHERE root_id = ? AND substr(lower(display_path), 1, ?) = lower(?);",
+                 newRootPath, oldRootPath.Length + 1, rootId, oldRootPath.Length, oldRootPath);
+            return Db.Changes;
+        }
+
         /// <summary>T18 / T06 D1: retire a location (the file moved away or the entry was removed) — its media, description, copy row
         /// and history stay; the export and the hub read present locations only. Returns true when it was present.</summary>
         internal bool RetireLocation(long locationId, string nowUtc)

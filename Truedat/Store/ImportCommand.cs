@@ -362,6 +362,10 @@ namespace Truedat.Store
 
         internal static ImportReport Execute(ImportOptions o) { var r = new ImportReport(); Execute(o, r); return r; }
 
+        /// <summary>T06: set by a catalog-changing verb around its store write — the arriving entries are the verb's EXACT result (content
+        /// and copy facts, nulls included: a strip or a migrate clears). Never set by a scan or an import. Single-threaded verbs only.</summary>
+        [ThreadStatic] internal static bool ExactArrival;
+
         /// <summary>Self-test seam: runs right after the store opened (schema and generation known) and before any entry is written,
         /// so a test can fail the verb there and prove the record keeps the at-open facts and carries no counts. Null in production.</summary>
         internal static Action? AfterStoreOpened;
@@ -618,6 +622,15 @@ namespace Truedat.Store
                 dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
                 contentWritten = true; r.ContentRekeyed++;
                 StoreLog.Info($"description re-keyed: {displayPath} ({existing.ContentKey} -> {contentKey})");
+            }
+            else if (ExactArrival)
+            {
+                // T06: a catalog-changing VERB's edit (strip, migrate, backfill, ...) is the new value of the description, exactly —
+                // a NULL arriving is a clear, not "not observed", and no noise rule applies. Equal rows write nothing.
+                bool anyDiffers = false;
+                for (int k = 0; k < TrackEntryMapper.ContentColumnCount && !anyDiffers; k++)
+                    if (!TrackEntryMapper.ContentEqualExact(k, existing.Values[k], TrackEntryMapper.ContentValue(row, k))) anyDiffers = true;
+                if (anyDiffers) { dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now); contentWritten = true; }
             }
             else
             {
