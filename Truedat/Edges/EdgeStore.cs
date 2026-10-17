@@ -150,7 +150,11 @@ namespace Truedat.Edges
         /// only a store that holds edge results at all (any version): a store that never captured edges stays unstamped, while a store
         /// holding only older-version rows is restamped to the current version, so a reader serves exactly what that companion would
         /// (nothing). A CHANGED value is written with a generation advance in one write transaction (a different version changes the
-        /// rows a reader serves — a visible mutation, T07); an unchanged value writes nothing. Returns true when it changed.</summary>
+        /// rows a reader serves — a visible mutation, T07); an unchanged value writes nothing. Returns true when it changed.
+        /// <para>Proof limit (keeper 111, TDA 091): the caller builds its companion from its own <paramref name="producerVersion"/> and does
+        /// not re-read the stamp inside its later snapshot, so "stamp, generation and rows agree in one snapshot" holds under truedat's
+        /// single-writer invariant (one truedat per library — concurrent same-library runs are unsupported). Every truedat build stamps
+        /// its own fixed EdgeSettings default, so the only way to see a different value in between is a second concurrent writer.</para></summary>
         internal static bool StampSelectedVersion(StoreDal dal, string producerVersion)
         {
             if (!dal.HasAnyEdgeResults()) return false;
