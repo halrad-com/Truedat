@@ -52,6 +52,7 @@ namespace Truedat.Store
             Block(assert, "Drift", () => TestDrift(assert));
             Console.WriteLine("Store self-test (keeper 067: a copy fact the arrival did not observe, or carries only at its written precision, keeps the stored value)");
             Block(assert, "CopyMerge", () => TestCopyMerge(assert));
+            Block(assert, "PerFileIdentity", () => TestPerFileIdentity(assert));
             Console.WriteLine("Store self-test (keeper 083/084 N1: --refresh before an import says why no track is selected for edges, and names the import for this catalog/store)");
             Block(assert, "EdgesRefreshNotice", () => TestEdgesRefreshNotice(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
@@ -506,6 +507,53 @@ namespace Truedat.Store
         // A copy fact the arriving catalog does not carry (absent, or JSON null) is not observed and keeps the stored value; an
         // explicit value (zero, empty, nonzero) is an observation and is written; a value equal to the stored one as the writer
         // prints it (FieldPrecision Dp) is the same observation.
+        // Keeper 099: the per-file scan modes (--analyze-file, --file-list, --folder) have no iTunes XML, so their entries carry the
+        // default trackId 0 — a value nobody observed. Through the REAL hand-off (Program.RecordPerFileScanEntry -> ScanSink -> the
+        // store) that 0 must not replace the XML id an iTunes-XML scan stored, while every copy fact the per-file scan DID observe
+        // (its tags) still lands; and an XML scan that observes a different id replaces it (the explicit replacement, proven apart).
+        static void TestPerFileIdentity(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "perfile-id-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            const string P = @"D:\Music\Tool\a.flac";
+            try
+            {
+                (long Id, string? Title) Stored()
+                {
+                    using var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                    using var st = os.Db.Prepare("SELECT tc.trackId, tc.title FROM track_copy tc JOIN track_location l ON l.id = tc.location_id WHERE l.display_path = ?;");
+                    st.Bind(1, P);
+                    return st.Step() ? (st.IsNull(0) ? -1 : st.GetInt64(0), st.IsNull(1) ? null : st.GetString(1)) : (-2, null);
+                }
+                void Flush() { var r = ScanSink.Flush(store, "output-x64.5", new[] { P }); assert(r.Ok, $"the sink flushed ({r.Error ?? "ok"})"); }
+
+                ScanSink.Reset();
+                var xml = FixtureEntries(@"D:\Music")[P];
+                xml.Features!.TrackId = 4242; xml.Features.Title = "XML title";
+                ScanSink.Record(P, xml);                      // the iTunes-XML scan's own hand-off: every copy fact observed
+                Flush();
+                assert(Stored().Id == 4242, $"setup: an iTunes-XML scan stores the XML id ({Stored().Id})");
+
+                var perFile = FixtureEntries(@"D:\Music")[P];
+                perFile.Features!.TrackId = 0; perFile.Features.Title = "tag title";
+                perFile.LastModified = xml.LastModified.AddMinutes(5);
+                Program.RecordPerFileScanEntry(P, perFile, null);
+                Flush();
+                var after = Stored();
+                assert(after.Id == 4242, $"a per-file scan's unobserved trackId 0 does not replace the stored XML id (stored {after.Id})");
+                assert(after.Title == "tag title", $"…while the copy facts the per-file scan DID observe still land: its tag title replaced the XML one ('{after.Title}')");
+
+                var xml2 = FixtureEntries(@"D:\Music")[P];
+                xml2.Features!.TrackId = 5151; xml2.Features.Title = "XML title";
+                xml2.LastModified = perFile.LastModified.AddMinutes(5);
+                ScanSink.Record(P, xml2);
+                Flush();
+                assert(Stored().Id == 5151, $"an iTunes-XML scan that observes a different id replaces the stored one (explicit replacement; stored {Stored().Id})");
+            }
+            finally { ScanSink.Reset(); try { Directory.Delete(dir, true); } catch { } }
+        }
+
         static void TestCopyMerge(Action<bool, string> assert)
         {
             var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "copymerge-" + Guid.NewGuid().ToString("N").Substring(0, 8));

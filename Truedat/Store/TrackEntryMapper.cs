@@ -444,6 +444,24 @@ namespace Truedat.Store
         /// <summary>Index of a copy column in CopyIdx order (what ReadCopyValues returns); -1 when unknown.</summary>
         internal static int CopyIndexOf(string name) { for (int k = 0; k < CopyIdx.Length; k++) if (Cols[CopyIdx[k]].Name == name) return k; return -1; }
 
+        /// <summary>Keeper 099: what a per-file scan (--analyze-file, --file-list, --folder) OBSERVES of a copy — every copy fact except
+        /// trackId. Those modes read tags, never an iTunes XML, so their trackId is the default 0, a value nobody observed; marked
+        /// unobserved, it can never replace the XML id an iTunes-XML scan stored (MergeCopy keeps the stored value). The iTunes-XML
+        /// scan leaves CopyObserved null (all observed), so an id it reads still replaces the stored one.</summary>
+        internal static ulong PerFileScanCopyObserved => AllCopyObservedExcept("trackId");
+
+        static ulong AllCopyObservedExcept(params string[] names)
+        {
+            ulong mask = CopyIdx.Length >= 64 ? ulong.MaxValue : (1UL << CopyIdx.Length) - 1;
+            foreach (var n in names)
+            {
+                int k = CopyIndexOf(n);
+                if (k < 0) throw new InvalidOperationException($"{n} is not a copy column");
+                mask &= ~(1UL << k);
+            }
+            return mask;
+        }
+
         /// <summary>The first column of a ToRow() row that the typed store CANNOT hold (a scalar beyond int64 at its scale, a vector
         /// element beyond int32, a sparse vector longer than u16), with the reason — or null when the whole row is storable. Called
         /// BEFORE any entry mutation (keeper partial-entry defect, T04): an entry is rejected whole or written whole, never a changed

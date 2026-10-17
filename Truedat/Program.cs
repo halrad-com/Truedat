@@ -4319,7 +4319,7 @@ namespace Truedat
                     afMoodsTracks ??= new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     afMoodsTracks[afKey] = trackEntry;
                     SaveResults(analyzeFileMoods!, afMoodsTracks);
-                    if (_storePath != null) { global::Truedat.Store.ScanSink.Record(afKey, trackEntry, afStagedSrc?.Path); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3/C-A
+                    if (_storePath != null) { RecordPerFileScanEntry(afKey, trackEntry, afStagedSrc?.Path); FlushStoreSink(afMoodsTracks.Keys); }   // S2 C3/C-A
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
                     // --analyze-file never consults the ledger, but its success still makes a
                     // review record for this file stale — clear it beside the catalog it wrote.
@@ -5056,7 +5056,7 @@ namespace Truedat
                         {
                             var flKey = Path.GetFullPath(filePath);
                             flMoodsTracks[flKey] = trackEntry;
-                            if (_storePath != null) global::Truedat.Store.ScanSink.Record(flKey, trackEntry, flStagedSrc?.Path);   // S2 C3/C-A
+                            if (_storePath != null) RecordPerFileScanEntry(flKey, trackEntry, flStagedSrc?.Path);   // S2 C3/C-A
                             ClearReviewRecord(filePath);
                         }
 
@@ -22182,6 +22182,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// additive shim only — the writer itself is unchanged; the store's schema drift test and the
         /// export call this so the JSON they produce is the writer's, byte for byte.</summary>
         internal static void WriteTrackEntryForStore(Utf8JsonWriter jw, string path, TrackEntry entry) => WriteTrackEntry(jw, path, entry);
+
+        /// <summary>The per-file scan modes' (--analyze-file, --file-list, --folder) hand-off to the store sink. They have no iTunes
+        /// XML, so the entry's trackId is the default 0 that nobody observed: it is declared unobserved here, at the one hand-off, so
+        /// the store keeps the XML id an iTunes-XML scan stored (keeper 099). Every other copy fact these modes read stays observed.</summary>
+        internal static void RecordPerFileScanEntry(string key, TrackEntry entry, string? analysedPath)
+        {
+            entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.PerFileScanCopyObserved;
+            global::Truedat.Store.ScanSink.Record(key, entry, analysedPath);
+        }
 
         /// <summary>The ONE predicate for "the catalog writes the truedat block" — the writer and the store's verdict projection (T19) both ask
         /// it, so an absent block and an absent verdict row cannot disagree. Emit only when at least one axis reached a real yes/no, or a
