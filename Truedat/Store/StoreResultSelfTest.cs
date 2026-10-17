@@ -125,6 +125,11 @@ namespace Truedat.Store
                     assert(said.Contains("seeds or extends the store") && said.Contains("it does not restore the store") && said.Contains("never removes store entries")
                         && !said.Contains("--store-import restores") && !said.Contains("restore the store with"),
                         $"--restore wording: an import seeds or extends, it is not a restore and never deletes ({said.Trim()})");
+                    // T09: the refusal is now about THIS archive, not about the verb — it names the member a store snapshot
+                    // carries and points at the snapshot that would have worked, so the operator is not left thinking a store
+                    // can never be restored.
+                    assert(said.Contains(StoreTransfer.StoreEntryName) && said.Contains("carries no store") && said.Contains("--snapshot"),
+                        $"--restore wording: the refusal names the missing store member and the snapshot route ({said.Trim()})");
                     File.Delete(resultPath);
                 }
                 // No store in force (store off, or --no-store): no refusal, nothing written, exit code untouched.

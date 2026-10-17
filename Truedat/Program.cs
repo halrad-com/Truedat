@@ -10697,7 +10697,7 @@ namespace Truedat
         /// when the restored bytes are older), and the record names both so the hub and the operator can see what
         /// happened. An archive whose store is damaged or from a newer schema is refused before anything is replaced.
         /// </summary>
-        static int RunStoreRestore(string archivePath, string storePath, string destCatalog)
+        internal static int RunStoreRestore(string archivePath, string storePath, string destCatalog)
         {
             Console.WriteLine("=== Restore Mode (store) ===");
             Console.WriteLine($"  Archive:     {archivePath}");
@@ -11087,8 +11087,8 @@ namespace Truedat
                 instead = "This archive carries no store (" + StoreTransferEntryName + "), and a store cannot be "
                     + "restored from a catalog alone. A --snapshot taken with the store in force DOES carry it and restores both; restore that "
                     + "instead. To restore this catalog on its own, run it again with --no-store; to bring its entries into the store afterwards, "
-                    + "run --store-import on it — that seeds or extends the store, it does not restore it, and it never removes store entries "
-                    + "the archive lacks.";
+                    + "run --store-import on it — that seeds or extends the store, it does not restore the store, and it never removes store "
+                    + "entries the archive lacks.";
             else
                 instead = "This verb cannot apply its change to the store yet. To change the catalog alone, run it again with --no-store "
                     + "(the store then no longer matches the catalog), or turn the store off in the config.";
@@ -15097,6 +15097,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.VerdictSelfTest.Run(Assert);       // T19 verdict projection (architect-2)
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
+            global::Truedat.Store.StoreTransferSelfTest.Run(Assert); // T09 snapshot/restore, T10 store merge source, T12 state (architect-2)
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);

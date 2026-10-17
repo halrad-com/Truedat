@@ -51,17 +51,18 @@ namespace Truedat.Store
             if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir!);
             if (File.Exists(dest)) throw new StoreException($"the snapshot target already exists: {dest}");
 
+            // The facts are read on the SAME connection that then copies, and NOT inside a transaction: VACUUM INTO
+            // refuses to run in one, and opening the finished copy to interrogate it would put that file into WAL mode
+            // and leave a handle on it — which is how the staged copy ends up undeletable. truedat is single-writer by
+            // design, so between these reads and the copy nothing of ours commits; VACUUM INTO's own read snapshot is
+            // what makes the copy itself consistent.
             int schema; long generation; int entries;
             using (var db = SqliteDb.Open(storePath, create: false))
             {
                 schema = SchemaMigrator.ReadVersion(db);
-                var dal = new StoreDal(db);
-                // One read snapshot for the facts AND the copy: a commit in between would describe the copy wrongly.
-                using var snap = db.BeginRead();
-                generation = dal.Generation();
-                entries = (int)(ToLong(db.ExecScalar("SELECT COUNT(*) FROM track_location WHERE retired_utc IS NULL;")) ?? 0);
+                generation = ReadGeneration(db);
+                entries = (int)(ToLong(db.ExecScalar("SELECT COUNT(*) FROM track_location WHERE state <> 'retired';")) ?? 0);
                 db.Exec($"VACUUM INTO '{dest.Replace("'", "''")}';");
-                snap.Complete();
             }
             return new StoreCopy(dest, new FileInfo(dest).Length, Sha256File(dest), schema, generation, entries);
         }
@@ -113,9 +114,8 @@ namespace Truedat.Store
                 if (schema > StoreSchema.CurrentVersion)
                     throw new StoreException($"the store in the archive is schema v{schema} and this build reads v{StoreSchema.CurrentVersion}; "
                         + "nothing was replaced. Restore it with the truedat that wrote it, or upgrade truedat.");
-                var dal = new StoreDal(db);
-                generation = dal.Generation();
-                entries = (int)(ToLong(db.ExecScalar("SELECT COUNT(*) FROM track_location WHERE retired_utc IS NULL;")) ?? 0);
+                generation = ReadGeneration(db);
+                entries = (int)(ToLong(db.ExecScalar("SELECT COUNT(*) FROM track_location WHERE state <> 'retired';")) ?? 0);
             }
             catch (StoreException) { throw; }
             catch (Exception ex)
@@ -161,14 +161,16 @@ namespace Truedat.Store
                 throw;
             }
 
-            // The store being replaced becomes a snapshot of its own, so this is reversible by the same command.
+            // The store being replaced becomes a snapshot of its own, so this is reversible by the same command. Its
+            // generation is kept: the restored store has to advance past it (see below), never merely past its own.
             string? backup = null;
+            long replacedGeneration = 0;
             if (File.Exists(store))
             {
                 backup = store + ".bak." + DateTime.Now.ToString("yyyyMMdd.HHmmss") + ".db";
                 try
                 {
-                    VacuumInto(store, backup);
+                    replacedGeneration = VacuumInto(store, backup).Generation;
                     RotateStoreBackups(store, keepBackups);
                 }
                 catch (Exception ex)
@@ -190,11 +192,21 @@ namespace Truedat.Store
             foreach (var side in new[] { store + "-wal", store + "-shm" })
                 try { if (File.Exists(side)) File.Delete(side); } catch { }
 
+            // The restored store's generation must exceed the one it REPLACED, not just its own. A snapshot taken at
+            // generation 1 and restored over a store at generation 2 would otherwise republish generation 2 with
+            // different content, and a consumer holding 2 would never look again — the one thing the generation
+            // exists to prevent.
             long generation;
             using (var os = OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
             using (var tx = os.Db.BeginTransaction())
             {
+                long replaced = replacedGeneration;
                 generation = os.Dal.AdvanceGeneration();
+                if (generation <= replaced)
+                {
+                    generation = replaced + 1;
+                    os.Dal.MetaSet(StoreDal.GenerationKey, generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
                 tx.Complete();
             }
             return new RestoreResult(candidate, backup, generation);
@@ -229,7 +241,7 @@ namespace Truedat.Store
             if (schema <= 0) throw new StoreException($"not a truedat store: {storePath}");
             if (schema > StoreSchema.CurrentVersion)
                 throw new StoreException($"{storePath} is schema v{schema} and this build reads v{StoreSchema.CurrentVersion}.");
-            var dal = new StoreDal(db);
+            using var dal = new StoreDal(db);
             using var snap = db.BeginRead();
             foreach (var root in dal.ListRoots())
                 foreach (var (display, entry) in dal.ReadEntries(root.Id))
@@ -251,6 +263,13 @@ namespace Truedat.Store
             }
             catch (Exception) { return false; }
         }
+
+        /// <summary>The store's generation read with a plain scalar query rather than through <see cref="StoreDal"/>.
+        /// The DAL caches prepared statements and holds them until it is disposed; an undisposed one leaves the
+        /// connection with unfinalized statements, so <c>sqlite3_close_v2</c> defers and the FILE stays locked —
+        /// which is exactly what stopped a validated copy from being moved into place.</summary>
+        static long ReadGeneration(SqliteDb db)
+            => ToLong(db.ExecScalar($"SELECT value FROM store_meta WHERE key = '{StoreDal.GenerationKey}';")) ?? 0;
 
         static long? ToLong(string? s) => long.TryParse(s, out var v) ? v : (long?)null;
 
