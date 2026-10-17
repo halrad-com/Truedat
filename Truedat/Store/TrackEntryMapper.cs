@@ -556,6 +556,17 @@ namespace Truedat.Store
             return row;
         }
 
+        /// <summary>T13 (gate d): <paramref name="copySide"/> with every CONTENT column replaced by <paramref name="contentSide"/>'s — the
+        /// copy facts and the location (lastModified) stay the copy's own. Two entries that render the same bytes after this differ only
+        /// in the shared description, the one difference a non-primary copy of a multi-copy media is allowed.</summary>
+        internal static TrackEntry WithContentOf(TrackEntry copySide, TrackEntry contentSide)
+        {
+            var row = ToRow(copySide);
+            var content = ToRow(contentSide);
+            foreach (var i in ContentIdx) row[i] = content[i];
+            return FromValues(row, copySide.LastModified);
+        }
+
         internal static TrackEntry FromValues(object?[] values, DateTime lastModified)
         {
             var e = new TrackEntry { Features = new TrackFeatures(), LastModified = lastModified };

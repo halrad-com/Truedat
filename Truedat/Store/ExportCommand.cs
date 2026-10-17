@@ -31,8 +31,9 @@ namespace Truedat.Store
     internal sealed class RoundtripReport
     {
         public int CatalogEntries, StoreEntries, Same, OnlyInCatalog, OnlyInStore, Different;
-        /// <summary>Differing entries whose location is a non-primary copy of a multi-copy media: by the 1:many:1
-        /// ruling they export their media's single description, so a difference there is expected, not a defect.</summary>
+        /// <summary>Differing entries whose location is a non-primary copy of a multi-copy media and which differ ONLY in the shared
+        /// content columns: by the 1:many:1 ruling they export their media's single description, so that difference is expected. A copy
+        /// fact or lastModified difference on such a copy counts in <see cref="Different"/> (T13, gate d).</summary>
         public int DifferentMerged;
         public string? FirstDifferentPath;
         public bool Equal => OnlyInCatalog == 0 && OnlyInStore == 0 && Different == 0 && CatalogEntries == StoreEntries;
@@ -242,7 +243,14 @@ namespace Truedat.Store
                 if (!catalog.TryGetValue(display, out var orig)) { r.OnlyInStore++; continue; }
                 string a = EntryJson(display, orig), b = EntryJson(display, entry);
                 if (a == b) r.Same++;
-                else if (merged.Contains(display)) { r.DifferentMerged++; StoreLog.Debug($"differs (merged copy, expected): {display}"); }
+                else if (merged.Contains(display))
+                {
+                    // T13 (gate d): the merge excuses the shared DESCRIPTION only. Put the store's content columns into the catalog's entry
+                    // and compare again: whatever still differs is a copy fact or the location — stored per copy — and fails the gate.
+                    var h = EntryJson(display, TrackEntryMapper.WithContentOf(orig, entry));
+                    if (h == b) { r.DifferentMerged++; StoreLog.Debug($"differs in the shared description only (merged copy, expected): {display}"); }
+                    else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"merged copy differs beyond the shared description: {display}: {FirstDifference(h, b)}"); }
+                }
                 else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"differs: {display}: {FirstDifference(a, b)}"); }
             }
             foreach (var key in catalog.Keys) if (!seen.Contains(key)) r.OnlyInCatalog++;

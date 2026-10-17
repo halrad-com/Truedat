@@ -53,6 +53,7 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (keeper 067: a copy fact the arrival did not observe, or carries only at its written precision, keeps the stored value)");
             Block(assert, "CopyMerge", () => TestCopyMerge(assert));
             Block(assert, "PerFileIdentity", () => TestPerFileIdentity(assert));
+            Block(assert, "RoundtripCopyFacts", () => TestRoundtripCopyFacts(assert));
             Console.WriteLine("Store self-test (keeper 083/084 N1: --refresh before an import says why no track is selected for edges, and names the import for this catalog/store)");
             Block(assert, "EdgesRefreshNotice", () => TestEdgesRefreshNotice(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
@@ -507,6 +508,46 @@ namespace Truedat.Store
         // A copy fact the arriving catalog does not carry (absent, or JSON null) is not observed and keeps the stored value; an
         // explicit value (zero, empty, nonzero) is an observation and is written; a value equal to the stored one as the writer
         // prints it (FieldPrecision Dp) is the same observation.
+        // T13 (gate d): a non-primary copy of a multi-copy media exports its media's ONE description, so only the shared CONTENT columns
+        // may differ from its catalog entry. Its copy facts (tags, trackId, fingerprint, SMFM, analysisDuration, fileMd5) and its location
+        // (lastModified) are stored per copy and must round-trip exactly — the gate used to excuse ANY difference on such a copy.
+        static void TestRoundtripCopyFacts(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "rt-copyfacts-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            const string A = @"D:\Music\a\one.flac", B = @"D:\Music\b\one copy.flac";
+            var lm = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            Dictionary<string, TrackEntry> Entries(string bArtist, DateTime bLm) => new Dictionary<string, TrackEntry>(PathComparer.Instance)
+            {
+                [A] = new TrackEntry { AudioStreamSha256 = new string('c', 64), AnalysisDurationSecs = 1.5, LastModified = lm, Features = new TrackFeatures { Artist = "Tool", Title = "Sober", Bpm = 120.0, Mfcc = new double[13] } },
+                [B] = new TrackEntry { AudioStreamSha256 = new string('c', 64), AnalysisDurationSecs = 2.5, LastModified = bLm, Features = new TrackFeatures { Artist = bArtist, Title = "Sober", Bpm = 135.0, Mfcc = new double[13] } },
+            };
+            try
+            {
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(catalog, Entries("TOOL", lm));
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+
+                var rt = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt.Same == 1 && rt.DifferentMerged == 1 && rt.Different == 0 && rt.Equal,
+                    $"a merged copy differing ONLY in the shared description (bpm 135 vs the media's 120) is the expected merge: EQUAL ({rt.Same} same / {rt.DifferentMerged} merged / {rt.Different} different)");
+
+                var changedTag = Path.Combine(dir, "changed-tag.json");
+                WriteCatalog(changedTag, Entries("Tool (remaster)", lm));
+                var rt2 = ExportCommand.Roundtrip(store, changedTag, null);
+                assert(rt2.Different == 1 && rt2.DifferentMerged == 0 && !rt2.Equal && rt2.FirstDifferentPath == B,
+                    $"a merged copy whose COPY FACT (artist) differs from the store fails the gate — tags are stored per copy ({rt2.DifferentMerged} merged / {rt2.Different} different, equal {rt2.Equal}, first {rt2.FirstDifferentPath})");
+
+                var changedLm = Path.Combine(dir, "changed-lm.json");
+                WriteCatalog(changedLm, Entries("TOOL", lm.AddDays(1)));
+                var rt3 = ExportCommand.Roundtrip(store, changedLm, null);
+                assert(rt3.Different == 1 && rt3.DifferentMerged == 0 && !rt3.Equal,
+                    $"a merged copy whose location (lastModified) differs fails the gate too ({rt3.DifferentMerged} merged / {rt3.Different} different, equal {rt3.Equal})");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         // Keeper 099: the per-file scan modes (--analyze-file, --file-list, --folder) have no iTunes XML, so their entries carry the
         // default trackId 0 — a value nobody observed. Through the REAL hand-off (Program.RecordPerFileScanEntry -> ScanSink -> the
         // store) that 0 must not replace the XML id an iTunes-XML scan stored, while every copy fact the per-file scan DID observe
