@@ -69,6 +69,19 @@ catalog — the format is auto-detected, so older plain-copy backups restore too
 up whatever it's about to overwrite first, so a restore is itself reversible. (The live
 `mbxmoods.json` MBXHub reads stays plain JSON; only backups and snapshots are compressed.)
 
+**With a store in force, the snapshot carries the store too** — the catalog is derived, the store
+is the authority, so archiving only the catalog backs up the wrong half. The store rides along as a
+`VACUUM INTO` copy (consistent even while a scan reads it; a plain file copy of `truedat.db` alone
+is a torn read, because a live WAL store's committed state spans three files), and the manifest
+records its schema, generation, live-location count and SHA-256 — so a transfer between machines is
+verifiable by hash the way the catalog already was. `--restore` of such an archive restores the
+**store**: it refuses before replacing anything if the extracted store will not open, fails
+`PRAGMA quick_check`, or comes from a newer schema than the running build reads; it snapshots the
+store it replaces (`truedat.db.bak.<ts>.db`, same `--keep-backups` rotation); and it then republishes
+`mbxmoods.json`, the sidecar and `mbxedges.v1.json` from the restored store at a **new generation**,
+because a restore is a change the hub must notice even when the restored bytes are older than what it
+cached. An archive carrying no store still refuses, and says which archive would have worked.
+
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
@@ -229,7 +242,9 @@ cached track is never re-analysed, which is why `--refresh` is the step that fil
 Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
-store has several roots), `--store-roundtrip <catalog>`, `--store-info`, `--store-vacuum`
+store has several roots), `--store-roundtrip <catalog>`, `--store-info` (measurements **and** state:
+generation, whether the published files are at that generation, edge-array capture, the next command),
+`--store-vacuum`
 (`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
 row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own. Measured on a 72,477-track
 catalog: import 25 s, export 7 s, round-trip EQUAL, store 3,651 bytes per distinct track (0.95× the
@@ -411,12 +426,17 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --snapshot [path]       Read-only: bundle the current catalog into a restorable, double-
                           clickable ZIP — mbxmoods.json + a manifest (trackCount, content
                           SHA-256, byte size) + mbxmoods-exclude.json when present. Default
-                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog.
+                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog. With a
+                          store in force the store rides along as a consistent VACUUM INTO
+                          copy, so the archive restores the authority and not just the files.
   --restore <archive>     Rebuild mbxmoods.json from a snapshot, a compressed backup, a .gz,
                           or a plain catalog (format is auto-detected). Backs up any existing
                           catalog first, then atomically swaps. Restores the catalog only — a
                           bundled exclusion file is left in the archive (extract it by hand to
-                          roll policy back too).
+                          roll policy back too). With a store in force and an archive that
+                          carries one, restores the STORE instead (snapshotting the one it
+                          replaces) and republishes the catalog, sidecar and companion from it
+                          at a new generation.
   --compact [path]        Re-format an existing catalog to minimal JSON in place — the format
                           every save already writes. Lossless: a JSON-level round-trip that
                           preserves every field byte-for-byte in value, including keys truedat
@@ -580,7 +600,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
 - **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
 - **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
-- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
+- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`, which takes a shard's **store** (`truedat.db`) as a source as readily as its catalog — a store source is read across every root, since a shard store names its own. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
 - **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches disk, writing `mbxmoods-verify.csv` and exiting 1 on any drift / missing / error (CI-friendly). FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`); FLACs whose tags were rewritten *before* upgrading are re-keyed automatically during a normal scan (props-gated, reported as `FLAC re-key`), or by `--verify --backfill --accept-flac-tag-drift` without a scan. `--backfill` repairs missing fields in place with no Essentia re-run: the identity tier (TagLib-driven, fast) and the features tier (ffmpeg-driven, ~30 s per applicable lossless 24-bit track) both run by default — narrow with `--backfill-level identity|features`. Every tier is gated by the drift check, so drifted entries are flagged `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - The progress line shows estimated completion, running average per track, and live throughput as `Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.

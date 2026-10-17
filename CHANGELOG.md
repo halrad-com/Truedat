@@ -8,6 +8,47 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.4-DV1] — 2026-10-16
+
+### Changed
+
+- **With a store in force, the store is what changes — the files are written from it.** A scan loads from
+  the store, records every catalog change into it, and publishes `mbxmoods.json`, the sidecar and
+  `mbxedges.v1.json` from it together, at one generation. All nine catalog-changing verbs (`--fixup`,
+  `--remap`, `--verify --backfill`, `--migrate`, `--strip-smfm`, `--prune-entry`, `--prune-excluded`,
+  `--merge-moods`, `--restore`) go the same way: the store's state is published, the verb runs unchanged,
+  its result is written into the store, and the files are republished. A store and a catalog that disagree
+  refuse the run and say which command reconciles them, rather than quietly picking one.
+- **`--snapshot` carries the store; `--restore` restores it.** With a store in force the snapshot bundles a
+  consistent `VACUUM INTO` copy of the store (never a file copy — a live store's committed state spans
+  three files) plus its schema, generation, location count and SHA-256. Restoring such an archive restores
+  the store — refusing first if it will not open, fails SQLite's integrity check, or is from a newer schema —
+  snapshots the store it replaces, and republishes the three files from the restored store at a new
+  generation. An archive with no store still refuses, and names the archive that would have worked.
+- **`--merge-moods` merges stores as well as catalogs.** A `--merge-source` may be a `--chunk` shard's
+  `truedat.db`; its entries are read across every root and merged exactly as a catalog's are.
+- **The catalog names where it came from.** Every published catalog carries a `contract` + `origin` header
+  (machine, store schema, truedat version, generation, the sidecar's SHA-256, the root published). The hub
+  binds the sidecar by that hash instead of guessing from timestamps; older catalogs without the header
+  still read.
+- **Every store verb leaves `store-result.json`** beside the store: schema, committed generation, what was
+  published (by hash), and an honest outcome — `completed`, `failed`, or `interrupted` when a scan died
+  without reaching its boundary.
+
+### Added
+
+- **Typed store columns (schema v3) and a typed edge table (v4).** Each numeric field is held at the
+  precision it is written with — scaled integers, int32 vectors, a sparse histogram — so nothing is widened
+  or rounded on the way in. The edge row is scalars + HPCP by default; the arrays come only with
+  `--edge-arrays`, stay with a track once captured (sticky), and are removed only by `--edge-arrays-drop
+  [--dry-run]`. A v2 or v3 store migrates on open, backup first, and refuses a store from a newer build.
+- **`--store-info` reports state, not just measurements**: the store's generation, the generation the
+  published catalog carries, whether the files are behind it and why, how many descriptions hold edge
+  arrays, and the one command that closes the gap. Same fields under `state` in `store-info.json`.
+- **The catalog's `truedat.*` verdict block is projected into the store**, one row per copy, re-derived when
+  the verdict or speech algorithm tag changes — so the authenticity and speech readings can be queried
+  without re-exporting the catalog.
+
 ## [0.5.5.3-DV1] — 2026-10-12
 
 ### Added
