@@ -121,14 +121,14 @@ namespace Truedat.Edges
                 var k = e.Whole.Key;
                 w.WriteStartObject();
                 w.WriteString("name", k.Name); w.WriteString("code", k.Code); w.WriteString("scale", k.Scale);
-                w.WriteNumber("strength", Dec(k.Strength, 2)); w.WriteNumber("agreement", k.Agreement); w.WriteNumber("votesPresent", k.VotesPresent);
+                w.WriteNumber("strength", Dec(k.Strength, Dp.KeyStrength)); w.WriteNumber("agreement", k.Agreement); w.WriteNumber("votesPresent", k.VotesPresent);
                 w.WriteEndObject();
             }
             else w.WriteNullValue();
             w.WritePropertyName("bpm");
             if (folded && e.Bpm != null)
             {
-                w.WriteStartObject(); w.WriteNumber("value", Dec(e.Bpm.Value, 1)); w.WriteNumber("beats", e.Bpm.Beats); w.WriteNumber("regularity", Dec(e.Bpm.Regularity, 2)); w.WriteEndObject();
+                w.WriteStartObject(); w.WriteNumber("value", Dec(e.Bpm.Value, Dp.BpmValue)); w.WriteNumber("beats", e.Bpm.Beats); w.WriteNumber("regularity", Dec(e.Bpm.Regularity, Dp.BpmRegularity)); w.WriteEndObject();
             }
             else w.WriteNullValue();
             w.WritePropertyName("loudness");
@@ -136,7 +136,7 @@ namespace Truedat.Edges
             {
                 var l = e.Loudness;
                 w.WriteStartObject();
-                Num(w, "startLufs", l.StartLufs, 1); Num(w, "endLufs", l.EndLufs, 1); Num(w, "meanLufs", l.MeanLufs, 1);
+                Num(w, "startLufs", l.StartLufs, Dp.Lufs); Num(w, "endLufs", l.EndLufs, Dp.Lufs); Num(w, "meanLufs", l.MeanLufs, Dp.Lufs);
                 w.WritePropertyName("fadeMs"); if (l.FadeMs.HasValue) w.WriteNumberValue(l.FadeMs.Value); else w.WriteNullValue();
                 w.WriteNumber("silenceMs", l.SilenceMs); w.WriteString("silenceSource", l.SilenceSource);
                 w.WriteEndObject();
@@ -148,8 +148,8 @@ namespace Truedat.Edges
             if (folded && e.Whole != null && HasTexture(e.Whole))
             {
                 w.WriteStartObject();
-                Arr(w, "mfccMean", e.Whole.MfccMean, 1); Arr(w, "mfccSpread", e.Whole.MfccSpread, 1);
-                Arr(w, "spectralMean", e.Whole.SpectralMean, 4); Arr(w, "spectralSpread", e.Whole.SpectralSpread, 4);
+                Arr(w, "mfccMean", e.Whole.MfccMean, Dp.Mfcc); Arr(w, "mfccSpread", e.Whole.MfccSpread, Dp.Mfcc);
+                Arr(w, "spectralMean", e.Whole.SpectralMean, Dp.Spectral); Arr(w, "spectralSpread", e.Whole.SpectralSpread, Dp.Spectral);
                 w.WriteEndObject();
             }
             else w.WriteNullValue();
@@ -157,14 +157,14 @@ namespace Truedat.Edges
             // every folded edge (default and opt-in capture alike), so a hub has the regional values without the texture block. Same summary
             // and 4 dp as texture.spectralMean[0] / [5]. The v1 reader ignores unknown keys, so the file stays v1-valid.
             bool hasSummary = folded && e.Whole != null && e.Whole.SpectralMean.Length >= 6;
-            Num(w, "centroid", hasSummary ? e.Whole!.SpectralMean[0] : (double?)null, 4);
-            Num(w, "dissonance", hasSummary ? e.Whole!.SpectralMean[5] : (double?)null, 4);
+            Num(w, "centroid", hasSummary ? e.Whole!.SpectralMean[0] : (double?)null, Dp.Centroid);
+            Num(w, "dissonance", hasSummary ? e.Whole!.SpectralMean[5] : (double?)null, Dp.Dissonance);
             w.WritePropertyName("divergence");
             if (folded && e.Divergence != null) WriteDivergence(w, e.Divergence); else w.WriteNullValue();
             w.WritePropertyName("rms");
             if (folded && e.Rms != null)
             {
-                w.WriteStartObject(); Num(w, "crestDb", e.Rms.CrestDb, 2); w.WriteNumber("transitionMs", e.Rms.TransitionMs); w.WriteEndObject();
+                w.WriteStartObject(); Num(w, "crestDb", e.Rms.CrestDb, Dp.CrestDb); w.WriteNumber("transitionMs", e.Rms.TransitionMs); w.WriteEndObject();
             }
             else w.WriteNullValue();
             w.WriteEndObject();
@@ -178,7 +178,25 @@ namespace Truedat.Edges
 
         static void WriteDivergence(Utf8JsonWriter w, EdgeDivergence d)
         {
-            w.WriteStartObject(); Num(w, "loudness", d.Loudness, 2); Num(w, "texture", d.Texture, 2); Num(w, "harmony", d.Harmony, 2); w.WriteEndObject();
+            w.WriteStartObject(); Num(w, "loudness", d.Loudness, Dp.Divergence); Num(w, "texture", d.Texture, Dp.Divergence); Num(w, "harmony", d.Harmony, Dp.Divergence); w.WriteEndObject();
+        }
+
+        /// <summary>TDA 086 (6): EVERY decimal-place count the companion writes, in one table — the companion's write-time rounding rule,
+        /// the one place a store-backed reader (hub:H02) mirrors and cites, so its values equal the companion's exactly rather than
+        /// within a tolerance. Each value goes through <see cref="Dec"/> (Math.Round, then a decimal of it); NaN/Infinity write JSON null.
+        /// Integers (startMs, endMs, durationMs, fadeMs, silenceMs, transitionMs, beats, agreement, votesPresent) are written as stored.</summary>
+        internal static class Dp
+        {
+            internal const int KeyStrength = 2;      // key.strength
+            internal const int BpmValue = 1;         // bpm.value
+            internal const int BpmRegularity = 2;    // bpm.regularity
+            internal const int Lufs = 1;             // loudness.startLufs / endLufs / meanLufs
+            internal const int Mfcc = 1;             // texture.mfccMean / mfccSpread (opt-in arrays only)
+            internal const int Spectral = 4;         // texture.spectralMean / spectralSpread (opt-in arrays only)
+            internal const int Centroid = 4;         // centroid (A04 (d) direct key)
+            internal const int Dissonance = 4;       // dissonance (A04 (d) direct key)
+            internal const int CrestDb = 2;          // rms.crestDb
+            internal const int Divergence = 2;       // divergence.loudness / texture / harmony, edge and head<->tail
         }
 
         // net48 formats a double with round-trip noise ("0.77000000000000002"); a decimal of the rounded value prints exactly
@@ -196,7 +214,7 @@ namespace Truedat.Edges
             w.WriteEndArray();
         }
 
-        static decimal Dec(double v, int dp)
+        internal static decimal Dec(double v, int dp)
         {
             double r = Math.Round(v, dp);
             if (r > 7.9e28 || r < -7.9e28) return (decimal)Math.Sign(r) * 79000000000000000000000000000m;
