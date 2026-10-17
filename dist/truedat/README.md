@@ -1,4 +1,4 @@
-# Truedat - Music Mood Extractor & Fingerprinter
+﻿# Truedat - Music Mood Extractor & Fingerprinter
 
 Truedat is a Windows .NET CLI that extracts **per-track mood** across a music library — the signal [MBXHub's ](https://mbxhub.com/download.htm) - [AutoQ](https://mbxhub.com/features.html#autoq)  engine uses for **mood-aware shuffle** — and writes it (alongside identity, authenticity, and metadata) into `mbxmoods.json` that MBXHub reads directly.
 
@@ -215,9 +215,12 @@ descriptor whole, so a multi-hour file costs several hundred MB of transient mem
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
 file-list scans; `--edges` needs extractor build `.5`.
 
-**Off by default.** The store and edges run only when `--store` / `--edges` or `truedat --config store true`
-(and `edges`) turns them on. An existing catalog needs `--store-import` first, so a scan never builds a store
-holding only the tracks it happened to analyse. `truedat --config store true|false` (and `edges`) pins the
+**Off until there is a store; on once there is.** Nothing creates a store unasked — `--store` / `--edges`,
+`truedat --config store true` (and `edges`), or `--store-import` make the first one, and an existing catalog
+needs `--store-import` first so a scan never builds a store holding only the tracks it happened to analyse.
+**Once a store exists at the resolved location, a plain `truedat` uses it and turns edges on**, because a
+store the scan ignores drifts out of step with the catalog it is authoritative over; the scan says so on the
+`Store:` line. `truedat --config store true|false` (and `edges`) pins the
 choice for an instance;
 `--no-store` and `--no-edges` override for one run. A default never makes a plain command refuse: a
 per-file mode without `--moods` skips the store, and an extractor older than `.5` skips edges, each with a
@@ -229,8 +232,11 @@ exe and the `.5` extractor beside it:
 ```
 truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
 truedat --refresh                      (one scan; Ctrl+C and re-run resumes)
-truedat                                (ongoing, unchanged)
+truedat                                (ongoing, unchanged — it finds the store and uses it)
 ```
+
+No config step: `--store-import` leaves a store at the default location, and every later scan picks it up
+with edges.
 
 `--store-import` gives the store every track you have already scanned, with no re-analysis. `--refresh`
 then does what it always did (re-analyse entries missing the newest feature fields) and, with the store
