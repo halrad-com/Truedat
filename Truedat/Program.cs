@@ -725,17 +725,27 @@ namespace Truedat
             Console.WriteLine("                      as a clickable link) — include groups in chunks, pick keepers, build the");
             Console.WriteLine("                      losers playlist. --html <path> overrides where it lands (default");
             Console.WriteLine("                      mbxmoods-duplicates.html next to the moods file).");
-            Console.WriteLine("  --merge-moods       Merge multiple mbxmoods.json files into one");
-            Console.WriteLine("  --merge-source <path> Source moods file (repeatable, at least 2)");
+            Console.WriteLine("  --merge-moods       Merge multiple mbxmoods.json files into one. A source may also be a");
+            Console.WriteLine("                      truedat STORE (a --chunk shard's truedat.db): its live entries are read");
+            Console.WriteLine("                      across every root and merged like a catalog's. With a store in force the");
+            Console.WriteLine("                      merged result is written into the store and the files republished from it,");
+            Console.WriteLine("                      so --merge-output must be the catalog that store publishes.");
+            Console.WriteLine("  --merge-source <path> Source moods file or store (repeatable, at least 2)");
             Console.WriteLine("  --merge-output <path> Output moods file path");
             Console.WriteLine();
             Console.WriteLine("Backup & snapshot:");
             Console.WriteLine("  --snapshot [path]   Read-only: bundle the current catalog + a manifest (trackCount,");
             Console.WriteLine("                      content SHA-256) + mbxmoods-exclude.json into a restorable, double-");
             Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip beside the catalog).");
+            Console.WriteLine("                      With a store in force the STORE rides along too — a consistent VACUUM INTO");
+            Console.WriteLine("                      copy, safe to take while a scan reads it — so the archive restores the");
+            Console.WriteLine("                      authority and not just the files derived from it.");
             Console.WriteLine("  --restore <archive> Rebuild mbxmoods.json from a snapshot / backup / .gz / plain catalog");
             Console.WriteLine("                      (format is sniffed). Backs up any existing catalog first; restores the");
             Console.WriteLine("                      catalog only (a bundled exclusion file is left in the archive).");
+            Console.WriteLine("                      When the archive carries a store AND a store is in force, the STORE is");
+            Console.WriteLine("                      restored instead (the one being replaced is snapshotted first) and the");
+            Console.WriteLine("                      catalog, sidecar and companion are republished from it at a new generation.");
             Console.WriteLine("  --compact [path]    Re-format an existing catalog to minimal JSON in place (the format");
             Console.WriteLine("                      every save already writes). Lossless: a JSON-level round-trip that");
             Console.WriteLine("                      preserves every field byte-for-byte in value, including keys truedat");
@@ -3158,6 +3168,22 @@ namespace Truedat
             // before --snapshot because a run naming both should restore, not snapshot.
             if (restoreMode)
             {
+                // store-v3 T09/T06: a snapshot that carries the store restores the STORE and republishes the files from
+                // it; a catalog-only archive still refuses, because restoring the derived files alone would leave the
+                // authority holding something else.
+                if (_storePath != null && !string.IsNullOrEmpty(restoreArchivePath) && File.Exists(restoreArchivePath!)
+                    && global::Truedat.Store.StoreTransfer.ArchiveContainsStore(restoreArchivePath!))
+                {
+                    string? storeDest = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var srRefusal, includeMarkerScan: false);
+                    if (srRefusal != null)
+                    {
+                        Console.Error.WriteLine(srRefusal);
+                        Environment.ExitCode = 1;
+                        return;
+                    }
+                    Environment.ExitCode = RunStoreRestore(restoreArchivePath!, _storePath!, storeDest!);
+                    return;
+                }
                 if (RefuseCatalogVerbWithStore(_storePath, "--restore", "restore")) return;   // store-v3 T06 Step 0
                 // --restore OVERWRITES the destination catalog. Never let it pick that
                 // destination out of the current directory (see IsBareCwdCatalog).
@@ -3911,7 +3937,6 @@ namespace Truedat
             // --merge-moods is independent of the XML-based modes
             if (mergeMode)
             {
-                if (RefuseCatalogVerbWithStore(_storePath, "--merge-moods", "merge-moods")) return;   // store-v3 T06 Step 0
                 if (mergeSources.Count < 2)
                 {
                     Console.WriteLine("Error: --merge-moods requires at least 2 --merge-source <path> arguments");
@@ -3924,7 +3949,15 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = RunMergeMoods(mergeSources, mergeOutput!);
+                // store-v3 T10/T06: with a store in force the merge goes through the one write path — the store's state
+                // is published first, the merge runs unchanged, and its result is written into the store exactly, then
+                // republished. The merge output must therefore BE the catalog the store publishes; merging into some
+                // other file would leave the store holding one thing and that file another.
+                if (_storePath != null)
+                    Environment.ExitCode = RunStoreBackedVerb("merge-moods", "--merge-moods", Path.GetFullPath(mergeOutput!),
+                        () => RunMergeMoods(mergeSources, mergeOutput!));
+                else
+                    Environment.ExitCode = RunMergeMoods(mergeSources, mergeOutput!);
                 return;
             }
 
@@ -9371,18 +9404,48 @@ namespace Truedat
 
                 Console.WriteLine($"Loading: {source}");
                 phase.Restart();
-                var root = LoadCatalogRoot(source, docOptions);
-                if (root == null)
-                {
-                    Console.WriteLine($"  Invalid JSON: {source}");
-                    return 1;
-                }
 
-                var tracks = root["tracks"]?.AsObject();
-                if (tracks == null)
+                // store-v3 T10: a source may be another STORE — a shard minted on a second machine, or a snapshot's
+                // store member extracted by hand. Its entries are read through the same mapper the exporter uses and
+                // rendered with the same writer, so a store source and a catalog source merge byte-identically; a
+                // shard store's own root is read along with every other, which is exactly the shard's share.
+                JsonObject tracks;
+                if (global::Truedat.Store.StoreTransfer.LooksLikeStore(source))
                 {
-                    Console.WriteLine($"  No tracks object: {source}");
-                    return 1;
+                    Dictionary<string, TrackEntry> storeEntries;
+                    try { storeEntries = global::Truedat.Store.StoreTransfer.ReadEntries(source); }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  Cannot read store: {source} ({ex.Message})");
+                        return 1;
+                    }
+                    tracks = new JsonObject();
+                    foreach (var kv in storeEntries)
+                    {
+                        var node = JsonNode.Parse(global::Truedat.Store.ExportCommand.EntryJson(kv.Key, kv.Value))!.AsObject();
+                        // EntryJson writes the entry as a one-property object keyed by the path — unwrap to the value,
+                        // so the merged object is keyed exactly as a catalog's tracks object is.
+                        var first = node.First();
+                        tracks[first.Key] = first.Value?.DeepClone();
+                    }
+                    Console.WriteLine($"  store: schema-read, {tracks.Count:N0} live locations across every root");
+                }
+                else
+                {
+                    var root = LoadCatalogRoot(source, docOptions);
+                    if (root == null)
+                    {
+                        Console.WriteLine($"  Invalid JSON: {source}");
+                        return 1;
+                    }
+
+                    var parsed = root["tracks"]?.AsObject();
+                    if (parsed == null)
+                    {
+                        Console.WriteLine($"  No tracks object: {source}");
+                        return 1;
+                    }
+                    tracks = parsed;
                 }
 
                 int count = 0;
@@ -10363,16 +10426,49 @@ namespace Truedat
             var excludePath = Path.Combine(dir, ExclusionStore.FileName);
             bool haveExclude = File.Exists(excludePath);
 
+            // store-v3 T09: with a store in force the snapshot carries the STORE too — the catalog alone restores the
+            // files, not the authority they come from. The copy is a VACUUM INTO (consistent against a live WAL store,
+            // and already compacted), staged beside the archive and deleted once it is inside.
+            string? stagedStore = null;
+            CatalogArchive.StoreMember? storeMember = null;
+            long storeBytes = 0;
+            if (_storePath != null)
+            {
+                stagedStore = Path.Combine(dir, Path.GetFileName(outPath!) + ".store.tmp");
+                try { File.Delete(stagedStore); } catch { }
+                try
+                {
+                    var copy = global::Truedat.Store.StoreTransfer.VacuumInto(_storePath, stagedStore);
+                    storeMember = new CatalogArchive.StoreMember(copy.Path, global::Truedat.Store.StoreTransfer.StoreEntryName,
+                        copy.Schema, copy.Generation, copy.Entries, copy.Sha256);
+                    storeBytes = copy.Bytes;
+                    Console.WriteLine($"  Store:   {_storePath} (schema v{copy.Schema}, generation {copy.Generation}, {copy.Entries:N0} locations)");
+                }
+                catch (Exception ex)
+                {
+                    // A store that cannot be copied consistently must not become a catalog-only snapshot wearing a
+                    // store snapshot's name: the operator would restore it later and find the store untouched.
+                    Console.Error.WriteLine($"Error: snapshot failed: the store could not be copied ({ex.Message}); nothing was written. "
+                        + "Run it again with --no-store to snapshot the catalog alone.");
+                    try { if (stagedStore != null) File.Delete(stagedStore); } catch { }
+                    return 1;
+                }
+            }
+
             try
             {
-                var info = CatalogArchive.WriteSnapshot(catalogPath, haveExclude ? excludePath : null, outPath!, VersionInfo.Display);
+                var info = CatalogArchive.WriteSnapshot(catalogPath, haveExclude ? excludePath : null, outPath!, VersionInfo.Display, storeMember);
                 Console.WriteLine();
                 Console.WriteLine($"Snapshot: {outPath}");
                 Console.WriteLine($"  Tracks:   {(info.TrackCount.HasValue ? info.TrackCount.Value.ToString("N0") : "unknown")}");
                 Console.WriteLine($"  Catalog:  {info.CatalogBytes / (1024.0 * 1024.0):F1} MB uncompressed");
+                if (storeMember.HasValue)
+                    Console.WriteLine($"  Store:    {storeBytes / (1024.0 * 1024.0):F1} MB uncompressed (generation {storeMember.Value.Generation})");
                 Console.WriteLine($"  Archive:  {new FileInfo(outPath!).Length / (1024.0 * 1024.0):F1} MB");
                 Console.WriteLine($"  SHA-256:  {info.ContentSha256}");
                 Console.WriteLine($"  Exclude:  {(haveExclude ? "bundled" : "none beside catalog")}");
+                if (storeMember.HasValue)
+                    Console.WriteLine($"  Restore:  truedat --restore {Path.GetFileName(outPath!)} — restores the store and republishes the files from it");
                 return 0;
             }
             catch (Exception ex)
@@ -10380,6 +10476,10 @@ namespace Truedat
                 Console.Error.WriteLine($"Error: snapshot failed: {ex.Message}");
                 try { File.Delete(outPath! + ".tmp"); } catch { }
                 return 1;
+            }
+            finally
+            {
+                try { if (stagedStore != null) File.Delete(stagedStore); } catch { }
             }
         }
 
@@ -10586,6 +10686,71 @@ namespace Truedat
             if (CatalogArchive.SniffFile(archivePath) == CatalogArchive.CatalogFormat.Zip
                 && CatalogArchive.ArchiveContainsExclude(archivePath))
                 Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
+            return 0;
+        }
+
+        /// <summary>
+        /// store-v3 T09 — <c>--restore</c> of a snapshot that carries the store. The store is the authority, so this
+        /// restores the STORE and then publishes the catalog, sidecar and companion FROM it (T07's one path), rather
+        /// than installing a catalog the store would immediately disagree with. The store being replaced is
+        /// snapshotted first, the restored store's generation advances (a restore is a consumer-visible mutation even
+        /// when the restored bytes are older), and the record names both so the hub and the operator can see what
+        /// happened. An archive whose store is damaged or from a newer schema is refused before anything is replaced.
+        /// </summary>
+        static int RunStoreRestore(string archivePath, string storePath, string destCatalog)
+        {
+            Console.WriteLine("=== Restore Mode (store) ===");
+            Console.WriteLine($"  Archive:     {archivePath}");
+            Console.WriteLine($"  Store:       {storePath}");
+            Console.WriteLine($"  Publishes:   {destCatalog}");
+
+            var rec = global::Truedat.Store.StoreResult.Begin("restore");
+            rec.Store = new global::Truedat.Store.StoreResultStore { Path = Path.GetFullPath(storePath), TruedatVersion = VersionInfo.Display };
+            int Fail(string sentence, int exit)
+            {
+                Console.Error.WriteLine(sentence);
+                global::Truedat.Store.StoreResult.Write(storePath, rec, exit, global::Truedat.Store.StoreResult.OutcomeFailed,
+                    sentence.StartsWith("Error: ", StringComparison.Ordinal) ? sentence.Substring(7) : sentence);
+                return exit;
+            }
+
+            if (!File.Exists(archivePath)) return Fail($"Error: archive not found: {archivePath}", 2);
+
+            global::Truedat.Store.StoreTransfer.RestoreResult restored;
+            try { restored = global::Truedat.Store.StoreTransfer.RestoreStore(archivePath, storePath, _keepBackups); }
+            catch (global::Truedat.Store.StoreException ex) { return Fail("Error: restore refused: " + ex.Message, 1); }
+            catch (Exception ex) { return Fail($"Error: restore failed: {ex.Message}", 1); }
+
+            if (restored.BackupPath != null) Console.WriteLine($"Backup: {restored.BackupPath}");
+            Console.WriteLine($"Restored: store schema v{restored.Restored.Schema}, {restored.Restored.Entries:N0} locations, "
+                + $"snapshot generation {restored.Restored.Generation} → now generation {restored.Generation}");
+            rec.Store.SchemaVersion = restored.Restored.Schema;
+            rec.Store.Generation = restored.Generation;
+            rec.Detail = new Dictionary<string, long>
+            {
+                ["locations"] = restored.Restored.Entries,
+                ["snapshotGeneration"] = restored.Restored.Generation,
+                ["storeBytes"] = restored.Restored.Bytes,
+            };
+
+            // The files come from the restored store, through the same publication every scan and verb uses.
+            var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, destCatalog, null, out var rep);
+            rec.Export = new global::Truedat.Store.StoreResultExport
+            {
+                Performed = pubEx == null && rep.Published, Generation = pubEx == null ? rep.Generation : (long?)null,
+                Catalog = pubEx == null ? global::Truedat.Store.StoreResult.Describe(rep.OutPath) : null,
+                Sidecar = pubEx == null ? global::Truedat.Store.StoreResult.Describe(rep.SidecarPath) : null,
+                Companion = pubEx == null && rep.Companion ? global::Truedat.Store.StoreResult.Describe(rep.CompanionPath) : null,
+            };
+            if (pubEx != null)
+                return Fail($"Error: the store was restored but publishing the files failed ({CheckpointCause.Describe(pubEx)}); "
+                    + "the store is ahead of the files — run --store-export.", 1);
+
+            Console.WriteLine($"Published: {rep.Entries:N0} entries at generation {rep.Generation} "
+                + $"(catalog + sidecar{(rep.Companion ? " + " + global::Truedat.Edges.EdgeCompanion.FileName : "")})");
+            if (CatalogArchive.ArchiveContainsExclude(archivePath))
+                Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
+            global::Truedat.Store.StoreResult.Write(storePath, rec, 0, global::Truedat.Store.StoreResult.OutcomeCompleted);
             return 0;
         }
 
@@ -10908,6 +11073,10 @@ namespace Truedat
             return verbExit;
         }
 
+        /// <summary>The store's entry name inside a snapshot archive, named once so the refusal below and the archive
+        /// writer cannot drift (store-v3 T09).</summary>
+        static readonly string StoreTransferEntryName = global::Truedat.Store.StoreTransfer.StoreEntryName;
+
         internal static bool RefuseCatalogVerbWithStore(string? storePath, string flag, string hubVerb)
         {
             if (storePath == null) return false;
@@ -10915,13 +11084,11 @@ namespace Truedat
             try { full = Path.GetFullPath(storePath); } catch (Exception) { full = storePath; }
             string instead;
             if (hubVerb == "restore")
-                instead = "A store cannot be restored from a catalog archive. To restore the catalog alone, run it again with --no-store; "
-                    + "to bring that catalog's entries into the store afterwards, run --store-import on it — that seeds or extends the "
-                    + "store from the catalog; it does not restore the store, and it never removes store entries the archive lacks.";
-            else if (hubVerb == "merge-moods")
-                instead = "Merging catalogs into a store is not supported yet. To merge the catalogs alone, run it again with --no-store; "
-                    + "to bring the merged catalog into a store afterwards, run --store-import on it (that seeds or extends the store; "
-                    + "it never removes store entries).";
+                instead = "This archive carries no store (" + StoreTransferEntryName + "), and a store cannot be "
+                    + "restored from a catalog alone. A --snapshot taken with the store in force DOES carry it and restores both; restore that "
+                    + "instead. To restore this catalog on its own, run it again with --no-store; to bring its entries into the store afterwards, "
+                    + "run --store-import on it — that seeds or extends the store, it does not restore it, and it never removes store entries "
+                    + "the archive lacks.";
             else
                 instead = "This verb cannot apply its change to the store yet. To change the catalog alone, run it again with --no-store "
                     + "(the store then no longer matches the catalog), or turn the store off in the config.";

@@ -30,6 +30,18 @@ namespace Truedat.Store
         public long NoShaFeatures;                // feature rows keyed entity:<uuid>
         // S2 C4: the edges producer — media with an edge row, bytes of packed rows, ok/failed 'edges' runs, median fold+PCM ms.
         public long EdgeTracks, EdgeUnavailable, EdgeBytes, EdgeRunsOk, EdgeRunsFailed; public double? EdgeMedianMs; public string EdgesVersion = "";
+
+        // store-v3 T12 — the state the operator and the hub's OOBE ask for: which generation the store is at, whether
+        // the published files are at that generation, what the store has CAPTURED (arrays are opt-in and sticky), and
+        // the one command that closes whatever gap there is. Every field is read from the store or from the files
+        // beside it; none is inferred from the command line.
+        public long Generation;                   // store_meta's generation: advances on every consumer-visible mutation
+        public long EdgeArrayTracks;              // edge rows that hold the opt-in arrays (capture state, sticky per media)
+        public string CatalogPath = "";           // the catalog beside the store — where a publication lands by default
+        public long? PublishedGeneration;         // the generation the catalog on disk carries; null = legacy v1 header or no catalog
+        public string FilesState = "";            // at-generation | behind | absent | legacy
+        public string? FilesWhy;                  // when behind: the predicate's own reason
+        public string NextCommand = "";           // the command that closes the gap this state names
     }
 
     /// <summary>--store-info: the measurements S1 owes, all derived from the store by query — bytes per
@@ -84,6 +96,13 @@ namespace Truedat.Store
                 Console.WriteLine(i.ArtifactCount > 0
                     ? $"  aggregate artifacts: {i.ArtifactCount:N0} files, {i.ArtifactBytes:N0} bytes beside the store ({i.ArtifactBytes / (double)i.ArtifactCount:N0} bytes each; {(i.Tracks > 0 ? i.ArtifactCount * 100.0 / i.Tracks : 0):F1}% of descriptions)"
                     : "  aggregate artifacts: none (kept by scans run with --store)");
+                // store-v3 T12: the state the OOBE and the operator read — generation, what the files show, what is captured.
+                Console.WriteLine($"  generation: {i.Generation:N0}; files: {i.FilesState}"
+                    + (i.PublishedGeneration.HasValue ? $" (catalog at generation {i.PublishedGeneration.Value:N0})" : "")
+                    + (i.FilesWhy != null ? $" — {i.FilesWhy}" : "") + $"  [{i.CatalogPath}]");
+                Console.WriteLine($"  capture: edge arrays on {i.EdgeArrayTracks:N0} of {i.EdgeTracks:N0} captured description(s)"
+                    + (i.EdgeArrayTracks == 0 ? " (default row only — arrays are opt-in via --edge-arrays and sticky once captured)" : ""));
+                Console.WriteLine($"  next: {i.NextCommand}");
                 var outPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(i.Path) ?? ".", ResultFileName);
                 File.WriteAllText(outPath, ToJson(i).ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 Console.WriteLine($"  written: {outPath}");
@@ -168,6 +187,42 @@ namespace Truedat.Store
             using (var st = db.Prepare("SELECT duration_ms FROM run WHERE producer_key = 'edges' AND outcome = 'ok' AND duration_ms IS NOT NULL;"))
                 while (st.Step()) edgeMs.Add(st.GetInt64(0));
             if (edgeMs.Count > 0) { edgeMs.Sort(); i.EdgeMedianMs = edgeMs.Count % 2 == 1 ? edgeMs[edgeMs.Count / 2] : (edgeMs[edgeMs.Count / 2 - 1] + edgeMs[edgeMs.Count / 2]) / 2.0; }
+
+            // store-v3 T12: the state block.
+            i.Generation = dal.Generation();
+            i.EdgeArrayTracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT content_hash) FROM edge WHERE arrays IS NOT NULL;") ?? "0");
+            var storeDir = System.IO.Path.GetDirectoryName(os.Path) ?? ".";
+            i.CatalogPath = System.IO.Path.Combine(storeDir, Program.MoodsFileName);
+            var sidecarPath = System.IO.Path.ChangeExtension(i.CatalogPath, ".mbxs");
+            var companionPath = System.IO.Path.Combine(storeDir, global::Truedat.Edges.EdgeCompanion.FileName);
+            bool expectCompanion = i.EdgeTracks > 0;
+            if (!File.Exists(i.CatalogPath))
+            {
+                i.FilesState = "absent";
+                i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\"";
+            }
+            else if (!CatalogOrigin.TryRead(i.CatalogPath, out var origin))
+            {
+                // A v1 header: written before the store existed, or by a build that did not publish. The generation
+                // cannot be compared at all, so this is its own state rather than a guess at "behind".
+                i.FilesState = "legacy";
+                i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\"";
+            }
+            else
+            {
+                i.PublishedGeneration = origin.Generation;
+                i.FilesState = Publication.FilesBehind(i.CatalogPath, sidecarPath, companionPath, expectCompanion, i.Generation, out var why)
+                    ? "behind" : "at-generation";
+                if (i.FilesState == "behind") { i.FilesWhy = why; i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\""; }
+            }
+            // With the files whole, the gap that remains is work: edges not yet folded, then nothing.
+            if (i.NextCommand.Length == 0)
+            {
+                long missingEdges = Math.Max(0, i.Tracks - i.EdgeTracks);
+                i.NextCommand = missingEdges > 0
+                    ? "truedat --store --edges --refresh   (" + missingEdges.ToString("N0") + " description(s) with no edge row at " + i.EdgesVersion + ")"
+                    : "nothing — the store is current and the files are published at its generation";
+            }
             return i;
         }
 
@@ -193,6 +248,18 @@ namespace Truedat.Store
                 {
                     ["producerVersion"] = i.EdgesVersion, ["eligible"] = i.Tracks, ["captured"] = i.EdgeTracks, ["unavailable"] = i.EdgeUnavailable, ["missing"] = Math.Max(0, i.Tracks - i.EdgeTracks),
                     ["bytes"] = i.EdgeBytes, ["runsOk"] = i.EdgeRunsOk, ["runsFailed"] = i.EdgeRunsFailed, ["medianMs"] = i.EdgeMedianMs,
+                    ["arrayTracks"] = i.EdgeArrayTracks,
+                },
+                // store-v3 T12: machine-readable state for the hub's detect-and-guide half.
+                ["state"] = new JsonObject
+                {
+                    ["generation"] = i.Generation,
+                    ["catalog"] = i.CatalogPath,
+                    ["publishedGeneration"] = i.PublishedGeneration,
+                    ["files"] = i.FilesState,
+                    ["filesWhy"] = i.FilesWhy,
+                    ["edgeArrayTracks"] = i.EdgeArrayTracks,
+                    ["nextCommand"] = i.NextCommand,
                 },
             };
         }

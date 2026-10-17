@@ -28,6 +28,21 @@ namespace Truedat
         internal const string ExcludeEntryName = "mbxmoods-exclude.json";
         internal const string ManifestEntryName = "manifest.json";
 
+        /// <summary>store-v3 T09: a snapshot taken with a store in force carries the STORE as well, so the archive
+        /// restores the authority and not just the files derived from it. The member is produced by
+        /// <c>StoreTransfer.VacuumInto</c> — a consistent SQLite copy, never a file copy of a live WAL store.</summary>
+        internal readonly struct StoreMember
+        {
+            internal StoreMember(string file, string entryName, int schema, long generation, int entries, string sha256)
+            { File = file; EntryName = entryName; Schema = schema; Generation = generation; Entries = entries; Sha256 = sha256; }
+            internal string File { get; }
+            internal string EntryName { get; }
+            internal int Schema { get; }
+            internal long Generation { get; }
+            internal int Entries { get; }
+            internal string Sha256 { get; }
+        }
+
         // trackCount is written before the tracks object (SaveResults order:
         // version, generatedAt, trackCount, tracks), so a leading window always
         // carries it for real catalogs. Bounded so a pathological property order
@@ -210,7 +225,8 @@ namespace Truedat
         /// mbxmoods-exclude.json when <paramref name="excludePath"/> exists — so the
         /// archive is a complete, self-verifying, restorable state in one file.
         /// Read-only over the live catalog. Returns the computed manifest facts.</summary>
-        internal static SnapshotInfo WriteSnapshot(string catalogPath, string? excludePath, string outPath, string toolVersion)
+        internal static SnapshotInfo WriteSnapshot(string catalogPath, string? excludePath, string outPath, string toolVersion,
+            StoreMember? store = null)
         {
             var tmp = outPath + ".tmp";
             try { File.Delete(tmp); } catch { }
@@ -271,6 +287,18 @@ namespace Truedat
                     jw.WriteString("catalogEntry", CatalogEntryName);
                     jw.WriteBoolean("hasExclusions", !string.IsNullOrEmpty(excludePath) && File.Exists(excludePath));
                     jw.WriteString("truedatVersion", toolVersion ?? "");
+                    // store-v3 T09: the store's own facts, so a restore can say what it is about to install before
+                    // it opens it, and a transfer between machines is verifiable by hash like the catalog is.
+                    if (store.HasValue)
+                    {
+                        var st = store.Value;
+                        jw.WriteString("storeEntry", st.EntryName);
+                        jw.WriteNumber("storeBytes", new FileInfo(st.File).Length);
+                        jw.WriteString("storeSha256", st.Sha256);
+                        jw.WriteNumber("storeSchema", st.Schema);
+                        jw.WriteNumber("storeGeneration", st.Generation);
+                        jw.WriteNumber("storeEntries", st.Entries);
+                    }
                     jw.WriteEndObject();
                 }
 
@@ -281,6 +309,15 @@ namespace Truedat
                     using var exs = exEntry.Open();
                     using var exsrc = new FileStream(excludePath!, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
                     exsrc.CopyTo(exs);
+                }
+
+                // 4) the store (T09), when one is in force — the consistent copy the caller already made.
+                if (store.HasValue)
+                {
+                    var stEntry = zip.CreateEntry(store.Value.EntryName, CompressionLevel.Optimal);
+                    using var sts = stEntry.Open();
+                    using var stsrc = new FileStream(store.Value.File, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                    stsrc.CopyTo(sts);
                 }
             }
 
