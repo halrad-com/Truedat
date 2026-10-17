@@ -50,6 +50,9 @@ namespace Truedat.Store
         public int ContentRekeyed;
         /// <summary>S2 C4: edge rows written (an 'edges' run row + the packed rows) / folds that failed (a failed run row, no rows).</summary>
         public int Edges, EdgesFailed;
+        /// <summary>Keeper 099: edge rows written WITH arrays only because the track already held them while the scan's array flag was
+        /// off ("sticky per track") — the store-result's capture.stickyRowsRefreshed.</summary>
+        public int StickyRowsRefreshed;
         /// <summary>Edge spills that could not be read back at write time — counted in EdgesFailed too, and separately because they are a
         /// store-side loss, not an audio condition.</summary>
         public int SpillsLost;
@@ -521,7 +524,7 @@ namespace Truedat.Store
             if (edges != null)
             {
                 // A lost spill is a store-side loss: its failed run is marked 'spill-lost' so the refresh gate still lists the track (TDA N1).
-                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges")) { r.Edges++; r.VisibleChanges++; } else r.EdgesFailed++;
+                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges", r)) { r.Edges++; r.VisibleChanges++; } else r.EdgesFailed++;
             }
         }
 
@@ -529,7 +532,7 @@ namespace Truedat.Store
         /// and, when it folded, the packed rows under the content key. Shared by the scan sink and the --work drain so the two
         /// cannot record the same event differently. Returns true when rows were written.</summary>
         internal static bool WriteEdges(StoreDal dal, string entityId, string contentKey, string contentKeyKind, string? sha, long? locationId,
-            global::Truedat.Edges.EdgeFoldResult edges, string source, string now, string displayPath, string failedComponent = "edges")
+            global::Truedat.Edges.EdgeFoldResult edges, string source, string now, string displayPath, string failedComponent = "edges", ImportReport? r = null)
         {
             bool failed = edges.Status == "failed";
             dal.EnsureProducer(global::Truedat.Edges.EdgeStore.ProducerKey, edges.ProducerVersion, "analysis", needsAudio: true);   // the run row references it, even for a failed fold
@@ -540,6 +543,11 @@ namespace Truedat.Store
             // move does not drop to the default row. Otherwise the scan's flag decides (Write's own per-content sticky still applies).
             bool media = global::Truedat.Edges.EdgeStore.MediaHoldsArrays(dal, entityId);
             global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null);
+            // Keeper 099: with the flag OFF, arrays in the rows just written can only be the sticky rule's (the track already held
+            // them) — those are the record's capture.stickyRowsRefreshed. With the flag ON every row carries arrays by request.
+            if (r != null && !global::Truedat.Edges.EdgeStore.CaptureArraysDefault)
+                r.StickyRowsRefreshed += (int)dal.ScalarLong("SELECT count(*) FROM edge WHERE content_hash = ? AND producer_version = ? AND arrays IS NOT NULL;",
+                    contentKey, edges.ProducerVersion);
             return true;
         }
 

@@ -181,7 +181,13 @@ namespace Truedat.Store
             }
             catch (Exception ex) { StoreLog.Warn($"store-result: store not readable for the record ({ex.Message})"); }
             rec.Export = new StoreResultExport { Performed = false, Companion = companionPath != null ? Describe(companionPath) : null };
-            rec.Capture = new StoreResultCapture { EdgeArrays = "off" };   // the array flag ships with T05; edges on/off is the companion's presence
+            // Keeper 099: the scan's RESOLVED array flag (the persistence gate it set before any write) and the rows the sticky rule kept
+            // arrays on while that flag was off — the tally over every flush. Edges on/off stays the companion's presence + detail.edgesOn.
+            rec.Capture = new StoreResultCapture
+            {
+                EdgeArrays = global::Truedat.Edges.EdgeStore.CaptureArraysDefault ? "on" : "off",
+                StickyRowsRefreshed = r.StickyRowsRefreshed,
+            };
             rec.Detail = new Dictionary<string, long>
             {
                 ["entries"] = r.Entries, ["failures"] = r.Failures, ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift,

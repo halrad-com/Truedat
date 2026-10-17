@@ -54,6 +54,11 @@ namespace Truedat.Store
             try { TestEdgesExportGeneration(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.EdgesExport: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { Program.AfterEdgesCompanionWritten = null; }
+            Console.WriteLine("Store-result self-test (keeper 099: the scan record's capture block is the scan's real array flag and its real sticky refreshes)");
+            bool savedCapture = global::Truedat.Edges.EdgeStore.CaptureArraysDefault; var savedDir = ScanSink.StoreDirectory;
+            try { TestScanCaptureFacts(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.Capture: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { global::Truedat.Edges.EdgeStore.CaptureArraysDefault = savedCapture; ScanSink.StoreDirectory = savedDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: --store-import writes the common record on success AND on failure)");
             try { TestImportWritesIt(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Import: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -602,6 +607,43 @@ namespace Truedat.Store
         {
             using var doc = JsonDocument.Parse(File.ReadAllBytes(companionPath));
             return doc.RootElement.TryGetProperty("origin", out var o) && o.TryGetProperty("generation", out var g) ? g.GetInt64() : -1;
+        }
+
+        // Keeper 099: WriteScan wrote capture { edgeArrays: "off", stickyRowsRefreshed: 0 } whatever the scan did. The block must be
+        // the scan's resolved array flag and the edge rows it wrote WITH arrays only because the media already held them while the
+        // flag was off ("sticky per track"). Three scans through the real sink, each its own record.
+        static void TestScanCaptureFacts(Action<bool, string> assert)
+        {
+            const string P = @"D:\music\verdict\a-lavc.mp3";
+            StoreResultFile Scan(string store, string dir, bool flagOn)
+            {
+                ScanSink.Reset(); StoreResult.ResetScanForTest();
+                global::Truedat.Edges.EdgeStore.CaptureArraysDefault = flagOn;
+                ScanSink.StoreDirectory = dir;
+                var analysed = Path.Combine(dir, "staged-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".mp3");
+                ScanSink.StashEdges(analysed, global::Truedat.Edges.EdgeSelfTest.SyntheticFold(dir, 240, true));
+                ScanSink.Record(P, VerdictSelfTest.Fixture()[P], analysed);
+                ScanSink.Flush(store, "output-x64.5", new[] { P });
+                var rec = new StoreResultFile();
+                StoreResult.TryRead(StoreResult.PathFor(store), out rec);
+                return rec;
+            }
+            using (var d = new Dir())
+            {
+                var on = Scan(d.P("on.db"), d.Root, flagOn: true);
+                assert(on.Capture != null && on.Capture.EdgeArrays == "on" && on.Capture.StickyRowsRefreshed == 0,
+                    $"a scan with the array flag ON records edgeArrays 'on' and no sticky refreshes (got '{on.Capture?.EdgeArrays}', {on.Capture?.StickyRowsRefreshed})");
+
+                var sticky = d.P("sticky.db");
+                Scan(sticky, d.Root, flagOn: true);                          // a first scan captured the arrays
+                var off = Scan(sticky, d.Root, flagOn: false);               // a later scan, flag off, re-folds the same track
+                assert(off.Capture != null && off.Capture.EdgeArrays == "off" && off.Capture.StickyRowsRefreshed == 2,
+                    $"a flag-OFF scan re-folding a track that holds arrays records edgeArrays 'off' and both edge rows refreshed WITH arrays (got '{off.Capture?.EdgeArrays}', {off.Capture?.StickyRowsRefreshed})");
+
+                var none = Scan(d.P("none.db"), d.Root, flagOn: false);
+                assert(none.Capture != null && none.Capture.EdgeArrays == "off" && none.Capture.StickyRowsRefreshed == 0,
+                    $"a flag-OFF scan of a track with no arrays records 'off' and no sticky refreshes (got '{none.Capture?.EdgeArrays}', {none.Capture?.StickyRowsRefreshed})");
+            }
         }
 
         static void TestEdgesExportGeneration(Action<bool, string> assert)

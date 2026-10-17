@@ -21,13 +21,15 @@ namespace Truedat.Store
         /// <summary>Edge spills the store could not read back when writing (recorded as failed edges runs): a STORE-side loss, so the scan's
         /// record is failed, not completed (keeper 006 / TDA rule).</summary>
         public int SpillsLost;
+        /// <summary>Keeper 099: edge rows written with arrays only by the sticky rule while the array flag was off (capture.stickyRowsRefreshed).</summary>
+        public int StickyRowsRefreshed;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
 
         internal void Add(ScanSinkReport r)
         {
             Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
             Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
-            Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost;
+            Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost; StickyRowsRefreshed += r.StickyRowsRefreshed;
         }
     }
 
@@ -218,7 +220,7 @@ namespace Truedat.Store
                 report.ContentReplaced = r.ContentReplaced; report.ContentRekeyed = r.ContentRekeyed; report.Remeasured = r.Remeasured; report.Stale = r.Stale;
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
-                report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost;
+                report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost; report.StickyRowsRefreshed = r.StickyRowsRefreshed;
                 report.StorePath = storePath;
             }
             catch (Exception ex)
