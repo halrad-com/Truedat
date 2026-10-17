@@ -5284,6 +5284,14 @@ namespace Truedat
             bool libraryScan = !checkFilenames && !duplicatesMode && !migrateMode && !fixupMode;
             bool xmlExplicit = !string.IsNullOrEmpty(xmlPath);
             if (libraryScan) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
+            // T18e (Q4): shards on different machines would each publish the catalog from their own store, and combining stores is the
+            // portable merge (T10), not built — refuse rather than publish one shard's share as the whole library.
+            if (libraryScan && chunkTotal > 0 && _storePath != null)
+            {
+                Environment.ExitCode = RefuseScan(_storePath, "Error: --chunk with a store in force: each shard would publish the catalog from its own store, " +
+                    "and combining stores is not supported yet. Run the shards without the store (--no-store) and merge them with --merge-moods, or scan without --chunk.", 2);
+                return;
+            }
             xmlPath = ResolveITunesXml(xmlPath);
 
             if (!File.Exists(xmlPath))
