@@ -113,7 +113,7 @@ namespace Truedat.Store
                 assert(edgesBefore == 0 && edgesAfter == 2 && r.Unchanged == 1, $"setup: the second flush wrote edge rows only — description and copy unchanged (edges {edgesBefore} -> {edgesAfter}, unchanged {r.Unchanged})");
                 assert(Gen(store) == g0 + 1, $"an edge-only change (the --refresh backfill on a cached track) is a visible mutation: one advance ({g0} -> {g0 + 1}; got {Gen(store)})");
             }
-            finally { ScanSink.Reset(); ScanSink.StoreDirectory = savedDir; try { Directory.Delete(dir, true); } catch { } }
+            finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); ScanSink.StoreDirectory = savedDir; try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---- keeper 104 / TDA 083: a --store-import that fails AFTER an earlier batch committed must record the generation the store is

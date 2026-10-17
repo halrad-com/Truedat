@@ -551,7 +551,7 @@ namespace Truedat.Store
                 Flush();
                 assert(Stored().Id == 5151, $"an iTunes-XML scan that observes a different id replaces the stored one (explicit replacement; stored {Stored().Id})");
             }
-            finally { ScanSink.Reset(); try { Directory.Delete(dir, true); } catch { } }
+            finally { ScanSink.Reset(); StoreResult.ResetScanForTest(); try { Directory.Delete(dir, true); } catch { } }
         }
 
         static void TestCopyMerge(Action<bool, string> assert)
