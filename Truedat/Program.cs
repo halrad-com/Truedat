@@ -10729,7 +10729,7 @@ namespace Truedat
             var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys, final);
             if (!final)
             {
-                if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} edge rows" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
+                if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} tracks folded" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
                 else Console.Error.WriteLine($"  WARNING: store checkpoint not written ({r.Error}); the catalog is complete and unaffected");
                 return;
             }
@@ -10751,7 +10751,7 @@ namespace Truedat
                 // whenever the checkpoints had already committed every edge row (a long --store --edges scan) and the final flush was empty.
                 var t = total;
                 Console.WriteLine($"  store: {t.Entries} analysed entries written ({t.EntitiesCreated} new media, {t.Unchanged} unchanged, {t.Remeasured} remeasured, {t.Drift} drift, {t.ContentReplaced} replaced), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}");
-                if (edgesOn) Console.WriteLine($"  edges: {t.Edges} edge rows written, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
+                if (edgesOn) Console.WriteLine($"  edges: {t.Edges} tracks folded, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
                 if (edgesOn && t.Edges > 0) companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
             }
             else

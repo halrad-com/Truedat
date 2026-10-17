@@ -772,7 +772,7 @@ namespace Truedat.Store
                 assert(written && File.Exists(companion) && tracks.Contains(sha),
                     $"the companion IS rewritten after a run whose edges all landed at checkpoints, and holds the run's rows (written {written}; file {File.Exists(companion)}; tracks {tracks.Count})");
                 var printed = captured.ToString();
-                assert(printed.Contains("edges: 2 edge rows written"),
+                assert(printed.Contains("edges: 2 tracks folded"),
                     $"the summary prints the scan-wide edge total, not the final flush's (printed: {printed.Replace(Environment.NewLine, " | ").Trim()})");
             }
         }
