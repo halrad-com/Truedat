@@ -88,23 +88,19 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 | Component | Version | License | Purpose |
 |-----------|---------|---------|---------|
-| ffmpeg.exe | git master `2026-08-20-git-7d77562d2a-full_build` (gcc 16.1.0, MSYS2) | GPL-3.0+ | Audio downmixing, decode retry, bitUsage / HF analysis, `--transcode` |
-| ffprobe.exe | git master `2026-08-20-git-7d77562d2a-full_build` (gcc 16.1.0, MSYS2) | GPL-3.0+ | `--transcode` source-property matching |
+| ffmpeg.exe | git master `2026-10-08-git-ec420ba161-full_build` (gcc 16.2.0, MSYS2) | GPL-3.0+ | Audio downmixing, decode retry, bitUsage / HF analysis, `--transcode` |
+| ffprobe.exe | git master `2026-10-08-git-ec420ba161-full_build` (gcc 16.2.0, MSYS2) | GPL-3.0+ | `--transcode` source-property matching |
 
 **Binaries:** the exact copies used are carried on the repo's `truedat-deps` branch (Git LFS), with a SHA-256 recorded per file in its `README.md`:
 
 | File | SHA-256 |
 |------|---------|
-| `ffmpeg.exe` | `9c6b03ec0c5b5efc6c471ec81d3bdc99b50d88c0cdefbfe0cb6e1b55e28cd331` |
-| `ffprobe.exe` | `307a1f169d1e3c0c099aa3eb384a5de53b1a489ccb9b9a4c2d3082b8bf1d2188` |
-
-The copies in `dist/truedat/` hash differently from the `truedat-deps` records above, so the two
-are not the same files; whichever is authoritative, they need reconciling:
-
-| File (as shipped in `dist/truedat/`) | SHA-256 |
-|------|---------|
 | `ffmpeg.exe` | `59c8a17f012f148bdce12b93f8cba2d37f281a3e0e856d505608ca5eaa4520ed` |
 | `ffprobe.exe` | `2fac541ccf404a600c62c9f7be14600dd98ae5679defb31f5ed2fe71e3a388a8` |
+
+Verified equal: the copies in `dist/truedat/` hash to the same values, so the shipped files are
+the recorded ones. (The extractor on that branch is **not** current — it is MD5
+`c6a436d0fe9a33a4c8eac120d9e6243f`, an older build than the `output-x64.5` shipped here.)
 
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
