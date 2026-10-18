@@ -8,6 +8,16 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV2.2] — 2026-10-18
+
+### Fixed
+
+- **`--store-roundtrip` no longer reports the store as missing values it holds.** A catalog written by an older build spells
+  some numbers one step off their decimal; the store keeps each field at its declared precision and writes the decimal back.
+  Those entries now count as equal, reported on their own line, and the gate uses the same comparison as the scan.
+- **The `--store-import` summary names its two conflict kinds.** `sha collisions` (same hash, different audio) and value-drift
+  conflicts were both called conflicts, so `conflicts: 0` beside `4 drifted` read as a contradiction.
+
 ## [0.5.5.3-EV2.1] — 2026-10-17
 
 ### Fixed
