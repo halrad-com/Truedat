@@ -64,6 +64,7 @@ namespace Truedat.Store
 
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
             var storeEntries = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+            var mergedCopies = new HashSet<string>(PathComparer.Instance);
             using (var snapshot = os.Db.BeginRead())
             {
                 res.Generation = os.Dal.Generation();
@@ -90,6 +91,7 @@ namespace Truedat.Store
                 {
                     res.RootPath = root.Value.Path;
                     foreach (var (display, entry) in os.Dal.ReadEntries(root.Value.Id)) storeEntries[display] = entry;
+                    mergedCopies = os.Dal.NonPrimaryCopyPaths(root.Value.Id);
                 }
             }
 
@@ -133,7 +135,7 @@ namespace Truedat.Store
                     $"a store-authoritative scan would publish only what it analyses. Seed the store from the catalog first: truedat --store-import --moods \"{catalogPath}\" --store \"{storePath}\".");
             var changed = new List<string>();
             foreach (var kv in catalog)
-                if (storeEntries.TryGetValue(kv.Key, out var se) && !Program.EntryBytes(kv.Key, kv.Value).AsSpan().SequenceEqual(Program.EntryBytes(kv.Key, se)))
+                if (storeEntries.TryGetValue(kv.Key, out var se) && !HoldsSameFacts(kv.Key, kv.Value, se, mergedCopies.Contains(kv.Key)))
                     changed.Add(kv.Key);
             changed.Sort(StringComparer.OrdinalIgnoreCase);
             if (onlyCatalog.Count > 0 || onlyStore.Count > 0 || changed.Count > 0)
@@ -145,6 +147,21 @@ namespace Truedat.Store
                     "(it never removes store entries); if the store is the newer, move the catalog aside and the scan re-derives it. Nothing was scanned.");
             res.Case = "no-origin-agree";
             return Fill(res, storeEntries, target);
+        }
+
+        /// <summary>Whether a catalog entry with no store origin and the store's entry for the same path hold the same facts — the
+        /// question the no-origin precondition asks, which is not "same bytes". An import makes two differences by design, and the
+        /// first real library hit both (MB3, 2026-10-18: 140 of 7,641 refused, with --store-import named as the remedy for a gap it
+        /// had just made): the store holds each field at its declared precision, so an older writer's one-ulp spelling comes back
+        /// as the decimal it stood for; and a non-primary copy of duplicate audio comes back carrying its media's one description
+        /// (the excuse --store-roundtrip already makes, gate d). Anything else — a value beyond the precision, a copy fact, the
+        /// location — is still a difference.</summary>
+        internal static bool HoldsSameFacts(string path, TrackEntry catalogEntry, TrackEntry storeEntry, bool nonPrimaryCopy)
+        {
+            if (Program.EntryBytes(path, catalogEntry).AsSpan().SequenceEqual(Program.EntryBytes(path, storeEntry))) return true;
+            var store = ExportCommand.EntryJson(path, TrackEntryMapper.AtStorePrecision(storeEntry));
+            if (ExportCommand.EntryJson(path, TrackEntryMapper.AtStorePrecision(catalogEntry)) == store) return true;
+            return nonPrimaryCopy && ExportCommand.EntryJson(path, TrackEntryMapper.WithContentOf(catalogEntry, storeEntry)) == store;
         }
 
         static LoadResult Fill(LoadResult res, Dictionary<string, TrackEntry> entries, ConcurrentDictionary<string, TrackEntry> target)

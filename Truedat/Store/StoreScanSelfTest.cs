@@ -117,6 +117,50 @@ namespace Truedat.Store
                 assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 with different values") && r2.Refusal.Contains(@"D:\music\a.flac") && r2.Refusal.Contains("--store-import"),
                     $"no origin, a same-path NEW value in the catalog -> refused, naming the path and the remedies ({r2.Refusal})");
             }
+            // The operator's sequence on a real library (MB3, 2026-10-18): a catalog the SCAN wrote, then `--store-import` of it, then a
+            // plain scan. The test above writes its catalog FROM the store, so it never met the two differences an import makes by
+            // design, and the scan refused 140 of 7,641 entries naming a remedy (--store-import) that cannot clear them.
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db"); var cat = d.P("mbxmoods.json");
+                // (1) the old writer's spelling: one ulp above the 6-dp decimal ("0.0028770000000000002"); the store holds the field at its
+                // declared precision and gives back the double nearest 0.002877 — the same value at that precision, different text
+                var ulp = E("ulp.flac", 120, 'u');
+                ulp.Features.SpectralRms = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.002877) + 1);
+                // (2) duplicate audio: two copies of one media, the second's description within run-to-run noise of the first's;
+                // the store keeps ONE description per media, so the second copy comes back carrying the first's values
+                var first = E("dup-1.flac", 120.0, 'd');
+                var second = E("dup-2.flac", 120.5, 'd');
+                var cataloged = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    [@"D:\music\ulp.flac"] = ulp, [@"D:\music\dup-1.flac"] = first, [@"D:\music\dup-2.flac"] = second,
+                };
+                StoreSelfTest.WriteCatalog(cat, cataloged);
+                var fromCatalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(cat, fromCatalog);
+                using (StoreLog.Quiet()) ImportCommand.ExecuteEntries(store, fromCatalog, @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                var r = Load(store, cat, out var t);
+                assert(!r.Refused && r.Case == "no-origin-agree" && t.Count == 3,
+                    $"no origin, a catalog just imported into the store (one-ulp spelling + a duplicate copy) -> proceeds ({r.Case}: {r.Refusal})");
+
+                // ...but the excuse is the shared DESCRIPTION and the precision, nothing else: a copy fact still has to agree
+                var moved = new Dictionary<string, TrackEntry>(cataloged, PathComparer.Instance);
+                moved[@"D:\music\dup-2.flac"] = E("dup-2.flac", 120.5, 'd');
+                moved[@"D:\music\dup-2.flac"].LastModified = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+                StoreSelfTest.WriteCatalog(cat, moved);
+                var r2 = Load(store, cat, out _);
+                assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 with different values") && r2.Refusal.Contains("dup-2.flac"),
+                    $"no origin, a duplicate copy whose own lastModified differs -> still refused ({r2.Refusal})");
+
+                // ...and a value that differs beyond the declared precision on a single-copy entry is still a difference
+                var changed = new Dictionary<string, TrackEntry>(cataloged, PathComparer.Instance);
+                changed[@"D:\music\ulp.flac"] = E("ulp.flac", 120, 'u');
+                changed[@"D:\music\ulp.flac"].Features.SpectralRms = 0.002878;
+                StoreSelfTest.WriteCatalog(cat, changed);
+                var r3 = Load(store, cat, out _);
+                assert(r3.Refused && r3.Case == "no-origin-disagree" && r3.Refusal!.Contains("1 with different values") && r3.Refusal.Contains("ulp.flac"),
+                    $"no origin, a value one step beyond the declared precision -> still refused ({r3.Refusal})");
+            }
             // no origin + a store with no entries for the library -> refuse naming --store-import
             using (var d = new Dir())
             {

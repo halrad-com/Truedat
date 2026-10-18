@@ -567,6 +567,11 @@ namespace Truedat.Store
             return FromValues(row, copySide.LastModified);
         }
 
+        /// <summary>The entry as the store would hold it: every numeric field at its declared precision (<see cref="ToRow"/>) and back.
+        /// Two entries that render the same bytes after this hold the same facts — what differs is only how an older writer spelled a
+        /// value (one ulp off the decimal, "0.0028770000000000002" for 0.002877), which no column can carry.</summary>
+        internal static TrackEntry AtStorePrecision(TrackEntry entry) => FromValues(ToRow(entry), entry.LastModified);
+
         internal static TrackEntry FromValues(object?[] values, DateTime lastModified)
         {
             var e = new TrackEntry { Features = new TrackFeatures(), LastModified = lastModified };
