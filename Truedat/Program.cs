@@ -13002,11 +13002,68 @@ namespace Truedat
         /// wraps and looses its prettified report output"). Every line the report prints is built to fit this
         /// width; a note that does not fit moves to its own indented continuation lines, broken on words.
         /// 78 leaves an 80-column console a margin — the narrowest window worth designing for.</summary>
-        internal const int ReportWidth = 78;
+        internal static int ReportWidth => _reportWidth ?? (_reportWidth = MeasureReportWidth()).Value;
+        static int? _reportWidth;
+
+        /// <summary>The window truedat is actually printing into, capped at 78 (past that, long lines are harder to
+        /// read, not easier) and floored at 40 so a very narrow window still gets whole words instead of a column of
+        /// fragments. A redirected or absent console reports nothing usable, so the cap stands in — a piped report is
+        /// read in a file or an editor, not a terminal.</summary>
+        static int MeasureReportWidth()
+        {
+            try
+            {
+                int w = Console.WindowWidth;                 // throws when there is no console at all
+                if (w <= 0) return 78;
+                return Math.Max(40, Math.Min(78, w - 1));    // -1: a line that fills the last column wraps on its own
+            }
+            catch { return 78; }
+        }
+
+        /// <summary>Test seam: pin the width instead of reading the console.</summary>
+        internal static void SetReportWidthForTest(int? width) => _reportWidth = width;
+
+        /// <summary>Words, except that a command and its flags are ONE word. An operator COPIES a recommendation, and
+        /// a break inside <c>truedat --verify --backfill --backfill-level identity</c> yields something that does not
+        /// run; prose can break anywhere, a command cannot. A bare word straight after a flag is taken as that flag's
+        /// value unless it carries sentence punctuation — so a trailing prose word may ride along with a command
+        /// (<c>truedat --refresh adds</c>), which costs a longer unbreakable run and nothing else.</summary>
+        static List<string> CommandAwareWords(string note)
+        {
+            var raw = note.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var words = new List<string>();
+            for (int i = 0; i < raw.Length; i++)
+            {
+                if (!string.Equals(raw[i], "truedat", StringComparison.Ordinal)) { words.Add(raw[i]); continue; }
+                var cmd = new StringBuilder(raw[i]);
+                bool prevWasFlag = false;
+                while (i + 1 < raw.Length)
+                {
+                    var next = raw[i + 1];
+                    bool isFlag = next.Length > 1 && next[0] == '-';
+                    bool isFlagValue = prevWasFlag && !isFlag && next.IndexOfAny(new[] { ',', ';', ':', ')', '.' }) < 0;
+                    if (!isFlag && !isFlagValue) break;
+                    cmd.Append(' ').Append(next);
+                    prevWasFlag = isFlag;
+                    i++;
+                }
+                words.Add(cmd.ToString());
+            }
+            return words;
+        }
 
         /// <summary>Print <paramref name="note"/> under a stat line, wrapped on word boundaries inside
         /// <see cref="ReportWidth"/>. A single word longer than the width (a path) is left whole: breaking
         /// it would make it uncopyable, which costs more than the wrap.</summary>
+        /// <summary>A report entry: the first line at <paramref name="indent"/>, continuations four columns deeper,
+        /// so a wrapped line reads as part of the entry above it rather than as a new entry of its own.</summary>
+        static void ReportEntry(string text, string indent)
+        {
+            var cont = indent + "    ";
+            var lines = WrapNote(text, Math.Max(20, ReportWidth - cont.Length));
+            for (int i = 0; i < lines.Count; i++) Console.WriteLine((i == 0 ? indent : cont) + lines[i]);
+        }
+
         static void ReportNote(string note, string indent = "      ")
         {
             foreach (var line in WrapNote(note, Math.Max(20, ReportWidth - indent.Length)))
@@ -13019,7 +13076,7 @@ namespace Truedat
             var lines = new List<string>();
             if (string.IsNullOrWhiteSpace(note)) return lines;
             var line = new StringBuilder();
-            foreach (var word in note.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var word in CommandAwareWords(note))
             {
                 if (line.Length > 0 && line.Length + 1 + word.Length > width)
                 {
@@ -13271,13 +13328,9 @@ namespace Truedat
                 if (waveBreakdown != null && waveBreakdown.Count > 0)
                 {
                     Console.WriteLine($"    {s.MissingWave:N0} entries lack the latest features:");
-                    foreach (var w in waveBreakdown) Console.WriteLine($"      {w}");
+                    foreach (var w in waveBreakdown) ReportEntry(w, "      ");
                 }
-                foreach (var r in rec)
-                {
-                    if (r.Length + 4 <= ReportWidth) Console.WriteLine($"    {r}");
-                    else ReportNote(r, "    ");
-                }
+                foreach (var r in rec) ReportEntry(r, "    ");
             }
             try
             {
@@ -13362,26 +13415,29 @@ namespace Truedat
 
                 // The side files. Small individually, 9.6 MB together on a 7.6k library, and never named -
                 // which is how a summary that listed three files came to miss a tenth of what it wrote.
+                // Matched, not listed: a fixed list is a list that goes stale, and the first one did — it missed
+                // mbxmoods-speech.csv on a 72k library and reported a total that was short by a file it had written
+                // itself. Everything truedat writes beside the catalog counts, minus the lines above that already
+                // counted it.
                 var reportNames = new List<string>();
                 long repBytes = 0;
-                foreach (var rf in new[] { "mbxmoods-skipped.csv", "mbxmoods-errors.csv", "mbxmoods-errors.log",
-                                           "mbxmoods-verify.csv", "store-result.json", "store-import-result.json",
-                                           "store-info.json", "apply-result.json" })
-                {
-                    var rp = Path.Combine(dir, rf);
-                    if (!File.Exists(rp)) continue;
-                    repBytes += new FileInfo(rp).Length;
-                    reportNames.Add(rf);
-                }
                 try
                 {
-                    foreach (var lg in Directory.GetFiles(dir, "truedat*.log"))
-                    {
-                        repBytes += new FileInfo(lg).Length;
-                        reportNames.Add(Path.GetFileName(lg));
-                    }
+                    var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                        { Path.GetFileName(path), Path.GetFileName(Path.ChangeExtension(path, ".mbxs")), compName };
+                    foreach (var pattern in new[] { "mbxmoods-*", "store-*.json", "truedat*.log" })
+                        foreach (var f in Directory.GetFiles(dir, pattern))
+                        {
+                            var name = Path.GetFileName(f);
+                            if (counted.Contains(name)) continue;                                            // catalog, sidecar, companion
+                            if (name.IndexOf(".bak.", StringComparison.OrdinalIgnoreCase) >= 0) continue;    // the Backups line
+                            counted.Add(name);
+                            repBytes += new FileInfo(f).Length;
+                            reportNames.Add(name);
+                        }
+                    reportNames.Sort(StringComparer.OrdinalIgnoreCase);
                 }
-                catch { /* the log glob is best-effort */ }
+                catch { /* the sibling scan is best-effort */ }
                 if (reportNames.Count > 0)
                 {
                     accounted += repBytes;
@@ -21206,6 +21262,33 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // costs the operator more than the wrap does.
                 var oneWord = WrapNote(@"C:\test\MB3\Library\a-very-long-single-token-that-exceeds-the-width.json", 40);
                 Assert(oneWord.Count == 1 && oneWord[0].Length > 40, "report-note: a single over-long word is left whole");
+
+                // A recommendation is copied, so a wrap must never land inside the command it recommends.
+                const string rec = "2 entries lack fingerprint.v1 -> truedat --verify --backfill --backfill-level identity";
+                foreach (int w in new[] { 36, 40, 56, 72 })
+                {
+                    var ls = WrapNote(rec, w);
+                    bool split = false;
+                    foreach (var l in ls) if (l.StartsWith("--", StringComparison.Ordinal)) split = true;
+                    Assert(!split, $"report-note: the command is never broken across lines at width {w} ({string.Join(" | ", ls)})");
+                    Assert(string.Join(" ", ls) == rec, $"report-note: width {w} preserves the recommendation word for word");
+                }
+                var speech = WrapNote("review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions", 72);
+                bool danglingFlag = false;
+                foreach (var l in speech) if (l.StartsWith("--", StringComparison.Ordinal)) danglingFlag = true;
+                Assert(!danglingFlag, $"report-note: a second command in the same note stays whole ({string.Join(" | ", speech)})");
+
+                // The window, not a guess: a 40-column terminal gets 40-column lines.
+                var saved = _reportWidth;
+                try
+                {
+                    SetReportWidthForTest(40);
+                    Assert(ReportWidth == 40, $"report-width: the pinned width is used ({ReportWidth})");
+                    var narrow = WrapNote(longNote, ReportWidth - 10);
+                    int widestNarrow = 0; foreach (var l in narrow) widestNarrow = Math.Max(widestNarrow, l.Length);
+                    Assert(widestNarrow <= 30, $"report-width: a narrow window wraps to it (widest {widestNarrow} of 30)");
+                }
+                finally { SetReportWidthForTest(saved); }
             }
 
             // Every test deletes its own directory; the shared parent goes too once it is empty (a non-recursive delete: anything still
