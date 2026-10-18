@@ -26,8 +26,8 @@ namespace Truedat
         /// <summary>Review-folder destination, falling back beside the moods file.</summary>
         public static string ResolveDest(string moodsDir)
         {
-            var rd = Program.ResolveReviewDir(moodsDir);
-            if (rd != null) return Path.Combine(rd, FileName);
+            var rd = Program.ResolveReviewDir(moodsDir, out var announce);
+            if (rd != null) { if (announce != null) Console.WriteLine(announce); return Path.Combine(rd, FileName); }
             Console.WriteLine("  (no MusicBee/MBXHub instance found — writing preview next to moods; pass --preview <path> to override)");
             return Path.Combine(moodsDir, "mbxmoods-preview.json");
         }

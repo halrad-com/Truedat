@@ -13804,8 +13804,8 @@ namespace Truedat
         /// to next-to-moods. An explicit --manifest &lt;path&gt; always wins over all of this.</summary>
         internal static string ResolveManifestDest(string moodsDir)
         {
-            var rd = ResolveReviewDir(moodsDir);
-            if (rd != null) return Path.Combine(rd, "dupes.json");
+            var rd = ResolveReviewDir(moodsDir, out var announce);
+            if (rd != null) { if (announce != null) Console.WriteLine(announce); return Path.Combine(rd, "dupes.json"); }
             Console.WriteLine("  (no MusicBee/MBXHub instance found — writing manifest next to moods; pass --manifest <path> to override)");
             return Path.Combine(moodsDir, "mbxmoods-duplicates.manifest.json");
         }
@@ -13925,8 +13925,16 @@ namespace Truedat
         /// exe folder (MusicBeeDetector's pure-Win32 lookup). Returns null (silently — the
         /// filename-specific give-up line is the caller's concern) when no instance is
         /// found.</summary>
-        internal static string? ResolveReviewDir(string moodsDir)
+        internal static string? ResolveReviewDir(string moodsDir) => ResolveReviewDir(moodsDir, out _);
+
+        /// <summary>As above, handing the caller the sentence describing WHICH instance was resolved instead of
+        /// printing it. A resolver that writes to the console puts its line wherever it happens to be called from:
+        /// this one is called while building the review-ledger path, so "(targeting the scanned library's instance:
+        /// …)" surfaced in the middle of the catalog summary, under the speech count, reading as a remark about
+        /// speech. The two callers that actually WRITE a review surface announce it; the rest resolve in silence.</summary>
+        internal static string? ResolveReviewDir(string moodsDir, out string? announce)
         {
+            announce = null;
             // 1. Library-anchored: <moodsDir>\..\AppData\MBXHub\review — the instance that owns this library.
             try
             {
@@ -13938,7 +13946,7 @@ namespace Truedat
                     {
                         var reviewDir = Path.Combine(mbxhub, "review");
                         Directory.CreateDirectory(reviewDir);
-                        Console.WriteLine($"  (targeting the scanned library's instance: {root})");
+                        announce = $"  (targeting the scanned library's instance: {root})";
                         return reviewDir;
                     }
                 }
@@ -13974,7 +13982,7 @@ namespace Truedat
                 {
                     var rd = Path.Combine(matched, "review");
                     Directory.CreateDirectory(rd);
-                    Console.WriteLine($"  (matched running MusicBee to the scanned library: {Path.GetDirectoryName(matched)})");
+                    announce = $"  (matched running MusicBee to the scanned library: {Path.GetDirectoryName(matched)})";
                     return rd;
                 }
             }
