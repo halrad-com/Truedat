@@ -96,8 +96,8 @@ namespace Truedat.Store
                 Console.WriteLine($"  entities: {r.EntitiesCreated} created, {r.MatchedHash} matched by sha, {r.MatchedPath} matched by path, {r.CreatedNoSha} created without a sha");
                 // Wording (operator's MB3 import, 2026-10-12): "3138 unrecoverable" read as damage. It counts FLAC entries that carry only
                 // the current frame-anchored hash — i.e. a mirror catalog scanned before 2026-07-21 could not be matched to them. Normal.
-                Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); conflicts: {r.Conflicts}; FLAC hashes: {r.LegacySha} pre-2026-07 (kept as a facet), {r.LegacyShaUnrecoverable} current-only (a pre-2026-07 mirror would not match them; normal for a library scanned since)");
-                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Remeasured} remeasured (fresh values stored), {r.Drift} drifted (conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
+                Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); sha collisions (same hash, different audio): {r.Conflicts}; FLAC hashes: {r.LegacySha} pre-2026-07 (kept as a facet), {r.LegacyShaUnrecoverable} current-only (a pre-2026-07 mirror would not match them; normal for a library scanned since)");
+                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Remeasured} remeasured (fresh values stored), {r.Drift} drifted (value-drift conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
                 Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts" +
                                   (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
@@ -475,7 +475,7 @@ namespace Truedat.Store
             r.ResultPath = Path.Combine(Path.GetDirectoryName(os.Path) ?? ".", ResultFileName);
             WriteResult(r, os.Path, o.RootRole ?? "primary", "import@1");
             r.Generation = dal.Generation();   // the committed generation after this import (each visible batch advanced it, T07)
-            StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} conflicts, {r.ElapsedMs} ms");
+            StoreLog.Info($"import done: {r.Entries} entries, {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Conflicts} sha collisions, {r.Drift} value drifts, {r.ElapsedMs} ms");
         }
 
         static void ImportEntry(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string key, TrackEntry entry, long sharedRun,
