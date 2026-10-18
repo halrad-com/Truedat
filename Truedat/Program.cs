@@ -13946,7 +13946,10 @@ namespace Truedat
                     {
                         var reviewDir = Path.Combine(mbxhub, "review");
                         Directory.CreateDirectory(reviewDir);
-                        announce = $"  (targeting the scanned library's instance: {root})";
+                        // Deliberately silent: this arm derives the destination from the catalog's own root, so the
+                        // full path the caller prints next already contains everything the sentence said. The second
+                        // arm is NOT silent, because there the destination came from a running process rather than
+                        // from the path — the one case where the instance and the catalog can genuinely differ.
                         return reviewDir;
                     }
                 }
