@@ -2941,6 +2941,10 @@ namespace Truedat
                 if (storePath != null)
                 {
                     global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
+                    // The spill is transient working data, so it goes where truedat's other transient working data
+                    // goes — the stage dir — instead of making an artifacts\ folder beside the operator's library.
+                    // One setting moves both (--stage-dir), and the startup orphan sweep already owns that directory.
+                    global::Truedat.Store.ArtifactStore.WorkRoot = _stageOpts.StageDir;
                     // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
                     // added edge rows, and by --edges-export (its explicit path wins).
                     if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
@@ -11430,7 +11434,12 @@ namespace Truedat
                 var t = total;
                 Console.WriteLine($"  store: {t.Entries} analysed entries written ({t.EntitiesCreated} new media, {t.Unchanged} unchanged, {t.Remeasured} remeasured, {t.Drift} drift, {t.ContentReplaced} replaced), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}");
                 if (edgesOn) Console.WriteLine($"  edges: {t.Edges} tracks folded, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
-                if (edgesOn && t.Edges > 0) companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);   // S2 C7: the companion file reflects the store after every run that added edges
+                // S2 C7: the companion reflects the store after every run that added edges. A null companionPath is the
+                // T18 caller saying "the publication that follows writes it with the catalog and sidecar" — not a missing
+                // argument, so it is not an error. Calling through printed "Error: no catalog beside which to write
+                // mbxedges.v1.json" on a successful scan that had just published that very file.
+                if (edgesOn && t.Edges > 0 && companionPath != null)
+                    companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);
             }
             else
                 Console.Error.WriteLine($"  WARNING: store not written ({final.Error}); {final.LostEntries} entries were not committed and are lost (the files show the store's last publication)");

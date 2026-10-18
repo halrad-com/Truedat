@@ -20,7 +20,17 @@ namespace Truedat.Store
         internal const string Extension = ".main.json.z";
 
         internal static string ArtifactsDir(string storeDir) => Path.Combine(storeDir, "artifacts");
-        internal static string PendingDir(string storeDir) => Path.Combine(ArtifactsDir(storeDir), "pending");
+
+        /// <summary>Where the TRANSIENT spill lives: written during a scan, consumed by the flush that commits its rows,
+        /// deleted after. It is truedat's own working data, so it does not belong in the store's folder beside the
+        /// library (operator, 2026-10-18: "lets not put artifacts in the store folder… it should be in the stage folder
+        /// really, thats all just transient data"). The scan sets this to the stage directory — already probed writable
+        /// at startup, already swept for orphans, and already relocatable with <c>--stage-dir</c>. Null (the self-tests,
+        /// and any path that resolves no stage dir) keeps the old place beside the store.</summary>
+        internal static string? WorkRoot;
+
+        internal static string PendingDir(string storeDir)
+            => WorkRoot != null ? Path.Combine(WorkRoot, "pending") : Path.Combine(ArtifactsDir(storeDir), "pending");
 
         /// <summary>Compresses the extractor's JSON text into a pending file and returns its path.</summary>
         internal static string Stash(string storeDir, string json)
@@ -111,7 +121,17 @@ namespace Truedat.Store
         /// entry and the next analysis re-stashes it.</summary>
         internal static int SweepPending(string storeDir, TimeSpan olderThan)
         {
-            var dir = PendingDir(storeDir);
+            int n = SweepOne(PendingDir(storeDir), olderThan);
+            // An install that spilled beside the store before the spill moved to the stage dir still has those files;
+            // nothing else would ever remove them, so the sweep covers the old place too (once, and only when it is
+            // not the current one).
+            var legacy = Path.Combine(ArtifactsDir(storeDir), "pending");
+            if (!string.Equals(legacy, PendingDir(storeDir), StringComparison.OrdinalIgnoreCase)) n += SweepOne(legacy, olderThan);
+            return n;
+        }
+
+        static int SweepOne(string dir, TimeSpan olderThan)
+        {
             if (!Directory.Exists(dir)) return 0;
             int n = 0; var cutoff = DateTime.UtcNow - olderThan;
             foreach (var f in Directory.GetFiles(dir))

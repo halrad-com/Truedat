@@ -490,6 +490,11 @@ namespace Truedat.Edges
                 var store = System.IO.Path.Combine(dir, "truedat.db");
                 Truedat.Store.ScanSink.Reset();
                 Truedat.Store.ScanSink.StoreDirectory = dir;
+                // The spill is transient working data and belongs with truedat's other transient working data, not in
+                // an artifacts\ folder beside the operator's library (operator, 2026-10-18). A scan points WorkRoot at
+                // the stage dir; here a temp stand-in plays that part, and the store folder must stay clean of it.
+                var stage = System.IO.Path.Combine(dir, "stage");
+                Truedat.Store.ArtifactStore.WorkRoot = stage;
                 var entries = Truedat.Store.StoreSelfTest.FixtureEntries(@"D:\Music");
                 var ok = SyntheticFold(dir);
                 EdgeFoldResult failed;
@@ -507,7 +512,11 @@ namespace Truedat.Edges
                 // Review I3: folds are spilled to disk, one packed file each, in the pending dir; nothing of them stays in memory.
                 var pendingDir = Truedat.Store.ArtifactStore.PendingDir(dir);
                 int spilled = System.IO.Directory.Exists(pendingDir) ? System.IO.Directory.GetFiles(pendingDir, "*.edges").Length : 0;
-                assert(spilled == 2, $"the two tied folds are two .edges files in artifacts\\pending, the discarded one deleted ({spilled})");
+                assert(spilled == 2, $"the two tied folds are two .edges files in the pending dir, the discarded one deleted ({spilled})");
+                assert(pendingDir.StartsWith(stage, StringComparison.OrdinalIgnoreCase),
+                    $"the spill goes under the working root, not the store ({pendingDir})");
+                assert(!System.IO.Directory.Exists(Truedat.Store.ArtifactStore.ArtifactsDir(dir)),
+                    "the store folder gets no artifacts\\ directory from a scan that spills");
                 var r = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
                 assert(r.Ok && r.Edges == 1 && r.EdgesFailed == 1, $"the flush reports 1 edge row written and 1 failed fold ({r.Edges}, {r.EdgesFailed}, ok {r.Ok} {r.Error})");
                 assert(System.IO.Directory.GetFiles(pendingDir, "*.edges").Length == 0, "the flush consumed every spilled fold");
@@ -562,7 +571,7 @@ namespace Truedat.Edges
                         $"lacking-edges: the failed-run check searches the track's runs by ix_run_entity, never every failed run by ix_run_outcome (plan: {string.Join(" | ", plan)})");
                 }
             }
-            finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
+            finally { Truedat.Store.ScanSink.Reset(); Truedat.Store.ScanSink.StoreDirectory = null; Truedat.Store.ArtifactStore.WorkRoot = null; try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         /// <summary>The scan's periodic checkpoint flush (beside its 5-minute catalog save, workers still running): files what is tied,
