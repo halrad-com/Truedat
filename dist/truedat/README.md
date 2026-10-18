@@ -34,6 +34,28 @@ What's inside and what happens if you drop pieces: [dependency-surface notes](ht
 
 Source tree and tagged snapshots are on [GitHub](https://github.com/halrad-com/Truedat).
 
+## Migration
+
+Replace the truedat folder with the new bundle (keep `truedat.config.json` if you have one), then:
+
+**Catalog only (no store)** — nothing to do. Run `truedat` as before.
+
+**Move an existing catalog into the store:**
+```
+truedat --store-import
+truedat --refresh
+truedat
+```
+
+**Already have a store from an earlier build** — just run `truedat`. It upgrades the store on open and
+writes `truedat.db.bak.v<N>.<timestamp>` first.
+
+**New library, want the store from the start** — `truedat --store --edges`.
+
+**Files that failed under an earlier build** — run `truedat --retry-errors` once.
+
+**Keep a store out of one run** — `--no-store` / `--no-edges`.
+
 ## What It Does
 
 Truedat reads an iTunes Music Library XML file (or a `--folder`, `--file-list`, or single `--analyze-file`) and runs each track through Essentia plus its own analyses. Per-track work is parallelized across cores; everything is cache-aware so re-runs only touch what changed.
@@ -94,7 +116,8 @@ Scans your library for filenames with characters that cause Essentia tools to fa
 ### Store (preview, v2) — `--store-import`, `--store-export`, `--store-info`, `--store-roundtrip`, `--store-vacuum`
 
 **`STORE.md` is the reference** for the store: what the tables hold, where the file lives, the edges
-layer (`--edges`, `--edges-export`), the typed columns (every field at its declared precision; schema v3), and how to open
+layer (`--edges`, `--edges-export`), the typed columns (every field at its declared precision; schema v3), the typed edge table and the
+per-copy verdict rows (schema v4), and how to open
 the file with DB Browser for SQLite or `sqlite3`. This section is the summary.
 
 A SQLite store that holds everything `mbxmoods.json` holds, keyed by identity (a UUID per file
@@ -109,20 +132,19 @@ field. An exported copy of duplicate audio therefore carries its media's one des
 `--store-roundtrip` reports those copies separately from unexplained differences. Re-importing writes
 only what changed: an equal entry touches nothing, a value that differs beyond noise under the same
 producer is recorded as a `value-drift` conflict and the stored description is kept, and copy facts take
-the newer value. **A scan run with `--store` writes the store too**, as a second sink after the catalog is
-saved exactly as today: the entries it analysed this run (never cache hits) go in through the same
-rules as an import, as producer `essentia@<build>` with one run row per entry carrying the analysis
-time, and every failure becomes a failed run with its components. Only the flag activates this: a
-`truedat.db` sitting beside the catalog does **not** make a bare scan write it. A store problem is
-reported and counted; it never costs a catalog entry. `store-result.json` beside the store records
-each write. A scan killed before its final save leaves the already-saved entries in the catalog but
-not in the store; the next `--store-import` reconciles them. A stored value
+the newer value. **With a store in force the store is the authority:** a scan records every change into
+it (analysed entries as producer `essentia@<build>`, one run row per entry, every failure a failed run
+with its components) and publishes `mbxmoods.json`, the `.mbxs` sidecar and `mbxedges.v1.json` from it
+together, at one generation. The nine catalog-changing verbs (`--fixup`, `--remap`, `--verify --backfill`,
+`--migrate`, `--strip-smfm`, `--prune-entry`, `--prune-excluded`, `--merge-moods`, `--restore`) do the
+same. A store and a catalog that disagree refuse the run and name the command that reconciles them. The
+store saves at the scan's five-minute checkpoints and at the end; `store-result.json` beside it records
+each run's outcome (`completed`, `failed`, `interrupted`). A stored value
 that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
 scan measures it; an older extractor build never overwrites a newer build's description, and a newer
 one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
 3.40 or newer, checked at open) — nothing new to install, nothing added beside the exe. **The store
-is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads, and every existing mode behaves
-exactly as before.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in
+is a preview: `mbxmoods.json` and `.mbxs` stay what MBXHub reads.** The store file lives beside the catalog — `truedat.db` next to `mbxmoods.json` in
 the library folder — and is found the same way the catalog is, so the store verbs need no `--store`
 at all and `--stats --store` / `--duplicates --store` (bare) use that default. **The store file is
 always local:** when the catalog folder is itself a network share, the default is a local per-library
@@ -150,7 +172,7 @@ truedat.exe --store-info --store "D:\truedat\truedat.db"
 REM Repack a store (a store created before 16 KB pages were the default shrinks ~29%; add --page-size N to re-tune)
 truedat.exe --store-vacuum --store "D:\truedat\truedat.db"
 
-REM A scan with --store (bare = the default location) also writes what it analysed into the store, after the catalog
+REM A scan with --store (bare = the default location) writes the store and publishes the catalog from it
 truedat.exe --store
 truedat.exe --file-list new.txt --moods "D:\MusicBee\Library\mbxmoods.json" --store
 
@@ -174,7 +196,7 @@ edge's HPCP (about 1.6 KB per track); with `--edge-arrays` (config `edge-arrays`
 series, beats, sub-window summaries and MFCC/spectral vectors. Captured arrays are sticky per track and
 leave only through `--edge-arrays-drop [--dry-run]`. Roughly 0.2 s of fold plus PCM per track beside the
 analysis. `--store-info` reports the coverage
-(eligible, captured, missing), bytes per track, median time and the work queue by state. In
+(eligible, captured, missing), bytes per track and median time. In
 `--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
 catalog entry.
 
@@ -193,7 +215,8 @@ written from the store, compactly (about 1.8 KB per track), after any `--edges` 
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
 
-**Measured (2026-10-12, a 200-track slice of a local library, 83 FLAC / 111 MP3, local SSD, parallelism 20):**
+**Measured (2026-10-12, on the 0.5.5.3-DV1 layout — before the typed columns and edge table; `--store-info`
+gives the current figures for your store. A 200-track slice of a local library, 83 FLAC / 111 MP3, local SSD, parallelism 20):**
 
 | | |
 |---|---|
@@ -209,8 +232,7 @@ FLAC; the decode-coverage gate (a file whose claimed duration exceeds what the e
 is transcoded, then fails the fold rather than writing a wrong tail); the refusals on an older extractor
 and on a missing `--moods`; the stage directory left clean after parallel runs.
 
-**Not yet verified:** the library (iTunes
-XML) scan and `--folder` with `--edges`; the store checkpoint save in a real library scan. **Known limits:** the fold reads each
+**Not yet verified:** `--folder` with `--edges`. **Known limits:** the fold reads each
 descriptor whole, so a multi-hour file costs several hundred MB of transient memory per worker;
 `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
 file-list scans; `--edges` needs extractor build `.5`.
@@ -226,35 +248,21 @@ choice for an instance;
 per-file mode without `--moods` skips the store, and an extractor older than `.5` skips edges, each with a
 note.
 
-**Upgrading an instance that already has a catalog** — from the instance's truedat folder with the rebuilt
-exe and the `.5` extractor beside it:
+**Upgrading an instance:** see [Migration](#migration).
 
-```
-truedat --store-import                 (reads the catalog into the store; seconds, no audio read)
-truedat --refresh                      (one scan; Ctrl+C and re-run resumes)
-truedat                                (ongoing, unchanged — it finds the store and uses it)
-```
-
-No config step: `--store-import` leaves a store at the default location, and every later scan picks it up
-with edges.
-
-`--store-import` gives the store every track you have already scanned, with no re-analysis. `--refresh`
-then does what it always did (re-analyse entries missing the newest feature fields) and, with the store
-and edges on, also re-analyses every track the store lists as lacking edge rows. It is one ordinary scan:
-the scan's parallel workers, progress line and ETA, the catalog and the store saved every five minutes, so
-Ctrl+C and a re-run picks up where it stopped. A normal scan keeps everything current from then on; a
-cached track is never re-analysed, which is why `--refresh` is the step that fills the gap.
-
-Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`, `--store-import`, `--library-root <path>` (else inferred per volume and
+Flags: `--store [db]` (bare = the default location), `--store-dir <dir>`, `--edges`, `--no-store`, `--no-edges`,
+`--edge-arrays`, `--no-edge-arrays`, `--edge-arrays-drop [--dry-run]`, `--edges-export [path]`, `--refresh`,
+`--budget <time>`, `--store-import`, `--library-root <path>` (else inferred per volume and
 reported), `--root-role primary|mirror|endpoint`, `--machine-adopt` (write from a host other than
 the one that created the store), `--store-export <out.json>`, `--export-root <path>` (when the
 store has several roots), `--store-roundtrip <catalog>`, `--store-info` (measurements **and** state:
 generation, whether the published files are at that generation, edge-array capture, the next command),
 `--store-vacuum`
 (`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
-row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own. Measured on a 72,477-track
-catalog: import 25 s, export 7 s, round-trip EQUAL, store 3,651 bytes per distinct track (0.95× the
-JSON it holds); vacuum of a 4 KB-page store 2 s, −29%.
+row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own; vacuuming a 4 KB-page store
+shrank it 29%. Measured 2026-10-17 on this build: `--store-import` of a 7,641-entry catalog (29.3 MB) took
+4.0 s and made a 23.0 MB store, before edges. A store migrated from an older schema also keeps its
+pre-migration backup beside it.
 
 ## Quick Start
 
