@@ -27,6 +27,11 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   TagLib, 180.9 s by MusicBee, 174.2 s by ffprobe and 163 s by VLC. Four `.aac` files decoded in full and
   were failed anyway as `decode-7%`, losing their catalog entries. A format that records no length now gets
   no coverage verdict, and where two claims exist the smaller one is the reference.
+- **A failed track gets a second attempt before it is recorded as failed.** A recorded failure is skipped by
+  every later scan, so one unlucky attempt kept a healthy track out of the catalog until `--retry-errors`. The
+  library scan and `--file-list` / `--folder` now re-analyze a failing track once in the same scan; only a
+  second failure is written to `mbxmoods-errors.csv`, and the scan summary counts the tracks that made it
+  in on the retry.
 
 ## [0.5.5.3-DV2] — 2026-10-16
 
