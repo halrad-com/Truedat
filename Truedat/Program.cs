@@ -4753,6 +4753,7 @@ namespace Truedat
                 var flCachedByShaPath = 0;
                 var flCachedByShaCross = 0;
                 var flFailed = 0;
+                var flRetryRecovered = 0;   // failed the first attempt, succeeded on the in-scan retry
                 var flDsdSkipped = 0;
                 var flSmfmAdded = 0;
                 var flErrors = new ConcurrentBag<string>();
@@ -5073,10 +5074,35 @@ namespace Truedat
 
                         // Cache miss — full Essentia + identity ride-along on the staged copy.
                         EnsureStagedSrc();
-                        var flResults = RunSourceWorkers(
-                            flEssentiaExe, flStagedSrc!, flFileSize, filePath, knownDurationSec: 0,
-                            extractTags: true, _stageOpts, CancellationToken.None,
-                            precomputedHashes: flBodyHashes);   // T2: reuse the tier walk's body read, if it happened
+                        // The one health gate for this mode — the retry and the ledger both read it.
+                        // tagsOk: ExtractFileTags never returns null — TagLib refusal yields an
+                        // EMPTY FileTags, and readable audio always has a duration, so
+                        // DurationMs==0 is the refusal signature.
+                        (bool Pass, List<string> Failed) FlGate(WorkerResults r) => ClassifyTrackHealth(
+                            essentiaOk: true,
+                            decodedSec: r.Features!.AnalyzedLengthSec,
+                            claimedSec: GateCoverageReferenceSec(filePath, r.FingerprintV1?.DurationMs, r.Tags!.DurationMs),
+                            decodeMinFraction: DecodeCoverageMinFraction,
+                            fingerprintOk: r.FingerprintV1 != null,
+                            shaOk: !string.IsNullOrEmpty(r.AudioStreamSha256),
+                            tagsExpected: true, tagsOk: r.Tags!.DurationMs > 0,
+                            bitUsageApplicable: !r.BitUsageNotApplicable, bitUsageOk: r.BitUsage != null,
+                            hfApplicable: !r.HfNotApplicable, hfOk: r.HfEnergyRatio.HasValue);
+                        // No cancellation token on this path (it passes None to the workers), so
+                        // nothing can ask the retry to stand down.
+                        var flAttempt = RunAnalysisAttempts(
+                            () => RunSourceWorkers(
+                                flEssentiaExe, flStagedSrc!, flFileSize, filePath, knownDurationSec: 0,
+                                extractTags: true, _stageOpts, CancellationToken.None,
+                                precomputedHashes: flBodyHashes),   // T2: reuse the tier walk's body read, if it happened
+                            r => FlGate(r).Failed,
+                            () => false);
+                        var flResults = flAttempt.Results;
+                        if (flAttempt.Attempts > 1)
+                        {
+                            if (flAttempt.Ok) Interlocked.Increment(ref flRetryRecovered);
+                            Console.Error.WriteLine($"[RETRY] {Path.GetFileName(filePath)}: attempt 1 failed ({flAttempt.FirstFailureReason}), attempt 2 {(flAttempt.Ok ? "succeeded" : "failed too")}");
+                        }
 
                         var features = flResults.Features;
                         var fileMd5 = flResults.FileMd5;
@@ -5098,22 +5124,8 @@ namespace Truedat
 
                         // Scan-health gate (2026-07-30) — same rule as MoodsMode: analyzed
                         // but unidentifiable/short-decoded is a FAIL, no phantom entry.
-                        // tagsOk: ExtractFileTags never returns null — TagLib refusal
-                        // yields an EMPTY FileTags, and readable audio always has a
-                        // duration, so DurationMs==0 is the refusal signature.
                         {
-                            double flClaimedSec = GateCoverageReferenceSec(
-                                filePath, fingerprintV1?.DurationMs, tags.DurationMs);
-                            var (healthPass, healthFailed) = ClassifyTrackHealth(
-                                essentiaOk: true,
-                                decodedSec: features.AnalyzedLengthSec,
-                                claimedSec: flClaimedSec,
-                                decodeMinFraction: DecodeCoverageMinFraction,
-                                fingerprintOk: fingerprintV1 != null,
-                                shaOk: !string.IsNullOrEmpty(audioStreamSha256),
-                                tagsExpected: true, tagsOk: tags.DurationMs > 0,
-                                bitUsageApplicable: !flResults.BitUsageNotApplicable, bitUsageOk: bitUsage != null,
-                                hfApplicable: !flResults.HfNotApplicable, hfOk: flResults.HfEnergyRatio.HasValue);
+                            var (healthPass, healthFailed) = FlGate(flResults);
                             if (!healthPass)
                             {
                                 var comps = string.Join(";", healthFailed);
@@ -5296,7 +5308,7 @@ namespace Truedat
                     Console.WriteLine(summaryJson);
                 }
 
-                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed{(flRetryRecovered > 0 ? $" ({flRetryRecovered} more recovered on retry)" : "")}, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
                 EmitDirStatSummary();
                 FlushRunLedger(flLedgerPath);
@@ -5797,6 +5809,7 @@ namespace Truedat
             int missingSkipped = 0;
             int failed = 0;
             int timedOut = 0;
+            int retryRecovered = 0;     // failed the first attempt, succeeded on the in-scan retry
             int processed = 0;
             int total = tracks.Count;
             // T1 (2026-07-30): errors-CSV appends get their own lock. They used to share
@@ -6412,12 +6425,33 @@ namespace Truedat
                         // slowest-task).
                         msSourceSize = fileSizeBytes;
                         EnsureStagedSrc();
-                        var msResults = RunSourceWorkers(
-                            essentiaExe, msStagedSrc!, fileSizeBytes, t.Location,
-                            knownDurationSec: trackDurationSecs,
-                            extractTags: false, _stageOpts, cts.Token,
-                            precomputedHashes: msBodyHashes);   // T2: reuse the tier walk's body read, if it happened
-                        Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks);
+                        // The one health gate for this mode: the retry decides with it, and the
+                        // block below ledgers with it, so the two cannot disagree.
+                        (bool Pass, List<string> Failed) MsGate(WorkerResults r) => ClassifyTrackHealth(
+                            essentiaOk: true,
+                            decodedSec: r.Features!.AnalyzedLengthSec,
+                            claimedSec: GateCoverageReferenceSec(t.Location, r.FingerprintV1?.DurationMs, t.TotalTimeMs),
+                            decodeMinFraction: DecodeCoverageMinFraction,
+                            fingerprintOk: r.FingerprintV1 != null,
+                            shaOk: !string.IsNullOrEmpty(r.AudioStreamSha256),
+                            tagsExpected: false, tagsOk: true,   // MoodsMode: XML supplies metadata
+                            bitUsageApplicable: !r.BitUsageNotApplicable, bitUsageOk: r.BitUsage != null,
+                            hfApplicable: !r.HfNotApplicable, hfOk: r.HfEnergyRatio.HasValue);
+                        var msAttempt = RunAnalysisAttempts(
+                            () => RunSourceWorkers(
+                                essentiaExe, msStagedSrc!, fileSizeBytes, t.Location,
+                                knownDurationSec: trackDurationSecs,
+                                extractTags: false, _stageOpts, cts.Token,
+                                precomputedHashes: msBodyHashes),   // T2: reuse the tier walk's body read, if it happened
+                            r => MsGate(r).Failed,
+                            () => cts.IsCancellationRequested || Volatile.Read(ref budgetStop) != 0);
+                        var msResults = msAttempt.Results;
+                        if (msAttempt.Attempts > 1)
+                        {
+                            if (msAttempt.Ok) Interlocked.Increment(ref retryRecovered);
+                            Console.WriteLine($"  retry: {t.Artist} - {t.Name}: attempt 1 failed ({msAttempt.FirstFailureReason}), attempt 2 {(msAttempt.Ok ? "succeeded" : "failed too")}  [{Path.GetFileName(t.Location)}]");
+                        }
+                        Interlocked.Add(ref _analyzeTicksTotal, msResults.AnalyzeTicks + msAttempt.DiscardedAnalyzeTicks);
                         Interlocked.Increment(ref _analyzeCount);
                         // Rate + ETA model: bytes were processed whether the analysis
                         // succeeded or failed, and a new-to-catalog track leaves the
@@ -6463,16 +6497,7 @@ namespace Truedat
                         // error list is what stops truedat re-analyzing it every scan
                         // (--retry-errors re-attempts after the operator fixes the file).
                         {
-                            var (healthPass, healthFailed) = ClassifyTrackHealth(
-                                essentiaOk: true,
-                                decodedSec: feat.AnalyzedLengthSec,
-                                claimedSec: GateCoverageReferenceSec(t.Location, fingerprintV1?.DurationMs, t.TotalTimeMs),
-                                decodeMinFraction: DecodeCoverageMinFraction,
-                                fingerprintOk: fingerprintV1 != null,
-                                shaOk: !string.IsNullOrEmpty(audioStreamSha256),
-                                tagsExpected: false, tagsOk: true,   // MoodsMode: XML supplies metadata
-                                bitUsageApplicable: !msResults.BitUsageNotApplicable, bitUsageOk: bitUsageResult != null,
-                                hfApplicable: !msResults.HfNotApplicable, hfOk: msResults.HfEnergyRatio.HasValue);
+                            var (healthPass, healthFailed) = MsGate(msResults);
                             if (!healthPass)
                             {
                                 var comps = string.Join(";", healthFailed);
@@ -6679,6 +6704,8 @@ namespace Truedat
             if (missingSkipped > 0)
                 Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
             Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
+            if (retryRecovered > 0)
+                Console.WriteLine($"  Retried:    {retryRecovered}  (failed the first attempt, analyzed on the retry — in the catalog)");
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
@@ -14391,6 +14418,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             public long AnalyzeTicks;
         }
 
+        /// <summary>How many times one track's analysis is attempted inside a single scan
+        /// before the failure is ledgered. 2 = one retry.</summary>
+        internal const int AnalysisAttemptLimit = 2;
+
+        /// <summary>
+        /// The outcome of analysing one track, after however many attempts it took.
+        /// <see cref="Results"/> is the LAST attempt's bundle — the one the caller writes
+        /// or ledgers; earlier attempts are discarded apart from their analyze time, which
+        /// is kept in <see cref="DiscardedAnalyzeTicks"/> so throughput reporting does not
+        /// quietly omit work that was really done.
+        /// </summary>
+        internal sealed class AnalysisAttempt
+        {
+            public WorkerResults Results = new WorkerResults();
+            public string? EssentiaError;                           // non-null iff the extractor produced no features
+            public List<string> FailedComponents = new List<string>();
+            public string? FirstFailureReason;                      // what the first attempt failed with, for the log line
+            public int Attempts;
+            public long DiscardedAnalyzeTicks;
+            public bool Ok => EssentiaError == null && FailedComponents.Count == 0;
+        }
+
         /// <summary>Skip-or-run helper for the optional-signal pattern.
         /// `skip=true` returns a completed task with the disabled value (no thread
         /// pool spin). `skip=false` runs <paramref name="work"/> on the pool.</summary>
@@ -16710,6 +16759,71 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // did before, never treat an unavailable counter as a hang.
                 Assert(EssentiaProgressed(TimeSpan.FromSeconds(1.5), t1, 0, 0), "watchdog: unavailable IO counters fall back to CPU");
                 Assert(EssentiaStallIdlePolls * EssentiaPollSeconds >= 120, "watchdog: the idle window is at least two minutes");
+            }
+
+            // --- scan health: a failed analysis gets a second attempt before it is ledgered ---
+            {
+                WorkerResults Healthy() => new WorkerResults
+                {
+                    Features = new TrackFeatures(), FingerprintV1 = new FingerprintV1(),
+                    AudioStreamSha256 = "sha", AnalyzeTicks = 11,
+                };
+                // the extractor produced nothing: Exit code 1 / Timeout / bad_alloc
+                WorkerResults ExtractorFailed() => new WorkerResults { EssentiaError = "Exit code 1", AnalyzeTicks = 3 };
+                // it produced features, but the file could not be identified (fingerprint + sha null)
+                WorkerResults NoIdentity() => new WorkerResults { Features = new TrackFeatures(), AnalyzeTicks = 5 };
+                List<string> Gate(WorkerResults r) => ClassifyTrackHealth(
+                    essentiaOk: true, decodedSec: null, claimedSec: 0.0, decodeMinFraction: DecodeCoverageMinFraction,
+                    fingerprintOk: r.FingerprintV1 != null, shaOk: !string.IsNullOrEmpty(r.AudioStreamSha256),
+                    tagsExpected: false, tagsOk: true,
+                    bitUsageApplicable: false, bitUsageOk: true, hfApplicable: false, hfOk: true).Failed;
+
+                Assert(AnalysisAttemptLimit == 2, "retry: one retry, not a loop");
+                // a healthy track must cost exactly what it costs today
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => { calls++; return Healthy(); }, Gate, () => false);
+                    Assert(a.Ok && a.Attempts == 1 && calls == 1, "retry: a healthy track is analyzed once");
+                    Assert(a.DiscardedAnalyzeTicks == 0, "retry: a first-attempt success discards nothing");
+                }
+                // class 1 of the measured population: the extractor failed, and the retry wins
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => ++calls == 1 ? ExtractorFailed() : Healthy(), Gate, () => false);
+                    Assert(a.Ok && a.Attempts == 2 && calls == 2, "retry: an extractor failure is re-attempted and can succeed");
+                    Assert(a.FirstFailureReason == "Exit code 1", "retry: the first failure's reason survives for the log line");
+                    Assert(a.DiscardedAnalyzeTicks == 3, "retry: the failed attempt's analyze time is still counted");
+                    Assert(a.Results.AnalyzeTicks == 11 && a.Results.EssentiaError == null,
+                        "retry: the caller is handed the attempt that succeeded");
+                }
+                // class 2: features but no identity — the gate's verdict must also buy a retry
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => ++calls == 1 ? NoIdentity() : Healthy(), Gate, () => false);
+                    Assert(a.Ok && a.Attempts == 2 && calls == 2, "retry: a health-gate failure is re-attempted too");
+                    Assert(a.FirstFailureReason == "fingerprint;sha", "retry: the gate's components are the logged first reason");
+                }
+                // a genuinely broken file (the two zero-byte MP3s) is ledgered exactly as before
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => { calls++; return ExtractorFailed(); }, Gate, () => false);
+                    Assert(!a.Ok && a.Attempts == 2 && calls == 2, "retry: a file that fails twice is attempted twice, not more");
+                    Assert(a.EssentiaError == "Exit code 1" && a.FailedComponents.Count == 0,
+                        "retry: what gets ledgered is the last attempt's verdict");
+                    Assert(a.DiscardedAnalyzeTicks == 3, "retry: both attempts' analyze time is accounted for");
+                }
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => { calls++; return NoIdentity(); }, Gate, () => false);
+                    Assert(!a.Ok && a.Attempts == 2 && a.EssentiaError == null && string.Join(";", a.FailedComponents) == "fingerprint;sha",
+                        "retry: a twice-failing gate ledgers the components, not an extractor error");
+                }
+                // Ctrl+C / --budget: the scan is stopping, so it does not buy another attempt
+                {
+                    int calls = 0;
+                    var a = RunAnalysisAttempts(() => { calls++; return ExtractorFailed(); }, Gate, () => true);
+                    Assert(!a.Ok && a.Attempts == 1 && calls == 1, "retry: a cancelling scan does not re-attempt");
+                }
             }
 
             // --- SMFM is carried across cache hits (so it needn't be re-read from the file) ---
@@ -21689,6 +21803,44 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (bitUsageApplicable && !bitUsageOk) failed.Add("bitUsage");
             if (hfApplicable && !hfOk) failed.Add("hf");
             return (failed.Count == 0, failed);
+        }
+
+        /// <summary>
+        /// Analyse one track, and re-attempt once before a failure is ledgered.
+        ///
+        /// Measured 2026-10-17: of a 7,645-track scan's 32 failures, 26 cleared on a clean
+        /// re-scan with no change to the files, the extractor or the code — three were run
+        /// standalone and completed in seconds. Most failures in this population are
+        /// transient. A ledgered failure is skipped by every later scan
+        /// (<see cref="ReviewSkipReason"/>), so one unlucky attempt took the track out of
+        /// the catalog until an operator noticed and typed <c>--retry-errors</c> — an absence
+        /// with no symptom but itself, since the hub indexes the catalog.
+        ///
+        /// <paramref name="classify"/> is the caller's health gate, so BOTH ledgerable
+        /// classes get the second attempt: the extractor producing nothing, and the gate
+        /// rejecting what it produced (10 of those 32 were <c>sha</c> / <c>fingerprint</c>).
+        /// A genuinely broken file fails both attempts and is ledgered exactly as before.
+        /// <paramref name="stopRequested"/> is checked before spending the retry: a scan
+        /// that is cancelling or out of budget must not buy another attempt.
+        /// </summary>
+        internal static AnalysisAttempt RunAnalysisAttempts(
+            Func<WorkerResults> runAttempt,
+            Func<WorkerResults, List<string>> classify,
+            Func<bool> stopRequested,
+            int attemptLimit = AnalysisAttemptLimit)
+        {
+            var outcome = new AnalysisAttempt();
+            for (int attempt = 1; ; attempt++)
+            {
+                var results = runAttempt();
+                outcome.Results = results;
+                outcome.Attempts = attempt;
+                outcome.EssentiaError = results.Features == null ? (results.EssentiaError ?? "Unknown error") : null;
+                outcome.FailedComponents = results.Features == null ? new List<string>() : classify(results);
+                if (outcome.Ok || attempt >= attemptLimit || stopRequested()) return outcome;
+                outcome.FirstFailureReason ??= outcome.EssentiaError ?? string.Join(";", outcome.FailedComponents);
+                outcome.DiscardedAnalyzeTicks += results.AnalyzeTicks;
+            }
         }
 
         /// <summary>The suffix that explains a <c>tags</c> gate failure — " — tags: &lt;what
