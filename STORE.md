@@ -183,8 +183,8 @@ SELECT producer_version, txt, count(*) FROM value
 SELECT state, count(*) FROM work_item GROUP BY state;
 
 -- a track's edge windows
-SELECT s.kind, s.start_ms, s.end_ms, length(v.vec) AS bytes FROM segment s JOIN value v ON v.segment_id = s.id
- WHERE s.content_hash = '<audioStreamSha256>' ORDER BY s.kind;
+SELECT kind, status, start_ms, end_ms, key_code, bpm, mean_lufs, arrays IS NOT NULL AS has_arrays FROM edge
+ WHERE content_hash = '<audioStreamSha256>' ORDER BY kind;
 
 -- open conflicts by kind
 SELECT kind, count(*) FROM conflict WHERE state = 'open' GROUP BY kind;
