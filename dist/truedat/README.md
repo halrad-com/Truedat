@@ -215,27 +215,11 @@ written from the store, compactly (about 1.8 KB per track), after any `--edges` 
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
 Absent means not yet. The hub never reads the store.
 
-**Measured (2026-10-12, on the 0.5.5.3-DV1 layout — before the typed columns and edge table; `--store-info`
-gives the current figures for your store. A 200-track slice of a local library, 83 FLAC / 111 MP3, local SSD, parallelism 20):**
-
-| | |
-|---|---|
-| Scan with `--store --edges` | 2.8 s per track wall; 200 of 200 edge rows, 0 failed folds |
-| Edge rows in the store | 6,404 bytes per track (one packed row per edge) |
-| Store, everything included | 19.7 KB per track; about 2.9 GB projected at 156k tracks |
-| `mbxedges.v1.json` | 1.7 KB per track |
-| `--refresh` filling edges | about 1,100 tracks per hour at parallelism 18 (the old one-at-a-time drain: 130 to 440) |
-| `--store-roundtrip` on the scan-built store | EQUAL, 200 of 200, at the six-figure precision |
-
-**Verified on real audio:** `--edges` through `--analyze-file` and `--file-list` on MP3, M4A, WMA and
-FLAC; the decode-coverage gate (a file whose claimed duration exceeds what the extractor decodes
-is transcoded, then fails the fold rather than writing a wrong tail); the refusals on an older extractor
-and on a missing `--moods`; the stage directory left clean after parallel runs.
-
-**Not yet verified:** `--folder` with `--edges`. **Known limits:** the fold reads each
-descriptor whole, so a multi-hour file costs several hundred MB of transient memory per worker;
-`--file-list` records `analysisDuration` 0, so `--store-info`'s speed line is empty for a store built from
-file-list scans; `--edges` needs extractor build `.5`.
+**Limits.** The fold reads each descriptor whole, so a multi-hour file costs several hundred MB of
+transient memory per worker. `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line
+is empty for a store built from file-list scans. `--edges` needs extractor build `.5`. For what any of
+this costs on your library — bytes per track, coverage, speed — run `truedat --store-info`; it measures
+the store you have rather than one someone else had.
 
 **Off until there is a store; on once there is.** Nothing creates a store unasked — `--store` / `--edges`,
 `truedat --config store true` (and `edges`), or `--store-import` make the first one, and an existing catalog
@@ -260,9 +244,8 @@ generation, whether the published files are at that generation, edge-array captu
 `--store-vacuum`
 (`--page-size <N>`, a power of two 512..65536; default 16384). New stores use 16 KB pages: a feature
 row is ~2 KB, so at SQLite's 4 KB default every row took a page of its own; vacuuming a 4 KB-page store
-shrank it 29%. Measured 2026-10-17 on this build: `--store-import` of a 7,641-entry catalog (29.3 MB) took
-4.0 s and made a 23.0 MB store, before edges. A store migrated from an older schema also keeps its
-pre-migration backup beside it.
+shrank it by about a third. A store migrated from an older schema also keeps its pre-migration backup
+beside it.
 
 ## Quick Start
 
