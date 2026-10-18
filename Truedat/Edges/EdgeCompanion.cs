@@ -29,6 +29,62 @@ namespace Truedat.Edges
         };
         static readonly string[] StatusWords = { "ok", "short-context", "unavailable", "failed" };
 
+        /// <summary>Bounded head read of a companion on disk: the count and generation THE FILE declares, for a
+        /// summary line that reports the artifact rather than the store it was written from (a stale companion
+        /// must be able to disagree with the store, or the line cannot show that it is stale). Same shape as
+        /// <c>CatalogOrigin.TryReadHead</c> — first 64 KB, tolerant of a BOM, stops at <c>tracks</c>. False when
+        /// the head is not this contract.</summary>
+        internal static bool TryReadSummary(string path, out int tracks, out long? generation)
+        {
+            tracks = 0; generation = null;
+            byte[] head;
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    var buf = new byte[64 * 1024];
+                    int n = 0, r;
+                    while (n < buf.Length && (r = fs.Read(buf, n, buf.Length - n)) > 0) n += r;
+                    head = new byte[n]; Array.Copy(buf, head, n);
+                }
+            }
+            catch { return false; }
+
+            int start = (head.Length >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) ? 3 : 0;
+            bool contractOk = false;
+            try
+            {
+                var reader = new Utf8JsonReader(new ReadOnlySpan<byte>(head, start, head.Length - start),
+                    isFinalBlock: false, state: new JsonReaderState());
+                if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return false;
+                while (reader.Read())
+                {
+                    if (reader.TokenType == JsonTokenType.EndObject) break;
+                    if (reader.TokenType != JsonTokenType.PropertyName) continue;
+                    string name = reader.GetString() ?? "";
+                    if (name == "tracks") break;                       // past the head — stop
+                    if (!reader.Read()) break;
+                    if (name == "contract") contractOk = reader.TokenType == JsonTokenType.String && reader.GetString() == Contract;
+                    else if (name == "trackCount" && reader.TokenType == JsonTokenType.Number) tracks = reader.GetInt32();
+                    else if (name == "origin" && reader.TokenType == JsonTokenType.StartObject)
+                    {
+                        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+                        {
+                            if (reader.TokenType != JsonTokenType.PropertyName) continue;
+                            string k = reader.GetString() ?? "";
+                            if (!reader.Read()) break;
+                            if (k == "generation" && reader.TokenType == JsonTokenType.Number) generation = reader.GetInt64();
+                        }
+                    }
+                    // spectralOrder / statusWords sit between the header and trackCount. TrySkip, never Skip:
+                    // the buffer is deliberately partial (isFinalBlock: false) and Skip throws on one.
+                    else if (reader.TokenType == JsonTokenType.StartArray && !reader.TrySkip()) break;
+                }
+            }
+            catch { return false; }
+            return contractOk;
+        }
+
         /// <summary>Write the companion to <paramref name="path"/> atomically (temp + swap). <paramref name="generation"/>, when
         /// given, is the store's publication generation (store-v3 T07): it lands as <c>origin.generation</c> in the root, which an
         /// upgraded hub matches against the catalog's and an old hub ignores (unknown root key). Null keeps the pre-T07 shape.</summary>

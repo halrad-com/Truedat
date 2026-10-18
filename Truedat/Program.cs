@@ -6712,30 +6712,6 @@ namespace Truedat
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
             Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
-            try
-            {
-                long catBytes = File.Exists(moodsPath) ? new FileInfo(moodsPath).Length : 0;
-                if (catBytes > 0)
-                {
-                    double catMb = catBytes / (1024.0 * 1024.0);
-                    Console.WriteLine($"  Catalog:    {catMb:F1} MB  (mbxmoods.json)");
-                    var scPath = Path.ChangeExtension(moodsPath, ".mbxs");
-                    if (File.Exists(scPath))
-                    {
-                        long scBytes = new FileInfo(scPath).Length;
-                        Console.WriteLine($"  Sidecar:    {scBytes / (1024.0 * 1024.0):F1} MB  (.mbxs binary index, {(double)catBytes / Math.Max(1, scBytes):F0}x smaller)");
-                    }
-                    var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
-                    var baks = Directory.GetFiles(dir, Path.GetFileName(moodsPath) + ".bak.*.zip");
-                    if (baks.Length > 0)
-                    {
-                        long bakBytes = 0; foreach (var b in baks) bakBytes += new FileInfo(b).Length;
-                        double avgBak = (double)bakBytes / baks.Length;
-                        Console.WriteLine($"  Backups:    {baks.Length} compressed .zip, {bakBytes / (1024.0 * 1024.0):F1} MB total  (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
-                    }
-                }
-            }
-            catch { /* size/compression stats are best-effort */ }
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
@@ -13063,7 +13039,13 @@ namespace Truedat
                 Console.WriteLine($"  {"fileMd5",-20} {s.FileMd5,9:N0} stray values   (unused; truedat --migrate strips)");
             if (s.AudioHead64kMd5 < total)
                 Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5) + "   (quick-cache; --verify --backfill fills)");
-            Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
+            // SMFM has been off by default since 4e91ef7, and truedat only READS it — no command fills
+            // the gap a 0% row implies (the same advisor rule that keeps --list-missing-smfm out of
+            // Recommended). With nothing captured and the reader off, the row reports a feature that is
+            // not running as missing data, so it is omitted; the header says so when it IS on. A catalog
+            // that holds blocks always gets the row, whatever this run's setting.
+            if (s.Smfm > 0 || !_noSmfm)
+                Console.WriteLine(Cov("Sony SMFM (12-TONE)", s.Smfm, showComplete: false, showGap: false));
             if (s.DuplicateGroups > 0)
             {
                 Console.WriteLine();
@@ -13243,6 +13225,28 @@ namespace Truedat
                         Console.WriteLine("  Sidecar:  none  (.mbxs absent — MBXHub parses the full JSON at boot)");
                     }
                     var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+                    // The edge companion is published beside the catalog and was the one artifact this block
+                    // never named — a scan that wrote 7.8 MB of edges reported three files and not that one
+                    // (operator, 2026-10-18). Reported from the FILE's own head, so a companion left behind by
+                    // an older generation shows as behind instead of borrowing the store's current numbers.
+                    string compName = global::Truedat.Edges.EdgeCompanion.FileName;
+                    var compPath = Path.Combine(dir, compName);
+                    if (File.Exists(compPath))
+                    {
+                        long compBytes = new FileInfo(compPath).Length;
+                        string compNote;
+                        if (global::Truedat.Edges.EdgeCompanion.TryReadSummary(compPath, out int compTracks, out long? compGen))
+                        {
+                            compNote = $"{compTracks:N0} tracks";
+                            if (compGen.HasValue) compNote += $", generation {compGen.Value:N0}";
+                            if (compGen.HasValue && storeInfo != null && compGen.Value != storeInfo.Generation)
+                                compNote += $" — store at {storeInfo.Generation:N0}: truedat --edges-export";
+                        }
+                        else compNote = "header unreadable";
+                        Console.WriteLine($"  Edges:    {compBytes / (1024.0 * 1024.0):F1} MB  ({compName}, {compNote})");
+                    }
+                    else if (storeInfo != null && storeInfo.EdgeTracks > 0)
+                        Console.WriteLine($"  Edges:    none  ({compName} absent; the store holds {storeInfo.EdgeTracks:N0}: truedat --edges-export)");
                     var baks = Directory.GetFiles(dir, Path.GetFileName(path) + ".bak.*.zip");
                     if (baks.Length > 0)
                     {
