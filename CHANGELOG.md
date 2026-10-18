@@ -8,6 +8,35 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV2.2.1] — 2026-10-18
+
+### Changed
+
+- **The end-of-scan report names every file the run wrote, and prints the list once.** `mbxedges.v1.json` was
+  never named by any summary, the catalog and sidecar sizes were printed twice by two different emitters, and
+  nine files — 9.6 MB of 89.1 on a 7,651-track library — went unlisted. One block now: catalog, sidecar, edges,
+  store, reports, backups, and a total.
+- **Report lines fit an 80-column window.** A wrapped line destroyed the table's alignment; long notes now sit
+  on their own indented lines and count columns are sized to the catalog.
+- **The store line carries both counts.** `7,534 descriptions for 7,651 catalog tracks (117 duplicate paths)` —
+  the store describes audio, the catalog holds paths, and the gap used to read as missing edge rows.
+- **The Sony SMFM row is omitted when nothing is captured and the reader is off** (its default). No command
+  fills that gap, so a 0% line reported a feature that is not running as missing data. A catalog that holds
+  SMFM blocks still gets the row.
+- **`Elapsed` covers the whole run.** The clock stopped before the catalog, store, sidecar and companion were
+  written, so a 4.4 s write was reported as `Elapsed 0.3s` with a finish time from before those files existed.
+  It now reads `4.7s (scan 0.3s, write 4.4s)`, and the separate `Last save` line is gone.
+- **`Output:` lists what the run wrote**, not just the catalog.
+
+### Fixed
+
+- **Scan spill files no longer land beside the library.** Each fold is spilled to disk and deleted by the flush
+  that commits it — transient working data that was creating an `artifacts\` folder next to `mbxmoods.json`.
+  It now goes under the stage directory, so `--stage-dir` moves every scratch file truedat writes. Existing
+  `artifacts\pending` leftovers are swept.
+- **A successful scan no longer prints `Error: no catalog beside which to write mbxedges.v1.json`** while
+  publishing that exact file.
+
 ## [0.5.5.3-EV2.2] — 2026-10-18
 
 ### Fixed
