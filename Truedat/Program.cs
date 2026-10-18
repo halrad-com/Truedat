@@ -2887,6 +2887,7 @@ namespace Truedat
             // folder is a share, --store-dir relocating that layout; explicit --store <path> always wins.
             // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
             if (noStore) { storePath = null; _storeFromConfig = false; }
+            _noStoreTyped = noStore;
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
@@ -13205,6 +13206,8 @@ namespace Truedat
                 if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
                     rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
             }
+            else if (ShouldRecommendStore(storeInForce: false, _noStoreTyped, entries.Count))
+                rec.Add("no store yet                            ->  truedat --store-import  (seconds, no audio read; then truedat --refresh adds the edges)");
 
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
             if (anyRec)
@@ -16727,6 +16730,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "adopt: an explicit --store needs no adoption (it resolves on its own)");
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: true, storeFileExists: true),
                     "adopt: a store verb resolves its own path, never through adoption");
+                Assert(ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 7641), "advisor: a catalog with no store is told the first store step");
+                Assert(!ShouldRecommendStore(storeInForce: true, noStore: false, catalogEntries: 7641), "advisor: a store in force gets the edges line instead, not this one");
+                Assert(!ShouldRecommendStore(storeInForce: false, noStore: true, catalogEntries: 7641), "advisor: a typed --no-store is not advised against");
+                Assert(!ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 0), "advisor: an empty catalog has nothing to import");
                 Assert(ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false), "adopt: edges come on with an adopted store");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: true), "adopt: --no-edges still wins");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: false, noEdges: false), "adopt: no adopted store means edges stay as they were");
@@ -21918,6 +21925,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// created a store (and its artifacts) on a fresh library and is what the 2026-10-13 footprint
         /// ruling removed; the <c>storeExists</c> arm only ever used one that was already there, and was
         /// removed with it in b9b27ec by mistake. Restored here, alone.
+        /// <summary>Whether the advisor names the store's first step. A catalog with no store was never counted as a gap (the store is
+        /// opt-in and nothing creates one unasked, 2026-10-13), so the summary told an operator how to add edges only once they had
+        /// already found the store on their own. Advice, never an action; a typed --no-store is the operator saying no.</summary>
+        internal static bool ShouldRecommendStore(bool storeInForce, bool noStore, int catalogEntries)
+            => !storeInForce && !noStore && catalogEntries > 0;
+
+        /// <summary>The run's typed --no-store, kept for the advisor (the config key is already folded into the args).</summary>
+        static bool _noStoreTyped;
+
         internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists)
             => !noStore && !storeAsked && !storeVerb && storeFileExists;
 
