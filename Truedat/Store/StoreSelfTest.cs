@@ -54,6 +54,7 @@ namespace Truedat.Store
             Block(assert, "CopyMerge", () => TestCopyMerge(assert));
             Block(assert, "PerFileIdentity", () => TestPerFileIdentity(assert));
             Block(assert, "RoundtripCopyFacts", () => TestRoundtripCopyFacts(assert));
+            Block(assert, "RoundtripPrecision", () => TestRoundtripPrecision(assert));
             Console.WriteLine("Store self-test (keeper 083/084 N1: --refresh before an import says why no track is selected for edges, and names the import for this catalog/store)");
             Block(assert, "EdgesRefreshNotice", () => TestEdgesRefreshNotice(assert));
             Console.WriteLine("Store self-test (S2 C3: the scan writes the store through the import's in-memory entry)");
@@ -514,6 +515,39 @@ namespace Truedat.Store
         // T13 (gate d): a non-primary copy of a multi-copy media exports its media's ONE description, so only the shared CONTENT columns
         // may differ from its catalog entry. Its copy facts (tags, trackId, fingerprint, SMFM, analysisDuration, fileMd5) and its location
         // (lastModified) are stored per copy and must round-trip exactly — the gate used to excuse ANY difference on such a copy.
+        // MB3 (2026-10-18): a catalog written by an older build spells some values one ulp off their decimal; the store holds each field
+        // at its declared precision and gives the decimal back. The gate reported those 47 entries as NOT EQUAL — the store holds the
+        // catalog, only the spelling differs — while a value one step beyond the precision must still fail it.
+        static void TestRoundtripPrecision(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "rt-precision-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            const string A = @"D:\Music\a\one.flac";
+            TrackEntry Entry(double rms) => new TrackEntry
+            {
+                AudioStreamSha256 = new string('e', 64), LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc),
+                Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120.0, SpectralRms = rms, Mfcc = new double[13] },
+            };
+            try
+            {
+                var catalog = Path.Combine(dir, "mbxmoods.json");
+                var oneUlp = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(0.002877) + 1);
+                WriteCatalog(catalog, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [A] = Entry(oneUlp) });
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                var rt = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt.SamePrecision == 1 && rt.Different == 0 && rt.Equal,
+                    $"a value spelled one ulp off its decimal round-trips EQUAL at its declared precision ({rt.Same} same / {rt.SamePrecision} at precision / {rt.Different} different, equal {rt.Equal})");
+
+                var beyond = Path.Combine(dir, "beyond.json");
+                WriteCatalog(beyond, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [A] = Entry(0.002878) });
+                var rt2 = ExportCommand.Roundtrip(store, beyond, null);
+                assert(rt2.Different == 1 && rt2.SamePrecision == 0 && !rt2.Equal && rt2.FirstDifferentPath == A,
+                    $"a value one step beyond the declared precision still fails the gate ({rt2.SamePrecision} at precision / {rt2.Different} different, equal {rt2.Equal})");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         static void TestRoundtripCopyFacts(Action<bool, string> assert)
         {
             var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "rt-copyfacts-" + Guid.NewGuid().ToString("N").Substring(0, 8));

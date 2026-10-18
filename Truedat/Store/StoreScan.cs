@@ -157,12 +157,7 @@ namespace Truedat.Store
         /// (the excuse --store-roundtrip already makes, gate d). Anything else — a value beyond the precision, a copy fact, the
         /// location — is still a difference.</summary>
         internal static bool HoldsSameFacts(string path, TrackEntry catalogEntry, TrackEntry storeEntry, bool nonPrimaryCopy)
-        {
-            if (Program.EntryBytes(path, catalogEntry).AsSpan().SequenceEqual(Program.EntryBytes(path, storeEntry))) return true;
-            var store = ExportCommand.EntryJson(path, TrackEntryMapper.AtStorePrecision(storeEntry));
-            if (ExportCommand.EntryJson(path, TrackEntryMapper.AtStorePrecision(catalogEntry)) == store) return true;
-            return nonPrimaryCopy && ExportCommand.EntryJson(path, TrackEntryMapper.WithContentOf(catalogEntry, storeEntry)) == store;
-        }
+            => ExportCommand.Classify(path, catalogEntry, storeEntry, nonPrimaryCopy, out _) != ExportCommand.Agreement.Different;
 
         static LoadResult Fill(LoadResult res, Dictionary<string, TrackEntry> entries, ConcurrentDictionary<string, TrackEntry> target)
         {

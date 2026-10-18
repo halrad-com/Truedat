@@ -35,6 +35,10 @@ namespace Truedat.Store
         /// content columns: by the 1:many:1 ruling they export their media's single description, so that difference is expected. A copy
         /// fact or lastModified difference on such a copy counts in <see cref="Different"/> (T13, gate d).</summary>
         public int DifferentMerged;
+        /// <summary>Entries whose bytes differ but whose values agree at each field's declared precision: an older writer spelled a value
+        /// one ulp off its decimal ("0.0028770000000000002" for 0.002877), and the store, holding the field at that precision, gives the
+        /// decimal back. The store holds the catalog; only the spelling moved. (MB3, 2026-10-18: 47 of 7,641.)</summary>
+        public int SamePrecision;
         public string? FirstDifferentPath;
         public bool Equal => OnlyInCatalog == 0 && OnlyInStore == 0 && Different == 0 && CatalogEntries == StoreEntries;
     }
@@ -206,16 +210,46 @@ namespace Truedat.Store
                 StoreLog.SetVerbose(audit);
                 var r = Roundtrip(storePath, catalogPath, exportRoot);
                 Console.WriteLine($"Round-trip {storePath} vs {catalogPath}: catalog {r.CatalogEntries}, store {r.StoreEntries}, identical {r.Same}, different {r.Different}, only in catalog {r.OnlyInCatalog}, only in store {r.OnlyInStore}" +
+                                  (r.SamePrecision > 0 ? $", same at declared precision {r.SamePrecision} (only the number spelling differs)" : "") +
                                   (r.DifferentMerged > 0 ? $", merged copies differing {r.DifferentMerged} (expected: a non-primary copy exports its media's single description)" : ""));
                 if (r.FirstDifferentPath != null) Console.WriteLine($"  first difference: {r.FirstDifferentPath}");
                 Console.WriteLine(r.Equal
-                    ? (r.DifferentMerged == 0 ? "RESULT: EQUAL — every entry writes the same bytes from the store as from the catalog"
-                                              : $"RESULT: EQUAL — every single-copy entry writes the same bytes; {r.DifferentMerged} extra copies of duplicate audio now carry their media's one description (1 : many : 1)")
+                    ? (r.DifferentMerged == 0 && r.SamePrecision == 0 ? "RESULT: EQUAL — every entry writes the same bytes from the store as from the catalog"
+                                              : "RESULT: EQUAL — the store holds every entry" +
+                                                (r.SamePrecision > 0 ? $"; {r.SamePrecision} write their numbers as the decimal at the field's precision" : "") +
+                                                (r.DifferentMerged > 0 ? $"; {r.DifferentMerged} extra copies of duplicate audio now carry their media's one description (1 : many : 1)" : ""))
                     : "RESULT: NOT EQUAL");
                 return r.Equal ? 0 : 1;
             }
             catch (StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); return ex.ExitCode; }
             catch (Exception ex) { Console.Error.WriteLine("Error: round-trip failed: " + ex.Message); return 1; }
+        }
+
+        internal enum Agreement { Same, SamePrecision, MergedCopy, Different }
+
+        /// <summary>How a catalog entry relates to the store's entry for the same path — the ONE rule, shared by this gate and the scan's
+        /// no-origin precondition (StoreScan.HoldsSameFacts), so the two cannot disagree about whether the store holds the catalog.
+        /// Same = identical bytes. SamePrecision = identical once both are taken to each field's declared precision: the store holds
+        /// that precision, so an older writer's one-ulp spelling comes back as the decimal it stood for. MergedCopy = a non-primary copy
+        /// of duplicate audio that differs only in the shared description (T13, gate d: put the store's content columns into the
+        /// catalog's entry; whatever still differs is a copy fact or the location, stored per copy). Different = anything else.
+        /// <paramref name="firstDifference"/> names where the renderings part, for the log.</summary>
+        internal static Agreement Classify(string path, TrackEntry catalogEntry, TrackEntry storeEntry, bool nonPrimaryCopy, out string? firstDifference)
+        {
+            firstDifference = null;
+            string a = EntryJson(path, catalogEntry), b = EntryJson(path, storeEntry);
+            if (a == b) return Agreement.Same;
+            string store = EntryJson(path, TrackEntryMapper.AtStorePrecision(storeEntry));
+            if (EntryJson(path, TrackEntryMapper.AtStorePrecision(catalogEntry)) == store) { firstDifference = FirstDifference(a, b); return Agreement.SamePrecision; }
+            if (nonPrimaryCopy)
+            {
+                var h = EntryJson(path, TrackEntryMapper.WithContentOf(catalogEntry, storeEntry));
+                if (h == store) return Agreement.MergedCopy;
+                firstDifference = FirstDifference(h, store);
+                return Agreement.Different;
+            }
+            firstDifference = FirstDifference(a, b);
+            return Agreement.Different;
         }
 
         /// <summary>Where two renderings first part, with 60 characters of each around it — a NOT EQUAL that names only the path
@@ -248,17 +282,17 @@ namespace Truedat.Store
                 r.StoreEntries++;
                 seen.Add(display);
                 if (!catalog.TryGetValue(display, out var orig)) { r.OnlyInStore++; continue; }
-                string a = EntryJson(display, orig), b = EntryJson(display, entry);
-                if (a == b) r.Same++;
-                else if (merged.Contains(display))
+                bool nonPrimary = merged.Contains(display);
+                switch (Classify(display, orig, entry, nonPrimary, out var diff))
                 {
-                    // T13 (gate d): the merge excuses the shared DESCRIPTION only. Put the store's content columns into the catalog's entry
-                    // and compare again: whatever still differs is a copy fact or the location — stored per copy — and fails the gate.
-                    var h = EntryJson(display, TrackEntryMapper.WithContentOf(orig, entry));
-                    if (h == b) { r.DifferentMerged++; StoreLog.Debug($"differs in the shared description only (merged copy, expected): {display}"); }
-                    else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"merged copy differs beyond the shared description: {display}: {FirstDifference(h, b)}"); }
+                    case Agreement.Same: r.Same++; break;
+                    case Agreement.SamePrecision: r.SamePrecision++; StoreLog.Debug($"differs only in how a value is spelled (same at its declared precision): {display}: {diff}"); break;
+                    case Agreement.MergedCopy: r.DifferentMerged++; StoreLog.Debug($"differs in the shared description only (merged copy, expected): {display}"); break;
+                    default:
+                        r.Different++; r.FirstDifferentPath ??= display;
+                        StoreLog.Debug(nonPrimary ? $"merged copy differs beyond the shared description: {display}: {diff}" : $"differs: {display}: {diff}");
+                        break;
                 }
-                else { r.Different++; r.FirstDifferentPath ??= display; StoreLog.Debug($"differs: {display}: {FirstDifference(a, b)}"); }
             }
             foreach (var key in catalog.Keys) if (!seen.Contains(key)) r.OnlyInCatalog++;
             return r;
