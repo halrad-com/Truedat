@@ -8,9 +8,14 @@ This is the `truedat-deps` branch of the Truedat repo (binaries via Git LFS), ke
 
 `essentia_streaming_extractor_music.exe` is the audio feature extractor Truedat invokes for a default scan. It is **built from source** (`essentia-build/` in the main repo) as a static x86-64 MinGW cross-compile — the official Essentia builds are 32-bit only and hit a 2 GB memory ceiling on large audio files. The former 32-bit `essentia_streaming_extractor_music_i686.exe` is no longer carried.
 
-| File | SHA-256 |
-|------|---------|
-| `essentia_streaming_extractor_music.exe` | `6441e29e5e6ed180d0d6ba78f4ee94240571eb38a657210a83a76756892e7229` |
+| File | SHA-256 | MD5 |
+|------|---------|-----|
+| `essentia_streaming_extractor_music.exe` | `5114426816ef64f11cb3b8c53844dc324cf420272ba9d757e148bc7edf224a98` | `6f47bdfcaadfd4f510c5e1621c07945d` |
+
+Truedat identifies the build by MD5 and names it on the `Extractor:` line of a scan, so the MD5 is
+carried here too. This one is **`output-x64.5`**: `.4` plus a binary frames output (`--frames-bin`,
+`framesInclude`) and a build id in the output. `--edges` requires it and refuses an older build by name;
+everything else works unchanged on `.4`.
 
 - **Version**: music extractor `music 2.0`, Essentia 2.1-beta6-dev
 - **Architecture**: PE32+ x86-64 (static)
