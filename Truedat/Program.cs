@@ -6647,8 +6647,7 @@ namespace Truedat
             catch (OperationCanceledException) { }
             budgetTimer?.Dispose();   // also keeps the timer reachable until here (a local-only Timer can be collected before it fires)
 
-            sw.Stop();
-            var endTime = DateTime.Now;
+            sw.Stop();   // the SCAN clock, and the divisor for every rate below — it stops with the analysis
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
 
             var finalSaveSw = Stopwatch.StartNew();
@@ -6657,8 +6656,12 @@ namespace Truedat
             // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
             var finalWrites = _storePath != null
                 ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys)
-                : RunFinalWrites(checkpointFailure, true, () => { SaveResults(moodsPath, allTracks); finalSaveSw.Stop(); }, () => FlushStoreSink(allTracks.Keys));
-            finalSaveSw.Stop();
+                : RunFinalWrites(checkpointFailure, true, () => SaveResults(moodsPath, allTracks), () => FlushStoreSink(allTracks.Keys));
+            finalSaveSw.Stop();   // the WHOLE final-write phase: catalog, store flush, sidecar, companion
+            // Stamped after the writes, not at sw.Stop(). It used to be taken before them, so a run that
+            // spent four seconds writing the catalog, the store and the companion printed "Elapsed 1.8s"
+            // and a Finished time from before those files existed (operator, 2026-10-18).
+            var endTime = DateTime.Now;
             KeepAwakeRelease();   // scan phase (incl. final save) is over; nothing left to hold awake for
 
             Console.WriteLine();
@@ -6681,7 +6684,7 @@ namespace Truedat
             }
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
-            Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed)}");
+            Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed + finalSaveSw.Elapsed)}  (scan {FormatTimeSpan(sw.Elapsed)}, write {finalSaveSw.Elapsed.TotalSeconds:F1}s)");
             Console.WriteLine();
             void PrintScanTallies()
             {
@@ -6803,8 +6806,8 @@ namespace Truedat
             FlushRunLedger(runLedgerPath);
             PruneErrorsCsv(errorsPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
-            if (finalSaveSw != null)
-                Console.WriteLine($"  Last save:  {finalSaveSw.Elapsed.TotalSeconds:F1}s");
+            // (the final-write time is in Elapsed above, where it belongs — it was a line of its own that
+            //  reported more seconds than the run it sat inside)
             try
             {
                 using var currentProcess = Process.GetCurrentProcess();
@@ -6821,6 +6824,14 @@ namespace Truedat
             ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys, workListKeys);
             Console.WriteLine();
             Console.WriteLine($"Output: {moodsPath}");
+            // ...and the rest of what the run wrote. "Output" named one file of four, which is how a scan
+            // that published 7.8 MB of edges could look like it had written only the catalog.
+            var alsoWrote = new List<string>();
+            var sidecarOut = Path.ChangeExtension(moodsPath, ".mbxs");
+            if (File.Exists(sidecarOut)) alsoWrote.Add(Path.GetFileName(sidecarOut));
+            if (_edgesCompanionPath != null && File.Exists(_edgesCompanionPath)) alsoWrote.Add(Path.GetFileName(_edgesCompanionPath));
+            if (_storePath != null && File.Exists(_storePath)) alsoWrote.Add(Path.GetFileName(_storePath));
+            if (alsoWrote.Count > 0) Console.WriteLine($"        + {string.Join(", ", alsoWrote)}");
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
 
@@ -12977,6 +12988,42 @@ namespace Truedat
         /// --audit tee captures it in truedat.log). When the catalog has fewer than
         /// <paramref name="detailThreshold"/> tracks it lists each file with its per-field
         /// status instead of aggregate counts — aggregates over 1-4 files aren't useful.</summary>
+        /// <summary>The catalog summary is a TABLE, and a terminal that wraps one of its lines destroys the
+        /// column alignment that makes it readable at a glance (operator, 2026-10-18: "on narrow windows this
+        /// wraps and looses its prettified report output"). Every line the report prints is built to fit this
+        /// width; a note that does not fit moves to its own indented continuation lines, broken on words.
+        /// 78 leaves an 80-column console a margin — the narrowest window worth designing for.</summary>
+        internal const int ReportWidth = 78;
+
+        /// <summary>Print <paramref name="note"/> under a stat line, wrapped on word boundaries inside
+        /// <see cref="ReportWidth"/>. A single word longer than the width (a path) is left whole: breaking
+        /// it would make it uncopyable, which costs more than the wrap.</summary>
+        static void ReportNote(string note, string indent = "      ")
+        {
+            foreach (var line in WrapNote(note, Math.Max(20, ReportWidth - indent.Length)))
+                Console.WriteLine(indent + line);
+        }
+
+        /// <summary>The wrap itself, pure so the self-test can hold it to the width.</summary>
+        internal static List<string> WrapNote(string note, int width)
+        {
+            var lines = new List<string>();
+            if (string.IsNullOrWhiteSpace(note)) return lines;
+            var line = new StringBuilder();
+            foreach (var word in note.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Length > 0 && line.Length + 1 + word.Length > width)
+                {
+                    lines.Add(line.ToString());
+                    line.Clear();
+                }
+                if (line.Length > 0) line.Append(' ');
+                line.Append(word);
+            }
+            if (line.Length > 0) lines.Add(line.ToString());
+            return lines;
+        }
+
         static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
@@ -13012,13 +13059,16 @@ namespace Truedat
             // a plain-English status note so the gaps read at a glance.
             // Floor the percent so a near-complete count never rounds up to a
             // misleading "100%" while tracks are still missing.
+            // Count columns are sized to the catalog, not to a fixed 9: on a 7k library the fixed width
+            // padded every row with four dead spaces and pushed the suffixes past a narrow terminal.
+            int numW = total.ToString("N0").Length;
             string Cov(string label, int present, bool showComplete = true, bool showGap = true)
             {
                 int pct = total == 0 ? 0 : (int)Math.Floor(100.0 * present / total);
                 string note = present == total
                     ? (showComplete ? "complete" : "")
                     : (showGap ? $"{total - present:N0} missing" : "");
-                string line = $"  {label,-20} {present,9:N0} / {total,-9:N0} {pct,3}%";
+                string line = $"  {label,-20} {present.ToString("N0").PadLeft(numW)} / {total.ToString("N0").PadRight(numW)} {pct,3}%";
                 return note.Length > 0 ? line + "   " + note : line;
             }
 
@@ -13036,9 +13086,15 @@ namespace Truedat
             if (_fileMd5Enabled && s.FileMd5 > 0)
                 Console.WriteLine(Cov("fileMd5", s.FileMd5));
             else if (s.FileMd5 > 0)
-                Console.WriteLine($"  {"fileMd5",-20} {s.FileMd5,9:N0} stray values   (unused; truedat --migrate strips)");
+            {
+                Console.WriteLine($"  {"fileMd5",-20} {s.FileMd5.ToString("N0").PadLeft(numW)} stray values");
+                ReportNote("unused; truedat --migrate strips");
+            }
             if (s.AudioHead64kMd5 < total)
-                Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5) + "   (quick-cache; --verify --backfill fills)");
+            {
+                Console.WriteLine(Cov("audioHead64kMd5", s.AudioHead64kMd5));
+                ReportNote("quick-cache evidence; truedat --verify --backfill fills");
+            }
             // SMFM has been off by default since 4e91ef7, and truedat only READS it — no command fills
             // the gap a 0% row implies (the same advisor rule that keeps --list-missing-smfm out of
             // Recommended). With nothing captured and the reader off, the row reports a feature that is
@@ -13049,7 +13105,8 @@ namespace Truedat
             if (s.DuplicateGroups > 0)
             {
                 Console.WriteLine();
-                Console.WriteLine($"  Duplicate audio       {s.DuplicateGroups,9:N0} groups, {s.RedundantCopies:N0} redundant   (list: truedat --duplicates)");
+                Console.WriteLine($"  {"Duplicate audio",-20} {s.DuplicateGroups.ToString("N0").PadLeft(numW)} groups, {s.RedundantCopies:N0} redundant");
+                ReportNote("list: truedat --duplicates");
             }
             // Speech is a class stat like Duplicate audio above — a fact about the
             // catalog, not a nag. Two lines, not one: each must point ONLY at a surface
@@ -13062,9 +13119,15 @@ namespace Truedat
             if (s.SpeechAcoustic > 0 || s.SpeechLabelOnly > 0)
                 Console.WriteLine();
             if (s.SpeechAcoustic > 0)
-                Console.WriteLine($"  {"Speech (acoustic)",-20} {s.SpeechAcoustic,9:N0} tracks   (review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions)");
+            {
+                Console.WriteLine($"  {"Speech (acoustic)",-20} {s.SpeechAcoustic.ToString("N0").PadLeft(numW)} tracks");
+                ReportNote("review: truedat --list-speech, then write a decisions delta and truedat --apply-exclusions");
+            }
             if (s.SpeechLabelOnly > 0)
-                Console.WriteLine($"  {"Speech (genre label)",-20} {s.SpeechLabelOnly,9:N0} tracks   (labeled Podcast in the library; not acoustically speech — a genre rule excludes them: kind:genre, value:Podcast)");
+            {
+                Console.WriteLine($"  {"Speech (genre label)",-20} {s.SpeechLabelOnly.ToString("N0").PadLeft(numW)} tracks");
+                ReportNote("labeled Podcast in the library; not acoustically speech — a genre rule excludes them: kind:genre, value:Podcast");
+            }
 
             // Recommended next steps — detected state -> exact command. Advisory
             // only: truedat NEVER prompts; it prints what to run and moves on.
@@ -13201,66 +13264,139 @@ namespace Truedat
                     Console.WriteLine($"    {s.MissingWave:N0} entries lack the latest features:");
                     foreach (var w in waveBreakdown) Console.WriteLine($"      {w}");
                 }
-                foreach (var r in rec) Console.WriteLine($"    {r}");
+                foreach (var r in rec)
+                {
+                    if (r.Length + 4 <= ReportWidth) Console.WriteLine($"    {r}");
+                    else ReportNote(r, "    ");
+                }
             }
             try
             {
+                // Every file the run leaves on disk for this library, one aligned line each, and a total that
+                // closes the accounting (operator, 2026-10-18: "why is not all the data accounted for here").
+                // Sizes are read from the files themselves; nothing here is inferred from the command line.
+                // Lines are built to ReportWidth so a narrow terminal cannot wrap the table out of alignment.
+                long accounted = 0;
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+                void SizeLine(string label, long bytes, string detail)
+                {
+                    string head = $"  {label,-10}{bytes / (1024.0 * 1024.0),7:F1} MB  ";
+                    if (head.Length + detail.Length <= ReportWidth) Console.WriteLine(head + detail);
+                    else { Console.WriteLine(head.TrimEnd()); ReportNote(detail); }
+                }
+
                 long catBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
+                if (catBytes > 0 || storeInfo != null) Console.WriteLine();
                 if (catBytes > 0)
                 {
-                    Console.WriteLine();
-                    Console.WriteLine($"  Catalog:  {catBytes / (1024.0 * 1024.0):F1} MB  (mbxmoods.json)");
+                    accounted += catBytes;
+                    SizeLine("Catalog:", catBytes, Path.GetFileName(path));
                     if (sc.Present)
                     {
-                        // One line, but it must answer the question that matters: can MBXHub boot
-                        // from this, or is it silently falling back to parsing the whole JSON?
-                        // Size alone never answered that — a v2 sidecar looks perfectly healthy.
+                        // The version and state are the point: size alone never answered whether MBXHub can
+                        // boot from this sidecar - a v2 one looks perfectly healthy.
                         string ver = sc.Version < 0 ? "unreadable"
                                    : sc.Version == scCurrent ? $"v{sc.Version}"
                                    : $"v{sc.Version}, needs v{scCurrent}";
-                        Console.WriteLine($"  Sidecar:  {sc.SizeBytes / (1024.0 * 1024.0):F1} MB  (.mbxs {ver}, {(double)catBytes / Math.Max(1, sc.SizeBytes):F0}x smaller) — {SidecarStateNote(sc, scCurrent)}");
+                        accounted += sc.SizeBytes;
+                        SizeLine("Sidecar:", sc.SizeBytes, $"{Path.GetFileName(Path.ChangeExtension(path, ".mbxs"))} ({ver}, {SidecarStateNote(sc, scCurrent)})");
                     }
                     else
                     {
-                        Console.WriteLine("  Sidecar:  none  (.mbxs absent — MBXHub parses the full JSON at boot)");
+                        Console.WriteLine("  Sidecar:      none");
+                        ReportNote(".mbxs absent — MBXHub parses the full JSON at boot");
                     }
-                    var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
-                    // The edge companion is published beside the catalog and was the one artifact this block
-                    // never named — a scan that wrote 7.8 MB of edges reported three files and not that one
-                    // (operator, 2026-10-18). Reported from the FILE's own head, so a companion left behind by
-                    // an older generation shows as behind instead of borrowing the store's current numbers.
-                    string compName = global::Truedat.Edges.EdgeCompanion.FileName;
-                    var compPath = Path.Combine(dir, compName);
-                    if (File.Exists(compPath))
+                }
+
+                // The edge companion: read from the FILE's own head, never from the store, so one left behind
+                // at an older generation reads as behind instead of borrowing the store's current numbers.
+                string compName = global::Truedat.Edges.EdgeCompanion.FileName;
+                var compPath = Path.Combine(dir, compName);
+                if (File.Exists(compPath))
+                {
+                    long compBytes = new FileInfo(compPath).Length;
+                    accounted += compBytes;
+                    bool compRead = global::Truedat.Edges.EdgeCompanion.TryReadSummary(compPath, out int compTracks, out long? compGen);
+                    SizeLine("Edges:", compBytes, compRead
+                        ? $"{compName} ({compTracks:N0} tracks{(compGen.HasValue ? $", gen {compGen.Value:N0}" : "")})"
+                        : $"{compName} (header unreadable)");
+                    if (compRead && compGen.HasValue && storeInfo != null && compGen.Value != storeInfo.Generation)
+                        ReportNote($"store is at generation {storeInfo.Generation:N0}: truedat --edges-export");
+                }
+                else if (storeInfo != null && storeInfo.EdgeTracks > 0)
+                {
+                    Console.WriteLine("  Edges:        none");
+                    ReportNote($"{compName} absent; the store holds {storeInfo.EdgeTracks:N0}: truedat --edges-export");
+                }
+
+                if (storeInfo != null)
+                {
+                    accounted += storeInfo.FileBytes + storeInfo.WalBytes;
+                    SizeLine("Store:", storeInfo.FileBytes, $"{Path.GetFileName(storeInfo.Path)} (schema v{storeInfo.SchemaVersion}, {storeInfo.BytesPerTrack:N0} B/track)");
+                    // Both denominators, because they differ and the difference read as missing data: the
+                    // store describes AUDIO (one row per distinct content), the catalog holds PATHS. They
+                    // reconcile through the duplicate paths - say so only when they actually do.
+                    long gap = total - storeInfo.Tracks;
+                    string cover = $"{storeInfo.Tracks:N0} descriptions for {total:N0} catalog tracks";
+                    if (gap > 0 && gap == s.RedundantCopies) cover += $" ({s.RedundantCopies:N0} duplicate paths)";
+                    else if (gap > 0) cover += $" ({gap:N0} not described)";
+                    else if (gap < 0) cover += $" ({-gap:N0} beyond the catalog)";
+                    ReportNote(cover);
+                    long missing = Math.Max(0, storeInfo.Tracks - storeInfo.EdgeTracks);
+                    ReportNote($"edges {storeInfo.EdgeTracks:N0} of {storeInfo.Tracks:N0}"
+                        + (missing > 0 ? $", {missing:N0} missing" : ", complete")
+                        + (storeInfo.EdgeRunsFailed > 0 ? $", {storeInfo.EdgeRunsFailed:N0} failed folds" : "")
+                        + " — detail: truedat --store-info");
+                    if (storeInfo.WalBytes > 1024 * 1024)
+                        ReportNote($"plus {storeInfo.WalBytes / (1024.0 * 1024.0):F1} MB of WAL not yet checkpointed");
+                }
+
+                // The side files. Small individually, 9.6 MB together on a 7.6k library, and never named -
+                // which is how a summary that listed three files came to miss a tenth of what it wrote.
+                var reportNames = new List<string>();
+                long repBytes = 0;
+                foreach (var rf in new[] { "mbxmoods-skipped.csv", "mbxmoods-errors.csv", "mbxmoods-errors.log",
+                                           "mbxmoods-verify.csv", "store-result.json", "store-import-result.json",
+                                           "store-info.json", "apply-result.json" })
+                {
+                    var rp = Path.Combine(dir, rf);
+                    if (!File.Exists(rp)) continue;
+                    repBytes += new FileInfo(rp).Length;
+                    reportNames.Add(rf);
+                }
+                try
+                {
+                    foreach (var lg in Directory.GetFiles(dir, "truedat*.log"))
                     {
-                        long compBytes = new FileInfo(compPath).Length;
-                        string compNote;
-                        if (global::Truedat.Edges.EdgeCompanion.TryReadSummary(compPath, out int compTracks, out long? compGen))
-                        {
-                            compNote = $"{compTracks:N0} tracks";
-                            if (compGen.HasValue) compNote += $", generation {compGen.Value:N0}";
-                            if (compGen.HasValue && storeInfo != null && compGen.Value != storeInfo.Generation)
-                                compNote += $" — store at {storeInfo.Generation:N0}: truedat --edges-export";
-                        }
-                        else compNote = "header unreadable";
-                        Console.WriteLine($"  Edges:    {compBytes / (1024.0 * 1024.0):F1} MB  ({compName}, {compNote})");
+                        repBytes += new FileInfo(lg).Length;
+                        reportNames.Add(Path.GetFileName(lg));
                     }
-                    else if (storeInfo != null && storeInfo.EdgeTracks > 0)
-                        Console.WriteLine($"  Edges:    none  ({compName} absent; the store holds {storeInfo.EdgeTracks:N0}: truedat --edges-export)");
+                }
+                catch { /* the log glob is best-effort */ }
+                if (reportNames.Count > 0)
+                {
+                    accounted += repBytes;
+                    string names = string.Join(", ", reportNames.GetRange(0, Math.Min(3, reportNames.Count)));
+                    if (reportNames.Count > 3) names += $" +{reportNames.Count - 3} more";
+                    SizeLine("Reports:", repBytes, names);
+                }
+
+                if (catBytes > 0)
+                {
                     var baks = Directory.GetFiles(dir, Path.GetFileName(path) + ".bak.*.zip");
                     if (baks.Length > 0)
                     {
                         long bakBytes = 0; foreach (var b in baks) bakBytes += new FileInfo(b).Length;
                         double avgBak = (double)bakBytes / baks.Length;
-                        Console.WriteLine($"  Backups:  {baks.Length} compressed .zip, {bakBytes / (1024.0 * 1024.0):F1} MB total  (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
+                        accounted += bakBytes;
+                        SizeLine("Backups:", bakBytes, $"{baks.Length} compressed .zip (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
                     }
                 }
-                if (storeInfo != null)
+
+                if (accounted > 0)
                 {
-                    long missing = Math.Max(0, storeInfo.Tracks - storeInfo.EdgeTracks);
-                    Console.WriteLine($"  Store:    {storeInfo.FileBytes / (1024.0 * 1024.0):F1} MB  (truedat.db, {storeInfo.Tracks:N0} descriptions, {storeInfo.BytesPerTrack:N0} bytes/track; "
-                        + $"edges {storeInfo.EdgeTracks:N0} of {storeInfo.Tracks:N0}" + (missing > 0 ? $", {missing:N0} missing" : ", complete")
-                        + (storeInfo.EdgeRunsFailed > 0 ? $", {storeInfo.EdgeRunsFailed:N0} failed folds" : "") + ")  — detail: truedat --store-info");
+                    Console.WriteLine("  " + new string('-', 19));
+                    SizeLine("Total:", accounted, "truedat files for this library");
                 }
             }
             catch { /* size/compression stats are best-effort */ }
@@ -21033,6 +21169,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(!gone.Present, "sidecar-readout: reports absent when the .mbxs is missing (JSON fallback)");
                 }
                 finally { try { Directory.Delete(scDir, true); } catch { } }
+            }
+
+            // The catalog summary is a table; a wrapped line destroys the alignment that makes it readable,
+            // so the notes under a stat are wrapped by us, to a width, rather than by the terminal.
+            {
+                const string longNote = "labeled Podcast in the library; not acoustically speech — a genre rule excludes them: kind:genre, value:Podcast";
+                var wrapped = WrapNote(longNote, 72);
+                Assert(wrapped.Count > 1, $"report-note: a note longer than the width is split ({wrapped.Count} lines)");
+                int widest = 0; foreach (var l in wrapped) widest = Math.Max(widest, l.Length);
+                Assert(widest <= 72, $"report-note: no wrapped line exceeds the width (widest {widest} of 72)");
+                Assert(string.Join(" ", wrapped) == longNote, "report-note: wrapping preserves the text word for word");
+                Assert(WrapNote("short note", 72).Count == 1, "report-note: a note that fits stays on one line");
+                Assert(WrapNote("", 72).Count == 0, "report-note: an empty note prints nothing");
+                // A path is one word and longer than the width: breaking it would make it uncopyable, which
+                // costs the operator more than the wrap does.
+                var oneWord = WrapNote(@"C:\test\MB3\Library\a-very-long-single-token-that-exceeds-the-width.json", 40);
+                Assert(oneWord.Count == 1 && oneWord[0].Length > 40, "report-note: a single over-long word is left whole");
             }
 
             // Every test deletes its own directory; the shared parent goes too once it is empty (a non-recursive delete: anything still
