@@ -21,8 +21,10 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   `--no-store` / `--no-edges` override for one run. A config key never
   makes a plain command refuse (a per-file mode without `--moods` skips the store, an extractor older
   than `.5` skips edges, each with a note).
-- Beside the store: `artifacts\pending\` (in-flight edge stashes, swept), `store-result.json`,
-  `store-import-result.json`, `store-info.json`.
+- Beside the store: `store-result.json`, `store-import-result.json`, `store-info.json`.
+- Not beside the store: the in-flight edge stashes. They are transient — written during a scan, consumed by
+  the flush that commits their rows, deleted — so they live in `pending\` under the stage directory and move
+  with `--stage-dir`. Leftovers from an interrupted scan are swept.
 
 ## What is in it
 
