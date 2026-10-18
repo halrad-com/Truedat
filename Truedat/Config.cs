@@ -92,8 +92,8 @@ namespace Truedat
             // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
             // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
-            new Setting { Key = "store",           Kind = Kind.Bool, Default = "false", Help = "every scan also writes the store (default location); off unless set" },
-            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "false", Help = "every scan also folds edge rows (needs the store and extractor output-x64.5); off unless set" },
+            new Setting { Key = "store",           Kind = Kind.Bool, Default = "true", Help = "every scan writes the store (default location); a scan with no store makes one. false turns it off" },
+            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "true", Help = "every scan folds edge rows into the store (needs extractor output-x64.5; skipped with a note otherwise). false turns it off" },
             // store-v3 T05 (operator, 2026-10-15: "opt in for the arrays. just keep the minimal mvp by default"): with edges on, also keep the
             // edge arrays (series, beats, sub-window summaries, MFCC/spectral vectors) in the store. Off = the default row (scalars + HPCP).
             // Sticky per track: a track that already holds arrays keeps them whatever this says; --edge-arrays-drop is the only discard.

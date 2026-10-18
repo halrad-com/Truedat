@@ -876,9 +876,9 @@ namespace Truedat
             Console.WriteLine("  --store [db]        Use the store: bare = the default location (beside a local catalog, else a local");
             Console.WriteLine("                      per-library path); a path names it. With a store in force the store is the authority:");
             Console.WriteLine("                      scans and catalog verbs write it and publish the catalog, sidecar and edges from it.");
-            Console.WriteLine("                      A store already at the default location is used by a plain run. Config keys `store`");
-            Console.WriteLine("                      and `edges` pin the choice (truedat --config store true); --no-store / --no-edges");
-            Console.WriteLine("                      override for one run.");
+            Console.WriteLine("                      On by default: a scan with no store makes one, with edges, seeding it from an existing");
+            Console.WriteLine("                      catalog first (no audio read, no rescan). --no-store / --no-edges turn it off for one");
+            Console.WriteLine("                      run; truedat --config store false (and edges false) for this install.");
             Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
             Console.WriteLine("  --store-import      Load the catalog (and the ledgers beside it) into the store, idempotently.");
             Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
@@ -2888,14 +2888,17 @@ namespace Truedat
             // --no-store / --no-edges: the one-run way past the config keys `store` / `edges` (the command line wins over the file).
             if (noStore) { storePath = null; _storeFromConfig = false; }
             _noStoreTyped = noStore;
+            _noEdgesTyped = noEdges;
+            _storeDirOpt = storeDir;
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || edgesExportMode;
-            // Store and edges are OFF unless the command line or the config file turns them on (operator 2026-10-13). The config's
-            // Default is the value that runs; there is no second, hard-coded default here.
+            // Store and edges are ON by default (operator 2026-10-18), but this block only RESOLVES a store the command line or the
+            // config file asked for, or adopts one that exists. Making one when there is none happens at each scan's entry
+            // (EnsureDefaultStore), so no read or maintenance verb that passes through here can create a store.
             // A store that already exists is adopted even though nothing on this command line asked for
             // one: the documented upgrade (--store-import, then --store --edges --refresh) otherwise leaves
             // a populated store that the next plain `truedat` would not open, and with store-authoritative
@@ -2938,17 +2941,7 @@ namespace Truedat
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
                 if (storeAdopted && storePath != null)
                     Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
-                if (storePath != null)
-                {
-                    global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
-                    // The spill is transient working data, so it goes where truedat's other transient working data
-                    // goes — the stage dir — instead of making an artifacts\ folder beside the operator's library.
-                    // One setting moves both (--stage-dir), and the startup orphan sweep already owns that directory.
-                    global::Truedat.Store.ArtifactStore.WorkRoot = _stageOpts.StageDir;
-                    // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
-                    // added edge rows, and by --edges-export (its explicit path wins).
-                    if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
-                }
+                if (storePath != null) ApplyStoreLocation(storePath, storeCatalog);
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -3992,6 +3985,7 @@ namespace Truedat
             // --analyze-file: single file Essentia analysis (no iTunes XML needed)
             if (analyzeFileMode)
             {
+                EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog);   // no store yet: this scan makes one (needs a --moods target)
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 // No path at all is a usage error and stays exit 1 — there is nothing to
                 // ledger and nothing the caller could have meant.
@@ -4616,6 +4610,7 @@ namespace Truedat
             //   --file-list -       read paths from stdin (one per line, # comments)
             if (fileListMode)
             {
+                EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog);   // no store yet: this scan makes one (needs a --moods target)
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 List<string> filePaths;
 
@@ -5417,6 +5412,10 @@ namespace Truedat
                 chunkHostSuffix = SanitizeForFilename(Environment.MachineName);
                 moodsPath = InsertFilenameSuffix(moodsPath, chunkHostSuffix);
             }
+            // No store yet: the library scan makes one now that its catalog path is known, and then begins the run record
+            // for it (BeginScan above ran with no store and recorded nothing). A --chunk shard never does.
+            if (libraryScan && EnsureDefaultStore(moodsPath, chunked: chunkTotal > 0, auditLog))
+                global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             var logPath = Path.Combine(outputDir, "truedat.log");
             TeeWriter? tee = null;
             if (auditLog)
@@ -11011,9 +11010,10 @@ namespace Truedat
         /// the verb. Until each verb writes the store (T06a-i) it refuses: a sentence naming the store and what to do, exit 1, a
         /// failed <c>store-result.json</c> beside the store, and nothing else written (the store is never opened, so a store that
         /// does not exist yet is not created). "In force" is the run's RESOLVED store path — the predicate every other store path
-        /// uses: <c>--store</c> or config <c>store</c>, with <c>--no-store</c> winning. A store file that merely exists while the
-        /// store is off is NOT in force (store and edges are off unless turned on, operator 2026-10-13) and the verb runs as
-        /// before (TDA 103 / keeper 118). <paramref name="hubVerb"/> is the record's verb spelling the hub reads.
+        /// uses: <c>--store</c> or config <c>store</c>, or a store file already at the default location (adopted), with
+        /// <c>--no-store</c> winning. A verb never MAKES a store — only a scan's entry does (EnsureDefaultStore) — so with no
+        /// store file and nothing asking for one the verb runs as before (TDA 103 / keeper 118). <paramref name="hubVerb"/> is
+        /// the record's verb spelling the hub reads.
         /// </summary>
         /// <summary>
         /// store-v3 T06: the ONE write path for a catalog-changing verb with a store in force. The verb's own logic runs unchanged:
@@ -11179,7 +11179,7 @@ namespace Truedat
             var required = global::Truedat.Edges.EdgeProducer.RequiredBuild;
             if (_edgesFromConfig && !string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine($"  edges: on by config but the extractor is {build}, not {required}; edges skipped this run (update the extractor from truedat-deps)");
+                Console.WriteLine($"  edges: on, but the extractor is {build}, not {required}; edges skipped this run (update the extractor from truedat-deps)");
                 _stageOpts.Edges = false;
                 return null;
             }
@@ -16929,17 +16929,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- a store that already exists is not optional ---
             {
-                // Creating a store (and its artifacts) unasked is what stays off - that was the
-                // 2026-10-13 ruling after the footprint measurement. Ignoring one the operator
-                // deliberately built is a different act, and a silent one: the documented upgrade
-                // (--store-import, then --store --edges --refresh) leaves a populated store that the
-                // very next plain `truedat` would not open, so the catalog and the store diverge with
-                // nothing on screen saying so. With store-authoritative scans that is worse than a
-                // missing feature.
+                // Ignoring a store the operator deliberately built is a silent act: the documented
+                // upgrade leaves a populated store that the very next plain `truedat` would not open,
+                // so the catalog and the store diverge with nothing on screen saying so. Adoption is
+                // about a store that EXISTS; making one when none does is the scan-time default below.
                 Assert(ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true),
                     "adopt: a plain scan uses a store that already exists");
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: false),
-                    "adopt: no store on disk means no store is created");
+                    "adopt: no store on disk is nothing to adopt");
+
+                // The default (operator 2026-10-18): a SCAN with no store makes one, so a fresh install
+                // analyses its library once with edges instead of twice. Every way to say no is a no.
+                Assert(ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true),
+                    "default store: a scan with no store makes one");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: true, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true),
+                    "default store: a store already on disk is used, never made again");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: true, configStoreOff: false, chunked: false, hasCatalogTarget: true),
+                    "default store: --no-store wins");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: true, chunked: false, hasCatalogTarget: true),
+                    "default store: config store=false is a standing no");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: true, hasCatalogTarget: true),
+                    "default store: a --chunk shard never makes one (shards would each publish from their own store)");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: false),
+                    "default store: a per-file mode with no --moods target has nothing to put in one");
                 Assert(!ShouldAdoptExistingStore(noStore: true, storeAsked: false, storeVerb: false, storeFileExists: true),
                     "adopt: --no-store still wins over an existing store");
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: true, storeVerb: false, storeFileExists: true),
@@ -22193,9 +22205,112 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         /// <summary>The run's typed --no-store, kept for the advisor (the config key is already folded into the args).</summary>
         static bool _noStoreTyped;
+        /// <summary>The run's typed --no-edges and --store-dir, kept for the scan-time default below.</summary>
+        static bool _noEdgesTyped;
+        static string? _storeDirOpt;
 
         internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists)
             => !noStore && !storeAsked && !storeVerb && storeFileExists;
+
+        /// <summary>A scan with no store makes one (operator, 2026-10-18: "make it the default… if there is no store").
+        /// Off by default made a fresh install analyse its library twice: edges can only be folded while the extractor
+        /// is running on the audio, so a library scanned without them needs a full re-analysis to get them later — for
+        /// work that costs about 0.2 s per track the first time. The 2026-10-13 ruling that took the store off was about
+        /// a store that measured ~15x the catalog; that was the main artifact and untyped columns, both gone, and the
+        /// store is about 2x the catalog now. Asked only at a SCAN's entry (library, --file-list/--folder,
+        /// --analyze-file), so no read or maintenance verb can create one. --no-store, config `store false`, a --chunk
+        /// shard and a per-file mode with no --moods catalog all keep it off.</summary>
+        internal static bool ShouldCreateDefaultStore(bool storeFileExists, bool noStoreTyped, bool configStoreOff, bool chunked, bool hasCatalogTarget)
+            => !storeFileExists && !noStoreTyped && !configStoreOff && !chunked && hasCatalogTarget;
+
+        /// <summary>True when the config FILE sets <paramref name="key"/> to false — the operator's standing "no".</summary>
+        static bool ConfigSaysOff(string key)
+            => _configValues.TryGetValue(key, out var v) && string.Equals(v?.Trim(), "false", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Make the default store for this scan, before the scan touches it. An existing catalog is SEEDED first
+        /// (the import: no audio read, seconds) so the store never holds only the tracks this run happens to analyse —
+        /// and no rescan happens: tracks already in the catalog get edges only under an explicit --refresh (operator:
+        /// "a rescan is an opt in"). A store the scan cannot have — SQLite unavailable on this OS, a seed that fails —
+        /// is a note and a scan without it, never a refused scan: a default must not break the command it rides on.
+        /// Returns true when a store is now in force for this run.</summary>
+        static bool EnsureDefaultStore(string? catalogPath, bool chunked, bool audit)
+        {
+            if (catalogPath == null) return false;
+            // The store asked for by a flag or the config file was resolved in the arg block; otherwise the default location.
+            // Either way the question is the same — is there a store FILE yet — so a typed --store or config `store true`
+            // on a library that has a catalog seeds too, instead of refusing until --store-import has been run by hand.
+            string storePath;
+            try { storePath = _storePath ?? global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _); }
+            catch (Exception ex) { Console.WriteLine($"  Store:      not created ({ex.Message}); this scan runs without it"); return false; }
+            if (!ShouldCreateDefaultStore(File.Exists(storePath), _noStoreTyped, ConfigSaysOff("store"), chunked, hasCatalogTarget: true))
+                return false;
+
+            var probe = global::Truedat.Store.SqliteProbe.Probe();
+            if (!probe.Ok)
+            {
+                Console.WriteLine($"  Store:      not created — {probe.Message} This scan runs without it.");
+                return false;
+            }
+
+            bool catalogHasEntries = File.Exists(catalogPath) && new FileInfo(catalogPath).Length > 0;
+            if (catalogHasEntries)
+            {
+                Console.WriteLine($"  Store:      none yet — seeding {storePath} from the catalog (no audio read)");
+                int rc;
+                try
+                {
+                    rc = global::Truedat.Store.ImportCommand.Run(new global::Truedat.Store.ImportOptions
+                    { StorePath = storePath, CatalogPath = catalogPath!, Audit = audit });
+                }
+                catch (Exception ex) { Console.Error.WriteLine($"  WARNING: {ex.Message}"); rc = 1; }
+                // Bind the catalog to the new store. A catalog that a previous store published carries that store's
+                // generation in its header; a freshly seeded store starts its own count, so without this the scan's
+                // T18i check rightly refuses a catalog "from another store state" — measured on a copy of MB3, whose
+                // store had been deleted. Every store-in-force scan publishes at its end anyway; this does it first.
+                string? publishFailure = null;
+                if (rc == 0)
+                {
+                    var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, catalogPath!, null, out _);
+                    if (pubEx != null) publishFailure = CheckpointCause.Describe(pubEx);
+                }
+                if (rc != 0 || publishFailure != null)
+                {
+                    // A half-built store would be ADOPTED by the next plain scan as if it were whole, so a seed that did not
+                    // finish takes its files with it. They are the files this call just created (none existed above).
+                    foreach (var f in new[] { storePath, storePath + "-wal", storePath + "-shm" })
+                        try { if (File.Exists(f)) File.Delete(f); } catch { }
+                    Console.WriteLine(publishFailure != null
+                        ? $"  Store:      seeded, but the catalog could not be published from it ({publishFailure}); this scan runs without a store"
+                        : "  Store:      seeding did not complete; this scan runs without a store (truedat --store-import shows why)");
+                    return false;
+                }
+                Console.WriteLine("              tracks already in the catalog get edges with truedat --refresh (a re-analysis, so opt-in)");
+            }
+            else
+                Console.WriteLine($"  Store:      none yet — this scan creates {storePath}");
+
+            _storePath = storePath;
+            ApplyStoreLocation(storePath, catalogPath);
+            // Edges ride with it, softly: an extractor older than .5 skips them with a note instead of refusing the scan. A typed
+            // --edges is already on and stays HARD (it refuses on an old extractor, as asked), so it is left exactly as it is.
+            if (!_stageOpts.Edges && !_noEdgesTyped && !ConfigSaysOff("edges")) { _stageOpts.Edges = true; _edgesFromConfig = true; }
+            Console.WriteLine($"              on by default{(_stageOpts.Edges ? ", with edges" : "")}; --no-store, or truedat --config store false, turns it off");
+            return true;
+        }
+
+        /// <summary>Where a store in force puts its working files and its companion — one place for the arg block and the
+        /// scan-time default, so the two cannot drift.</summary>
+        static void ApplyStoreLocation(string storePath, string? storeCatalog)
+        {
+            global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
+            // The spill is transient working data, so it goes where truedat's other transient working data
+            // goes — the stage dir — instead of making an artifacts\ folder beside the operator's library.
+            // One setting moves both (--stage-dir), and the startup orphan sweep already owns that directory.
+            global::Truedat.Store.ArtifactStore.WorkRoot = _stageOpts.StageDir;
+            // S2 C7: the companion file lives beside the catalog the store was resolved against; written after a flush that
+            // added edge rows, and by --edges-export (its explicit path wins).
+            if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
+        }
 
         /// <summary>Edges follow an adopted store: a store built by the documented upgrade holds edge
         /// rows, and leaving edges off would let those go stale exactly as the store itself would.

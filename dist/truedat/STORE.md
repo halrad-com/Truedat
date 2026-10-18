@@ -13,14 +13,15 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- The store and edges are off until there is a store, then they are on. Nothing creates one unasked:
-  `--store` / `--edges`, the `store` / `edges` config keys, or `--store-import` make the first one. **Once a
-  store exists at the resolved location a plain `truedat` uses it, with edges**, because a store the scan
-  ignores drifts out of step with the catalog it is supposed to be authoritative over. An existing catalog
-  still needs `--store-import` first, so a scan never builds a store holding only the tracks it analysed.
-  `--no-store` / `--no-edges` override for one run. A config key never
-  makes a plain command refuse (a per-file mode without `--moods` skips the store, an extractor older
-  than `.5` skips edges, each with a note).
+- The store and edges are on by default. A scan with no store makes one; a new library therefore gets its
+  edges in its first and only full analysis. An existing catalog is seeded into the new store first (an
+  import: no audio read) and the catalog is published from it, so the store never holds only the tracks one
+  run analysed — and nothing is re-analysed: tracks already in the catalog get edges only under an explicit
+  `truedat --refresh`. A store that already exists is used. Only a scan makes a store (never a read or
+  maintenance verb), and never a `--chunk` shard or a per-file mode without `--moods`. `--no-store` /
+  `--no-edges` turn it off for one run, config `store false` / `edges false` for an instance. A default
+  never makes a scan refuse: no SQLite on the machine or a failed seed means a scan without a store and a
+  note; an extractor older than `.5` skips edges with a note.
 - Beside the store: `store-result.json`, `store-import-result.json`, `store-info.json`.
 - Not beside the store: the in-flight edge stashes. They are transient — written during a scan, consumed by
   the flush that commits their rows, deleted — so they live in `pending\` under the stage directory and move
