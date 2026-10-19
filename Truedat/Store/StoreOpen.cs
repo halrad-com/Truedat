@@ -52,6 +52,7 @@ namespace Truedat.Store
                 var dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);
                 FoldNestedRoots(db, dal, nowUtc);   // a store left with nested primary roots is repaired before anything reads it
+                ConvertSpectralFlatness(db, dal);   // rows an older build wrote with the three-band average get Essentia's value
                 VerdictStore.EnsureCurrent(db, dal, nowUtc);   // T19: derive / re-derive the verdict projection when the build's tags differ
                 StoreLog.Info($"store open: {full} (schema v{SchemaMigrator.ReadVersion(db)}, sqlite {probe.VersionText}, machine {machine.Id} on {machine.CreatedByHost})");
                 return new OpenStore(db, dal, machine, probe, full);
@@ -82,6 +83,25 @@ namespace Truedat.Store
                 tx.Complete();
             }
             foreach (var f in folds) StoreLog.Warn("root " + f);
+        }
+
+        /// <summary>spectralFlatness is Essentia's spectral_flatness_db: FlatnessDB over the Bark bands, emitted by the music extractor as
+        /// barkbands_flatness_db, so it equals barkFlatness. Rows written 2026-08-11 .. 2026-10-19 carry truedat's old three-band
+        /// average instead; they are converted from the stored Bark value (same 4-dp scaled integer, so the copy is exact), no audio
+        /// read. A consumer-visible change, so the generation advances. A store with nothing to convert opens as a read.</summary>
+        static void ConvertSpectralFlatness(SqliteDb db, StoreDal dal)
+        {
+            const string Differs = "barkFlatness IS NOT NULL AND spectralFlatness IS NOT barkFlatness";
+            if (dal.ScalarLong($"SELECT EXISTS(SELECT 1 FROM track_content WHERE {Differs});") == 0) return;
+            int converted;
+            using (var tx = db.BeginTransaction())
+            {
+                dal.ExecBound($"UPDATE track_content SET spectralFlatness = barkFlatness WHERE {Differs};");
+                converted = db.Changes;
+                dal.AdvanceGeneration();
+                tx.Complete();
+            }
+            StoreLog.Info($"spectralFlatness is Essentia's Bark-band flatness: {converted:N0} descriptions converted from the old three-band average, from the stored Bark value");
         }
 
         public void Dispose() { Dal.Dispose(); Db.Dispose(); }

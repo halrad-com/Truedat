@@ -67,8 +67,8 @@ namespace Truedat
                  "dissonanceStdev", "pitchSalienceStdev", "hpcpEntropyStdev", "zeroCrossingRateStdev",
                  "bitUsage_bottomBitActivity", "hfSpectralStructure_flatness", "hfSpectralStructure_imagingSymmetry");
             // 6 dp: tiny spectral energies, rates near zero, the HF energy ratio.
-            // spectralFlatness is DERIVED (DeriveSpectralFlatness: the mean of the three band flatnesses, rounded at 4) and its initializer
-            // literal was 6 — re-rounding a 4-dp value at 6 is a no-op, so its EFFECTIVE precision is 4 and that is what is declared (review).
+            // spectralFlatness is Essentia's Bark-band flatness (DeriveSpectralFlatness, rounded at 4 — the same 4 dp as barkFlatness, so the
+            // store copies one scaled integer into the other exactly); its initializer literal was 6, a no-op on a 4-dp value, so 4 is declared.
             F(4, "spectralFlatness");
             F(6, "zeroCrossingRate", "spectralRms", "spectralEnergy", "spectralEnergyLow",
                  "spectralEnergyMidLow", "spectralEnergyMidHigh", "spectralEnergyHigh", "spectralEnergyStdev", "hfEnergyRatio");

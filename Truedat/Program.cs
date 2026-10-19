@@ -20979,12 +20979,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- phantom-field fixes (2026-08-11): spectralFlatness repoint + spectralDecrease precision ---
             {
-                // Flatness: derived from the present band flatnesses (the real signal), never the
-                // nonexistent global key that produced 0 on every track.
-                Assert(DeriveSpectralFlatness(0.10, 0.20, 0.30) == 0.20, "flatness: mean of three bands");
-                Assert(DeriveSpectralFlatness(0.10, null, 0.30) == 0.20, "flatness: mean of the present bands");
-                Assert(DeriveSpectralFlatness(0.4062, null, null) == 0.4062, "flatness: single present band");
-                Assert(DeriveSpectralFlatness(null, null, null) == 0.0, "flatness: none present -> 0 (core contract)");
+                // Flatness is ESSENTIA'S: its spectral_flatness_db is FlatnessDB over the Bark bands (LowLevelSpectralExtractor), which the
+                // music extractor emits as barkbands_flatness_db. Never the nonexistent global key (0 on every track until 2026-08-11), and
+                // never an average of Bark, ERB and Mel (2026-08-11 .. 2026-10-19) — that was truedat's own arithmetic, not Essentia's.
+                Assert(DeriveSpectralFlatness(0.10) == 0.10, "flatness: Essentia's spectral_flatness_db = the Bark-band flatness");
+                Assert(DeriveSpectralFlatness(0.40624) == 0.4062, "flatness: the Bark value at the field's 4 dp");
+                Assert(DeriveSpectralFlatness(null) == 0.0, "flatness: none present -> 0 (core contract)");
 
                 // Decrease: real values are ~1e-9; 6 dp annihilated them to 0, 12 dp preserves them. Opt2 is a local model of the
                 // rounding arithmetic only — production Opt reads its dp from FieldPrecision (T03), pinned here to the 12 this test needs.
@@ -20999,23 +20999,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // that needed it. Gate-current + phantom-zero entries are unreachable by any scan, so
             // both write surfaces that can see the stored bands now re-derive from them. ---
             {
-                // Cache-reuse copy: a phantom zero heals from the bands the entry already carries.
+                // Cache-reuse copy: a phantom zero heals from the Bark value the entry already carries.
                 var pinned = new TrackFeatures { SpectralFlatness = 0, BarkFlatness = 0.2396, ErbFlatness = 0.2498, MelFlatness = 0.2594 };
-                Assert(HealSpectralFlatness(pinned) == 0.2496, "heal: phantom 0 re-derived from the stored bands");
+                Assert(HealSpectralFlatness(pinned) == 0.2396, "heal: phantom 0 becomes Essentia's Bark flatness");
 
-                // A real value is never touched — re-deriving off already-rounded bands would
-                // churn the last decimal across a healthy catalog for no gain.
-                var healthy = new TrackFeatures { SpectralFlatness = 0.2496, BarkFlatness = 0.10, ErbFlatness = 0.10, MelFlatness = 0.10 };
-                Assert(HealSpectralFlatness(healthy) == 0.2496, "heal: a real value is left alone, not re-derived");
+                // An August-to-October entry carries the old three-band average: it converts to Essentia's value, from the stored Bark
+                // value, with no audio read. Equal values are a no-op (the two fields share the 4-dp precision, so there is no churn).
+                var averaged = new TrackFeatures { SpectralFlatness = 0.2496, BarkFlatness = 0.2396, ErbFlatness = 0.2498, MelFlatness = 0.2594 };
+                Assert(HealSpectralFlatness(averaged) == 0.2396, "heal: the old three-band average converts to Essentia's Bark flatness");
+                Assert(HealSpectralFlatness(new TrackFeatures { SpectralFlatness = 0.2396, BarkFlatness = 0.2396 }) == 0.2396, "heal: Essentia's value already -> unchanged");
 
-                // No bands stored -> 0 stands (core field must stay present; 0 is the honest answer).
+                // No Bark value stored -> what is there stands (core field must stay present; nothing honest to put instead).
                 Assert(HealSpectralFlatness(new TrackFeatures { SpectralFlatness = 0 }) == 0.0, "heal: no bands -> 0 stands");
+                Assert(HealSpectralFlatness(new TrackFeatures { SpectralFlatness = 0.2496, ErbFlatness = 0.2498 }) == 0.2496, "heal: no Bark value -> the stored value stands");
 
                 // JSON twin (--fixup) agrees with the TrackFeatures path on the same inputs.
                 var node = JsonNode.Parse("{\"spectralFlatness\":0,\"barkFlatness\":0.2396,\"erbFlatness\":0.2498,\"melFlatness\":0.2594}")!.AsObject();
                 Assert(RepairSpectralFlatness(node), "repair: reports the entry as changed");
-                Assert(SafeDbl(node, "spectralFlatness") == 0.2496, "repair: writes the same value the cache path derives");
+                Assert(SafeDbl(node, "spectralFlatness") == 0.2396, "repair: writes the same value the cache path derives");
                 Assert(!RepairSpectralFlatness(node), "repair: idempotent — a second pass changes nothing");
+                var avgNode = JsonNode.Parse("{\"spectralFlatness\":0.2496,\"barkFlatness\":0.2396,\"erbFlatness\":0.2498,\"melFlatness\":0.2594}")!.AsObject();
+                Assert(RepairSpectralFlatness(avgNode) && SafeDbl(avgNode, "spectralFlatness") == 0.2396 && !RepairSpectralFlatness(avgNode),
+                    "repair: --fixup converts the old three-band average to Essentia's value, once");
 
                 // The repaired value must SERIALIZE short. Asserting the double alone passes even
                 // when the text is the net48 G17 artifact, which is how ~500 KB of "0.0675" ->
@@ -21034,9 +21039,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!RepairSpectralFlatness(noBands), "repair: no bands -> no change (never invents a value)");
                 Assert(SafeDbl(noBands, "spectralFlatness") == 0.0, "repair: leaves the core field present at 0");
 
+                // A value that is not Essentia's (an older build's average) is converted — the pre-2026-10-19 rule kept any non-zero
+                // value, which is how the three-band average would have stayed forever. Essentia's value is left exactly as it is.
                 var realNode = JsonNode.Parse("{\"spectralFlatness\":0.4062,\"barkFlatness\":0.10}")!.AsObject();
-                Assert(!RepairSpectralFlatness(realNode), "repair: a real value is not overwritten");
-                Assert(SafeDbl(realNode, "spectralFlatness") == 0.4062, "repair: real value survives untouched");
+                Assert(RepairSpectralFlatness(realNode) && SafeDbl(realNode, "spectralFlatness") == 0.10, "repair: a value that is not Essentia's Bark flatness is converted");
+                var essentiaNode = JsonNode.Parse("{\"spectralFlatness\":0.10,\"barkFlatness\":0.10}")!.AsObject();
+                Assert(!RepairSpectralFlatness(essentiaNode) && SafeDbl(essentiaNode, "spectralFlatness") == 0.10, "repair: Essentia's value already -> untouched");
             }
 
             // --- fingerprint.v1.pathTail: the tail NAMES the track -----------------------------
@@ -22001,38 +22009,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         }
 
         /// <summary>
-        /// Derive a global spectral-flatness scalar from the per-band flatnesses (bark/erb/mel).
-        /// The music extractor emits no global <c>lowlevel.spectral_flatness_db</c>, so the old direct
-        /// read was 0 on every track; the per-band flatnesses ARE emitted and carry the real
-        /// tonal-vs-noisy signal. Mean of whichever bands are present, 4 dp; 0.0 when none are present
-        /// (preserving the core always-present contract). The three band values are still emitted
-        /// separately for the consumer model — this scalar is for schema continuity.
+        /// <c>spectralFlatness</c> is ESSENTIA'S spectral flatness: its <c>spectral_flatness_db</c> is FlatnessDB over the Bark bands
+        /// (LowLevelSpectralExtractor), and the music extractor computes exactly that and emits it as
+        /// <c>lowlevel.barkbands_flatness_db</c> (MusicLowlevelDescriptors). It emits no key named <c>spectral_flatness_db</c>, which is
+        /// why the old direct read was 0 on every track until 2026-08-11; from then to 2026-10-19 truedat wrote the average of the Bark,
+        /// ERB and Mel flatnesses — its own arithmetic, a definition Essentia does not have. ERB and Mel stay in the catalog as their own
+        /// fields. 4 dp; 0.0 when there is no Bark value (the core always-present contract).
         /// </summary>
-        internal static double DeriveSpectralFlatness(double? bark, double? erb, double? mel)
-        {
-            double sum = 0; int n = 0;
-            if (bark.HasValue) { sum += bark.Value; n++; }
-            if (erb.HasValue) { sum += erb.Value; n++; }
-            if (mel.HasValue) { sum += mel.Value; n++; }
-            return n > 0 ? Math.Round(sum / n, FieldPrecision.Dp("spectralFlatness")) : 0.0;   // the field's effective precision (4) lives in the registry; the initializer re-rounds through the same entry
-        }
+        internal static double DeriveSpectralFlatness(double? bark)
+            => bark.HasValue ? Math.Round(bark.Value, FieldPrecision.Dp("spectralFlatness")) : 0.0;   // the field's precision (4) lives in the registry
 
         /// <summary>
-        /// Heal a phantom-zero <c>spectralFlatness</c> on a CACHE-REUSE copy, re-deriving it from
-        /// the per-band flatnesses the same entry already carries. Cache hits copy stored features
-        /// forward verbatim, so without this an entry written before the 8c06ec2 repoint keeps its
-        /// phantom 0 through every future scan — and cannot be nudged out of it, because neither
-        /// spectralFlatness nor the bands are re-extract canary markers.
-        ///
-        /// Only a stored 0 is touched. A non-zero value came from the fixed write path off these
-        /// same bands; re-deriving it from the already-rounded stored bands would churn the last
-        /// decimal place for no gain. When no band is present, 0 stands — it is the honest answer
-        /// and the field is core/always-present.
+        /// Give a CACHE-REUSE copy Essentia's <c>spectralFlatness</c> (<see cref="DeriveSpectralFlatness"/>) from the Bark value the entry
+        /// already carries. Cache hits copy stored features forward verbatim, so without this an entry keeps whatever an older build
+        /// wrote — the phantom 0 (before 8c06ec2) or the three-band average (2026-08-11 .. 2026-10-19) — through every future scan,
+        /// because neither spectralFlatness nor the bands are re-extract canary markers. Both fields are 4 dp, so an entry that already
+        /// has Essentia's value is unchanged. With no Bark value the stored value stands: there is nothing honest to put instead.
         /// </summary>
         internal static double HealSpectralFlatness(TrackFeatures sf)
-            => sf.SpectralFlatness != 0
-                ? sf.SpectralFlatness
-                : DeriveSpectralFlatness(sf.BarkFlatness, sf.ErbFlatness, sf.MelFlatness);
+            => sf.BarkFlatness.HasValue ? DeriveSpectralFlatness(sf.BarkFlatness) : sf.SpectralFlatness;
 
         /// <summary>
         /// JSON-facing twin of <see cref="HealSpectralFlatness"/>, for <c>--fixup</c> — repairs an
@@ -22051,13 +22046,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// </summary>
         internal static bool RepairSpectralFlatness(JsonObject trackData)
         {
+            var bark = SafeDbl(trackData, "barkFlatness");
+            if (!bark.HasValue) return false;   // no Bark value stored: nothing honest to write
             var stored = SafeDbl(trackData, "spectralFlatness");
-            if (stored.HasValue && stored.Value != 0) return false;   // real value — leave it alone
-            var derived = DeriveSpectralFlatness(
-                SafeDbl(trackData, "barkFlatness"),
-                SafeDbl(trackData, "erbFlatness"),
-                SafeDbl(trackData, "melFlatness"));
-            if (derived == 0) return false;   // no bands stored, or bands are genuinely ~0
+            var derived = DeriveSpectralFlatness(bark);
+            if (stored.HasValue && stored.Value == derived) return false;   // already Essentia's value — idempotent
             // Write through the same shortest-number convention the scan writer uses. Assigning
             // the raw double emits the net48 G17 artifact ("0.067500000000000004" for 0.0675) —
             // bit-identical but ~13 junk chars per repaired entry, which on a 72k catalog is
@@ -24951,7 +24944,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Derive the global spectralFlatness scalar from the per-band flatnesses just read
                 // (the real tonal-vs-noisy signal). The three band values stay emitted separately —
                 // the consumer model uses those; this scalar is for schema continuity.
-                var spectralFlatness = DeriveSpectralFlatness(barkFlatness, erbFlatness, melFlatness);
+                var spectralFlatness = DeriveSpectralFlatness(barkFlatness);   // Essentia's spectral_flatness_db = the Bark-band flatness
                 var beatsLoudness = OptN(root, "rhythm.beats_loudness.mean", "beatsLoudness");
                 var chordsStrength = OptN(root, "tonal.chords_strength.mean", "chordsStrength");
                 var hpcpCrest = OptN(root, "tonal.hpcp_crest.mean", "hpcpCrest");

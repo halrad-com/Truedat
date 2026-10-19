@@ -34,6 +34,7 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
+            Block(assert, "FlatnessDefinition", () => TestFlatnessDefinition(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
             Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
             Console.WriteLine("Store self-test (C8: --store-info measurements)");
@@ -1268,6 +1269,51 @@ namespace Truedat.Store
                        && !CanonicalPath.Contains(@"D:\Music", @"D:\Music") && !CanonicalPath.Contains(@"D:\Music", @"D:\Music2")
                        && !CanonicalPath.Contains(@"D:\Music\anchors", @"D:\Music") && CanonicalPath.Contains(@"\\nas\share", @"\\nas\share\music"),
                     "containment: strict, case- and separator-insensitive, no prefix-sibling match");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>
+        /// spectralFlatness is Essentia's spectral_flatness_db — FlatnessDB over the Bark bands, which the music extractor emits as
+        /// barkbands_flatness_db — so in the store it equals barkFlatness wherever that is present. Rows an older build wrote (the
+        /// 2026-08-11 .. 2026-10-19 three-band average) are converted the first time the store is opened, from the stored Bark value,
+        /// with no audio read; anything written since goes through the same rule at write time, an imported old catalog included.
+        /// </summary>
+        static void TestFlatnessDefinition(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "flatness-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var store = Path.Combine(dir, "truedat.db");
+            string? Raw(string sql) { using var db = SqliteDb.Open(store, false); return db.ExecScalar(sql); }
+            void RawExec(string sql) { using var db = SqliteDb.Open(store, false); db.Exec(sql); }
+            try
+            {
+                // An old catalog carries the three-band average: importing it must store Essentia's value.
+                var a = Entry("1111111111111111111111111111111111111111111111111111111111111111", "flac-frames", "flac", 100000, full: true);
+                a.Features.BarkFlatness = 0.2396; a.Features.ErbFlatness = 0.2498; a.Features.MelFlatness = 0.2594; a.Features.SpectralFlatness = 0.2496;
+                var b = Entry("2222222222222222222222222222222222222222222222222222222222222222", "flac-frames", "flac", 110000, full: true);
+                b.Features.BarkFlatness = 0.3100; b.Features.ErbFlatness = 0.3200; b.Features.MelFlatness = 0.3300; b.Features.SpectralFlatness = 0.3200;
+                var cat = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(cat, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\Music\a.flac"] = a, [@"D:\Music\b.flac"] = b });
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat });
+                assert(Raw("SELECT count(*) FROM track_content WHERE spectralFlatness IS NOT barkFlatness;") == "0"
+                       && Raw("SELECT count(*) FROM track_content WHERE spectralFlatness = 2396;") == "1",
+                    $"an imported three-band average is stored as Essentia's Bark flatness ({Raw("SELECT group_concat(spectralFlatness || '/' || barkFlatness) FROM track_content;")})");
+
+                // A store an older build wrote: the average sits in the row. Opening converts it, once, and that is a mutation.
+                RawExec("UPDATE track_content SET spectralFlatness = 2496 WHERE barkFlatness = 2396;" +
+                        "UPDATE track_content SET barkFlatness = NULL, spectralFlatness = 3200 WHERE barkFlatness = 3100;");
+                long genBefore = long.Parse(Raw("SELECT value FROM store_meta WHERE key = 'generation';")!);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    assert(os.Db.ExecScalar("SELECT spectralFlatness FROM track_content WHERE barkFlatness = 2396;") == "2396",
+                        $"opening converts the old average to Essentia's value ({os.Db.ExecScalar("SELECT spectralFlatness FROM track_content WHERE barkFlatness = 2396;")})");
+                    assert(os.Db.ExecScalar("SELECT spectralFlatness FROM track_content WHERE barkFlatness IS NULL;") == "3200",
+                        "a row with no Bark value keeps what it has");
+                    assert(os.Dal.Generation() == genBefore + 1, $"the conversion is a mutation: the generation advances ({genBefore} -> {os.Dal.Generation()})");
+                }
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Dal.Generation() == genBefore + 1, "a converted store's next open is a read: the generation does not move again");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

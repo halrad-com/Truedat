@@ -38,7 +38,7 @@ high level — what MBXHub uses it for.
 | `onsetRate` | `rhythm.onset_rate` | num | rhythm feature |
 | `zeroCrossingRate` | `lowlevel.zerocrossingrate.mean` | num | speech-detection input |
 | `spectralRms` | `lowlevel.spectral_rms.mean` | num | level feature |
-| `spectralFlatness` | derived: mean of `{bark,erb,mel}bands_flatness_db.mean` | num | tonal-vs-noisy (flatness) feature |
+| `spectralFlatness` | `lowlevel.barkbands_flatness_db.mean` — Essentia's `spectral_flatness_db` (FlatnessDB over the Bark bands); equals `barkFlatness` | num | tonal-vs-noisy (flatness) feature. Was 0 on every track before 2026-08-11 (a key the extractor never writes) and the average of Bark/ERB/Mel from then to 2026-10-19; existing entries convert from the stored Bark value, no rescan |
 | `dissonance` | `lowlevel.dissonance.mean` | num | tonal-tension feature |
 | `pitchSalience` | `lowlevel.pitch_salience.mean` | num | tonal feature |
 | `chordsChangesRate` | `tonal.chords_changes_rate` | num | chord-density feature |

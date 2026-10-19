@@ -488,6 +488,9 @@ namespace Truedat.Store
         {
             var rf = RootFor(roots, key);
             if (rf == null) { r.Unrooted++; StoreLog.Warn($"not under any root, skipped: {key}"); return; }
+            // spectralFlatness is Essentia's Bark-band flatness: an entry from a catalog an older build wrote (the three-band average)
+            // is stored with Essentia's value, so the store holds one definition whatever wrote the arriving entry.
+            if (entry.Features != null) entry.Features.SpectralFlatness = Program.HealSpectralFlatness(entry.Features);
             // Keeper partial-entry defect (T04): every representation of this entry is validated BEFORE any mutation — entity, location,
             // content, copy — so a value the typed store cannot hold rejects the entry whole (one failed run, nothing changed), never a
             // changed content row beside an untouched copy row and an ok run. The throw is caught per entry by ImportEntriesCore.
