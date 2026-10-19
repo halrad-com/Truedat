@@ -1,5 +1,11 @@
 # vam-tools
 
+> **Reference for a new training run — not the product files.** The model MBXHub ships is built and
+> maintained with MBXHub's own tooling, and these scripts are not kept in step with it. They are here so
+> anyone who wants to train their own model can: they read the same contracts (`mbxmoods.json`, MBXHub's
+> training export) and write the same model format the hub loads. If you only want to use truedat and the
+> shipped model, you do not need anything in this folder.
+
 Optional Python toolset that ships alongside truedat for users who want to
 retrain the V/A (valence/arousal) mood model from their own library. **You
 do not need any of this to use truedat normally** — `truedat.exe` produces
