@@ -12496,6 +12496,10 @@ namespace Truedat
             // Counters are per-process and one scan mode runs per invocation, so there
             // is nothing to reset for. stdout (not stderr) so it lands in the run log —
             // a fallback is exactly the kind of thing worth keeping a record of.
+            // Before the staging early-return: a local library stages nothing but can still have hi-res files.
+            int resampledOnce = Volatile.Read(ref _preResampledCount);
+            if (resampledOnce > 0)
+                Console.WriteLine($"  Resampled:  {resampledOnce} hi-res file(s) converted to 44.1 kHz once before analysis");
             int success = Volatile.Read(ref _stageSuccessCount);
             int fallback = Volatile.Read(ref _stageFallbackCount);
             int total = success + fallback;
@@ -21303,6 +21307,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { SetReportWidthForTest(saved); }
             }
 
+            // Resample once (2026-10-18): only hi-res mono/stereo with ffmpeg present is converted before the extractor;
+            // everything else reaches the extractor exactly as before.
+            {
+                Assert(ShouldPreResample(48000, 2, ffmpegAvailable: true), "resample-once: a 48 kHz stereo file is converted first");
+                Assert(ShouldPreResample(192000, 1, ffmpegAvailable: true), "resample-once: a 192 kHz mono file is converted first");
+                Assert(!ShouldPreResample(44100, 2, ffmpegAvailable: true), "resample-once: a 44.1 kHz file is left alone (nothing to convert)");
+                Assert(!ShouldPreResample(22050, 2, ffmpegAvailable: true), "resample-once: below 44.1 kHz is left alone");
+                Assert(!ShouldPreResample(96000, 6, ffmpegAvailable: true), "resample-once: more than two channels keeps the downmix retry path");
+                Assert(!ShouldPreResample(96000, 2, ffmpegAvailable: false), "resample-once: no ffmpeg means the original goes to the extractor");
+                Assert(!ShouldPreResample(96000, 0, ffmpegAvailable: true), "resample-once: an unreadable channel count is left alone");
+            }
+
             // Every test deletes its own directory; the shared parent goes too once it is empty (a non-recursive delete: anything still
             // in it is a leak to fix, not to hide).
             try { Directory.Delete(Path.Combine(Path.GetTempPath(), ".truedat-selftest")); } catch { }
@@ -24287,7 +24303,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // What the console calls this file: the SOURCE name when the caller staged a GUID-named copy, else the path itself.
             string shown = Path.GetFileName(displayName ?? audioPath);
 
-            var result = AnalyzeWithEssentiaCore(essentiaExe, audioPath, fileSizeBytes, ct);
+            // Hi-res: convert to 44.1 kHz ONCE, with ffmpeg's soxr, and give the extractor that copy. The extractor
+            // analyses at 44.1 kHz regardless and otherwise resamples the file five channel-times with
+            // libsamplerate's medium converter - measured 2x slower at 48 kHz, ~3x at 88.2/96, ~5x at 176.4/192
+            // (2026-10-18 spike, docs/spikes/2026-10-18-resample-once). Measured on 22 hi-res files: no key, scale,
+            // BPM or speech-verdict change; median drift <= 0.3% of the library's spread per field (operator: "if we
+            // can measure it as inconsequential the faster speed is a win"). The authenticity checks and the
+            // identity hash still read the ORIGINAL file, which is why this sits here and not in staging.
+            string? resampled = null;
+            if (TryReadRateAndChannels(audioPath, out int srcRate, out int srcChannels)
+                && ShouldPreResample(srcRate, srcChannels, _ffmpegPath.Value != null))
+                resampled = ResampleTo44k(audioPath, srcRate, shown);
+            try
+            {
+            var result = resampled != null
+                ? AnalyzeWithEssentiaCore(essentiaExe, resampled, new FileInfo(resampled).Length, ct)
+                : AnalyzeWithEssentiaCore(essentiaExe, audioPath, fileSizeBytes, ct);
+            if (resampled != null && result.Features != null)
+                global::Truedat.Store.ScanSink.Rekey(resampled, audioPath);   // the stash follows the source the scan records
 
             // Multi-channel files: downmix to stereo and retry
             if (result.Features == null && result.Error != null && result.Error.Contains("more than 2 channels"))
@@ -24349,6 +24382,89 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             return result;
+            }
+            finally
+            {
+                if (resampled != null) try { File.Delete(resampled); } catch { }
+            }
+        }
+
+        /// <summary>Hi-res sources (above 44.1 kHz, mono or stereo) are converted once before the extractor; with
+        /// no ffmpeg the original goes to the extractor as before. More than two channels already takes the downmix
+        /// retry, and below 44.1 kHz is rare and cheap, so both are left exactly as they were.</summary>
+        internal static bool ShouldPreResample(int sampleRate, int channels, bool ffmpegAvailable)
+            => ffmpegAvailable && sampleRate > 44100 && channels >= 1 && channels <= 2;
+
+        /// <summary>The source's sample rate and channel count from a header read (TagLib, no decode). False when
+        /// TagLib cannot read it — the caller then leaves the file as it is.</summary>
+        static bool TryReadRateAndChannels(string path, out int sampleRate, out int channels)
+        {
+            sampleRate = 0; channels = 0;
+            try
+            {
+                using var f = TagLib.File.Create(path);
+                sampleRate = f.Properties?.AudioSampleRate ?? 0;
+                channels = f.Properties?.AudioChannels ?? 0;
+                return sampleRate > 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Count of files converted once before analysis this run (the end-of-scan summary line).</summary>
+        static int _preResampledCount;
+
+        /// <summary>One ffmpeg pass: source -> 44.1 kHz, same channels, 32-bit float WAV in the stage dir (16-bit would
+        /// itself move the low-level features). soxr, not ffmpeg's default resampler: the default flipped a weak tempo
+        /// 3:2 in the spike and soxr did not. Null on any failure, and the caller analyses the original.</summary>
+        static string? ResampleTo44k(string audioPath, int sourceRate, string shown)
+        {
+            var ffmpeg = _ffmpegPath.Value;
+            if (ffmpeg == null) return null;
+            string dir = _stageOpts.StageDir;
+            try { Directory.CreateDirectory(dir); } catch { dir = Path.GetTempPath(); }
+            string tempPath = Path.Combine(dir, $"truedat_44k_{Guid.NewGuid():N}.wav");   // swept with the rest of the stage dir
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpeg,
+                    Arguments = $"-v error -i {PathHelper.QuoteArg(audioPath)} -af aresample=resampler=soxr:precision=28 -ar 44100 -c:a pcm_f32le -y {PathHelper.QuoteArg(tempPath)}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)!;
+                ApplyCpuLimit(proc);
+                DisableEcoQos(proc.Handle);
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(300000))
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz timed out (300 s); analysing the original  [{shown}]");
+                    try { File.Delete(tempPath); } catch { }
+                    return null;
+                }
+                proc.WaitForExit();
+                stdoutTask.Wait(5000);
+                if (proc.ExitCode == 0 && File.Exists(tempPath))
+                {
+                    Interlocked.Increment(ref _preResampledCount);
+                    if (_audit) Console.Error.WriteLine($"  RESAMPLE: {sourceRate} Hz -> 44100 Hz (soxr) in {sw.ElapsedMilliseconds} ms  [{shown}]");
+                    return tempPath;
+                }
+                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
+                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed (exit {proc.ExitCode}); analysing the original  [{shown}] {stderr.Substring(0, Math.Min(200, stderr.Length)).Trim()}");
+                try { File.Delete(tempPath); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed ({ex.Message}); analysing the original  [{shown}]");
+                try { File.Delete(tempPath); } catch { }
+            }
+            return null;
         }
 
         static (TrackFeatures? Features, string? Error) AnalyzeWithEssentiaCore(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default)
