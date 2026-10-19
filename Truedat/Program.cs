@@ -1302,6 +1302,28 @@ namespace Truedat
         /// <summary>T18: the store root a store-authoritative scan loaded from and publishes (store-intent item 8); null without a store.</summary>
         static string? _storeRootPath;
         static string? _storeExportRoot;
+        /// <summary>Every path the running scan will consider, captured once before analysis starts: the root hint for its store
+        /// flushes, beside the catalog's keys. The catalog alone is not enough on a FRESH scan — at the first checkpoint it holds only
+        /// the few tracks analysed by then, so the root was inferred from whichever sub-folder those shared (MTest, 2026-10-18).</summary>
+        static string[]? _scanWorkPaths;
+
+        /// <summary>The root hint for a store flush: the catalog's keys plus the scan's whole work list (<see cref="_scanWorkPaths"/>).</summary>
+        internal static IEnumerable<string> ScanRootHints(IEnumerable<string> catalogKeys, IReadOnlyCollection<string>? workPaths)
+            => workPaths == null || workPaths.Count == 0 ? catalogKeys : catalogKeys.Concat(workPaths);
+
+        /// <summary>What a store-authoritative scan's publications actually did. The end-of-run summary reports THIS — the 2026-10-18
+        /// MTest summary said "3439 tracks in moods file" and listed four files as written while every publication after the first had
+        /// refused and the file on disk held 154.</summary>
+        internal sealed class PublishState
+        {
+            internal bool Ok;
+            internal int Entries;
+            internal long Generation;
+            internal string? Error;
+            internal int Succeeded;
+            internal int Failed;
+        }
+        static PublishState? _publish;
 
         /// <summary>--audit-verdicts: also emit the per-signal verdict vote trace.
         /// OFF even under --audit, because the trace is recomputed for EVERY catalog entry
@@ -1469,12 +1491,17 @@ namespace Truedat
         // Source-staging telemetry. Set during the per-track fan-out, summarised
         // at end-of-scan. Reset at start of each scan mode.
         internal static int _stageSuccessCount;
+        // Of the successful stages, those copied FROM THE NETWORK (UNC / mapped drive). The rest are local non-ASCII paths
+        // (staged-fallback): a local disk copy so every tool reads an ASCII name, with no link involved — reporting those as
+        // "pulled over the source link" told an all-local scan it had a 1.1 MB/s network (MTest, 2026-10-18).
+        internal static int _stageNetworkCount;
         internal static int _stageFallbackCount;
         // Staged copies that hit a sharing violation and opened on a later attempt.
         // Counted separately from fallbacks: these SUCCEEDED, so they cost only latency
         // — but a non-zero count is the signal that something is watching the stage dir.
         internal static int _stageLockRetryCount;
-        internal static long _stageBytesTotal;   // bytes copied over the source link (successful stages)
+        internal static long _stageBytesTotal;   // bytes copied over the source link (successful NETWORK stages only)
+        internal static long _stageCopyTicks;    // Stopwatch ticks summed over those copies (the link rate's other denominator)
         internal static long _stageFirstStamp;   // Stopwatch ts of the first staging copy start (0 = none yet)
         internal static long _stageLastStamp;    // Stopwatch ts of the last staging copy end
 
@@ -4424,7 +4451,9 @@ namespace Truedat
                     ClearReviewRecord(analyzeFilePath!);
                     if (afHasRecord) FlushRunLedger(afLedgerPath);
                     PruneErrorsCsv(Path.Combine(afMoodsDir, "mbxmoods-errors.csv"));
-                    ReportCatalog(analyzeFileMoods!, afMoodsTracks.Values, statsDetailThreshold);
+                    if (_publish != null && !_publish.Ok) foreach (var line in OutputSummaryLines(afMoodsTracks.Count, _publish, analyzeFileMoods!)) Console.WriteLine(line);
+                    ReportCatalog(analyzeFileMoods!, afMoodsTracks.Values, statsDetailThreshold,
+                        countsNote: _publish != null && !_publish.Ok ? "counts are the STORE's — the file on disk was not published (see Output above)" : null);
                 }
 
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
@@ -4735,6 +4764,7 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
+                _scanWorkPaths = filePaths.ToArray();   // the store's root hint: the whole list, never just what is analysed so far
 
                 // Find Essentia (mirror MoodsMode resolution).
                 var flBaseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -5317,7 +5347,11 @@ namespace Truedat
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                     PruneErrorsCsv(Path.Combine(flLedgerDir, "mbxmoods-errors.csv"));
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
-                    ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold);
+                {
+                    if (_publish != null && !_publish.Ok) foreach (var line in OutputSummaryLines(flMoodsTracks.Count, _publish, analyzeFileMoods!)) Console.WriteLine(line);
+                    ReportCatalog(analyzeFileMoods!, flMoodsTracks.Values, statsDetailThreshold,
+                        countsNote: _publish != null && !_publish.Ok ? "counts are the STORE's — the file on disk was not published (see Output above)" : null);
+                }
                 // Exit 3 (not 1) when the source went away: the caller — the autoscan plugin —
                 // must be able to tell "some files failed analysis" from "the share dropped, so
                 // this run means nothing and the paths should be re-queued".
@@ -6626,6 +6660,9 @@ namespace Truedat
                 // the work lane. The hint is advisory ONLY: the body re-runs every cache tier,
                 // so a mis-hinted track is still processed correctly, just under the other
                 // partitioner. No mtime/hash/staging here — that is exactly the IO this avoids.
+                // The store's root hint: the whole work list, so a fresh scan's first checkpoint cannot infer its root from the
+                // few tracks finished by then.
+                _scanWorkPaths = tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!).ToArray();
                 var msLikelyCached = new List<ITunesTrack>();
                 var msLikelyWork = new List<ITunesTrack>();
                 foreach (var t in tracks)
@@ -6717,7 +6754,7 @@ namespace Truedat
                 Console.WriteLine($"  Retried:    {retryRecovered}  (failed the first attempt, analyzed on the retry — in the catalog)");
             Console.WriteLine($"  --------    -----");
             Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
-            Console.WriteLine($"  Output:     {allTracks.Count} tracks in moods file");
+            foreach (var line in OutputSummaryLines(allTracks.Count, _publish, moodsPath)) Console.WriteLine(line);
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
@@ -6824,17 +6861,29 @@ namespace Truedat
             var workListKeys = new HashSet<string>(
                 tracks.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!),
                 PathComparer.Instance);
-            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys, workListKeys);
+            ReportCatalog(moodsPath, allTracks.Values, statsDetailThreshold, libraryKeys, workListKeys,
+                countsNote: _publish != null && !_publish.Ok ? "counts are the STORE's — the file on disk was not published (see Output above)" : null);
             Console.WriteLine();
-            Console.WriteLine($"Output: {moodsPath}");
-            // ...and the rest of what the run wrote. "Output" named one file of four, which is how a scan
-            // that published 7.8 MB of edges could look like it had written only the catalog.
-            var alsoWrote = new List<string>();
-            var sidecarOut = Path.ChangeExtension(moodsPath, ".mbxs");
-            if (File.Exists(sidecarOut)) alsoWrote.Add(Path.GetFileName(sidecarOut));
-            if (_edgesCompanionPath != null && File.Exists(_edgesCompanionPath)) alsoWrote.Add(Path.GetFileName(_edgesCompanionPath));
-            if (_storePath != null && File.Exists(_storePath)) alsoWrote.Add(Path.GetFileName(_storePath));
-            if (alsoWrote.Count > 0) Console.WriteLine($"        + {string.Join(", ", alsoWrote)}");
+            if (_publish != null && !_publish.Ok)
+            {
+                // The store is the only file this run brought current. Listing the catalog, sidecar and companion here because they
+                // EXIST is how the 2026-10-18 MTest summary named three files last written 90 minutes before the run ended.
+                Console.WriteLine($"Output: {_storePath}");
+                Console.WriteLine($"        not published: {Path.GetFileName(moodsPath)}, {Path.GetFileName(Path.ChangeExtension(moodsPath, ".mbxs"))}, " +
+                                  $"{(global::Truedat.Edges.EdgeCompanion.FileName)} — fix the reason above, then truedat --store-export");
+            }
+            else
+            {
+                Console.WriteLine($"Output: {moodsPath}");
+                // ...and the rest of what the run wrote. "Output" named one file of four, which is how a scan
+                // that published 7.8 MB of edges could look like it had written only the catalog.
+                var alsoWrote = new List<string>();
+                var sidecarOut = Path.ChangeExtension(moodsPath, ".mbxs");
+                if (File.Exists(sidecarOut)) alsoWrote.Add(Path.GetFileName(sidecarOut));
+                if (_edgesCompanionPath != null && File.Exists(_edgesCompanionPath)) alsoWrote.Add(Path.GetFileName(_edgesCompanionPath));
+                if (_storePath != null && File.Exists(_storePath)) alsoWrote.Add(Path.GetFileName(_storePath));
+                if (alsoWrote.Count > 0) Console.WriteLine($"        + {string.Join(", ", alsoWrote)}");
+            }
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
             tee?.Dispose();
 
@@ -11196,8 +11245,8 @@ namespace Truedat
         static global::Truedat.Store.ScanSinkReport? FlushStoreSink(IEnumerable<string> catalogKeys, bool final = true)
         {
             if (_storePath == null) return null;
-            // The whole catalog's keys are the root hint: a root is never inferred from the analysed subset alone.
-            var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, catalogKeys, final);
+            // The root hint is the whole catalog's keys AND the scan's whole work list: a root is never inferred from the analysed subset alone.
+            var r = global::Truedat.Store.ScanSink.Flush(_storePath, global::Truedat.Store.ScanSink.ExtractorBuild, ScanRootHints(catalogKeys, _scanWorkPaths), final);
             if (!final)
             {
                 if (r.Ok) { if (r.Entries + r.Failures > 0) Console.WriteLine($"  [store checkpoint: {r.Entries} entries{(_stageOpts.Edges ? $", {r.Edges} tracks folded" : "")}, {r.Failures} failures · {r.ElapsedMs / 1000.0:F1}s]"); }
@@ -11244,14 +11293,34 @@ namespace Truedat
             if (_storePath == null) return false;
             var ex = global::Truedat.Store.StoreScan.Publish(_storePath, catalogPath, _storeRootPath, out var rep);
             global::Truedat.Store.StoreResult.NoteScanExport(rep, ex);
+            var p = _publish ??= new PublishState();
             if (ex != null)
             {
-                Console.Error.WriteLine($"  WARNING: {(checkpoint ? "checkpoint" : "final")} publication from the store failed ({CheckpointCause.Describe(ex)}); " +
+                p.Ok = false; p.Error = CheckpointCause.Describe(ex); p.Failed++;
+                Console.Error.WriteLine($"  WARNING: {(checkpoint ? "checkpoint" : "final")} publication from the store failed ({p.Error}); " +
                                         "the store holds the work and is ahead of the files — the next publication (or --store-export) brings them level");
                 return false;
             }
+            p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
+            // A fold during this scan (the library grew past its old root) moved the root this scan loaded; publish the surviving one from now on.
+            if (!string.IsNullOrEmpty(rep.Root)) _storeRootPath = rep.Root;
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
             return true;
+        }
+
+        /// <summary>The scan summary's "Output:" line, from what the scan's publications did (<paramref name="p"/>) rather than the
+        /// in-memory count. Null = no store in force: the scan wrote the catalog itself, and the in-memory count IS the file.</summary>
+        internal static List<string> OutputSummaryLines(int inMemory, PublishState? p, string catalogPath)
+        {
+            if (p == null) return new List<string> { $"  Output:     {inMemory} tracks in moods file" };
+            if (p.Ok) return new List<string> { $"  Output:     {p.Entries} tracks published to the moods file (generation {p.Generation})" };
+            const string pad = "              ";
+            var lines = new List<string> { $"  Output:     NOT PUBLISHED — {Path.GetFileName(catalogPath)} was not written from the store" };
+            int w = Math.Max(20, ReportWidth - pad.Length);
+            foreach (var l in WrapNote(p.Error ?? "the publication failed", w)) lines.Add(pad + l);
+            foreach (var l in WrapNote($"the store holds the {inMemory} tracks; {p.Succeeded} of {p.Succeeded + p.Failed} publications this run wrote the files", w))
+                lines.Add(pad + l);
+            return lines;
         }
 
         /// <summary>The store half: null when no store is in force or the flush committed, else a failed outcome (stage <c>store</c>)
@@ -12447,13 +12516,19 @@ namespace Truedat
                 if (_audit)
                     Console.Error.WriteLine($"  STAGE: {method} {sourcePath} -> {dest} ({sw.ElapsedMilliseconds}ms, {(bytes / 1024.0 / 1024.0):F1}MB)");
                 Interlocked.Increment(ref _stageSuccessCount);
-                // Link throughput: total bytes + the wall span (earliest copy start ..
-                // latest copy end) so the summary reports aggregate MB/s over the source
-                // link. Aggregate, not per-copy — concurrent copies share the link, so a
-                // per-copy average would understate a shared WiFi link by the worker count.
-                Interlocked.Add(ref _stageBytesTotal, bytes);
-                long f; do { f = Volatile.Read(ref _stageFirstStamp); if (f != 0 && copyStart >= f) break; } while (Interlocked.CompareExchange(ref _stageFirstStamp, copyStart, f) != f);
-                long l; do { l = Volatile.Read(ref _stageLastStamp); if (copyEnd <= l) break; } while (Interlocked.CompareExchange(ref _stageLastStamp, copyEnd, l) != l);
+                if (isNetwork)
+                {
+                    Interlocked.Increment(ref _stageNetworkCount);
+                    // Link throughput: total bytes + the wall span (earliest copy start ..
+                    // latest copy end) so the summary reports aggregate MB/s over the source
+                    // link. Aggregate, not per-copy — concurrent copies share the link, so a
+                    // per-copy average would understate a shared WiFi link by the worker count.
+                    // Network stages only: a local non-ASCII copy crosses no link.
+                    Interlocked.Add(ref _stageBytesTotal, bytes);
+                    Interlocked.Add(ref _stageCopyTicks, copyEnd - copyStart);
+                    long f; do { f = Volatile.Read(ref _stageFirstStamp); if (f != 0 && copyStart >= f) break; } while (Interlocked.CompareExchange(ref _stageFirstStamp, copyStart, f) != f);
+                    long l; do { l = Volatile.Read(ref _stageLastStamp); if (copyEnd <= l) break; } while (Interlocked.CompareExchange(ref _stageLastStamp, copyEnd, l) != l);
+                }
                 return new SourceHandle(dest, sourcePath, method, sw.ElapsedMilliseconds, bytes, dest, mtime);
             }
             catch (Exception ex)
@@ -12501,41 +12576,52 @@ namespace Truedat
             if (resampledOnce > 0)
                 Console.WriteLine($"  Resampled:  {resampledOnce} hi-res file(s) converted to 44.1 kHz once before analysis");
             int success = Volatile.Read(ref _stageSuccessCount);
-            int fallback = Volatile.Read(ref _stageFallbackCount);
-            int total = success + fallback;
-            if (total == 0) return;
-            if (fallback == 0)
-                Console.WriteLine($"  Staging:    {success} staged (one local copy per track)");
-            else
-            {
-                double fallbackPct = 100.0 * fallback / total;
-                Console.WriteLine($"  Staging:    {success} staged, {fallback} direct-fallback ({fallbackPct:F1}% fell back)");
-                if (fallbackPct > 5.0)
-                    Console.WriteLine(
-                        $"              source link slow or unstable — {fallback} of {total} reads bypassed staging");
-            }
-            // Recovered lock contention. Named on its own line because it is a DIFFERENT
-            // problem from a slow link: the stage dir is being watched by something
-            // (antivirus, backup, sync), and --stage-dir moves it out of the way.
-            int lockRetries = Volatile.Read(ref _stageLockRetryCount);
-            if (lockRetries > 0)
-                Console.WriteLine(
-                    $"              {lockRetries} staged file(s) briefly locked by another process — retried OK (see [stage-lock] lines; --stage-dir to relocate)");
-            // Aggregate link throughput: bytes pulled over the source link across the wall
-            // span (first copy start .. last copy end). Read this against the analysis MB/s
-            // — a link far below it means the scan is link-bound (workers waiting on copies),
-            // not CPU-bound. Understates when staging is sparse (cache-only stretches sit
-            // inside the span); it never overstates, so a low number is trustworthy.
-            long bytesT = Volatile.Read(ref _stageBytesTotal);
+            int network = Volatile.Read(ref _stageNetworkCount);
             long first = Volatile.Read(ref _stageFirstStamp);
             long last = Volatile.Read(ref _stageLastStamp);
             double spanSecs = (first != 0 && last > first) ? (double)(last - first) / Stopwatch.Frequency : 0;
-            if (bytesT > 0 && spanSecs > 0)
+            double copySecs = (double)Volatile.Read(ref _stageCopyTicks) / Stopwatch.Frequency;
+            foreach (var line in StagingSummaryLines(network, success - network, Volatile.Read(ref _stageFallbackCount),
+                         Volatile.Read(ref _stageLockRetryCount), Volatile.Read(ref _stageBytesTotal), spanSecs, copySecs))
+                Console.WriteLine(line);
+        }
+
+        /// <summary>The staging lines of a scan summary. A NETWORK stage pulls the file over the source link; a LOCAL stage is a
+        /// non-ASCII path copied on the same disk so every tool reads an ASCII name — no link, so no link rate. The 2026-10-18 MTest
+        /// summary reported 10 local copies as "433 MB pulled over the source link @ 1.1 MB/s" on an all-local library.
+        /// The rate divides by the smaller of the copy span (first start .. last end) and the summed copy time: the span alone counts
+        /// every idle stretch between sparse copies, so a handful of copies over a long scan read as a crawling link; the summed time
+        /// alone undercounts copies that ran together. The smaller is exact at both extremes and never overstates in between.</summary>
+        internal static List<string> StagingSummaryLines(int network, int local, int fallback, int lockRetries, long networkBytes, double spanSecs, double copySecs)
+        {
+            var lines = new List<string>();
+            int total = network + local + fallback;
+            if (total == 0) return lines;
+            const string pad = "              ";
+            string Copies(int n) => n == 1 ? "1 local copy" : $"{n} local copies";
+            if (network > 0 || local == 0)
+                lines.Add($"  Staging:    {network} staged from the network" +
+                          (fallback == 0 ? " (one local copy per track)" : $", {fallback} direct-fallback ({100.0 * fallback / total:F1}% fell back)"));
+            if (local > 0)
+                lines.Add((lines.Count == 0 ? "  Staging:    " : pad) + $"{Copies(local)} for non-ASCII file names" +
+                          (network == 0 ? " (no network source)" : "") +
+                          (network == 0 && fallback > 0 ? $", {fallback} direct-fallback ({100.0 * fallback / total:F1}% fell back)" : ""));
+            if (network > 0 && fallback > 0 && 100.0 * fallback / total > 5.0)
+                lines.Add($"{pad}source link slow or unstable — {fallback} of {total} reads bypassed staging");
+            // Recovered lock contention. Named on its own line because it is a DIFFERENT
+            // problem from a slow link: the stage dir is being watched by something
+            // (antivirus, backup, sync), and --stage-dir moves it out of the way.
+            if (lockRetries > 0)
+                lines.Add($"{pad}{lockRetries} staged file(s) briefly locked by another process — retried OK (see [stage-lock] lines; --stage-dir to relocate)");
+            // Read against the analysis MB/s: a link far below it means the scan is link-bound (workers waiting on copies).
+            double secs = spanSecs > 0 && copySecs > 0 ? Math.Min(spanSecs, copySecs) : spanSecs > 0 ? spanSecs : copySecs;
+            if (network > 0 && networkBytes > 0 && secs > 0)
             {
-                double mbTotal = bytesT / (1024.0 * 1024.0);
+                double mbTotal = networkBytes / (1024.0 * 1024.0);
                 string vol = mbTotal >= 1024 ? $"{mbTotal / 1024.0:F1} GB" : $"{mbTotal:F0} MB";
-                Console.WriteLine($"              {vol} pulled over the source link @ {mbTotal / spanSecs:F1} MB/s");
+                lines.Add($"{pad}{vol} pulled over the source link @ {mbTotal / secs:F1} MB/s");
             }
+            return lines;
         }
 
         /// <summary>Per-entry presence flags for the catalog summary. Computed once
@@ -13094,14 +13180,16 @@ namespace Truedat
             return lines;
         }
 
-        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null)
+        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null, string? countsNote = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
             int total = entries.Count;
             Console.WriteLine();
+            // countsNote: where the counts below come from when that is NOT the named file (a scan whose publication refused).
+            void Header(string text) { Console.WriteLine(text); if (countsNote != null) ReportNote(countsNote, "  "); }
             if (total == 0)
             {
-                Console.WriteLine($"Catalog summary: {path}");
+                Header($"Catalog summary: {path}");
                 Console.WriteLine("  (empty — no track entries)");
                 return;
             }
@@ -13111,7 +13199,7 @@ namespace Truedat
             // Small catalog: list each file with its per-field status.
             if (total < detailThreshold)
             {
-                Console.WriteLine($"Catalog summary: {path}  ({total} track{(total == 1 ? "" : "s")})");
+                Header($"Catalog summary: {path}  ({total} track{(total == 1 ? "" : "s")})");
                 // Show the opt-in fileMd5 column only when some entry actually carries it,
                 // matching the aggregate view (the two views must never disagree).
                 bool anyFileMd5 = entries.Any(e => e != null && !string.IsNullOrEmpty(e.FileMd5));
@@ -13143,7 +13231,7 @@ namespace Truedat
             }
 
             var s = ComputeCatalogStats(entries, exclusions);
-            Console.WriteLine($"Catalog summary: {path}");
+            Header($"Catalog summary: {path}");
             Console.WriteLine($"  {total:N0} tracks total");
             Console.WriteLine();
             Console.WriteLine(Cov("Essentia analysis", s.EssentiaAnalyzed));
@@ -13353,10 +13441,21 @@ namespace Truedat
 
                 long catBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
                 if (catBytes > 0 || storeInfo != null) Console.WriteLine();
+                bool catalogBehind = false;   // then --store-export is the one command for every file below
                 if (catBytes > 0)
                 {
                     accounted += catBytes;
                     SizeLine("Catalog:", catBytes, Path.GetFileName(path));
+                    // The catalog names the store generation it was published at, exactly like the companion below. Read from the
+                    // FILE's own head: a catalog left behind by a refused publication reads as behind instead of as the store's count.
+                    if (storeInfo != null && global::Truedat.Store.CatalogOrigin.TryReadHead(path, global::Truedat.Store.CatalogOrigin.ContractV2, out var catOrigin)
+                        && catOrigin.Generation != storeInfo.Generation)
+                    {
+                        catalogBehind = true;
+                        var onDisk = TryCatalogTrackCount(path);
+                        ReportNote($"the file holds {(onDisk.HasValue ? $"{onDisk.Value:N0} tracks at " : "")}generation {catOrigin.Generation:N0}; " +
+                                   $"the store is at {storeInfo.Generation:N0}: truedat --store-export");
+                    }
                     if (sc.Present)
                     {
                         // The version and state are the point: size alone never answered whether MBXHub can
@@ -13387,7 +13486,7 @@ namespace Truedat
                         ? $"{compName} ({compTracks:N0} tracks{(compGen.HasValue ? $", gen {compGen.Value:N0}" : "")})"
                         : $"{compName} (header unreadable)");
                     if (compRead && compGen.HasValue && storeInfo != null && compGen.Value != storeInfo.Generation)
-                        ReportNote($"store is at generation {storeInfo.Generation:N0}: truedat --edges-export");
+                        ReportNote($"store is at generation {storeInfo.Generation:N0}: truedat {(catalogBehind ? "--store-export" : "--edges-export")}");
                 }
                 else if (storeInfo != null && storeInfo.EdgeTracks > 0)
                 {
@@ -21305,6 +21404,47 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(widestNarrow <= 30, $"report-width: a narrow window wraps to it (widest {widestNarrow} of 30)");
                 }
                 finally { SetReportWidthForTest(saved); }
+            }
+
+            // The scan summary reports what was WRITTEN (MTest, 2026-10-18: "3439 tracks in moods file" over a 154-track file, and
+            // ten local non-ASCII copies reported as a 1.1 MB/s network).
+            {
+                var saved = _reportWidth;
+                try
+                {
+                    SetReportWidthForTest(78);
+                    var noStore = OutputSummaryLines(3439, null, @"C:\lib\mbxmoods.json");
+                    Assert(noStore.Count == 1 && noStore[0] == "  Output:     3439 tracks in moods file", $"output: without a store the scan wrote the file itself ({noStore[0]})");
+                    var ok = OutputSummaryLines(3439, new PublishState { Ok = true, Entries = 3439, Generation = 11, Succeeded = 19 }, @"C:\lib\mbxmoods.json");
+                    Assert(ok.Count == 1 && ok[0] == "  Output:     3439 tracks published to the moods file (generation 11)", $"output: a published scan names what it published ({ok[0]})");
+                    var refused = OutputSummaryLines(3439, new PublishState { Ok = false, Entries = 154, Generation = 2, Succeeded = 1, Failed = 9,
+                        Error = @"The store has 2 primary roots; pass --export-root to pick one: C:\test\TEST_FILES\anchors, C:\test\TEST_FILES." }, @"C:\lib\mbxmoods.json");
+                    string all = string.Join("\n", refused);
+                    Assert(refused[0].Contains("NOT PUBLISHED") && refused[0].Contains("mbxmoods.json") && !all.Contains("3439 tracks in moods file"),
+                        $"output: a refused publication says the file was not written, never the in-memory count as the file's ({refused[0]})");
+                    Assert(all.Contains("2 primary roots") && all.Contains("1 of 10 publications"), $"output: the reason and the run's publication record are shown ({all})");
+                    int widest = 0; foreach (var l in refused) widest = Math.Max(widest, l.Length);
+                    Assert(widest <= 78, $"output: the refusal wraps to the window (widest {widest})");
+                }
+                finally { SetReportWidthForTest(saved); }
+
+                var local = StagingSummaryLines(network: 0, local: 10, fallback: 0, lockRetries: 0, networkBytes: 0, spanSecs: 0, copySecs: 0);
+                Assert(local.Count == 1 && local[0] == "  Staging:    10 local copies for non-ASCII file names (no network source)",
+                    $"staging: local non-ASCII copies are not network staging and report no link rate ({string.Join(" | ", local)})");
+                var net = StagingSummaryLines(network: 10, local: 0, fallback: 0, lockRetries: 0, networkBytes: 433L * 1024 * 1024, spanSecs: 400, copySecs: 4.33);
+                Assert(net.Count == 2 && net[0] == "  Staging:    10 staged from the network (one local copy per track)" && net[1].Trim() == "433 MB pulled over the source link @ 100.0 MB/s",
+                    $"staging: sparse network copies are rated over their copy time, not the idle span between them ({string.Join(" | ", net)})");
+                var busy = StagingSummaryLines(network: 40, local: 0, fallback: 0, lockRetries: 0, networkBytes: 400L * 1024 * 1024, spanSecs: 10, copySecs: 80);
+                Assert(busy[1].Trim() == "400 MB pulled over the source link @ 40.0 MB/s", $"staging: concurrent copies share the link — rated over the span ({string.Join(" | ", busy)})");
+                var mixed = StagingSummaryLines(network: 5, local: 1, fallback: 1, lockRetries: 0, networkBytes: 50L * 1024 * 1024, spanSecs: 5, copySecs: 5);
+                Assert(mixed[0].StartsWith("  Staging:    5 staged from the network, 1 direct-fallback", StringComparison.Ordinal) && mixed[1].Trim() == "1 local copy for non-ASCII file names"
+                       && mixed.Count(l => l.Contains("source link slow")) == 1,
+                    $"staging: both kinds are named, and a network fallback above 5% still warns ({string.Join(" | ", mixed)})");
+                Assert(StagingSummaryLines(0, 0, 0, 0, 0, 0, 0).Count == 0, "staging: nothing staged prints nothing");
+
+                var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
+                Assert(hints.Contains(@"C:\t\real\r.mp3"), "root hints: the scan's whole work list joins the catalog's keys");
+                Assert(ScanRootHints(new[] { "x" }, null).SequenceEqual(new[] { "x" }), "root hints: without a work list, the catalog's keys alone");
             }
 
             // Resample once (2026-10-18): only hi-res mono/stereo with ffmpeg present is converted before the extractor;

@@ -112,6 +112,94 @@ namespace Truedat.Store
             return list;
         }
 
+        /// <summary>
+        /// One library has ONE primary root per machine and volume. A primary root inside another primary root on the same
+        /// machine is folded into it: its locations move under the containing root — root-relative paths recomputed with the
+        /// same <see cref="CanonicalPath.Split"/> the insert uses — and the inner row is dropped. Nested primaries are never a
+        /// real choice (the outer root IS the library), but they made every publication refuse ("N primary roots; pass
+        /// --export-root"): a fresh scan minted a sub-folder as the root at its first checkpoint and the real parent at a later
+        /// one (MTest, 2026-10-18: 154 of 3,439 tracks published, then nothing for 90 minutes). A path recorded under BOTH roots
+        /// (an explicit --library-root import over a store that already held the deeper root) keeps the location whose copy is
+        /// newer; the other's run and check history move onto it, and its copy, verdict and location row go. Runs in the
+        /// caller's transaction; returns the folds, empty when there were none.
+        /// </summary>
+        internal List<RootFold> FoldNestedRoots()
+        {
+            var primaries = new List<(long Id, string Machine, string Path)>();
+            var st = Stmt("SELECT id, machine_id, path FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) primaries.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
+            finally { st.Reset(); }
+            var folds = new List<RootFold>();
+            foreach (var inner in primaries)
+            {
+                // The OUTERMOST container, so A > B > C folds B and C straight into A (an outermost root is never itself inner).
+                (long Id, string Machine, string Path)? outer = null;
+                foreach (var p in primaries)
+                    if (p.Id != inner.Id && p.Machine == inner.Machine && CanonicalPath.Contains(p.Path, inner.Path)
+                        && (outer == null || CanonicalPath.Contains(p.Path, outer.Value.Path)))
+                        outer = p;
+                if (outer == null) continue;
+                var fold = new RootFold { InnerId = inner.Id, Inner = inner.Path, OuterId = outer.Value.Id, Outer = outer.Value.Path };
+                var locs = new List<(long Id, string Display)>();
+                using (var ls = Db.Prepare("SELECT id, display_path FROM track_location WHERE root_id = ? ORDER BY id;"))
+                {
+                    ls.Bind(1, inner.Id);
+                    while (ls.Step()) locs.Add((ls.GetInt64(0), ls.GetString(1)!));
+                }
+                foreach (var (locId, display) in locs)
+                {
+                    CanonicalPath.Split(outer.Value.Path, display, out var rel, out var canon);
+                    var dup = FindLocation(outer.Value.Id, canon, out _);
+                    long keep = locId;
+                    if (dup.HasValue)
+                    {
+                        keep = NewerCopy(locId, dup.Value);
+                        long drop = keep == locId ? dup.Value : locId;
+                        Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
+                        Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
+                        Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
+                        Exec("DELETE FROM track_copy WHERE location_id = ?;", drop);
+                        Exec("DELETE FROM track_location WHERE id = ?;", drop);
+                        fold.Merged++;
+                    }
+                    // Only now (the duplicate, if any, is gone) can the inner location take its place under the outer root.
+                    if (keep == locId)
+                    {
+                        Exec("UPDATE track_location SET root_id = ?, rel_path = ?, canonical_path = ? WHERE id = ?;", outer.Value.Id, rel, canon, locId);
+                        fold.Moved++;
+                    }
+                }
+                Exec("DELETE FROM library_root WHERE id = ?;", inner.Id);
+                folds.Add(fold);
+            }
+            return folds;
+        }
+
+        /// <summary>Whether any primary root lies inside another on the same machine — the read-only question asked before
+        /// <see cref="FoldNestedRoots"/> takes a write transaction, so a healthy store's open stays a read.</summary>
+        internal bool HasNestedRoots()
+        {
+            var primaries = new List<(string Machine, string Path)>();
+            var st = Stmt("SELECT machine_id, path FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) primaries.Add((st.GetString(0) ?? "", st.GetString(1) ?? "")); }
+            finally { st.Reset(); }
+            foreach (var a in primaries)
+                foreach (var b in primaries)
+                    if (a.Machine == b.Machine && CanonicalPath.Contains(a.Path, b.Path)) return true;
+            return false;
+        }
+
+        /// <summary>Of two locations for one path, the one whose copy was written last (ISO-8601 'o' sorts as text). A location
+        /// with no copy row loses; a tie keeps <paramref name="b"/> (the containing root's).</summary>
+        long NewerCopy(long a, long b)
+        {
+            string? ua = Row("SELECT updated_utc FROM track_copy WHERE location_id = ?;", s => s.GetString(0), null, a);
+            string? ub = Row("SELECT updated_utc FROM track_copy WHERE location_id = ?;", s => s.GetString(0), null, b);
+            if (ua == null) return b;
+            if (ub == null) return a;
+            return string.CompareOrdinal(ua, ub) > 0 ? a : b;
+        }
+
         // ---------------------------------------------------------------- entities and facets
         internal string CreateEntity(string nowUtc)
         {
@@ -541,5 +629,19 @@ namespace Truedat.Store
             foreach (var st in _stmts.Values) st.Dispose();
             _stmts.Clear();
         }
+    }
+
+    /// <summary>One nested primary root folded into the root that contains it (<see cref="StoreDal.FoldNestedRoots"/>).</summary>
+    internal sealed class RootFold
+    {
+        internal long InnerId;
+        internal string Inner = "";
+        internal long OuterId;
+        internal string Outer = "";
+        /// <summary>Locations moved under the outer root.</summary>
+        internal int Moved;
+        /// <summary>Paths that were recorded under BOTH roots and are now one location.</summary>
+        internal int Merged;
+        public override string ToString() => $"{Inner} is inside {Outer}: folded into it ({Moved:N0} locations moved, {Merged:N0} merged)";
     }
 }

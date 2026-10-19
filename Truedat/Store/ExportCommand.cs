@@ -16,6 +16,10 @@ namespace Truedat.Store
         public string? OutPath;
         public string? ExportRoot;
         public bool Audit;
+        /// <summary>The scan's publisher only: an <see cref="ExportRoot"/> that is no longer a root because it was folded into the
+        /// one primary root containing it (StoreDal.FoldNestedRoots) resolves to that root. An operator's typed --export-root never
+        /// sets this — it means exactly the root named.</summary>
+        public bool FollowFoldedRoot;
     }
 
     internal sealed class ExportReport
@@ -155,7 +159,7 @@ namespace Truedat.Store
             using var snapshot = os.Db.BeginRead();
             r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(os.Db); r.Generation = os.Dal.Generation();
             BeforeRootPicked?.Invoke();   // self-test seam: a concurrent commit lands here, inside the snapshot (item 8)
-            var root = PickRoot(os.Dal, o.ExportRoot);
+            var root = PickRoot(os.Dal, o.ExportRoot, o.FollowFoldedRoot);
 
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
@@ -315,7 +319,7 @@ namespace Truedat.Store
             return Encoding.UTF8.GetString(ms.ToArray());
         }
 
-        static (long Id, string Path, string Role) PickRoot(StoreDal dal, string? exportRoot)
+        static (long Id, string Path, string Role) PickRoot(StoreDal dal, string? exportRoot, bool followFold = false)
         {
             var roots = dal.ListRoots();
             if (roots.Count == 0) throw new StoreException("The store has no library roots; import a catalog first.");
@@ -323,6 +327,11 @@ namespace Truedat.Store
             {
                 var want = Norm(exportRoot!);
                 foreach (var r in roots) if (Norm(r.Path) == want) return r;
+                if (followFold)
+                {
+                    var containing = roots.Where(x => x.Role == "primary" && CanonicalPath.Contains(x.Path, exportRoot!)).ToList();
+                    if (containing.Count == 1) return containing[0];
+                }
                 throw new StoreException($"No root '{exportRoot}' in the store. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
             }
             var primaries = roots.Where(x => x.Role == "primary").ToList();

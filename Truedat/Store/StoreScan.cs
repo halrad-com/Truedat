@@ -73,6 +73,18 @@ namespace Truedat.Store
                 if (origin?.RootPath != null)
                 {
                     var match = roots.Where(x => string.Equals(x.Path, origin.RootPath, StringComparison.Ordinal) && string.Equals(x.Role, origin.RootRole, StringComparison.Ordinal)).ToList();
+                    // A catalog published from a sub-folder root that has since been folded into the root containing it
+                    // (StoreDal.FoldNestedRoots): that root IS its library now. Only a primary, only when no row names it
+                    // exactly, and only when exactly one primary contains it — anything else stays unresolved.
+                    if (match.Count == 0 && origin.RootRole == "primary")
+                    {
+                        var containing = roots.Where(x => x.Role == "primary" && CanonicalPath.Contains(x.Path, origin.RootPath)).ToList();
+                        if (containing.Count == 1)
+                        {
+                            match = containing;
+                            StoreLog.Info($"the catalog names root {origin.RootPath}, now folded into {containing[0].Path}: publishing that root");
+                        }
+                    }
                     if (match.Count != 1)
                         return Refuse(res, "root-unresolved",
                             $"the catalog names root {origin.RootPath} ({origin.RootRole}) and the store {Path.GetFullPath(storePath)} has {match.Count} rows matching it; " +
@@ -182,7 +194,9 @@ namespace Truedat.Store
         internal static Exception? Publish(string storePath, string catalogPath, string? rootPath, out ExportReport report)
         {
             report = new ExportReport();
-            try { ExportCommand.Execute(new ExportOptions { StorePath = storePath, OutPath = catalogPath, ExportRoot = rootPath }, report); return null; }
+            // The root a scan loaded may have been folded into one that contains it since (StoreDal.FoldNestedRoots at a checkpoint):
+            // the scan's publisher follows the fold. An operator's typed --export-root does not — it means exactly that root.
+            try { ExportCommand.Execute(new ExportOptions { StorePath = storePath, OutPath = catalogPath, ExportRoot = rootPath, FollowFoldedRoot = true }, report); return null; }
             catch (Exception ex) { return ex; }
         }
     }

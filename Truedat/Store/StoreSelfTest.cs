@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -33,6 +33,7 @@ namespace Truedat.Store
             Block(assert, "Import", () => TestImport(assert));
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
+            Block(assert, "NestedRoots", () => TestNestedRoots(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
             Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
             Console.WriteLine("Store self-test (C8: --store-info measurements)");
@@ -1087,6 +1088,163 @@ namespace Truedat.Store
                 assert(msg != null && msg.Contains(@"D:\Music") && msg.Contains(@"E:\Other"), $"two primary roots without --export-root refuse and name both ({msg})");
                 var r3 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json"), ExportRoot = @"d:\music\" });
                 assert(r3.Entries == 7 && r3.Root == @"D:\Music", "--export-root selects the root case-insensitively, tolerating a trailing separator");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        /// <summary>
+        /// A fresh scan mints its roots from the paths analysed SO FAR, so a first checkpoint holding one sub-folder minted that
+        /// sub-folder as the primary root, and a later batch under a sibling folder minted the real parent beside it. Two primary
+        /// roots, one inside the other, made every later publication refuse ("2 primary roots; pass --export-root"): the MTest scan
+        /// of 2026-10-18 published 154 of 3,439 tracks at its first checkpoint and nothing after. Nested primaries are never a real
+        /// choice — the containing root IS the library — so the store keeps ONE: the fold runs where a root is minted (prevention)
+        /// and at open (repair of a store an earlier build left nested), and every reader sees one root.
+        /// </summary>
+        static void TestNestedRoots(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "nested-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var catDir = Path.Combine(dir, "lib"); var outDir = Path.Combine(dir, "out");
+            Directory.CreateDirectory(catDir); Directory.CreateDirectory(outDir);
+            var store = Path.Combine(dir, "truedat.db");
+            string Now() => DateTime.UtcNow.ToString("o");
+            string? Raw(string sql) { using var db = SqliteDb.Open(store, false); return db.ExecScalar(sql); }
+            void RawExec(string sql) { using var db = SqliteDb.Open(store, false); db.Exec(sql); }
+            const string Outer = @"D:\Music", Inner = @"D:\Music\anchors";
+            try
+            {
+                // 0. The scan's own path: a FRESH scan's first checkpoint flush, holding only anchors tracks, mints the library's root
+                //    when the hint carries the scan's whole work list (Program.ScanRootHints) — not the sub-folder those tracks share.
+                var freshStore = Path.Combine(dir, "fresh.db");
+                ScanSink.Reset();
+                ScanSink.Record(Inner + @"\a1.flac", Entry("1111111111111111111111111111111111111111111111111111111111111111", "flac-frames", "flac", 100000));
+                var workList = new[] { Inner + @"\a1.flac", Inner + @"\a2.flac", Outer + @"\synthetic\s1.wav", Outer + @"\real\r1.mp3" };
+                var f0 = ScanSink.Flush(freshStore, "output-x64.5", Program.ScanRootHints(new[] { Inner + @"\a1.flac" }, workList), final: false);
+                using (var db0 = SqliteDb.Open(freshStore, false))
+                    assert(f0.Ok && db0.ExecScalar("SELECT group_concat(path, ' | ') FROM library_root;") == Outer,
+                        $"a fresh scan's first flush mints the library's root from the work list ({db0.ExecScalar("SELECT group_concat(path, ' | ') FROM library_root;")}; {f0.Error})");
+                ScanSink.Reset();
+
+                // 1. The first checkpoint: only the anchors folder has been analysed, so the root lands one level too deep,
+                //    and the first publication names it (exactly what MTest's 20:34 catalog carries).
+                var first = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                {
+                    [Inner + @"\a1.flac"] = Entry("1111111111111111111111111111111111111111111111111111111111111111", "flac-frames", "flac", 100000),
+                    [Inner + @"\a2.flac"] = Entry("2222222222222222222222222222222222222222222222222222222222222222", "flac-frames", "flac", 110000),
+                };
+                var cat = Path.Combine(catDir, "mbxmoods.json");
+                WriteCatalog(cat, first);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat });
+                assert(Raw("SELECT path FROM library_root;") == Inner, $"the first batch alone mints the deeper root ({Raw("SELECT path FROM library_root;")})");
+                var early = Path.Combine(outDir, "early", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(early)!);
+                var re = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = early });
+                assert(re.Published && re.Root == Inner && CatalogOrigin.TryReadHead(early, CatalogOrigin.ContractV2, out var eo) && eo.RootPath == Inner,
+                    $"the first publication names the deep root ({re.Root})");
+                long genEarly = re.Generation;
+
+                // 2. PREVENTION. A later batch under sibling folders: the parent is minted, and the deep root is folded into it in
+                //    the same transaction — the store never commits two nested primaries.
+                var second = new Dictionary<string, TrackEntry>(first, PathComparer.Instance)
+                {
+                    [Outer + @"\synthetic\s1.wav"] = Entry("3333333333333333333333333333333333333333333333333333333333333333", null, "wav", 120000),
+                    [Outer + @"\synthetic\s2.wav"] = Entry("4444444444444444444444444444444444444444444444444444444444444444", null, "wav", 130000),
+                    [Outer + @"\real\r1.mp3"] = Entry("5555555555555555555555555555555555555555555555555555555555555555", null, "mp3", 140000),
+                };
+                WriteCatalog(cat, second);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat });
+                assert(Raw("SELECT count(*) FROM library_root;") == "1" && Raw("SELECT path FROM library_root;") == Outer,
+                    $"the parent is minted and the deep root folded into it: one root ({Raw("SELECT group_concat(path, ' | ') FROM library_root;")})");
+                assert(Raw("SELECT count(*) FROM track_location;") == "5" && Raw("SELECT count(DISTINCT root_id) FROM track_location;") == "1",
+                    $"all five locations sit under the one root ({Raw("SELECT count(*) FROM track_location;")} locations)");
+                assert(Raw($"SELECT rel_path || '|' || canonical_path FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == "anchors/a1.flac|anchors/a1.flac",
+                    $"a moved location's root-relative paths are recomputed against the outer root ({Raw($"SELECT rel_path || '|' || canonical_path FROM track_location WHERE display_path = '{Inner}\\a1.flac';")})");
+
+                // 3. The stale first catalog (it names the folded root) must not make the next scan refuse: it resolves to the root
+                //    that contains it, the store is ahead, and the scan loads all five.
+                var target = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                var load = StoreScan.LoadAuthoritative(store, early, target);
+                assert(!load.Refused && load.Case == "store-ahead" && load.RootPath == Outer && target.Count == 5,
+                    $"a catalog naming a folded root loads the containing root, store ahead ({load.Case}, refused {load.Refused}: {load.Refusal}, root {load.RootPath}, {target.Count} entries)");
+
+                // 4. The publication that refused for 90 minutes now writes every entry.
+                var outPath = Path.Combine(outDir, "mbxmoods.json");
+                var rn = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath });
+                var written = File.ReadAllText(outPath);
+                assert(rn.Published && rn.Entries == 5 && rn.Root == Outer && rn.Generation > genEarly
+                       && written.Contains(@"anchors\\a1.flac") && written.Contains(@"synthetic\\s1.wav") && written.Contains(@"real\\r1.mp3"),
+                    $"the export publishes all five under the one root ({rn.Entries} entries, root {rn.Root}, generation {rn.Generation})");
+
+                // 4b. A scan that loaded the deep root before a checkpoint folded it keeps publishing: its publisher follows the fold.
+                //     An operator's typed --export-root does not — it still means exactly the root named.
+                var scanPub = Path.Combine(outDir, "scanpub", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(scanPub)!);
+                var pubEx = StoreScan.Publish(store, scanPub, Inner, out var pubRep);
+                assert(pubEx == null && pubRep.Root == Outer && pubRep.Entries == 5,
+                    $"the scan's publisher follows a folded root to the one containing it ({pubEx?.Message}; root {pubRep.Root}, {pubRep.Entries} entries)");
+                string? typedMsg = null;
+                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "typed.json"), ExportRoot = Inner }); }
+                catch (StoreException ex) { typedMsg = ex.Message; }
+                assert(typedMsg != null && typedMsg.Contains("No root"), $"a typed --export-root naming a folded root still refuses ({typedMsg})");
+
+                // 5. REPAIR ON OPEN. A store an earlier build left nested (re-created by hand, below the open path that repairs it).
+                RawExec($"INSERT INTO library_root(machine_id, path, role, created_utc) SELECT machine_id, '{Inner}', 'primary', '2026-10-18T03:34:55Z' FROM library_root WHERE path = '{Outer}';" +
+                        $"UPDATE track_location SET root_id = (SELECT id FROM library_root WHERE path = '{Inner}'), rel_path = substr(rel_path, 9), canonical_path = substr(canonical_path, 9) WHERE rel_path LIKE 'anchors/%';");
+                assert(Raw("SELECT count(*) FROM library_root WHERE role = 'primary';") == "2", "the broken state: two nested primaries");
+                var genBroken = long.Parse(Raw("SELECT value FROM store_meta WHERE key = 'generation';")!);
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                {
+                    assert(os.Dal.ListRoots().Count == 1 && os.Dal.ListRoots()[0].Path == Outer, $"opening the store folds the nested root ({os.Dal.ListRoots().Count} roots)");
+                    assert(os.Dal.Generation() == genBroken + 1, $"the repair is a mutation and advances the generation ({genBroken} -> {os.Dal.Generation()})");
+                    assert(os.Db.ExecScalar($"SELECT canonical_path FROM track_location WHERE display_path = '{Inner}\\a2.flac';") == "anchors/a2.flac",
+                        "the repaired location's paths are the outer root's again");
+                }
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                    assert(os.Dal.Generation() == genBroken + 1, "a healthy store's open is a read: a second open does not advance the generation");
+                assert(ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath }).Entries == 5, "the repaired store exports all five");
+
+                // 6. MERGE. One path recorded under BOTH roots (an explicit --library-root import over a store that held the deep root):
+                //    the location with the newer copy survives, the other's history moves onto it, and copies stay one per location.
+                string a1 = Raw($"SELECT id FROM track_location WHERE display_path = '{Inner}\\a1.flac';")!;
+                RawExec($"INSERT INTO library_root(machine_id, path, role, created_utc) SELECT machine_id, '{Inner}', 'primary', '2026-10-18T03:34:55Z' FROM library_root WHERE path = '{Outer}';" +
+                        $"INSERT INTO track_location(entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT entity_id, (SELECT id FROM library_root WHERE path = '{Inner}'), 'a1.flac', 'a1.flac', display_path, last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {a1};" +
+                        $"CREATE TEMP TABLE tc AS SELECT * FROM track_copy WHERE location_id = {a1};" +
+                        $"UPDATE tc SET location_id = (SELECT id FROM track_location WHERE root_id = (SELECT id FROM library_root WHERE path = '{Inner}')), updated_utc = '2099-01-01T00:00:00.0000000Z';" +
+                        "INSERT INTO track_copy SELECT * FROM tc; DROP TABLE tc;" +
+                        $"INSERT INTO check_result(location_id, kind, result, checked_utc) VALUES ({a1}, 'verify', 'OK', '2026-10-18T00:00:00Z');");
+                string dup = Raw($"SELECT id FROM track_location WHERE root_id = (SELECT id FROM library_root WHERE path = '{Inner}');")!;
+                assert(Raw($"SELECT count(*) FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == "2", "the broken state: a1 is recorded twice");
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                {
+                    var db = os.Db;
+                    assert(db.ExecScalar($"SELECT count(*) FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == "1"
+                           && db.ExecScalar($"SELECT id FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == dup,
+                        $"the location holding the newer copy survives ({db.ExecScalar($"SELECT id FROM track_location WHERE display_path = '{Inner}\\a1.flac';")}, want {dup})");
+                    assert(db.ExecScalar($"SELECT canonical_path FROM track_location WHERE id = {dup};") == "anchors/a1.flac"
+                           && db.ExecScalar($"SELECT updated_utc FROM track_copy WHERE location_id = {dup};") == "2099-01-01T00:00:00.0000000Z",
+                        "it moved under the outer root and kept its newer copy");
+                    assert(db.ExecScalar($"SELECT location_id FROM check_result;") == dup, "the dropped location's check history moved onto the survivor");
+                    assert(db.ExecScalar("SELECT count(*) FROM track_copy;") == db.ExecScalar("SELECT count(*) FROM track_location;")
+                           && db.ExecScalar("SELECT count(*) FROM track_copy WHERE location_id NOT IN (SELECT id FROM track_location);") == "0"
+                           && db.ExecScalar("SELECT count(*) FROM verdict WHERE location_id NOT IN (SELECT id FROM track_location);") == "0",
+                        "one copy per location; no copy or verdict left pointing at the dropped location");
+                    assert(db.ExecScalar("PRAGMA foreign_key_check;") == null, "no foreign key left dangling");
+                }
+
+                // 7. CONTROL: a root on another volume is not nested — it stays, and stays ambiguous.
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                    os.Dal.EnsureRoot(os.Machine.Id, @"E:\Other", "primary", Now());
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                    assert(os.Dal.ListRoots().Count == 2, "a disjoint root is not folded");
+                string? msg = null;
+                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json") }); } catch (StoreException ex) { msg = ex.Message; }
+                assert(msg != null && msg.Contains(@"E:\Other"), $"disjoint primaries still refuse, naming both ({msg})");
+
+                // CanonicalPath.Contains is the one containment rule both the fold and the T18i fallback use.
+                assert(CanonicalPath.Contains(@"D:\Music", @"D:\Music\anchors") && CanonicalPath.Contains(@"d:\music\", @"D:/Music/a/b")
+                       && !CanonicalPath.Contains(@"D:\Music", @"D:\Music") && !CanonicalPath.Contains(@"D:\Music", @"D:\Music2")
+                       && !CanonicalPath.Contains(@"D:\Music\anchors", @"D:\Music") && CanonicalPath.Contains(@"\\nas\share", @"\\nas\share\music"),
+                    "containment: strict, case- and separator-insensitive, no prefix-sibling match");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

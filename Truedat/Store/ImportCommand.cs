@@ -192,6 +192,7 @@ namespace Truedat.Store
                     }
                     if (rootIds.Count == 0 && allPaths.Count > 0) throw new StoreException("No library root could be inferred from the paths; pass --library-root.");
                 }
+                rootIds = FoldNestedRoots(dal, rootIds, now);
                 tx.Complete();
             }
             r.Roots.AddRange(rootIds.Select(x => x.Path));
@@ -418,6 +419,9 @@ namespace Truedat.Store
             using (var tx = db.BeginTransaction())
             {
                 foreach (var root in roots) rootIds.Add((root, dal.EnsureRoot(writerMachine, root, role, now)));
+                // The whole catalog's root may contain a root the store already had (a scan's first checkpoint minted a sub-folder):
+                // without the fold, every entry under the old root was written a SECOND time under the new one and both roots stayed.
+                rootIds = FoldNestedRoots(dal, rootIds, now);
                 tx.Complete();
             }
             r.Roots.AddRange(roots);
@@ -826,6 +830,20 @@ namespace Truedat.Store
             using var sha = SHA256.Create();
             using var fs = File.OpenRead(path);
             return BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+        }
+
+        /// <summary>The prevention half of <see cref="StoreDal.FoldNestedRoots"/>, in the caller's transaction, right after a root is
+        /// minted: a new root may contain one the store already had, or sit inside one. Folding there means no commit ever leaves
+        /// nested primaries (they made every later publication refuse), and this import is routed through the surviving roots.</summary>
+        static List<(string Path, long Id)> FoldNestedRoots(StoreDal dal, List<(string Path, long Id)> rootIds, string now)
+        {
+            var folds = dal.FoldNestedRoots();
+            if (folds.Count == 0) return rootIds;
+            if (folds.Any(f => f.Merged > 0)) VerdictStore.DeriveAll(dal, now);   // a merge dropped a verdict row
+            dal.AdvanceGeneration();
+            foreach (var f in folds) StoreLog.Info("root " + f);
+            var into = folds.ToDictionary(f => f.InnerId);
+            return rootIds.Select(x => into.TryGetValue(x.Id, out var f) ? (f.Outer, f.OuterId) : x).Distinct().ToList();
         }
 
         static (string Path, long Id)? RootFor(List<(string Path, long Id)> roots, string path)

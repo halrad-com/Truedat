@@ -67,6 +67,17 @@ namespace Truedat.Store
             return roots;
         }
 
+        /// <summary>Whether directory <paramref name="inner"/> lies strictly inside directory <paramref name="outer"/>
+        /// (case-insensitive, either separator, trailing separators ignored). A directory does not contain itself, and
+        /// <c>D:\Music2</c> is not inside <c>D:\Music</c>.</summary>
+        internal static bool Contains(string outer, string inner)
+        {
+            var o = Backslashes(outer).TrimEnd('\\');
+            var i = Backslashes(inner).TrimEnd('\\');
+            return o.Length > 0 && i.Length > o.Length + 1 && i[o.Length] == '\\'
+                && i.StartsWith(o, StringComparison.OrdinalIgnoreCase);
+        }
+
         static string Backslashes(string path) => path.Replace('/', '\\');
     }
 }

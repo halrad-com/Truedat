@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace Truedat.Store
 {
@@ -49,6 +51,7 @@ namespace Truedat.Store
                 SchemaMigrator.Apply(db, truedatVersion);
                 var dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);
+                FoldNestedRoots(db, dal, nowUtc);   // a store left with nested primary roots is repaired before anything reads it
                 VerdictStore.EnsureCurrent(db, dal, nowUtc);   // T19: derive / re-derive the verdict projection when the build's tags differ
                 StoreLog.Info($"store open: {full} (schema v{SchemaMigrator.ReadVersion(db)}, sqlite {probe.VersionText}, machine {machine.Id} on {machine.CreatedByHost})");
                 return new OpenStore(db, dal, machine, probe, full);
@@ -60,6 +63,25 @@ namespace Truedat.Store
                 throw new StoreException($"The store {full} could not be opened: {ex.Message}");
             }
             catch { db?.Dispose(); throw; }
+        }
+
+        /// <summary>The repair half of <see cref="StoreDal.FoldNestedRoots"/>: a store written before the fold ran at root minting
+        /// (or by any path that minted a sub-folder root first) is folded the first time it is opened, so every reader — the
+        /// export, the scan's load, --store-info, the hub — sees one root instead of each needing its own workaround. A mutation
+        /// a consumer can see (the locations' roots), so it advances the generation. A healthy store's open stays a read.</summary>
+        static void FoldNestedRoots(SqliteDb db, StoreDal dal, string nowUtc)
+        {
+            if (!dal.HasNestedRoots()) return;
+            List<RootFold> folds;
+            using (var tx = db.BeginTransaction())
+            {
+                folds = dal.FoldNestedRoots();
+                // A merge dropped one location's verdict; the projection is a row iff the block, so it is derived again.
+                if (folds.Any(f => f.Merged > 0)) VerdictStore.DeriveAll(dal, nowUtc);
+                if (folds.Count > 0) dal.AdvanceGeneration();
+                tx.Complete();
+            }
+            foreach (var f in folds) StoreLog.Warn("root " + f);
         }
 
         public void Dispose() { Dal.Dispose(); Db.Dispose(); }
