@@ -8,6 +8,23 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV2.2.3.1] — 2026-10-19
+
+### Fixed
+
+- **A library's files can be anywhere.** With the store in force, the catalog was published from one folder root
+  of the library. When a library had more than one root (files on two drives, or a scan that recorded a
+  sub-folder as a root first), `mbxmoods.json` was not written at all, or held only one root's tracks, and every
+  track elsewhere was re-analysed on every scan. Publishing, the scan, `--stats`, `--duplicates` and
+  `--store-roundtrip` now cover every entry of the library. A store already left with a sub-folder root is
+  repaired the first time it is opened; after that, `truedat --store-export` or the next scan writes the full
+  catalog. `--export-root` still exports exactly the root you name.
+- **The scan summary says what it wrote.** When the catalog could not be written from the store it prints
+  `NOT PUBLISHED` with the reason, instead of a track count for a file it did not write. The catalog line says
+  when the file on disk is behind the store.
+- **Local copies are not reported as network staging.** Files with non-ASCII names copied locally for the tools
+  no longer show a "pulled over the source link" rate.
+
 ## [0.5.5.3-EV2.2.3] — 2026-10-18
 
 ### Changed
