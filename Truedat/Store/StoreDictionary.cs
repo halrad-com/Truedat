@@ -13,32 +13,14 @@ namespace Truedat.Store
         internal static ConcurrentDictionary<string, TrackEntry> Load(string? storePath, string? exportRoot, out string rootPath)
         {
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-            var roots = os.Dal.ListRoots();
-            if (roots.Count == 0) throw new StoreException("The store has no library roots; import a catalog first.");
-            (long Id, string Path, string Role) root;
-            if (!string.IsNullOrWhiteSpace(exportRoot))
-            {
-                var want = Norm(exportRoot!);
-                root = roots.FirstOrDefault(r => Norm(r.Path) == want);
-                if (root.Path == null)
-                    throw new StoreException($"No root '{exportRoot}' in the store. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
-            }
-            else
-            {
-                var primaries = roots.Where(x => x.Role == "primary").ToList();
-                if (primaries.Count != 1)
-                    throw new StoreException(primaries.Count == 0
-                        ? $"The store has no primary root; pass --export-root. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}."
-                        : $"The store has {primaries.Count} primary roots; pass --export-root to pick one: {string.Join(", ", primaries.Select(x => x.Path))}.");
-                root = primaries[0];
-            }
+            // The same selection as the export (the whole library, or the one typed --export-root), so --stats and --duplicates
+            // describe exactly what a publication writes.
+            var roots = ExportCommand.PickRoots(os, exportRoot);
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
-            StoreLog.Info($"store dictionary: {dict.Count} entries of root {root.Path}");
-            rootPath = root.Path;
+            foreach (var (display, entry) in os.Dal.ReadEntries(roots.Select(x => x.Id))) dict[display] = entry;
+            rootPath = ExportCommand.Describe(roots);   // "root X" or "N roots (X, Y)" — for the Source line only
+            StoreLog.Info($"store dictionary: {dict.Count} entries of {ExportCommand.Describe(roots)}");
             return dict;
         }
-
-        static string Norm(string p) => p.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
     }
 }

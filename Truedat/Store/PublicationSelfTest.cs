@@ -105,21 +105,24 @@ namespace Truedat.Store
                 assert(r.Published && CatalogOrigin.TryRead(outP, out var o) && o.RootPath == mirror && o.RootRole == "mirror",
                     "no primary, explicit --export-root: exports, origin names the mirror");
             }
-            // Several primaries: the DEFAULT refuses, an explicit root still exports and names that root.
+            // Several primaries (a library whose files sit in several places): the DEFAULT publishes the whole library and names no
+            // single root; an explicit root still exports just that root and names it.
             using (var d = new Dir())
             {
                 var store = d.P("truedat.db");
                 ImportCommand.ExecuteEntries(store, One(@"D:\one\a.flac", 'a', 120), @"D:\one", "primary", true, "import", "1", "fixture", null, null);
                 ImportCommand.ExecuteEntries(store, One(@"D:\two\b.flac", 'b', 121), @"D:\two", "primary", true, "import", "1", "fixture", null, null);
                 var outP = d.P("mbxmoods.json");
-                assert(Refused(() => ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP }), out var why2) && why2.Contains("2 primary roots") && !File.Exists(outP),
-                    $"several primaries, default selection: refused, no file ({why2})");
+                var all = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP });
+                bool oaRead = CatalogOrigin.TryRead(outP, out var oa);
+                assert(all.Published && all.Entries == 2 && oaRead && oa.RootPath == null && oa.RootRole == null,
+                    $"several primaries, default selection: every entry published, origin names no single root ({all.Entries} entries, rootPath {oa.RootPath ?? "absent"})");
                 var r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outP, ExportRoot = @"D:\two" });
                 assert(r.Published && CatalogOrigin.TryRead(outP, out var o) && o.RootPath == @"D:\two" && o.RootRole == "primary",
                     "several primaries, explicit --export-root: exports, origin names the chosen one");
             }
             // The root is read inside the export's snapshot: a concurrent commit that adds a SECOND primary after the snapshot began
-            // and before the root is picked is invisible — the default pick still sees one primary (outside the snapshot it would refuse).
+            // and before the root is picked is invisible — the default pick still sees one primary (outside the snapshot it would publish both).
             using (var d = new Dir())
             {
                 var store = d.P("truedat.db");

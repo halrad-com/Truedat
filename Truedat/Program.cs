@@ -1299,8 +1299,6 @@ namespace Truedat
         // v2 store (S1, C7): --store / --export-root as seen by verbs that run deep in the scan path
         // (RunDuplicates(outputDir)) and cannot see Main's locals. Null = the JSON-backed path, unchanged.
         static string? _storePath;
-        /// <summary>T18: the store root a store-authoritative scan loaded from and publishes (store-intent item 8); null without a store.</summary>
-        static string? _storeRootPath;
         static string? _storeExportRoot;
         /// <summary>Every path the running scan will consider, captured once before analysis starts: the root hint for its store
         /// flushes, beside the catalog's keys. The catalog alone is not enough on a FRESH scan — at the first checkpoint it holds only
@@ -3456,7 +3454,7 @@ namespace Truedat
                 ConcurrentDictionary<string, TrackEntry> statsTracks;
                 if (storePath != null)
                 {
-                    try { statsTracks = global::Truedat.Store.StoreDictionary.Load(storePath, storeExportRoot, out var statsRoot); Console.WriteLine($"Source: store {storePath} (root {statsRoot})"); }
+                    try { statsTracks = global::Truedat.Store.StoreDictionary.Load(storePath, storeExportRoot, out var statsRoot); Console.WriteLine($"Source: store {storePath} ({statsRoot})"); }
                     catch (global::Truedat.Store.StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); Environment.ExitCode = ex.ExitCode; return; }
                 }
                 else
@@ -4157,7 +4155,6 @@ namespace Truedat
                     afMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                     var afLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, afMoodsTracks);   // T18i
                     if (afLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, afLoad.Refusal!, 2); return; }
-                    _storeRootPath = afLoad.RootPath;
                     if (afLoad.Note != null) Console.Error.WriteLine($"  store: {afLoad.Note}");
                 }
                 else if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
@@ -4821,7 +4818,6 @@ namespace Truedat
                 {
                     var flLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, flMoodsTracks);   // T18i
                     if (flLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, flLoad.Refusal!, 2); return; }
-                    _storeRootPath = flLoad.RootPath;
                     if (flLoad.Note != null) Console.Error.WriteLine($"  store: {flLoad.Note}");
                 }
                 else if (!string.IsNullOrEmpty(analyzeFileMoods) && File.Exists(analyzeFileMoods))
@@ -5749,7 +5745,7 @@ namespace Truedat
                     if (auditLog) { _tee = null; tee?.Dispose(); }
                     return;
                 }
-                _storeRootPath = storeLoad.RootPath; existingCount = storeLoad.Loaded;
+                existingCount = storeLoad.Loaded;
                 if (storeLoad.Note != null) Console.WriteLine($"  store: {storeLoad.Note}");
             }
             else existingCount = LoadExistingMoods(moodsPath, allTracks);
@@ -7430,7 +7426,7 @@ namespace Truedat
                 try
                 {
                     var storeTracks = global::Truedat.Store.StoreDictionary.Load(_storePath, _storeExportRoot, out var dupRoot);
-                    Console.WriteLine($"Source: store {_storePath} (root {dupRoot})");
+                    Console.WriteLine($"Source: store {_storePath} ({dupRoot})");
                     RunDuplicates(moodsPath, storeTracks);
                 }
                 catch (global::Truedat.Store.StoreException ex) { Console.Error.WriteLine("Error: " + ex.Message); Environment.ExitCode = ex.ExitCode; }
@@ -10824,7 +10820,7 @@ namespace Truedat
             };
 
             // The files come from the restored store, through the same publication every scan and verb uses.
-            var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, destCatalog, null, out var rep);
+            var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, destCatalog, out var rep);
             rec.Export = new global::Truedat.Store.StoreResultExport
             {
                 Performed = pubEx == null && rep.Published, Generation = pubEx == null ? rep.Generation : (long?)null,
@@ -11092,10 +11088,9 @@ namespace Truedat
             var load = global::Truedat.Store.StoreScan.LoadAuthoritative(store, catalogPath, before);
             if (load.Refused) return Fail(load.Refusal!.Replace("Nothing was scanned.", $"{flag} changed nothing."), 2);
             if (load.Case == "fresh") return Fail($"Error: {flag} with a store in force, but neither the store nor the catalog holds anything: nothing to change.", 1);
-            _storeRootPath = load.RootPath;
 
             // (2) the verb reads the store's state
-            var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, load.RootPath, out _);
+            var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out _);
             if (pubEx != null) return Fail($"Error: {flag} could not publish the store's state before running ({CheckpointCause.Describe(pubEx)}); nothing was changed.", 1);
 
             // (3) the verb, unchanged
@@ -11114,18 +11109,24 @@ namespace Truedat
             long generationBefore = load.Generation;
             try
             {
-                if (remapOld != null && remapNew != null && load.RootPath != null
-                    && string.Equals(remapOld.Replace('/', '\\').TrimEnd('\\'), load.RootPath.Replace('/', '\\').TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                if (remapOld != null && remapNew != null)
                 {
-                    // The remap moves the whole root: one transaction, the root row and every display path under it.
+                    // When the remapped prefix IS one of the library's roots (any of them — a library may sit on several drives),
+                    // the remap moves that whole root: one transaction, the root row and every display path under it.
+                    string oldRoot = remapOld.Replace('/', '\\').TrimEnd('\\'), newRoot = remapNew.Replace('/', '\\').TrimEnd('\\');
                     using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-                    using var tx = os.Db.BeginTransaction();
-                    var rootId = os.Dal.ListRoots().First(x => string.Equals(x.Path, load.RootPath, StringComparison.Ordinal)).Id;
-                    moved = os.Dal.MoveRoot(rootId, load.RootPath, remapNew.Replace('/', '\\').TrimEnd('\\'));
-                    if (moved > 0) os.Dal.AdvanceGeneration();
-                    _storeRootPath = remapNew.Replace('/', '\\').TrimEnd('\\');   // the publication below exports the MOVED root
-                    tx.Complete();
-                    removed.Clear(); changed.Clear();
+                    var hit = os.Dal.LibraryRoots(os.Machine.Id).Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (hit.Count == 1)
+                    {
+                        using var tx = os.Db.BeginTransaction();
+                        moved = os.Dal.MoveRoot(hit[0].Id, hit[0].Path, newRoot);
+                        if (moved > 0) os.Dal.AdvanceGeneration();
+                        tx.Complete();
+                        // The move accounts for exactly the renamed paths; whatever the verb changed on the library's OTHER roots
+                        // still goes to the store below.
+                        removed.RemoveAll(k => global::Truedat.Store.CanonicalPath.Contains(oldRoot, k));
+                        foreach (var k in changed.Keys.Where(k => global::Truedat.Store.CanonicalPath.Contains(newRoot, k)).ToList()) changed.Remove(k);
+                    }
                 }
                 if (removed.Count + changed.Count > 0)
                 {
@@ -11141,7 +11142,7 @@ namespace Truedat
             catch (Exception ex) { storeError = CheckpointCause.Describe(ex); }
 
             // (5) the files from the store, always
-            var pub2 = global::Truedat.Store.StoreScan.Publish(store, catalogPath, _storeRootPath, out var rep2);
+            var pub2 = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out var rep2);
             rec.Export = new global::Truedat.Store.StoreResultExport
             {
                 Performed = pub2 == null && rep2.Published, Generation = pub2 == null ? rep2.Generation : (long?)null,
@@ -11291,7 +11292,7 @@ namespace Truedat
         internal static bool PublishFromStore(string catalogPath, bool checkpoint)
         {
             if (_storePath == null) return false;
-            var ex = global::Truedat.Store.StoreScan.Publish(_storePath, catalogPath, _storeRootPath, out var rep);
+            var ex = global::Truedat.Store.StoreScan.Publish(_storePath, catalogPath, out var rep);
             global::Truedat.Store.StoreResult.NoteScanExport(rep, ex);
             var p = _publish ??= new PublishState();
             if (ex != null)
@@ -11302,8 +11303,6 @@ namespace Truedat
                 return false;
             }
             p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
-            // A fold during this scan (the library grew past its old root) moved the root this scan loaded; publish the surviving one from now on.
-            if (!string.IsNullOrEmpty(rep.Root)) _storeRootPath = rep.Root;
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
             return true;
         }
@@ -22426,7 +22425,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 string? publishFailure = null;
                 if (rc == 0)
                 {
-                    var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, catalogPath!, null, out _);
+                    var pubEx = global::Truedat.Store.StoreScan.Publish(storePath, catalogPath!, out _);
                     if (pubEx != null) publishFailure = CheckpointCause.Describe(pubEx);
                 }
                 if (rc != 0 || publishFailure != null)

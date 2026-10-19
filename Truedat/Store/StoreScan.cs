@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -69,41 +69,38 @@ namespace Truedat.Store
             {
                 res.Generation = os.Dal.Generation();
                 var roots = os.Dal.ListRoots();
-                (long Id, string Path, string Role)? root = null;
+                // The scan works on the LIBRARY — every entry, wherever its file is (StoreDal.LibraryRoots). Loading only the root a
+                // catalog names made every track under the library's other roots look new: re-analysed on every scan, and left out of
+                // the catalog again (MTest, 2026-10-18: the 12.5-hour file analysed a second time).
+                var load = os.Dal.LibraryRoots(os.Machine.Id);
                 if (origin?.RootPath != null)
                 {
-                    var match = roots.Where(x => string.Equals(x.Path, origin.RootPath, StringComparison.Ordinal) && string.Equals(x.Role, origin.RootRole, StringComparison.Ordinal)).ToList();
-                    // A catalog published from a sub-folder root that has since been folded into the root containing it
-                    // (StoreDal.FoldNestedRoots): that root IS its library now. Only a primary, only when no row names it
-                    // exactly, and only when exactly one primary contains it — anything else stays unresolved.
-                    if (match.Count == 0 && origin.RootRole == "primary")
+                    bool Same(string a, string b) => string.Equals(a.Replace('/', '\\').TrimEnd('\\'), b.Replace('/', '\\').TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+                    if (origin.RootRole == "primary")
                     {
-                        var containing = roots.Where(x => x.Role == "primary" && CanonicalPath.Contains(x.Path, origin.RootPath)).ToList();
-                        if (containing.Count == 1)
-                        {
-                            match = containing;
-                            StoreLog.Info($"the catalog names root {origin.RootPath}, now folded into {containing[0].Path}: publishing that root");
-                        }
+                        // A catalog naming a root must name one of THIS library's: a root it has, or one since folded into a root that
+                        // contains it (StoreDal.FoldNestedRoots). Anything else came from another store.
+                        if (!load.Any(x => Same(x.Path, origin.RootPath) || CanonicalPath.Contains(x.Path, origin.RootPath)))
+                            return Refuse(res, "root-unresolved",
+                                $"the catalog names root {origin.RootPath} and the store {Path.GetFullPath(storePath)} holds no such library root " +
+                                $"({string.Join(", ", load.Select(x => x.Path))}): the catalog came from another store. Re-publish with --store-export, or run without the store.");
                     }
-                    if (match.Count != 1)
-                        return Refuse(res, "root-unresolved",
-                            $"the catalog names root {origin.RootPath} ({origin.RootRole}) and the store {Path.GetFullPath(storePath)} has {match.Count} rows matching it; " +
-                            "the scan cannot tell which root it is publishing. Export the root you mean with --store-export --export-root, or run without the store.");
-                    root = match[0];
+                    else
+                    {
+                        // A catalog exported from one non-primary root (--store-export --export-root <mirror>): exactly that root, as before.
+                        var match = roots.Where(x => string.Equals(x.Path, origin.RootPath, StringComparison.Ordinal) && string.Equals(x.Role, origin.RootRole, StringComparison.Ordinal)).ToList();
+                        if (match.Count != 1)
+                            return Refuse(res, "root-unresolved",
+                                $"the catalog names root {origin.RootPath} ({origin.RootRole}) and the store {Path.GetFullPath(storePath)} has {match.Count} rows matching it; " +
+                                "the scan cannot tell which root it is publishing. Export the root you mean with --store-export --export-root, or run without the store.");
+                        load = match;
+                    }
                 }
-                else if (roots.Count > 0)
+                if (load.Count > 0)
                 {
-                    var primaries = roots.Where(x => x.Role == "primary").ToList();
-                    if (primaries.Count != 1)
-                        return Refuse(res, "root-unresolved",
-                            $"the store {Path.GetFullPath(storePath)} has {primaries.Count} primary roots and the catalog names none; the scan cannot tell which root to publish.");
-                    root = primaries[0];
-                }
-                if (root != null)
-                {
-                    res.RootPath = root.Value.Path;
-                    foreach (var (display, entry) in os.Dal.ReadEntries(root.Value.Id)) storeEntries[display] = entry;
-                    mergedCopies = os.Dal.NonPrimaryCopyPaths(root.Value.Id);
+                    res.RootPath = load.Count == 1 ? load[0].Path : null;
+                    foreach (var (display, entry) in os.Dal.ReadEntries(load.Select(x => x.Id))) storeEntries[display] = entry;
+                    mergedCopies = os.Dal.NonPrimaryCopyPaths(load.Select(x => x.Id));
                 }
             }
 
@@ -191,12 +188,12 @@ namespace Truedat.Store
         /// <summary>T18a-d: publish the catalog + sidecar + edges companion DERIVED from the store (the --store-export publisher: one read
         /// snapshot, generation-stamped, the ruled rename order). Returns null on success, else the failure (the store is unaffected: a
         /// publication failure leaves the files behind the store, which T07 accepts and the next publish repairs).</summary>
-        internal static Exception? Publish(string storePath, string catalogPath, string? rootPath, out ExportReport report)
+        internal static Exception? Publish(string storePath, string catalogPath, out ExportReport report)
         {
             report = new ExportReport();
-            // The root a scan loaded may have been folded into one that contains it since (StoreDal.FoldNestedRoots at a checkpoint):
-            // the scan's publisher follows the fold. An operator's typed --export-root does not — it means exactly that root.
-            try { ExportCommand.Execute(new ExportOptions { StorePath = storePath, OutPath = catalogPath, ExportRoot = rootPath, FollowFoldedRoot = true }, report); return null; }
+            // The WHOLE library, always (StoreDal.LibraryRoots): a scan or a verb publishes every entry it holds, wherever the files are.
+            // Passing the root the scan loaded made it publish one drive's tracks — or refuse, with the library under two roots.
+            try { ExportCommand.Execute(new ExportOptions { StorePath = storePath, OutPath = catalogPath }, report); return null; }
             catch (Exception ex) { return ex; }
         }
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Truedat.Store
 {
@@ -113,12 +114,45 @@ namespace Truedat.Store
         }
 
         /// <summary>
-        /// One library has ONE primary root per machine and volume. A primary root inside another primary root on the same
-        /// machine is folded into it: its locations move under the containing root — root-relative paths recomputed with the
-        /// same <see cref="CanonicalPath.Split"/> the insert uses — and the inner row is dropped. Nested primaries are never a
-        /// real choice (the outer root IS the library), but they made every publication refuse ("N primary roots; pass
-        /// --export-root"): a fresh scan minted a sub-folder as the root at its first checkpoint and the real parent at a later
-        /// one (MTest, 2026-10-18: 154 of 3,439 tracks published, then nothing for 90 minutes). A path recorded under BOTH roots
+        /// The library's roots. A library is one catalog and one store, and its entries live wherever the operator put the
+        /// files — any number of folders on any number of drives; MusicBee and the hub serve them all. A root is only how the
+        /// store records a path; it never decides what is published. So the library is every PRIMARY root of this machine
+        /// (mirror roots are another machine's view of the same audio). A machine with none — a metadata mirror reading a store
+        /// copied from the scanning box — reads every primary root. Picking ONE root here is what published 154 of MTest's
+        /// 3,439 tracks and then refused, and what would publish nothing at all for a library spread over two drives.
+        /// </summary>
+        internal List<(long Id, string Path, string Role)> LibraryRoots(string machineId)
+        {
+            var all = new List<(long Id, string Machine, string Path, string Role)>();
+            var st = Stmt("SELECT id, machine_id, path, role FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) all.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "", st.GetString(3) ?? "")); }
+            finally { st.Reset(); }
+            var mine = all.Where(r => r.Machine == machineId).ToList();
+            return (mine.Count > 0 ? mine : all).Select(r => (r.Id, r.Path, r.Role)).ToList();
+        }
+
+        /// <summary>Every present entry under any of <paramref name="rootIds"/> (the library: <see cref="LibraryRoots"/>).</summary>
+        internal IEnumerable<(string DisplayPath, TrackEntry Entry)> ReadEntries(IEnumerable<long> rootIds)
+        {
+            foreach (var id in rootIds)
+                foreach (var e in ReadEntries(id)) yield return e;
+        }
+
+        /// <summary><see cref="NonPrimaryCopyPaths(long)"/> over several roots.</summary>
+        internal HashSet<string> NonPrimaryCopyPaths(IEnumerable<long> rootIds)
+        {
+            var set = new HashSet<string>(PathComparer.Instance);
+            foreach (var id in rootIds) set.UnionWith(NonPrimaryCopyPaths(id));
+            return set;
+        }
+
+        /// <summary>
+        /// A primary root inside another primary root on the same machine is redundant — every path under it is already under the
+        /// outer one — so it is folded into it: its locations move under the containing root (root-relative paths recomputed with
+        /// the same <see cref="CanonicalPath.Split"/> the insert uses) and the inner row is dropped. A fresh scan used to mint a
+        /// sub-folder as a root at its first checkpoint and the real parent later (MTest, 2026-10-18), and a catalog import then
+        /// wrote every entry under the old root a second time under the new one. A library may have any number of DISJOINT
+        /// roots (folders on several drives); those are left alone and all published (<see cref="LibraryRoots"/>). A path recorded under BOTH roots
         /// (an explicit --library-root import over a store that already held the deeper root) keeps the location whose copy is
         /// newer; the other's run and check history move onto it, and its copy, verdict and location row go. Runs in the
         /// caller's transaction; returns the folds, empty when there were none.

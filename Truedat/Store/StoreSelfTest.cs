@@ -996,7 +996,7 @@ namespace Truedat.Store
                 var fromJson = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                 Program.LoadExistingMoodsForStore(catalog, fromJson);
                 var fromStore = StoreDictionary.Load(store, null, out var root);
-                assert(root == @"D:\Music" && fromStore.Count == fromJson.Count && fromStore.Count == 6, $"store dictionary has the catalog's 6 entries for the primary root ({fromStore.Count}, {root})");
+                assert(root == @"root D:\Music" && fromStore.Count == fromJson.Count && fromStore.Count == 6, $"store dictionary has the catalog's 6 entries for the primary root ({fromStore.Count}, {root})");
                 int same = 0;
                 foreach (var kv in fromJson) if (fromStore.TryGetValue(kv.Key, out var s) && EntryJson(kv.Key, kv.Value) == EntryJson(kv.Key, s)) same++;
                 assert(same == 6, $"every entry in the store dictionary writes the same bytes as the JSON-loaded one ({same}/6)");
@@ -1080,12 +1080,12 @@ namespace Truedat.Store
                 assert(km.Contains("1111111111111111111111111111111111111111111111111111111111111111") && km.Contains("2222222222222222222222222222222222222222222222222222222222222222")
                     && km.Contains(FacetKinds.ShaTaglibRegion) && km.Contains(FacetKinds.ShaFrames), "key-moves.json names old and new hash with their kinds");
 
-                // Two primary roots and no --export-root -> refuse, naming them.
+                // Two primary roots (the library's files in two places) and no --export-root: the whole library is published.
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     os.Dal.EnsureRoot(os.Machine.Id, @"E:\Other", "primary", DateTime.UtcNow.ToString("o"));
-                string? msg = null;
-                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json") }); } catch (StoreException ex) { msg = ex.Message; }
-                assert(msg != null && msg.Contains(@"D:\Music") && msg.Contains(@"E:\Other"), $"two primary roots without --export-root refuse and name both ({msg})");
+                var r2r = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json") });
+                assert(r2r.Entries == 7 && r2r.RootCount == 2 && r2r.Root.Contains(@"D:\Music") && r2r.Root.Contains(@"E:\Other"),
+                    $"two primary roots without --export-root publish the whole library and name both ({r2r.Entries} entries, {r2r.RootCount} roots: {r2r.Root})");
                 var r3 = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json"), ExportRoot = @"d:\music\" });
                 assert(r3.Entries == 7 && r3.Root == @"D:\Music", "--export-root selects the root case-insensitively, tolerating a trailing separator");
             }
@@ -1174,13 +1174,13 @@ namespace Truedat.Store
                        && written.Contains(@"anchors\\a1.flac") && written.Contains(@"synthetic\\s1.wav") && written.Contains(@"real\\r1.mp3"),
                     $"the export publishes all five under the one root ({rn.Entries} entries, root {rn.Root}, generation {rn.Generation})");
 
-                // 4b. A scan that loaded the deep root before a checkpoint folded it keeps publishing: its publisher follows the fold.
-                //     An operator's typed --export-root does not — it still means exactly the root named.
+                // 4b. The scan's publisher takes no root at all: it always writes the whole library, so a root it loaded and a
+                //     checkpoint later folded can never narrow it. An operator's typed --export-root still means exactly that root.
                 var scanPub = Path.Combine(outDir, "scanpub", "mbxmoods.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(scanPub)!);
-                var pubEx = StoreScan.Publish(store, scanPub, Inner, out var pubRep);
+                var pubEx = StoreScan.Publish(store, scanPub, out var pubRep);
                 assert(pubEx == null && pubRep.Root == Outer && pubRep.Entries == 5,
-                    $"the scan's publisher follows a folded root to the one containing it ({pubEx?.Message}; root {pubRep.Root}, {pubRep.Entries} entries)");
+                    $"the scan's publisher writes the whole library ({pubEx?.Message}; root {pubRep.Root}, {pubRep.Entries} entries)");
                 string? typedMsg = null;
                 try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "typed.json"), ExportRoot = Inner }); }
                 catch (StoreException ex) { typedMsg = ex.Message; }
@@ -1231,14 +1231,37 @@ namespace Truedat.Store
                     assert(db.ExecScalar("PRAGMA foreign_key_check;") == null, "no foreign key left dangling");
                 }
 
-                // 7. CONTROL: a root on another volume is not nested — it stays, and stays ambiguous.
+                // 7. A LIBRARY ON TWO DRIVES. Files can sit anywhere — MusicBee and the hub serve them all — so a library whose
+                //    tracks are on D: and E: is one library: two roots, never folded, both published, both loaded by every scan.
+                var twoDrives = new Dictionary<string, TrackEntry>(second, PathComparer.Instance)
+                {
+                    [@"E:\Other\x.mp3"] = Entry("6666666666666666666666666666666666666666666666666666666666666666", null, "mp3", 150000),
+                };
+                WriteCatalog(cat, twoDrives);
+                ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat });
                 using (var os = OpenStore.Open(store, false, "selftest", Now()))
-                    os.Dal.EnsureRoot(os.Machine.Id, @"E:\Other", "primary", Now());
-                using (var os = OpenStore.Open(store, false, "selftest", Now()))
-                    assert(os.Dal.ListRoots().Count == 2, "a disjoint root is not folded");
-                string? msg = null;
-                try { ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = Path.Combine(outDir, "x.json") }); } catch (StoreException ex) { msg = ex.Message; }
-                assert(msg != null && msg.Contains(@"E:\Other"), $"disjoint primaries still refuse, naming both ({msg})");
+                    assert(os.Dal.ListRoots().Count == 2 && os.Dal.LibraryRoots(os.Machine.Id).Count == 2, "a root on another drive is not folded: two library roots");
+                var both = Path.Combine(outDir, "both", "mbxmoods.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(both)!);
+                var rb = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = both });
+                bool boRead = CatalogOrigin.TryReadHead(both, CatalogOrigin.ContractV2, out var bo);
+                assert(rb.Published && rb.Entries == 6 && rb.RootCount == 2 && boRead && bo.RootPath == null,
+                    $"the two-drive library publishes all six entries and names no single root ({rb.Entries} entries, {rb.RootCount} roots, rootPath {bo.RootPath ?? "absent"})");
+                var tb = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                var lb = StoreScan.LoadAuthoritative(store, both, tb);
+                assert(!lb.Refused && tb.Count == 6 && lb.RootPath == null, $"a scan over that catalog loads the whole library ({lb.Case}, refused {lb.Refused}: {lb.Refusal}, {tb.Count} entries)");
+                // The 'scans it every time' case: a catalog published when the library had ONE root, loaded after it grew a second.
+                var tg = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                var lg = StoreScan.LoadAuthoritative(store, early, tg);
+                assert(!lg.Refused && tg.Count == 6 && tg.ContainsKey(@"E:\Other\x.mp3"),
+                    $"a catalog naming one root still loads every entry of the library, so the other drive's tracks are cached, not re-analysed ({lg.Case}, {tg.Count} entries)");
+                var dictAll = StoreDictionary.Load(store, null, out var dictRoots);
+                assert(dictAll.Count == 6 && dictRoots.StartsWith("2 roots", StringComparison.Ordinal), $"--stats / --duplicates read the whole library ({dictAll.Count}, {dictRoots})");
+                // A catalog naming a root this library does not have came from another store, and still refuses.
+                var foreign = Path.Combine(outDir, "foreign.json");
+                File.WriteAllText(foreign, File.ReadAllText(early).Replace(@"""rootPath"":""D:\\Music\\anchors""", @"""rootPath"":""Z:\\Elsewhere"""));
+                var lf = StoreScan.LoadAuthoritative(store, foreign, new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance));
+                assert(lf.Refused && lf.Refusal!.Contains(@"Z:\Elsewhere"), $"a catalog from another store's library still refuses, naming its root ({lf.Refusal})");
 
                 // CanonicalPath.Contains is the one containment rule both the fold and the T18i fallback use.
                 assert(CanonicalPath.Contains(@"D:\Music", @"D:\Music\anchors") && CanonicalPath.Contains(@"d:\music\", @"D:/Music/a/b")

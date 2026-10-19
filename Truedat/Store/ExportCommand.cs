@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -16,15 +16,11 @@ namespace Truedat.Store
         public string? OutPath;
         public string? ExportRoot;
         public bool Audit;
-        /// <summary>The scan's publisher only: an <see cref="ExportRoot"/> that is no longer a root because it was folded into the
-        /// one primary root containing it (StoreDal.FoldNestedRoots) resolves to that root. An operator's typed --export-root never
-        /// sets this — it means exactly the root named.</summary>
-        public bool FollowFoldedRoot;
     }
 
     internal sealed class ExportReport
     {
-        public string Root = ""; public string OutPath = ""; public int Entries; public int KeyMoves; public string? KeyMovesPath; public long ElapsedMs;
+        public string Root = ""; public int RootCount; public string OutPath = ""; public int Entries; public int KeyMoves; public string? KeyMovesPath; public long ElapsedMs;
         /// <summary>Store-v3 T07: the generation the triple carries; Published = the ruled publication ran (false = split
         /// fallback, v1 header); Companion = mbxedges.v1.json was part of it (the store had edge rows).</summary>
         public long Generation; public bool Published; public bool Companion;
@@ -86,7 +82,7 @@ namespace Truedat.Store
             try
             {
                 Execute(o, r);
-                Console.WriteLine($"Exported {r.Entries} entries of root {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s"
+                Console.WriteLine($"Exported {r.Entries} entries of {(r.RootCount > 1 ? $"{r.RootCount} roots" : "root")} {r.Root} to {r.OutPath} in {r.ElapsedMs / 1000.0:F1} s"
                     + (r.Published ? $" (generation {r.Generation}: catalog + sidecar{(r.Companion ? " + mbxedges.v1.json" : "")} published together)" : ""));
                 if (r.KeyMovesPath != null) Console.WriteLine($"  {r.KeyMoves} content-hash key move(s) recorded in {r.KeyMovesPath}");
                 result.Store = new StoreResultStore { Path = r.StorePath, SchemaVersion = r.StoreSchema, Generation = r.Generation, TruedatVersion = VersionInfo.Display };
@@ -159,12 +155,12 @@ namespace Truedat.Store
             using var snapshot = os.Db.BeginRead();
             r.StorePath = os.Path; r.StoreSchema = SchemaMigrator.ReadVersion(os.Db); r.Generation = os.Dal.Generation();
             BeforeRootPicked?.Invoke();   // self-test seam: a concurrent commit lands here, inside the snapshot (item 8)
-            var root = PickRoot(os.Dal, o.ExportRoot, o.FollowFoldedRoot);
+            var roots = PickRoots(os, o.ExportRoot);
 
             var dict = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            foreach (var (display, entry) in os.Dal.ReadEntries(root.Id)) dict[display] = entry;
+            foreach (var (display, entry) in os.Dal.ReadEntries(roots.Select(x => x.Id))) dict[display] = entry;
             AfterEntriesRead?.Invoke();   // self-test seam: a concurrent commit lands here
-            StoreLog.Info($"export: {dict.Count} entries of root {root.Path} -> {outFull}");
+            StoreLog.Info($"export: {dict.Count} entries of {Describe(roots)} -> {outFull}");
 
             // Store-v3 T07: --store-export means the TRIPLE — catalog (v2 header: contract + origin, the sidecar bound
             // by hash), sidecar and companion — published in the ruled order. The generation is the store's current one;
@@ -175,9 +171,11 @@ namespace Truedat.Store
                 Kind = "export", MachineId = os.Machine.Id, StoreSchema = r.StoreSchema,
                 Truedat = VersionInfo.Display, Generation = r.Generation,
                 // store-intent.md item (8): the selected row exactly as stored, read in this snapshot — never the typed --export-root.
-                RootPath = root.Path, RootRole = root.Role,
+                // A library whose files sit under several roots (several drives) names none: no single row describes it, and an
+                // absent rootPath is the reader's existing "not bound to one root" case.
+                RootPath = roots.Count == 1 ? roots[0].Path : null, RootRole = roots.Count == 1 ? roots[0].Role : null,
             };
-            r.Root = root.Path; r.OutPath = outFull; r.Entries = dict.Count;
+            r.Root = string.Join(", ", roots.Select(x => x.Path)); r.RootCount = roots.Count; r.OutPath = outFull; r.Entries = dict.Count;
             r.SidecarPath = Path.ChangeExtension(outFull, ".mbxs");
             r.CompanionPath = Path.Combine(outDir ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
             bool hasEdges = os.Dal.ContentKeysWithEdges(producerVersion).Count > 0;
@@ -276,12 +274,12 @@ namespace Truedat.Store
             var catalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             r.CatalogEntries = Program.LoadExistingMoodsForStore(Path.GetFullPath(catalogPath), catalog);
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-            var root = PickRoot(os.Dal, exportRoot);
+            var roots = PickRoots(os, exportRoot).Select(x => x.Id).ToList();
             // v2: a non-primary copy of a multi-copy media exports its media's single description (operator's
             // 1 : many : 1), so a difference there is expected and reported apart from unexplained ones.
-            var merged = os.Dal.NonPrimaryCopyPaths(root.Id);
+            var merged = os.Dal.NonPrimaryCopyPaths(roots);
             var seen = new HashSet<string>(PathComparer.Instance);
-            foreach (var (display, entry) in os.Dal.ReadEntries(root.Id))
+            foreach (var (display, entry) in os.Dal.ReadEntries(roots))
             {
                 r.StoreEntries++;
                 seen.Add(display);
@@ -319,26 +317,25 @@ namespace Truedat.Store
             return Encoding.UTF8.GetString(ms.ToArray());
         }
 
-        static (long Id, string Path, string Role) PickRoot(StoreDal dal, string? exportRoot, bool followFold = false)
+        /// <summary>What an export publishes: the whole library (<see cref="StoreDal.LibraryRoots"/> — every entry, wherever its file
+        /// is), or, when the operator types --export-root, exactly that one root.</summary>
+        internal static List<(long Id, string Path, string Role)> PickRoots(OpenStore os, string? exportRoot)
         {
-            var roots = dal.ListRoots();
+            var roots = os.Dal.ListRoots();
             if (roots.Count == 0) throw new StoreException("The store has no library roots; import a catalog first.");
             if (!string.IsNullOrWhiteSpace(exportRoot))
             {
                 var want = Norm(exportRoot!);
-                foreach (var r in roots) if (Norm(r.Path) == want) return r;
-                if (followFold)
-                {
-                    var containing = roots.Where(x => x.Role == "primary" && CanonicalPath.Contains(x.Path, exportRoot!)).ToList();
-                    if (containing.Count == 1) return containing[0];
-                }
+                foreach (var r in roots) if (Norm(r.Path) == want) return new List<(long, string, string)> { r };
                 throw new StoreException($"No root '{exportRoot}' in the store. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
             }
-            var primaries = roots.Where(x => x.Role == "primary").ToList();
-            if (primaries.Count == 1) return primaries[0];
-            if (primaries.Count == 0) throw new StoreException($"The store has no primary root; pass --export-root. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
-            throw new StoreException($"The store has {primaries.Count} primary roots; pass --export-root to pick one: {string.Join(", ", primaries.Select(x => x.Path))}.");
+            var library = os.Dal.LibraryRoots(os.Machine.Id);
+            if (library.Count == 0) throw new StoreException($"The store has no primary root; pass --export-root. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
+            return library;
         }
+
+        internal static string Describe(List<(long Id, string Path, string Role)> roots)
+            => roots.Count == 1 ? $"root {roots[0].Path}" : $"{roots.Count} roots ({string.Join(", ", roots.Select(x => x.Path))})";
 
         static string Norm(string p) => p.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
 
