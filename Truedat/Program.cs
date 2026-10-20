@@ -6725,6 +6725,10 @@ namespace Truedat
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed + finalSaveSw.Elapsed)}  (scan {FormatTimeSpan(sw.Elapsed)}, write {finalSaveSw.Elapsed.TotalSeconds:F1}s)");
+            // The header names the build, but a 14-hour run's header is tens of thousands of lines up the
+            // scrollback and what the operator saves is the TAIL. Two scans compared side by side could not
+            // say which truedat or which extractor produced either one (operator, 2026-10-20).
+            Console.WriteLine(ThisBuild(essentiaExe));
             Console.WriteLine();
             void PrintScanTallies()
             {
@@ -11329,6 +11333,16 @@ namespace Truedat
 
         /// <summary><see cref="CommandSummaryLines"/> for THIS process: the command line as typed, and what the config file added.</summary>
         static List<string> ThisCommand() => CommandSummaryLines(Environment.GetCommandLineArgs(), _argsFromConfig);
+
+        /// <summary>The end-of-scan "Build:" line — the same two facts the startup banner prints (this truedat, the extractor it
+        /// resolved), carried to the tail. Same reason as <see cref="CommandSummaryLines"/>: the tail is what gets saved and
+        /// compared, and two 14-hour summaries side by side could not say which build produced either one.</summary>
+        internal static string BuildSummaryLine(string version, string? extractorBuild) =>
+            "Build:      truedat " + version + ", extractor " + (extractorBuild ?? "NOT FOUND");
+
+        /// <summary><see cref="BuildSummaryLine"/> for THIS process. The MD5 read is one hash of a ~10 MB exe, at end of scan.</summary>
+        static string ThisBuild(string? essentiaExe) =>
+            BuildSummaryLine(VersionInfo.Display, essentiaExe != null ? ExtractorBuildId(essentiaExe) : null);
 
         /// <summary>The scan summary's "Output:" line, from what the scan's publications did (<paramref name="p"/>) rather than the
         /// in-memory count. Null = no store in force: the scan wrote the catalog itself, and the in-memory count IS the file.</summary>
@@ -21481,6 +21495,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var spaced = CommandSummaryLines(new[] { "truedat.exe", "--file-list", @"C:\My Music\list.txt" }, new string[0]);
                 Assert(spaced.Count == 1 && spaced[0] == "Command:    truedat.exe --file-list \"C:\\My Music\\list.txt\"",
                     $"command: an argument with a space is quoted so the line runs again as it stands ({string.Join(" | ", spaced)})");
+
+                // ...and which build ran it, because the startup banner is hours of progress lines above the saved tail.
+                Assert(BuildSummaryLine("1.0.0.0-v0.5.5.3-EV2.2.3", "output-x64.5") == "Build:      truedat 1.0.0.0-v0.5.5.3-EV2.2.3, extractor output-x64.5",
+                    $"build: the summary names this truedat and the extractor it resolved ({BuildSummaryLine("1.0.0.0-v0.5.5.3-EV2.2.3", "output-x64.5")})");
+                Assert(BuildSummaryLine("1.0.0.0", null) == "Build:      truedat 1.0.0.0, extractor NOT FOUND",
+                    $"build: no extractor resolved says so rather than printing a blank ({BuildSummaryLine("1.0.0.0", null)})");
 
                 var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
                 Assert(hints.Contains(@"C:\t\real\r.mp3"), "root hints: the scan's whole work list joins the catalog's keys");
