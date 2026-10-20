@@ -79,8 +79,8 @@ namespace Truedat
     ///   f32  SpectralEntropy   } mood model reads. NaN = absent. All already emitted to mbxmoods.json
     ///   f32  SpectralComplexity} today (nullable extended fields) -> writer projection, NO rescan.
     ///   f32  HpcpCrest         } Carried so MBXHub derives V/A from the sidecar byte-identical to the
-    ///   f32  HpcpEntropy       } JSON path with no mean-imputation. spectralFlatness (above) is the
-    ///   f32  Hfc               } known phantom (~0); carried as-is to keep the vector complete.
+    ///   f32  HpcpEntropy       } JSON path with no mean-imputation. For spectralFlatness (above) see
+    ///   f32  Hfc               } FIELD-CATALOG.md: a real Bark-band flatness, phantom 0 pre-2026-08-11.
     ///   f32  BeatsLoudness     }
     ///   f32  ChordsStrength    }
     ///   f32  DynamicRange      }  (distinct from DynCx = dynamicComplexity above)
