@@ -2488,7 +2488,8 @@ namespace Truedat
                     // read verb before the first scan answers from the catalog, and a per-file mode without --moods skips edges.
                     _storeFromConfig = configArgs.Contains("--store", StringComparer.OrdinalIgnoreCase) && !args.Contains("--store", StringComparer.OrdinalIgnoreCase);
                     _edgesFromConfig = configArgs.Contains("--edges", StringComparer.OrdinalIgnoreCase) && !args.Contains("--edges", StringComparer.OrdinalIgnoreCase);
-                    args = DropConfigArgsOverriddenBy(configArgs, args).Concat(args).ToArray();
+                    _argsFromConfig = DropConfigArgsOverriddenBy(configArgs, args);
+                    args = _argsFromConfig.Concat(args).ToArray();
                 }
             }
 
@@ -4453,6 +4454,7 @@ namespace Truedat
                         countsNote: _publish != null && !_publish.Ok ? "counts are the STORE's — the file on disk was not published (see Output above)" : null);
                 }
 
+                foreach (var line in ThisCommand()) Console.Error.WriteLine(line);
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
                 if (_storePath != null) global::Truedat.Store.ScanSink.DropUntied();   // S2: an analysed file that recorded no entry (no --moods) leaves no stash behind
                 Environment.ExitCode = 0;
@@ -5336,6 +5338,7 @@ namespace Truedat
                     Console.WriteLine(summaryJson);
                 }
 
+                foreach (var line in ThisCommand()) Console.Error.WriteLine(line);
                 Console.Error.WriteLine($"Done: {flProcessed} processed ({flCachedTotal} cached, {flAnalyzed} analyzed), {flFailed} failed{(flRetryRecovered > 0 ? $" ({flRetryRecovered} more recovered on retry)" : "")}, {flDsdSkipped} skipped{(flSmfmAdded > 0 ? $", {flSmfmAdded} SMFM-added" : "")} in {flSw.Elapsed.TotalSeconds:F1}s");
                 EmitStagingSummary();
                 EmitDirStatSummary();
@@ -6718,6 +6721,7 @@ namespace Truedat
                 global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "the library went away mid-scan; work up to that point was saved: " + scanSourceLostDetail);
                 Environment.ExitCode = 3;
             }
+            foreach (var line in ThisCommand()) Console.WriteLine(line);   // what this run was, where the operator reads after it
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed + finalSaveSw.Elapsed)}  (scan {FormatTimeSpan(sw.Elapsed)}, write {finalSaveSw.Elapsed.TotalSeconds:F1}s)");
@@ -11306,6 +11310,25 @@ namespace Truedat
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
             return true;
         }
+
+        /// <summary>The options truedat.config.json added to this run (after a typed flag overrode any of them); empty without a config.</summary>
+        static string[] _argsFromConfig = new string[0];
+
+        /// <summary>The end-of-scan "Command:" lines: exactly what was typed, then what truedat.config.json added. A long scan's
+        /// banner sits hours of progress lines above the summary an operator actually reads, so "was that a clean scan or a
+        /// --refresh?" had no answer at the end (2026-10-19: two 14-hour logs). Arguments with spaces are quoted so the line can be
+        /// run again as it stands.</summary>
+        internal static List<string> CommandSummaryLines(string[] typed, string[] fromConfig)
+        {
+            static string Q(string a) => a.Length == 0 || a.IndexOfAny(new[] { ' ', '\t', '"' }) >= 0 ? "\"" + a.Replace("\"", "\\\"") + "\"" : a;
+            var exe = typed.Length > 0 ? Path.GetFileName(typed[0]) : "truedat.exe";
+            var lines = new List<string> { "Command:    " + exe + (typed.Length > 1 ? " " + string.Join(" ", typed.Skip(1).Select(Q)) : "") };
+            if (fromConfig.Length > 0) lines.Add("            + config: " + string.Join(" ", fromConfig.Select(Q)));
+            return lines;
+        }
+
+        /// <summary><see cref="CommandSummaryLines"/> for THIS process: the command line as typed, and what the config file added.</summary>
+        static List<string> ThisCommand() => CommandSummaryLines(Environment.GetCommandLineArgs(), _argsFromConfig);
 
         /// <summary>The scan summary's "Output:" line, from what the scan's publications did (<paramref name="p"/>) rather than the
         /// in-memory count. Null = no store in force: the scan wrote the catalog itself, and the in-memory count IS the file.</summary>
@@ -21448,6 +21471,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                        && mixed.Count(l => l.Contains("source link slow")) == 1,
                     $"staging: both kinds are named, and a network fallback above 5% still warns ({string.Join(" | ", mixed)})");
                 Assert(StagingSummaryLines(0, 0, 0, 0, 0, 0, 0).Count == 0, "staging: nothing staged prints nothing");
+
+                // The end summary names the run: what was typed, and what the config file added (the 2026-10-19 "clean or refresh?").
+                var cmd = CommandSummaryLines(new[] { @"E:\Musicbee\Library\truedat\truedat.exe", "--refresh" }, new[] { "--store", "--edges" });
+                Assert(cmd.Count == 2 && cmd[0] == "Command:    truedat.exe --refresh" && cmd[1] == "            + config: --store --edges",
+                    $"command: the typed flags, then the config file's ({string.Join(" | ", cmd)})");
+                var bare = CommandSummaryLines(new[] { "truedat.exe" }, new string[0]);
+                Assert(bare.Count == 1 && bare[0] == "Command:    truedat.exe", $"command: a bare scan says so, and no config line without a config ({string.Join(" | ", bare)})");
+                var spaced = CommandSummaryLines(new[] { "truedat.exe", "--file-list", @"C:\My Music\list.txt" }, new string[0]);
+                Assert(spaced.Count == 1 && spaced[0] == "Command:    truedat.exe --file-list \"C:\\My Music\\list.txt\"",
+                    $"command: an argument with a space is quoted so the line runs again as it stands ({string.Join(" | ", spaced)})");
 
                 var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
                 Assert(hints.Contains(@"C:\t\real\r.mp3"), "root hints: the scan's whole work list joins the catalog's keys");
