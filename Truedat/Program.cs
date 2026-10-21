@@ -2968,6 +2968,10 @@ namespace Truedat
                 if (storeAdopted && storePath != null)
                     Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 if (storePath != null) ApplyStoreLocation(storePath, storeCatalog);
+                // Nothing named and nothing discovered: the resolved catalog is the cwd GUESS. --store-info must not report (or
+                // recommend publishing) against a catalog nobody named; with only --store given it reads beside the store, as it did
+                // before codex #8 (EV3 pre-tag review, M1).
+                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, ProbeCatalogBesideExe(AppContext.BaseDirectory))) _storeCatalogPath = null;
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -11111,9 +11115,14 @@ namespace Truedat
             if (File.Exists(catalogPath) || File.Exists(catalogPath + ".1")) LoadExistingMoods(catalogPath, after);
             var removed = before.Keys.Where(k => !after.ContainsKey(k)).ToList();
             var changed = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+            // A verb that RENAMED the path (--remap of a sub-folder, a --fixup reconciliation) leaves no `before` row under the new
+            // key; the content hash survives a rename, so the stored row is found by it (EV3 pre-tag review, H1).
+            var beforeBySha = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in before) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
             foreach (var kv in after)
                 if (!before.TryGetValue(kv.Key, out var b) || !EntryBytes(kv.Key, b).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
                 {
+                    if (b == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
                     // the published file lacks policy-cut fields; the verb never saw them, so the store's values stand
                     var entry = b != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, b) : kv.Value;
                     entry.CopyObserved = null; changed[kv.Key] = entry;   // null = every copy column observed: the verb's result is exact
@@ -15595,6 +15604,33 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         foreach (var (_, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) { histBack = back.Features.BpmHistogram; smfmBack = back.Features.SmfmScores; }
                     Assert(exit == 0 && smfmBack == null && histBack != null && histBack.Length == 250 && histBack[60] == 0.75 && histBack[120] == 0.25,
                         $"store-backed verb: --strip-smfm clears SMFM in the store and keeps the policy-cut bpmHistogram (exit {exit}, smfm {(smfmBack == null ? "cleared" : "kept")}, histogram {(histBack == null ? "ERASED" : histBack.Length + " bins")})");
+
+                    // The same result arriving under a RENAMED key — a --remap of a sub-folder, a path reconciled by --fixup — had no
+                    // `before` row under that key to restore from, so the histogram went to the store as a clear after all (EV3 pre-tag
+                    // review, H1). The stored row is found by the content hash, which a rename does not change.
+                    int exit2;
+                    saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                    try
+                    {
+                        using (global::Truedat.Store.StoreLog.Quiet())
+                            exit2 = RunStoreBackedVerb("remap", "--remap", cat, () =>
+                            {
+                                var all = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                                LoadExistingMoods(cat, all);
+                                var renamed = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                                foreach (var kv in all) renamed[kv.Key.Replace(@"D:\music\t.flac", @"D:\music\sub\t.flac")] = kv.Value;
+                                SaveResults(cat, renamed);
+                                return 0;
+                            });
+                    }
+                    finally { Console.SetOut(saveOut); }
+                    var histByPath = new Dictionary<string, double[]?>(PathComparer.Instance);
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                    using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) histByPath[p] = back.Features.BpmHistogram;
+                    histByPath.TryGetValue(@"D:\music\sub\t.flac", out var histMoved);
+                    Assert(exit2 == 0 && histByPath.ContainsKey(@"D:\music\sub\t.flac") && histMoved != null && histMoved.Length == 250 && histMoved[60] == 0.75 && histMoved[120] == 0.25,
+                        $"store-backed verb: an entry arriving under a renamed path keeps the policy-cut bpmHistogram (exit {exit2}, paths {string.Join("|", histByPath.Keys)}, histogram {(histMoved == null ? "ERASED" : histMoved.Length + " bins")})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }

@@ -444,6 +444,31 @@ namespace Truedat.Store
                     assert(r6.ContentRekeyed == 0 && key6 == "2222222222222222222222222222222222222222222222222222222222222222" && bpm6 != "770",
                         $"an older catalog's legacy FLAC hash does not re-key or regress the frame-keyed description (rekeyed {r6.ContentRekeyed}, key {key6}, bpm {bpm6})");
                 }
+
+                // 5b. The same arrival against a description a SCAN wrote (producer essentia) — how it arises in the field. Step 5's
+                // description was an import's, so both sides were import@1 and the drift rule kept it for the wrong reason; with the
+                // producers differing nothing could order the two and the older catalog REPLACED the scan's values (EV3 pre-tag
+                // review, H2). A legacy-hash arrival is a known-older observation: the description and its run stand, exactly.
+                const string sqlBpm = "SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';";
+                const string sqlRun = "SELECT c.run_id FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';";
+                var scanned = FixtureEntries(@"D:\Music")[@"D:\Music\old\legacy.flac"];
+                scanned.AudioStreamSha256 = "2222222222222222222222222222222222222222222222222222222222222222";
+                scanned.AudioStreamSha256Source = "flac-frames";
+                scanned.Features!.Bpm = 150;   // beyond the 1 % noise band from the stored 120, so the scan's write (and its producer) actually lands
+                ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\Music\old\legacy.flac"] = scanned },
+                    @"D:\Music", "primary", true, "essentia", "output-x64.5", "scan", null, null);
+                string bpmScan, runScan;
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"))) { bpmScan = os.Db.ExecScalar(sqlBpm) ?? ""; runScan = os.Db.ExecScalar(sqlRun) ?? ""; }
+                assert(bpmScan == "1500", $"fixture: the scan's description is in place (bpm {bpmScan}, expected 1500)");
+                WriteCatalog(catalog, older);   // the old catalog again: legacy hash, bpm 77
+                var r7 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var bpm7 = os.Db.ExecScalar(sqlBpm); var run7 = os.Db.ExecScalar(sqlRun);
+                    var key7 = os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';");
+                    assert(r7.ContentReplaced == 0 && r7.ContentRekeyed == 0 && key7 == "2222222222222222222222222222222222222222222222222222222222222222" && bpm7 == "1500" && run7 == runScan,
+                        $"an older catalog's legacy FLAC hash leaves a scan's description and its run untouched (replaced {r7.ContentReplaced}, rekeyed {r7.ContentRekeyed}, key {key7}, bpm {bpm7} expected 1500, run {run7} expected {runScan})");
+                }
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

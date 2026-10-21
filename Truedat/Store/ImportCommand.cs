@@ -617,24 +617,31 @@ namespace Truedat.Store
             bool contentWritten = false, copyWritten = false, drifted = false;
 
             var existing = dal.ReadContent(entityId);
-            if (existing != null && contentKeyKind == FacetKinds.ShaTaglibRegion && existing.ContentKeyKind == FacetKinds.ShaFrames)
+            bool legacyAlias = existing != null && contentKeyKind == FacetKinds.ShaTaglibRegion && existing.ContentKeyKind == FacetKinds.ShaFrames;
+            if (legacyAlias)
             {
                 // A superseded alias, not a key move: the store already describes this FLAC under its frame hash and the arrival carries
-                // the pre-2026-07-21 TagLib-region hash — an OLDER observation of the same media. The resolver kept the frame hash primary;
-                // the description keeps it too, and the arriving values meet the ordinary rules below (drift recorded, nothing regressed).
-                // Its identity columns are the stored ones, so the alias itself never reads as a changed value.
-                contentKey = existing.ContentKey; contentKeyKind = existing.ContentKeyKind;
+                // the pre-2026-07-21 TagLib-region hash — a KNOWN-OLDER observation of the same media (the frame hash replaced the region
+                // hash on 2026-07-21, so whatever carries the old one predates whatever carries the new). The description and its run
+                // stand untouched; only the copy facts below are merged. Letting the arrival into the producer rules was not enough:
+                // against a scan's description the producers differ, nothing can order them, and the old values REPLACED the scan's
+                // (EV3 pre-tag review, H2). Its identity columns are the stored ones, so the alias itself never reads as a changed value.
+                contentKey = existing!.ContentKey; contentKeyKind = existing.ContentKeyKind;
                 for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
                 {
                     var name = TrackEntryMapper.ContentColumnName(k);
                     if (name == "audioStreamSha256" || name == "audioStreamSha256Source") row[TrackEntryMapper.RowIndexOf(name)] = existing.Values[k];
                 }
-                StoreLog.Debug($"legacy FLAC hash arrival kept under the frame hash: {displayPath}");
+                StoreLog.Debug($"legacy FLAC hash arrival: the frame-keyed description stands, copy facts merged: {displayPath}");
             }
             if (existing == null)
             {
                 dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
                 contentWritten = true;
+            }
+            else if (legacyAlias)
+            {
+                // nothing for the description: see above
             }
             else if (!string.Equals(existing.ContentKey, contentKey, StringComparison.Ordinal))
             {
