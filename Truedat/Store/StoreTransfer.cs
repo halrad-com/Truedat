@@ -232,15 +232,33 @@ namespace Truedat.Store
 
         /// <summary>store-v3 T10: every live entry of another store, display path → entry, across EVERY root — a shard
         /// store minted on another machine names its own root, and a merge reading only the primary root would drop
-        /// exactly the shard's share. Read in one snapshot; the source is opened read-only and never migrated.</summary>
+        /// exactly the shard's share. Read in one snapshot; the source is opened read-only and never migrated.
+        /// An OLDER store is read through a migrated working copy: this build's mapper reads only the current column types,
+        /// and a v2 REAL read as a scaled integer turned bpm 120.5 into 12 (2026-10-20).</summary>
         internal static Dictionary<string, TrackEntry> ReadEntries(string storePath)
         {
-            var result = new Dictionary<string, TrackEntry>(PathComparer.Instance);
-            using var db = SqliteDb.Open(storePath, create: false);
-            var schema = SchemaMigrator.ReadVersion(db);
+            int schema;
+            using (var probe = SqliteDb.Open(storePath, create: false)) schema = SchemaMigrator.ReadVersion(probe);
             if (schema <= 0) throw new StoreException($"not a truedat store: {storePath}");
             if (schema > StoreSchema.CurrentVersion)
                 throw new StoreException($"{storePath} is schema v{schema} and this build reads v{StoreSchema.CurrentVersion}.");
+            if (schema == StoreSchema.CurrentVersion) return ReadCurrent(storePath);
+
+            var work = Path.Combine(Path.GetTempPath(), ".truedat-merge-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var copy = VacuumInto(storePath, Path.Combine(work, "source.db")).Path;
+                StoreLog.Info($"merge source {storePath} is schema v{schema}: reading a copy migrated to v{StoreSchema.CurrentVersion}; the source is not changed");
+                using (OpenStore.Open(copy, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) { }   // migrates the copy, backup first
+                return ReadCurrent(copy);
+            }
+            finally { try { Directory.Delete(work, true); } catch (Exception ex) { StoreLog.Warn($"could not remove the working copy {work}: {ex.Message}"); } }
+        }
+
+        static Dictionary<string, TrackEntry> ReadCurrent(string storePath)
+        {
+            var result = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+            using var db = SqliteDb.Open(storePath, create: false);
             using var dal = new StoreDal(db);
             using var snap = db.BeginRead();
             foreach (var root in dal.ListRoots())

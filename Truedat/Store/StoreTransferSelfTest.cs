@@ -222,6 +222,39 @@ namespace Truedat.Store
 
                 assert(!StoreTransfer.LooksLikeStore(d.P("nope.db")), "merge source: a missing file is not a store (no throw)");
             }
+
+            // An OLDER store as the source: a v2 store holds bpm as a REAL. Read raw through this build's mapper, 120.5 came back
+            // as the integer 120 scaled down by ten — 12 (operator, 2026-10-20). The source must read with its values intact and
+            // stay untouched: not migrated, not written.
+            using (var d = new Dir())
+            {
+                var v2 = d.P("old.db");
+                var row = TrackEntryMapper.ToRow(E("old.flac", 120.5, 'o'));
+                int copyCols = TrackEntryMapper.CopyColumnList().Split(',').Length;
+                string Q(int n) { var sb = new System.Text.StringBuilder(); for (int i = 0; i < n; i++) sb.Append(", ?"); return sb.ToString(); }
+                using (var db = SqliteDb.Open(v2, true, exclusiveLocking: false))
+                {
+                    SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
+                    db.Exec("PRAGMA foreign_keys=OFF;");
+                    db.Exec("INSERT INTO machine(id, hostname, created_utc) VALUES ('m1', 'old-box', '2026-10-11T00:00:00Z');");
+                    db.Exec(@"INSERT INTO library_root(id, machine_id, path, role, created_utc) VALUES (1, 'm1', 'D:\music', 'primary', '2026-10-11T00:00:00Z');");
+                    db.Exec("INSERT INTO file_entity(id, created_utc) VALUES ('e1', '2026-10-11T00:00:00Z');");
+                    db.Exec(@"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc) " +
+                            @"VALUES (7, 'e1', 1, 'old.flac', 'old.flac', 'D:\music\old.flac', '2026-05-01T00:00:00.0000000Z', '2026-10-11T00:00:00Z');");
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES ('e1', ?, 'sha', NULL, '2026-10-11T00:00:00Z'" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    { st.Bind(1, new string('o', 64)); TrackEntryMapper.BindLegacyV2(st, 2, row, content: true); st.Step(); }
+                    using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (7, NULL, '2026-10-11T00:00:00Z'" + Q(copyCols) + ");"))
+                    { TrackEntryMapper.BindLegacyV2(st, 1, row, content: false); st.Step(); }
+                }
+                var shaBefore = StoreTransfer.Sha256File(v2);
+                Dictionary<string, TrackEntry> fromOld;
+                using (StoreLog.Quiet()) fromOld = StoreTransfer.ReadEntries(v2);
+                var bpm = fromOld.TryGetValue(@"D:\music\old.flac", out var oe) ? oe.Features.Bpm : double.NaN;
+                assert(fromOld.Count == 1 && bpm == 120.5, $"merge source: an older (v2) store reads with its values intact — bpm 120.5, not 12 ({fromOld.Count} entries, bpm {bpm})");
+                int schemaAfter; using (var db = SqliteDb.Open(v2, create: false)) schemaAfter = SchemaMigrator.ReadVersion(db);
+                assert(schemaAfter == 2 && StoreTransfer.Sha256File(v2) == shaBefore, $"merge source: the older store is left exactly as it was — not migrated, not written (schema v{schemaAfter})");
+                assert(Directory.GetFileSystemEntries(d.Root).Length == 1, $"merge source: reading an older store leaves no working copy behind ({string.Join(", ", Directory.GetFileSystemEntries(d.Root).Select(Path.GetFileName))})");
+            }
         }
 
         static StoreInfo Collect(string store)
