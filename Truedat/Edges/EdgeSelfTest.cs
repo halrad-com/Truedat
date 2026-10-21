@@ -671,6 +671,24 @@ namespace Truedat.Edges
                 assert(t != null && t.Slices == 300 && t.SilenceMs == 2000 && t.TransitionMs >= 200 && t.TransitionMs <= 400 && t.CrestDb > 3.5 && t.CrestDb < 5.0, $"ffmpeg tail window: 300 slices, 2,000 ms silence, ~300 ms transition, crest ~4.2 ({t?.Slices}, {t?.SilenceMs}, {t?.TransitionMs}, {t?.CrestDb:F2})");
                 Console.WriteLine($"        two 30 s windows through ffmpeg in {sw.ElapsedMilliseconds} ms");
                 assert(EdgePcm.Analyze(System.IO.Path.Combine(dir, "missing.wav"), ffmpeg, 0, 30, false) == null, "a file ffmpeg cannot decode -> null, no throw");
+
+                // Codex review 2026-10-20 #9: an ffmpeg that holds its stdout open without producing — staged here with a named pipe
+                // nothing ever writes to — must be killed at the deadline, never left to block the worker. Proven only when the stall
+                // actually stages (ffmpeg opens the pipe and blocks); otherwise reported as a skip, not a pass.
+                var pipeName = "truedat-stall-" + Guid.NewGuid().ToString("N");
+                using (var server = new System.IO.Pipes.NamedPipeServerStream(pipeName, System.IO.Pipes.PipeDirection.InOut, 1, System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous))
+                {
+                    var accept = server.WaitForConnectionAsync();
+                    int savedDeadline = EdgePcm.StallTimeoutMs; EdgePcm.StallTimeoutMs = 3000;
+                    var stallSw = System.Diagnostics.Stopwatch.StartNew(); EdgePcmResult? stalled;
+                    try { stalled = EdgePcm.Analyze(@"\\.\pipe\" + pipeName, ffmpeg, 0, 30, false); }
+                    finally { EdgePcm.StallTimeoutMs = savedDeadline; }
+                    stallSw.Stop();
+                    if (!accept.IsCompleted || stallSw.ElapsedMilliseconds < 2500)
+                        Console.WriteLine($"  SKIP  the ffmpeg stall could not be staged on this machine (connected {accept.IsCompleted}, {stallSw.ElapsedMilliseconds} ms)");
+                    else
+                        assert(stalled == null && stallSw.ElapsedMilliseconds < 20000, $"a stalled ffmpeg (stdout open, nothing decoded) is killed at the deadline and the window is null ({stallSw.ElapsedMilliseconds} ms)");
+                }
             }
             finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
@@ -1047,6 +1065,18 @@ namespace Truedat.Edges
             assert(dEst != null && dEst.Key == "D" && dEst.Scale == "major", $"D-F#-A chroma -> D major ({dEst?.Key} {dEst?.Scale})");
             var ebEst = EdgeKey.Estimate(Chroma36(Eb, G, Bb), KeyProfile.Edma);
             assert(ebEst != null && ebEst.Key == "Eb", $"flats are spelled the extractor's way: Eb, not D# ({ebEst?.Key})");
+
+            // Codex review 2026-10-20 #10: the streaming Key the extractor votes with first normalises the mean HPCP, gates bins under
+            // 0.2 and rotates the peak onto a tempered bin (pcpThreshold 0.2, averageDetuningCorrection true — the defaults, which
+            // MusicTonalDescriptors leaves alone). Without that, a C-E-G triad a third of a semitone flat read as B major.
+            var detuned = new double[36]; detuned[8] = 1.0; detuned[20] = 0.7; detuned[29] = 0.8;
+            var dt = EdgeKey.Estimate(detuned, KeyProfile.Edma);
+            assert(dt != null && dt.Key == "C" && dt.Scale == "major", $"a C-E-G triad one bin flat (36-bin 8/20/29) -> C major after the extractor's detuning correction ({dt?.Key} {dt?.Scale})");
+            var gated = Chroma36(C, E, G); for (int i = 0; i < 36; i++) if (gated[i] == 0) gated[i] = 0.15;   // a noise floor under the 0.2 gate
+            var gt = EdgeKey.Estimate(gated, KeyProfile.Edma);
+            var clean = EdgeKey.Estimate(Chroma36(C, E, G), KeyProfile.Edma);
+            assert(gt != null && clean != null && gt.Key == "C" && gt.Scale == "major" && Math.Abs(gt.Strength - clean.Strength) < 1e-9,
+                $"bins under the 0.2 gate are zeroed before the correlation: a noise floor of 0.15 changes nothing ({gt?.Strength:F6} vs {clean?.Strength:F6})");
 
             // A minor triad decides A minor.
             var aMinor = Chroma36(A, C, E);

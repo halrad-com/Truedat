@@ -46,6 +46,7 @@ namespace Truedat.Edges
         internal static KeyEstimate? Estimate(double[] hpcp, KeyProfile profile)
         {
             if (hpcp == null || hpcp.Length < 12 || hpcp.Length % 12 != 0) return null;
+            hpcp = Preprocess(hpcp);
             int size = hpcp.Length;
             var p = ProfileFor(profile, size);
 
@@ -66,6 +67,35 @@ namespace Truedat.Edges
             else { keyIndex = (int)((long)idxMinor * 12 / size); scale = "minor"; max = maxMinor; max2 = max2Minor; }
             if (keyIndex < 0 || keyIndex > 11) return null;
             return new KeyEstimate { Key = KeyNames[keyIndex], Scale = scale, Strength = max, FirstToSecondRelativeStrength = max != 0 ? (max - max2) / max : 0 };
+        }
+
+        /// <summary>What the STREAMING Key does to the mean HPCP before the standard estimator sees it (key.cpp, streaming
+        /// <c>Key::process</c>), with the defaults the music extractor leaves in place: <c>pcpThreshold</c> 0.2 — normalise to the
+        /// peak and zero every bin under it — then <c>averageDetuningCorrection</c> — normalise again and rotate so the peak sits
+        /// on a tempered bin (its offset within the semitone, a right-rotation when it is above the midpoint). The port skipped
+        /// both, so a triad a third of a semitone flat read as the key a semitone down (codex review 2026-10-20 #10).</summary>
+        internal static double[] Preprocess(double[] pcp)
+        {
+            const double PcpThreshold = 0.2;
+            int n = pcp.Length;
+            var v = (double[])pcp.Clone();
+            Normalize(v);
+            for (int i = 0; i < n; i++) if (v[i] < PcpThreshold) v[i] = 0;
+            int resolution = n / 12;
+            Normalize(v);
+            int maxIdx = 0; for (int i = 1; i < n; i++) if (v[i] > v[maxIdx]) maxIdx = i;
+            int offset = maxIdx % resolution;
+            int newBegin = offset > resolution / 2 ? n + offset - resolution : offset;   // std::rotate(begin, newBegin, end)
+            if (newBegin == 0) return v;
+            var r = new double[n];
+            for (int i = 0; i < n; i++) r[i] = v[(i + newBegin) % n];
+            return r;
+        }
+
+        static void Normalize(double[] v)
+        {
+            double max = 0; foreach (var x in v) if (x > max) max = x;
+            if (max > 0) for (int i = 0; i < v.Length; i++) v[i] /= max;
         }
 
         /// <summary>EDMA's answer with its Camelot code, how many of the three profiles agree with it (1..3) and how many
