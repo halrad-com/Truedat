@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to Truedat. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 Truedat ships as stage tags on `main` — `DV` (design validation), `EV` (engineering
@@ -12,28 +12,25 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Changed
 
-- **The end-of-scan summary names the command and the build that ran**, so a saved summary says what produced
-  it.
+- Updated output summary - shows the version and inputs used.
 
 ### Fixed
 
-- **`spectralFlatness` is Essentia's Bark-band flatness**, not truedat's average of three bands. Corrected in
-  your catalog the next time you run a scan.
+- `spectralFlatness` is Essentia's Bark-band flatness, not truedat's average of three bands.
+  Any scan corrects an existing catalog.
 
 ## [0.5.5.3-EV2.2.3.1] — 2026-10-19
 
 ### Fixed
 
-- **A library's files can be anywhere.** With the store in force, the catalog was published from one folder root
-  of the library. When a library had more than one root (files on two drives, or a scan that recorded a
-  sub-folder as a root first), `mbxmoods.json` was not written at all, or held only one root's tracks, and every
-  track elsewhere was re-analysed on every scan. Publishing, the scan, `--stats`, `--duplicates` and
-  `--store-roundtrip` now cover every entry of the library. A store already left with a sub-folder root is
-  repaired the first time it is opened; after that, `truedat --store-export` or the next scan writes the full
-  catalog. `--export-root` still exports exactly the root you name.
+- When a library had more than one root (files on two drives, or a scan that recorded a sub-folder as a root
+  first), `mbxmoods.json` was not written - fixed.
+
 - **The scan summary says what it wrote.** When the catalog could not be written from the store it prints
-  `NOT PUBLISHED` with the reason, instead of a track count for a file it did not write. The catalog line says
-  when the file on disk is behind the store.
+  `NOT PUBLISHED` with the reason.
+
+- The catalog line says when the file on disk is behind the store.
+
 - **Local copies are not reported as network staging.** Files with non-ASCII names copied locally for the tools
   no longer show a "pulled over the source link" rate.
 
@@ -41,13 +38,11 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Changed
 
-- **The store and edges are on by default.** A scan with no store makes one, with edges, so a new library is
-  analysed once and gets its edges in that pass — edges can only be folded while the extractor reads the audio,
-  so adding them later meant analysing everything again. A library that already has a catalog is seeded from it
+- **The store and edges are on by default.**  A library that already has a catalog is seeded from it
   first (no audio read, seconds) and nothing is re-analysed: tracks already in the catalog get edges when you run
-  `truedat --refresh`. A typed `--store` on such a library now seeds instead of refusing until `--store-import`.
-  `--no-store` / `--no-edges` turn it off for one run, `truedat --config store false` (and `edges false`) for an
-  install. If SQLite is unavailable or the seed fails, the scan runs without a store and says why.
+  `truedat --refresh`. Using `--store` on an existing library now seeds like you did a `--store-import`.
+  `--no-store` / `--no-edges` turn it off for one run.
+
 - **Hi-res files scan 2-5x faster.** A file above 44.1 kHz is converted to 44.1 kHz once before analysis instead
   of being resampled on every pass inside the extractor: measured 2x at 48 kHz, 3x at 96 kHz and over 4x at
   192 kHz, the conversion counted in. The higher the rate the more there is to recover, and a converted file
@@ -170,12 +165,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   tracks carry no `smfm*` fields unless SMFM is turned on.
 
 - **`--stats` no longer prints the store's `store open` line inside its summary** (`--audit` still shows it).
+
 - **Console lines name their file.** `FAILED:` lines in the library scan carry artist, title and file name;
   the ffmpeg transcode and downmix announcements and the under-decode retry name the source file. In a
   parallel scan the track's own line can be far above the message.
+
 - **`--stats` shows the store.** With a store in force: a `Store:` line (size, descriptions, bytes per
   track, edge coverage) beside Catalog/Sidecar/Backups, and a Recommended entry pointing at `--refresh`
   while edge rows are missing. Detail stays in `--store-info`.
+
 - **`--refresh` fills in missing edges in the same scan.** With the store and edges on, a track the store
   lists as lacking edge rows counts as stale, so the scan's own parallel workers, progress line, ETA and
   saves handle it like any other re-analysis. The store now saves at the scan's five-minute checkpoint
@@ -184,16 +182,20 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   and exit) once that long has passed. The old one-track-at-a-time `--work` drain is gone. The
   import's "legacy FLAC sha: N unrecoverable" line now says what it counts (FLAC entries with only the
   current hash; normal).
+
 - **Store and edges off by default.** They run only with `--store` / `--edges` or `truedat --config store
   true` / `edges true`; `--no-store` / `--no-edges` override for one run. A scan no longer keeps the
   extractor's compressed output beside the store (`artifacts\`, ~37 KB per track, read by nothing).
+
 - **`STORE.md`** — the store, its tables, verbs, the edges layer, and how to open the file (DB Browser for
   SQLite, `sqlite3 -readonly`). The store verbs are in `--help` too. The README's store section carries the
   measured numbers (200-track slice: 2.8 s/track with edges, 6.4 KB/track of edge rows, 19.7 KB/track
   all-in, 1.7 KB/track companion) and what is and is not verified yet.
+
 - **Store precision: six significant figures.** Every float enters the store and leaves it on
   `--store-export` at 6 sf, written exactly (`0.022454`, never `0.022454000000000002`); the round-trip
   gate compares both sides at that precision. The scan's catalog writer and its bytes are unchanged.
+
 - **Edge folds are spilled to disk during a scan** instead of held in memory until the store write.
 
 - **Extractor build `output-x64.5` recognised as current.** `.4` is still accepted but the startup
@@ -201,6 +203,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   profile key, `metadata.version.extractor_build` in the main output) and that `--edges` will need
   it. The main output is otherwise unchanged against `.4`: verified on five real files across
   MP3/M4A/WMA/FLAC, every difference within the extractor's own run-to-run noise.
+
 - **`--edges` (preview, v2 S2).** With `--store`, every track a scan analyses also gets an *edge row*
   in the store: the first and last 30 s folded from a binary frames file the `.5` extractor writes
   (EBU loudness series at 10/s, beats and tempo, a key vote per edge and per 10 s sub-window, MFCC
@@ -210,6 +213,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `--store`, on an extractor older than `.5`, and in the per-file modes without `--moods`. Writes
   nothing to `mbxmoods.json`; without the flag a scan runs exactly as before. `--store-info` reports
   edge coverage, bytes per track and median fold time.
+
 - **`mbxedges.v1.json`.** The hub's edge companion file beside `mbxmoods.json`: per track (keyed by
   `audioStreamSha256`) the two edges' status, window, key, bpm, loudness, texture, divergence and `rms`,
   plus the head-vs-tail divergence; compact, about 1.8 KB per track; written after any `--edges` scan that
@@ -227,6 +231,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   SQLite (`winsqlite3.dll`, 3.40+, checked at open with a plain refusal when missing); nothing is
   installed or shipped. `mbxmoods.json` stays what MBXHub reads; every existing mode is unchanged;
   the store path is always explicit.
+
 - **Schema v2: one audio description per media.** `track_feature` (one wide row per location) is split
   into `track_content` (every Essentia descriptor, bitUsage, HF, the content hash — once per media) and
   `track_copy` (tags, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` — once per location). A v1
@@ -236,6 +241,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   within noise, 32 beyond (128 conflicts, led by one genuine sha collision). `--store-roundtrip` reports
   merged copies apart from unexplained differences and stays EQUAL for every single-copy entry.
   `value` gains `segment_id`; `conflict` gains `field`, `run_a`/`run_b`, `value_a`/`value_b`.
+
 - **A differing value is a conflict, never an overwrite.** Re-importing a catalog compares each entry with
   the stored description: equal (within the extractor's run-to-run noise) writes nothing, so a repeat import
   leaves every row's `updated_utc` alone; a difference beyond noise under the same producer becomes a
@@ -246,23 +252,27 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `fingerprint.v1`, SMFM) take the newer value, exactly. Identical drifts are recorded once. `--store-info`
   lists open conflicts by kind. On the real catalog a re-import
   is 22 s, 72,445 unchanged, 32 drifted, the store unchanged in size.
+
 - **The extractor's aggregate output is kept.** With `--store`, the main JSON the extractor writes per
   track (every descriptor's statistics, covariances, full HPCP, histograms — deleted at parse until now) is
   compressed and filed once per content hash and extractor build as `artifacts\<build>\<2>\<hash>.main.json.z` beside the store, with
   an `artifact` row (kind `main`, format = the extractor build, bytes, sha256, run). Any future field that
   is a fold of that output is a re-fold of the file, not a rescan. `--store-info` reports count and bytes.
+
 - **The scan writes the store.** With `--store`, every scan mode writes the entries it analysed this run
   into the store after the catalog is saved, through the import's new in-memory entry (no re-read of the
   catalog): producer `essentia@<build>`, one run row per entry with its analysis time, a failed run per
   failure with its components, the same drift and no-churn rules as an import. Roots come from the
   store's existing roots, else from the whole catalog, never from the analysed subset. A store problem
   is reported and never costs a catalog entry; `store-result.json` beside the store records each write.
+
 - **The store has a home.** `truedat.db` beside `mbxmoods.json`, found by the same resolver as the
   catalog, so the store verbs need no `--store`; bare `--store` on `--stats` / `--duplicates` means that
   default. The file is always local: a catalog on a network share gets a local per-library store under
   `%LOCALAPPDATA%\truedat\`, `--store-dir` (settable) relocates it, and an explicit network store opens
   with exclusive locking plus a warning. Closing a store leaves no `-wal` behind, so the file can travel
   by the same sync as the catalog. `--paths` lists the store and why it resolved there.
+
 - **16 KB store pages and `--store-vacuum`.** A feature row is ~2 KB, so at SQLite's 4 KB default
   each row took a page of its own and the store was 1.34× its JSON. New stores are created at
   16 KB pages (0.95× the JSON on the same catalog); `--store-vacuum [--page-size N]` repacks an
@@ -397,35 +407,35 @@ number, first public stage tag of the extended beta. See RC7 for what it does.
 - **Configuration support.** `truedat.config.json` beside the exe holds default values for
   the tuning flags. Keys are the flag names — `"no-smfm": true` means always skip SMFM.
   Precedence: explicit flag > config > built-in default.
-
-  | Key | Type | Effect |
-  |---|---|---|
-  | `no-stage` | bool | read sources directly, never stage a local copy |
-  | `no-quick-cache` | bool | disable the head-64k quick cache tier |
-  | `no-bitusage` | bool | skip the bitUsage signal |
-  | `no-hf-analysis` | bool | skip the HF signals |
-  | `no-smfm` | bool | never read Sony SMFM tags |
-  | `file-md5` | bool | compute and store the whole-file MD5 |
-  | `enableshortfiles` | bool | analyze files under the short-file threshold |
-  | `allow-sleep` | bool | do not hold the machine awake during a scan |
-  | `refresh-features` | bool | re-analyze entries missing a later feature wave |
-  | `refresh-smfm` | bool | re-read SMFM tags on cache hits |
-  | `audit` | bool | verbose per-track diagnostics to stderr |
-  | `fixup-after-scan` | bool | reconcile the catalog against disk after a full scan |
-  | `parallel` | int 1–1024 | worker count |
-  | `cpu-limit` | int 1–100 | percent CPU cap for subprocesses |
-  | `keep-backups` | int 0–10000 | catalog backups to retain (0 = keep all) |
-  | `long-track-mins` | int 1–10000 | duration that tags a track as long |
-  | `max-duration` | int 0–1000000 | skip tracks longer than this (seconds) |
-  | `stage-dir` | text | where staged copies are written |
-
+  
+  | Key                | Type          | Effect                                               |
+  | ------------------ | ------------- | ---------------------------------------------------- |
+  | `no-stage`         | bool          | read sources directly, never stage a local copy      |
+  | `no-quick-cache`   | bool          | disable the head-64k quick cache tier                |
+  | `no-bitusage`      | bool          | skip the bitUsage signal                             |
+  | `no-hf-analysis`   | bool          | skip the HF signals                                  |
+  | `no-smfm`          | bool          | never read Sony SMFM tags                            |
+  | `file-md5`         | bool          | compute and store the whole-file MD5                 |
+  | `enableshortfiles` | bool          | analyze files under the short-file threshold         |
+  | `allow-sleep`      | bool          | do not hold the machine awake during a scan          |
+  | `refresh-features` | bool          | re-analyze entries missing a later feature wave      |
+  | `refresh-smfm`     | bool          | re-read SMFM tags on cache hits                      |
+  | `audit`            | bool          | verbose per-track diagnostics to stderr              |
+  | `fixup-after-scan` | bool          | reconcile the catalog against disk after a full scan |
+  | `parallel`         | int 1–1024    | worker count                                         |
+  | `cpu-limit`        | int 1–100     | percent CPU cap for subprocesses                     |
+  | `keep-backups`     | int 0–10000   | catalog backups to retain (0 = keep all)             |
+  | `long-track-mins`  | int 1–10000   | duration that tags a track as long                   |
+  | `max-duration`     | int 0–1000000 | skip tracks longer than this (seconds)               |
+  | `stage-dir`        | text          | where staged copies are written                      |
+  
   ```
   truedat --config                 show what is in force
   truedat --config <key> <value>   set it
   truedat --config reset           delete the file
   truedat --no-config              ignore it for this run
   ```
-
+  
   Verbs and target paths are not settable. An unparseable file or unknown key stops the run.
 
 - **`--fixup-after-scan`** — runs `--fixup` when a scan finishes, so the catalog drops entries
