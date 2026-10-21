@@ -144,7 +144,7 @@ namespace Truedat.Store
                 Companion = ok && rep.Companion ? Describe(rep.CompanionPath) : null,
             };
             _scan.Messages.RemoveAll(m => m.Id == "publish-failed");
-            if (!ok) _scan.Messages.Add(new StoreResultMessage { Id = "publish-failed", Text = "the files were not published from the store: " + (error?.Message ?? "the export did not publish") + "; the store is ahead of the files", Action = "truedat --store-export" });
+            if (!ok) _scan.Messages.Add(new StoreResultMessage { Id = "publish-failed", Text = "the files were not published from the store: " + (error?.Message ?? "the export did not publish") + "; the store is ahead of the files; " + StoreScan.ScanPublishes, Action = "truedat" });
         }
 
         /// <summary>The final write, from the process boundary — EXACTLY ONCE: the pending record is cleared on the way out,

@@ -6875,7 +6875,7 @@ namespace Truedat
                 // EXIST is how the 2026-10-18 MTest summary named three files last written 90 minutes before the run ended.
                 Console.WriteLine($"Output: {_storePath}");
                 Console.WriteLine($"        not published: {Path.GetFileName(moodsPath)}, {Path.GetFileName(Path.ChangeExtension(moodsPath, ".mbxs"))}, " +
-                                  $"{(global::Truedat.Edges.EdgeCompanion.FileName)} — fix the reason above, then truedat --store-export");
+                                  $"{(global::Truedat.Edges.EdgeCompanion.FileName)} — fix the reason above; {ScanPublishesNote}");
             }
             else
             {
@@ -10840,7 +10840,7 @@ namespace Truedat
             };
             if (pubEx != null)
                 return Fail($"Error: the store was restored but publishing the files failed ({CheckpointCause.Describe(pubEx)}); "
-                    + "the store is ahead of the files — run --store-export.", 1);
+                    + "the store is ahead of the files; " + global::Truedat.Store.StoreScan.ScanPublishes + ".", 1);
 
             Console.WriteLine($"Published: {rep.Entries:N0} entries at generation {rep.Generation} "
                 + $"(catalog + sidecar{(rep.Companion ? " + " + global::Truedat.Edges.EdgeCompanion.FileName : "")})");
@@ -10998,7 +10998,7 @@ namespace Truedat
                 var build = global::Truedat.Store.ScanSink.ExtractorBuild;
                 if (build == "unknown") build = os.Dal.LatestRunVersion("essentia") ?? "unknown";
                 // origin.generation = the store's generation in this snapshot, so an upgraded hub can pair the file with its
-                // catalog (and label it behind when --edges-export ran alone after the store moved on: "run --store-export").
+                // catalog (and label it behind when --edges-export ran alone after the store moved on: the next scan publishes).
                 var rep = global::Truedat.Edges.EdgeCompanion.WriteFromStore(os.Dal, target, settings.ProducerVersion, "essentia_streaming_extractor_music " + build, generation);
                 snapshot.Complete();
                 if (announce) Console.WriteLine($"  edges file: {rep.Tracks:N0} tracks, {rep.Bytes:N0} bytes{(rep.OmittedNoSha > 0 ? $", {rep.OmittedNoSha:N0} no-sha media omitted" : "")} -> {rep.Path}");
@@ -11170,9 +11170,9 @@ namespace Truedat
 
             if (storeError != null)
                 return Fail($"Error: {flag} could not write its change to the store ({storeError}); the store is unchanged and the files were re-published from it" +
-                            (pub2 != null ? $" — but that publication ALSO failed ({CheckpointCause.Describe(pub2)}): the catalog on disk may show the verb's change; run --store-export" : "") + ".", 1);
+                            (pub2 != null ? $" — but that publication ALSO failed ({CheckpointCause.Describe(pub2)}): the catalog on disk may show the verb's change; " + global::Truedat.Store.StoreScan.ScanPublishes : "") + ".", 1);
             if (pub2 != null)
-                return Fail($"Error: {flag} wrote its change to the store but publishing the files failed ({CheckpointCause.Describe(pub2)}); the store is ahead of the files — run --store-export.", 1);
+                return Fail($"Error: {flag} wrote its change to the store but publishing the files failed ({CheckpointCause.Describe(pub2)}); the store is ahead of the files; {ScanPublishesNote}.", 1);
             Console.WriteLine($"  store: {flag} — {changed.Count} entr{(changed.Count == 1 ? "y" : "ies")} written, {removed.Count} retired{(moved > 0 ? $", root moved ({moved} locations)" : "")}; published at generation {rep2.Generation}");
             global::Truedat.Store.StoreResult.Write(store, rec, verbExit, verbExit == 0 ? global::Truedat.Store.StoreResult.OutcomeCompleted : global::Truedat.Store.StoreResult.OutcomeFailed,
                 verbExit == 0 ? null : $"{flag} exited {verbExit}; whatever it changed was written to the store and published");
@@ -11302,6 +11302,10 @@ namespace Truedat
             return null;
         }
 
+        /// <summary><see cref="global::Truedat.Store.StoreScan.ScanPublishes"/> for interpolated messages (a <c>global::</c> name
+        /// cannot sit inside an interpolation hole).</summary>
+        internal static string ScanPublishesNote => global::Truedat.Store.StoreScan.ScanPublishes;
+
         /// <summary>T18a-d: publish the triple derived from the store (the --store-export publisher) and note it in the scan's record.</summary>
         internal static bool PublishFromStore(string catalogPath, bool checkpoint)
         {
@@ -11313,7 +11317,7 @@ namespace Truedat
             {
                 p.Ok = false; p.Error = CheckpointCause.Describe(ex); p.Failed++;
                 Console.Error.WriteLine($"  WARNING: {(checkpoint ? "checkpoint" : "final")} publication from the store failed ({p.Error}); " +
-                                        "the store holds the work and is ahead of the files — the next publication (or --store-export) brings them level");
+                                        "the store holds the work and is ahead of the files — the next publication brings them level");
                 return false;
             }
             p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
@@ -11495,7 +11499,7 @@ namespace Truedat
             if (w.Catalog == FinalWrite.Failed)
                 return w.Store == FinalWrite.NotAttempted
                     ? $"the final catalog write failed ({(w.CatalogError != null ? CheckpointCause.Describe(w.CatalogError) : "unknown cause")})"
-                    : "the final publication from the store failed; the store is ahead of the files — run --store-export";
+                    : "the final publication from the store failed; the store is ahead of the files; " + global::Truedat.Store.StoreScan.ScanPublishes;
             return null;
         }
 
@@ -11535,7 +11539,7 @@ namespace Truedat
         internal static string AuthoritativeSurvivorFacts(FinalWrites w, int pendingUncommitted)
         {
             string files = w.Catalog == FinalWrite.Written ? "the files were published from the store at the end"
-                : $"the files were {Word(w.Catalog)} at the end and show the last publication (behind the store; --store-export brings them level)";
+                : $"the files were {Word(w.Catalog)} at the end and show the last publication (behind the store; {ScanPublishesNote})";
             int lost = w.Store == FinalWrite.Written ? 0 : pendingUncommitted;
             return $"the store holds every analysis committed up to its last durable checkpoint{(w.Store == FinalWrite.Written ? ", and the final commit landed" : "")}; {files}; " +
                    $"analyses never committed to the store (lost): {lost}";
@@ -13510,7 +13514,6 @@ namespace Truedat
 
                 long catBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
                 if (catBytes > 0 || storeInfo != null) Console.WriteLine();
-                bool catalogBehind = false;   // then --store-export is the one command for every file below
                 if (catBytes > 0)
                 {
                     accounted += catBytes;
@@ -13520,10 +13523,9 @@ namespace Truedat
                     if (storeInfo != null && global::Truedat.Store.CatalogOrigin.TryReadHead(path, global::Truedat.Store.CatalogOrigin.ContractV2, out var catOrigin)
                         && catOrigin.Generation != storeInfo.Generation)
                     {
-                        catalogBehind = true;
                         var onDisk = TryCatalogTrackCount(path);
                         ReportNote($"the file holds {(onDisk.HasValue ? $"{onDisk.Value:N0} tracks at " : "")}generation {catOrigin.Generation:N0}; " +
-                                   $"the store is at {storeInfo.Generation:N0}: truedat --store-export");
+                                   $"the store is at {storeInfo.Generation:N0}; {ScanPublishesNote}");
                     }
                     if (sc.Present)
                     {
@@ -13555,12 +13557,12 @@ namespace Truedat
                         ? $"{compName} ({compTracks:N0} tracks{(compGen.HasValue ? $", gen {compGen.Value:N0}" : "")})"
                         : $"{compName} (header unreadable)");
                     if (compRead && compGen.HasValue && storeInfo != null && compGen.Value != storeInfo.Generation)
-                        ReportNote($"store is at generation {storeInfo.Generation:N0}: truedat {(catalogBehind ? "--store-export" : "--edges-export")}");
+                        ReportNote($"store is at generation {storeInfo.Generation:N0}; {ScanPublishesNote}");
                 }
                 else if (storeInfo != null && storeInfo.EdgeTracks > 0)
                 {
                     Console.WriteLine("  Edges:        none");
-                    ReportNote($"{compName} absent; the store holds {storeInfo.EdgeTracks:N0}: truedat --edges-export");
+                    ReportNote($"{compName} absent; the store holds {storeInfo.EdgeTracks:N0} edge tracks; {ScanPublishesNote}");
                 }
 
                 if (storeInfo != null)
@@ -15606,7 +15608,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var sf = FinalWriteFailure(W(FinalWrite.Skipped, FinalWrite.Failed));
                 Assert(sf != null && sf.Contains("store write failed") && sf.Contains("disk full") && sf.Contains("7 analyses"), $"final writes: a failed store flush is a failure naming the cause and the loss ({sf})");
                 var pf = FinalWriteFailure(W(FinalWrite.Failed, FinalWrite.Written));
-                Assert(pf != null && pf.Contains("publication") && pf.Contains("--store-export"), $"final writes: store committed but the publication failed -> a failure naming the remedy ({pf})");
+                Assert(pf != null && pf.Contains("publication") && pf.Contains(global::Truedat.Store.StoreScan.ScanPublishes) && !pf.Contains("--store-export"),
+                    $"final writes: store committed but the publication failed -> a failure naming the remedy, which is a scan, never --store-export ({pf})");
                 var cf = FinalWriteFailure(new FinalWrites { Catalog = FinalWrite.Failed, Store = FinalWrite.NotAttempted, CatalogError = new IOException("no space") });
                 Assert(cf != null && cf.Contains("catalog write failed"), $"final writes: no store, the catalog save failed -> a failure ({cf})");
                 Assert(FinalWriteFailure(W(FinalWrite.Skipped, FinalWrite.Skipped)) == null, "final writes: skipped stages belong to the checkpoint-failure report, not counted twice");

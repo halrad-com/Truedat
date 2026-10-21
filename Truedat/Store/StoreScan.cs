@@ -83,7 +83,7 @@ namespace Truedat.Store
                         if (!load.Any(x => Same(x.Path, origin.RootPath) || CanonicalPath.Contains(x.Path, origin.RootPath)))
                             return Refuse(res, "root-unresolved",
                                 $"the catalog names root {origin.RootPath} and the store {Path.GetFullPath(storePath)} holds no such library root " +
-                                $"({string.Join(", ", load.Select(x => x.Path))}): the catalog came from another store. Re-publish with --store-export, or run without the store.");
+                                $"({string.Join(", ", load.Select(x => x.Path))}): the catalog came from another store. Move it aside and scan (the store publishes the whole library), seed this store from it with --store-import if it is the catalog you mean, or run without the store.");
                     }
                     else
                     {
@@ -92,7 +92,7 @@ namespace Truedat.Store
                         if (match.Count != 1)
                             return Refuse(res, "root-unresolved",
                                 $"the catalog names root {origin.RootPath} ({origin.RootRole}) and the store {Path.GetFullPath(storePath)} has {match.Count} rows matching it; " +
-                                "the scan cannot tell which root it is publishing. Export the root you mean with --store-export --export-root, or run without the store.");
+                                "the scan cannot tell which root it is publishing. Move the catalog aside and scan (the store publishes the whole library), or run without the store.");
                         load = match;
                     }
                 }
@@ -122,7 +122,7 @@ namespace Truedat.Store
                         return Refuse(res, "equal-generation-disagree",
                             $"the catalog and the store are both at generation {res.Generation} but disagree on the root's paths " +
                             $"({onlyCatalog.Count:N0} only in the catalog{Names(onlyCatalog)}; {onlyStore.Count:N0} only in the store{Names(onlyStore)}). " +
-                            "Something changed one without the other; nothing was scanned. Re-publish the files from the store with --store-export, or move the catalog aside.");
+                            "Something changed one without the other; nothing was scanned. Move the catalog aside and scan (the store publishes the whole library), or seed this store from it with --store-import if the catalog is the one you mean.");
                     res.Case = "equal-generation";
                     return Fill(res, storeEntries, target);
                 }
@@ -181,6 +181,14 @@ namespace Truedat.Store
             res.Refused = true; res.Case = why; res.Refusal = "Error: " + sentence;
             return res;
         }
+
+        /// <summary>The remedy for files behind the store, in every message that names one: a SCAN. Each scan publishes the catalog,
+        /// sidecar and edges companion from the store at its checkpoints and at the end (<see cref="Publish"/>), analysed entries or
+        /// not — so no message recommends <c>--store-export</c> or <c>--edges-export</c> (operator, 2026-10-20: "it happens
+        /// automatically"). The verbs remain for a deliberate export elsewhere.</summary>
+        internal const string ScanPublishes = "the next scan publishes them from the store";
+        /// <summary>The same remedy as a command line, for <c>--store-info</c>'s <c>next:</c> line and its JSON.</summary>
+        internal const string ScanPublishesCommand = "truedat   (a scan publishes the catalog, sidecar and edges file from the store)";
 
         static string Names(List<string> paths)
             => paths.Count == 0 ? "" : ": " + string.Join(", ", paths.Take(NameAtMost)) + (paths.Count > NameAtMost ? $", and {paths.Count - NameAtMost:N0} more" : "");

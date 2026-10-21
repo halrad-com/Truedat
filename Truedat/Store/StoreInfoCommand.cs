@@ -204,21 +204,21 @@ namespace Truedat.Store
             if (!File.Exists(i.CatalogPath))
             {
                 i.FilesState = "absent";
-                i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\"";
+                i.NextCommand = StoreScan.ScanPublishesCommand;
             }
             else if (!CatalogOrigin.TryRead(i.CatalogPath, out var origin))
             {
                 // A v1 header: written before the store existed, or by a build that did not publish. The generation
                 // cannot be compared at all, so this is its own state rather than a guess at "behind".
                 i.FilesState = "legacy";
-                i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\"";
+                i.NextCommand = StoreScan.ScanPublishesCommand;
             }
             else
             {
                 i.PublishedGeneration = origin.Generation;
                 i.FilesState = Publication.FilesBehind(i.CatalogPath, sidecarPath, companionPath, expectCompanion, i.Generation, out var why)
                     ? "behind" : "at-generation";
-                if (i.FilesState == "behind") { i.FilesWhy = why; i.NextCommand = "truedat --store-export \"" + i.CatalogPath + "\""; }
+                if (i.FilesState == "behind") { i.FilesWhy = why; i.NextCommand = StoreScan.ScanPublishesCommand; }
             }
             // With the files whole, the gap that remains is work: edges not yet folded, then nothing.
             if (i.NextCommand.Length == 0)

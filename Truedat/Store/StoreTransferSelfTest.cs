@@ -289,8 +289,11 @@ namespace Truedat.Store
                 var catalog = d.P(Program.MoodsFileName);
                 Mint(store, Lib(@"D:\music", ("a.flac", 120, 'a'), ("b.flac", 121, 'b')), @"D:\music");
 
+                // Operator, 2026-10-20: never recommend --store-export — every scan publishes the files from the store, so the
+                // command that closes a files-behind gap is a scan.
+                static bool ScanRemedy(string next) => next.StartsWith("truedat", StringComparison.Ordinal) && !next.Contains("--store-export") && next.Contains("scan publishes");
                 var absent = Collect(store);
-                assert(absent.FilesState == "absent" && absent.PublishedGeneration == null && absent.NextCommand.Contains("--store-export"),
+                assert(absent.FilesState == "absent" && absent.PublishedGeneration == null && ScanRemedy(absent.NextCommand),
                     $"state: no catalog beside the store -> absent, and the next command publishes one ({absent.FilesState}: {absent.NextCommand})");
                 assert(absent.Generation > 0 && absent.CatalogPath == catalog, "state: the store's generation and the catalog it would publish are named");
 
@@ -302,13 +305,13 @@ namespace Truedat.Store
 
                 Mint(store, Lib(@"D:\music", ("c.flac", 122, 'c')), @"D:\music");
                 var behind = Collect(store);
-                assert(behind.FilesState == "behind" && behind.PublishedGeneration < behind.Generation && behind.FilesWhy != null && behind.NextCommand.Contains("--store-export"),
+                assert(behind.FilesState == "behind" && behind.PublishedGeneration < behind.Generation && behind.FilesWhy != null && ScanRemedy(behind.NextCommand),
                     $"state: a committed change -> behind, with the predicate's reason and the command that republishes ({behind.FilesState}: {behind.FilesWhy})");
 
                 // A v1 catalog (no origin header) cannot be compared by generation at all: its own state, not a guess.
                 StoreSelfTest.WriteCatalog(catalog, Lib(@"D:\music", ("a.flac", 120, 'a')));
                 var legacy = Collect(store);
-                assert(legacy.FilesState == "legacy" && legacy.PublishedGeneration == null && legacy.NextCommand.Contains("--store-export"),
+                assert(legacy.FilesState == "legacy" && legacy.PublishedGeneration == null && ScanRemedy(legacy.NextCommand),
                     $"state: a catalog with no origin header -> legacy, never reported as at-generation ({legacy.FilesState})");
 
                 assert(legacy.EdgeArrayTracks == 0, "state: no edge arrays captured in a store with no edge rows");
