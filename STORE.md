@@ -107,9 +107,12 @@ from a short ffmpeg PCM pass the RMS crest and the transition into silence. The 
 it; the store keeps the typed default row (scalars + HPCP; measured about 1.6 KB per track in a vacuumed
 store) and, only with `--edge-arrays`, the arrays as well (`edge-row/1`, documented in
 `Truedat/Edges/EdgeStore.cs`; about 11.5 KB per track with the scalar row), with an `edges` run row
-carrying the fold and PCM time. Producer version `edges@v2;e30;p10` carries the
+carrying the fold and PCM time. Producer version `edges@v3;e30;p10` carries the
 algorithm generation and the settings; a fold-rule change is a new version and old rows stay
-attributable.
+attributable. Rows under an older version (`v2`: the edge key estimated without the extractor's
+preprocessing) are not served: they count as lacking, `--refresh` re-folds them from the audio, and
+the companion carries only current-version tracks until then (`--store-info` and `--stats` show the
+count).
 
 - `--edges` on any scan with `--store`: fold every analysed track. Refuses plainly without `--store`,
   on an extractor older than `.5`, and in `--analyze-file` / `--file-list` without `--moods`.

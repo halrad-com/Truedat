@@ -16,8 +16,11 @@ namespace Truedat.Edges
     /// </summary>
     internal static class EdgeStampSelfTest
     {
-        const string Current = "edges@v2;e30;p10";
+        static readonly string Current = new EdgeSettings().ProducerVersion;
         const string Older = "edges@v1;e30;p10";
+        /// <summary>The version the edge key was estimated under WITHOUT the extractor's preprocessing (969086f corrected the estimator but
+        /// left this version in place, so stored wrong keys looked current — codex rescan R4). Rows under it must read as stale.</summary>
+        const string PreKeyFix = "edges@v2;e30;p10";
         const string KindSha = "content_hash:audio-stream-sha256";
 
         internal static void Run(Action<bool, string> assert)
@@ -28,6 +31,39 @@ namespace Truedat.Edges
             Block(assert, "no edge results", () => TestNoEdgeResults(assert));
             Block(assert, "older-only rows", () => TestOlderOnly(assert));
             Block(assert, "publish fails after restamp", () => TestPublishFailsAfterRestamp(assert));
+            Block(assert, "algorithm generation", () => TestAlgorithmGeneration(assert));
+        }
+
+        /// <summary>R4: a fold-rule change is a new producer version (EdgeSettings' own contract). The key estimator changed in 969086f;
+        /// rows folded before it must be on the lacking-edges list (so --refresh re-folds them) and out of the companion, never served
+        /// as current.</summary>
+        static void TestAlgorithmGeneration(Action<bool, string> assert)
+        {
+            using var d = new Dir("algogen");
+            var store = d.P("truedat.db");
+            BuildStore(d.Root, store);
+            assert(Current != PreKeyFix, $"the producer version moved past the pre-key-fix generation ({Current} vs {PreKeyFix})");
+            string x;
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+            {
+                // a DESCRIBED media (the lacking list is over track_content), folded under the pre-key-fix version
+                x = os.Db.ExecScalar("SELECT content_key FROM track_content WHERE content_key_kind <> 'entity' ORDER BY content_key LIMIT 1;") ?? "";
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    var fold = EdgeSelfTest.SyntheticFold(d.Root, 240, true);
+                    fold.ProducerVersion = PreKeyFix;
+                    EdgeStore.Write(os.Dal, x, KindSha, null, fold, false);
+                    tx.Complete();
+                }
+                var lackingBefore = os.Dal.ContentKeysLackingEdges(EdgeStore.ProducerKey, PreKeyFix, includeFailed: false);
+                var lacking = os.Dal.ContentKeysLackingEdges(EdgeStore.ProducerKey, Current, includeFailed: false);
+                assert(x.Length == 64 && !lackingBefore.Contains(x) && lacking.Contains(x),
+                    $"a track folded under {PreKeyFix} lacks edges at {Current}: --refresh re-folds it (at the old version it did not lack; {lacking.Count} lacking now)");
+            }
+            var outPath = d.P(Path.Combine("out", "mbxmoods.json"));
+            ExportCommand.Run(new ExportOptions { StorePath = store, OutPath = outPath });
+            assert(!File.Exists(Path.Combine(Path.GetDirectoryName(outPath)!, EdgeCompanion.FileName)) && State(store).Stamp == Current,
+                $"a store holding only pre-key-fix rows publishes no companion and is stamped to {Current} (stamp '{State(store).Stamp}')");
         }
 
         static void Block(Action<bool, string> assert, string name, Action body)

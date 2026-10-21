@@ -538,8 +538,9 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     var ent = os.Db.ExecScalar($"SELECT entity_id FROM track_location WHERE display_path = '{a}';");
-                    os.Dal.EnsureProducer(Truedat.Edges.EdgeStore.ProducerKey, "edges@v2;e30;p10", "analysis", needsAudio: true);   // as ImportCommand.cs:520 does for a failed fold
-                    os.Dal.InsertRun(Truedat.Edges.EdgeStore.ProducerKey, "edges@v2;e30;p10", ent, null, null, null, DateTime.UtcNow.ToString("o"), null, null, null, "failed", "fold", null, "selftest", null);
+                    var edgesVersion = new Truedat.Edges.EdgeSettings().ProducerVersion;   // the CURRENT version: a failed fold at it is what parks a track
+                    os.Dal.EnsureProducer(Truedat.Edges.EdgeStore.ProducerKey, edgesVersion, "analysis", needsAudio: true);   // as ImportCommand.cs:520 does for a failed fold
+                    os.Dal.InsertRun(Truedat.Edges.EdgeStore.ProducerKey, edgesVersion, ent, null, null, null, DateTime.UtcNow.ToString("o"), null, null, null, "failed", "fold", null, "selftest", null);
                 }
                 var p3 = Notice();
                 assert(p3 == p2, $"a failed fold on held content does not change the count ({p3})");

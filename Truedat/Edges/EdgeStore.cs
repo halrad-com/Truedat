@@ -141,7 +141,7 @@ namespace Truedat.Edges
         /// <summary>hub:H02 (TDA 086, keeper 108, RBA 068/069): the store_meta row naming the store's SELECTED edge producer version — the
         /// one version whose rows a store reader serves, exactly the version the companion is built with. It is the authoritative
         /// selected/current version, NOT evidence that a companion file was published: it is committed before the publish, which can
-        /// still fail. The value is the producer_version string byte for byte (today 'edges@v2;e30;p10'), compared, never parsed.
+        /// still fail. The value is the producer_version string byte for byte (today 'edges@v3;e30;p10'), compared, never parsed.
         /// Absent = no store-backed edges declared (the reader falls back to the companion, labelled).</summary>
         internal const string SelectedVersionKey = "edges.selectedVersion";
 

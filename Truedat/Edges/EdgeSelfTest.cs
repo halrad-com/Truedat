@@ -175,7 +175,7 @@ namespace Truedat.Edges
                 // not V1's, and without the old row being discarded as a substitute.
                 const string ShaVer = "4444444444444444444444444444444444444444444444444444444444444444";
                 using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaVer, ShaKind, null, r, captureArrays: true); tx.Complete(); }
-                var rV2 = SyntheticFold(dir); rV2.ProducerVersion = "edges@v3;e30;p10"; rV2.Head.MomentaryCentiDb[3] = -1234;   // a new fold rule, new values
+                var rV2 = SyntheticFold(dir); rV2.ProducerVersion = "edges@v4;e30;p10"; rV2.Head.MomentaryCentiDb[3] = -1234;   // a hypothetical NEXT fold rule (one past the current), new values
                 using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaVer, ShaKind, null, rV2, captureArrays: false); tx.Complete(); }
                 var backV2 = EdgeStore.Read(dal, ShaVer, rV2.ProducerVersion);
                 var backV1 = EdgeStore.Read(dal, ShaVer, r.ProducerVersion);
@@ -812,7 +812,7 @@ namespace Truedat.Edges
             try
             {
                 var settings = new EdgeSettings();
-                assert(settings.ProducerVersion == "edges@v2;e30;p10", $"the producer version carries the algorithm generation and the settings ({settings.ProducerVersion})");
+                assert(settings.ProducerVersion == "edges@v3;e30;p10", $"the producer version carries the algorithm generation and the settings ({settings.ProducerVersion})");
 
                 EdgeFoldResult r;
                 using (var f = EspbFile.Open(BuildSyntheticFrames(dir))) r = EdgeFold.Fold(f, 240, settings);
@@ -845,7 +845,7 @@ namespace Truedat.Edges
                 assert(h.Divergence != null && h.Divergence.Loudness.HasValue && h.Divergence.Texture.HasValue && h.Divergence.Harmony.HasValue
                     && r.HeadTail != null && r.HeadTail.Harmony > 0.3 && r.HeadTail.Texture > 0 && r.HeadTail.Loudness < 0.5,
                     $"divergence per edge vs the whole and head vs tail (head-tail harmony {r.HeadTail?.Harmony:F2}, texture {r.HeadTail?.Texture:F2}, loudness {r.HeadTail?.Loudness:F2})");
-                assert(r.DurationMs == 240000 && r.ProducerVersion == "edges@v2;e30;p10", $"the result names the duration and the producer version ({r.ProducerVersion})");
+                assert(r.DurationMs == 240000 && r.ProducerVersion == "edges@v3;e30;p10", $"the result names the duration and the producer version ({r.ProducerVersion})");
 
                 // T02 (F6.4, I03): a tail edge that is ENTIRELY digital silence has no measurable loudness: every LUFS scalar is NULL,
                 // the loudness divergences are NULL (not 1.00 from a -300 sentinel), and the head is untouched. 240 s with a 31 s

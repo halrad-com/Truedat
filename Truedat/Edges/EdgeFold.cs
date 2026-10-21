@@ -12,9 +12,11 @@ namespace Truedat.Edges
         /// <summary>Tracks shorter than this (seconds) get no edge rows at all: whole-track only (RS02).</summary>
         public int MinTrackSeconds = 20;
         /// <summary>The algorithm generation precedes the settings: v1 = the first fold; v2 (2026-10-12) = texture divergence over
-        /// MFCC 1..12 and tempo from the interquartile mean interval. A fold-rule change is a new version so stored rows are never
-        /// mistaken for current ones, and --work re-queues the done items for it.</summary>
-        public string ProducerVersion => $"edges@v2;e{EdgeSeconds};p{PoolHz}";
+        /// MFCC 1..12 and tempo from the interquartile mean interval; v3 (2026-10-21) = the edge key estimated with the extractor's own
+        /// preprocessing (normalise, gate bins under 0.2, rotate for detuning — 969086f), which v2 rows lack. A fold-rule change is a
+        /// new version so stored rows are never mistaken for current ones: rows under an older version are on the lacking-edges list
+        /// (--refresh re-folds them, which needs the audio) and out of the companion until then (operator, 2026-10-21: "fix it").</summary>
+        public string ProducerVersion => $"edges@v3;e{EdgeSeconds};p{PoolHz}";
     }
 
     internal sealed class EdgeWindowSummary
