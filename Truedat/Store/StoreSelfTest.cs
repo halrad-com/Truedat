@@ -992,6 +992,16 @@ namespace Truedat.Store
 
                 int rc = StoreInfoCommand.Run(store, false);
                 assert(rc == 0 && File.Exists(Path.Combine(dir, StoreInfoCommand.ResultFileName)), "Run writes store-info.json beside the store and exits 0");
+
+                // Codex review 2026-10-20 #8: the catalog is not always beside the database (--store-dir, an explicit --store, a network
+                // library's local store). Given the catalog it was resolved against, store-info reports THOSE files; it used to look
+                // beside the database, report them absent, and recommend exporting a second catalog into the database's folder.
+                var libDir = Path.Combine(dir, "lib"); Directory.CreateDirectory(libDir);
+                var libCatalog = Path.Combine(libDir, Program.MoodsFileName);
+                using (StoreLog.Quiet()) ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = libCatalog });
+                var elsewhere = StoreInfoCommand.Collect(store, libCatalog);
+                assert(elsewhere.CatalogPath == libCatalog && elsewhere.FilesState == "at-generation" && !elsewhere.NextCommand.Contains("--store-export"),
+                    $"store-info with the catalog elsewhere: reports the real catalog as published, no export into the store's folder ({elsewhere.FilesState}; next: {elsewhere.NextCommand})");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

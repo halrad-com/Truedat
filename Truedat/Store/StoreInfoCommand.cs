@@ -67,12 +67,12 @@ namespace Truedat.Store
             ("hpcp12", "track_content", "hpcp12"), ("bitUsage", "track_content", "bitUsage_lowestNonZeroBit"), ("hfEnergyRatio", "track_content", "hfEnergyRatio"), ("smfmScores", "track_copy", "smfmScores"),
         };
 
-        internal static int Run(string? storePath, bool audit)
+        internal static int Run(string? storePath, bool audit, string? catalogPath = null)
         {
             try
             {
                 StoreLog.SetVerbose(audit);
-                var i = Collect(storePath);
+                var i = Collect(storePath, catalogPath);
                 Console.WriteLine($"Store: {i.Path}");
                 Console.WriteLine($"  schema v{i.SchemaVersion}, sqlite {i.SqliteVersion}, machine {i.MachineId} (created on {i.CreatedByHost})");
                 Console.WriteLine($"  roots: {string.Join(", ", i.Roots.Select(r => $"{r.Path} ({r.Role})"))}");
@@ -112,7 +112,10 @@ namespace Truedat.Store
             catch (Exception ex) { Console.Error.WriteLine("Error: store-info failed: " + ex.Message); return 1; }
         }
 
-        internal static StoreInfo Collect(string? storePath)
+        /// <summary><paramref name="catalogPath"/> is the catalog the store was resolved against. Without it the files are looked for beside
+        /// the database — wrong for --store-dir, an explicit --store and a network library's local store, where the state read "absent"
+        /// and the next command exported a second catalog into the database's folder (codex review 2026-10-20 #8).</summary>
+        internal static StoreInfo Collect(string? storePath, string? catalogPath = null)
         {
             var i = new StoreInfo();
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
@@ -191,10 +194,12 @@ namespace Truedat.Store
             // store-v3 T12: the state block.
             i.Generation = dal.Generation();
             i.EdgeArrayTracks = long.Parse(db.ExecScalar("SELECT count(DISTINCT content_hash) FROM edge WHERE arrays IS NOT NULL;") ?? "0");
-            var storeDir = System.IO.Path.GetDirectoryName(os.Path) ?? ".";
-            i.CatalogPath = System.IO.Path.Combine(storeDir, Program.MoodsFileName);
+            i.CatalogPath = catalogPath != null
+                ? System.IO.Path.GetFullPath(catalogPath)
+                : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(os.Path) ?? ".", Program.MoodsFileName);
+            var catalogDir = System.IO.Path.GetDirectoryName(i.CatalogPath) ?? ".";
             var sidecarPath = System.IO.Path.ChangeExtension(i.CatalogPath, ".mbxs");
-            var companionPath = System.IO.Path.Combine(storeDir, global::Truedat.Edges.EdgeCompanion.FileName);
+            var companionPath = System.IO.Path.Combine(catalogDir, global::Truedat.Edges.EdgeCompanion.FileName);
             bool expectCompanion = i.EdgeTracks > 0;
             if (!File.Exists(i.CatalogPath))
             {

@@ -3415,7 +3415,7 @@ namespace Truedat
             }
             if (storeInfoMode)
             {
-                Environment.ExitCode = global::Truedat.Store.StoreInfoCommand.Run(storePath, auditLog);
+                Environment.ExitCode = global::Truedat.Store.StoreInfoCommand.Run(storePath, auditLog, _storeCatalogPath);
                 return;
             }
             if (storeVacuumMode)
@@ -13471,7 +13471,7 @@ namespace Truedat
                 // Quiet: the "store open" INFO line belongs to the store verbs, not inside this summary (operator, 2026-10-12).
                 using (global::Truedat.Store.StoreLog.Quiet())
                 {
-                    try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath); } catch { /* the store block is best-effort */ }
+                    try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath, path); } catch { /* the store block is best-effort */ }
                 }
                 if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
                     rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
@@ -22588,8 +22588,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
         /// <summary>Where a store in force puts its working files and its companion — one place for the arg block and the
         /// scan-time default, so the two cannot drift.</summary>
+        /// <summary>The catalog the run's store was resolved against — the files --store-info reports on (codex review #8).</summary>
+        static string? _storeCatalogPath;
+
         static void ApplyStoreLocation(string storePath, string? storeCatalog)
         {
+            _storeCatalogPath = storeCatalog;
             global::Truedat.Store.ScanSink.StoreDirectory = Path.GetDirectoryName(storePath);   // S2 C-A: where a scan stashes the extractor's aggregate output
             // The spill is transient working data, so it goes where truedat's other transient working data
             // goes — the stage dir — instead of making an artifacts\ folder beside the operator's library.
