@@ -11129,7 +11129,7 @@ namespace Truedat
                     // the remap moves that whole root: one transaction, the root row and every display path under it.
                     string oldRoot = remapOld.Replace('/', '\\').TrimEnd('\\'), newRoot = remapNew.Replace('/', '\\').TrimEnd('\\');
                     using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-                    var hit = os.Dal.LibraryRoots(os.Machine.Id).Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
+                    var hit = os.Dal.LibraryRoots(os.Machine.LibraryMachineId(os.Dal)).Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
                     if (hit.Count == 1)
                     {
                         using var tx = os.Db.BeginTransaction();

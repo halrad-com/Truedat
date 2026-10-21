@@ -1710,6 +1710,18 @@ namespace Truedat.Store
                 long r2 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
                 long r3 = dal.EnsureRoot(m1.Id, @"X:\Library", "mirror", now);
                 assert(r1 == r2 && r3 != r1 && dal.Count("library_root") == 2, "EnsureRoot is idempotent per (machine, path) and distinct per path");
+
+                // Codex review 2026-10-20 #6: after --machine-adopt the adopting host's roots live under ITS machine row, but default
+                // export and the scan selected roots by the creating machine's id, so the host's own library was left out (and a scan
+                // whose catalog named it refused "root-unresolved").
+                long rB = dal.EnsureRoot(w3, @"E:\Music", "primary", now);
+                var libB = dal.LibraryRoots(m3.LibraryMachineId(dal));
+                assert(libB.Count == 1 && libB[0].Id == rB, $"#6 on the adopting host the library is that host's primary roots, E:\\Music, not the creating machine's ({string.Join(", ", libB.Select(x => x.Path))})");
+                var libA = dal.LibraryRoots(m1.LibraryMachineId(dal));
+                assert(libA.Count == 1 && libA[0].Id == r1, $"on the creating host the library is still its own roots ({string.Join(", ", libA.Select(x => x.Path))})");
+                var mirror = MachineIdentity.EnsureMinted(dal, "MIRRORBOX", now);
+                assert(dal.LibraryRoots(mirror.LibraryMachineId(dal)).Count == 1 && dal.LibraryRoots(mirror.LibraryMachineId(dal))[0].Id == r1,
+                    "a host that never adopted (a metadata mirror) still reads the creating machine's library");
             }
             finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
         }

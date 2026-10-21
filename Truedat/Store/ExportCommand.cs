@@ -333,7 +333,7 @@ namespace Truedat.Store
                 foreach (var r in roots) if (Norm(r.Path) == want) return new List<(long, string, string)> { r };
                 throw new StoreException($"No root '{exportRoot}' in the store. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
             }
-            var library = os.Dal.LibraryRoots(os.Machine.Id);
+            var library = os.Dal.LibraryRoots(os.Machine.LibraryMachineId(os.Dal));
             if (library.Count == 0) throw new StoreException($"The store has no primary root; pass --export-root. Roots: {string.Join(", ", roots.Select(x => $"{x.Path} ({x.Role})"))}.");
             return library;
         }

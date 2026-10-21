@@ -72,7 +72,7 @@ namespace Truedat.Store
                 // The scan works on the LIBRARY — every entry, wherever its file is (StoreDal.LibraryRoots). Loading only the root a
                 // catalog names made every track under the library's other roots look new: re-analysed on every scan, and left out of
                 // the catalog again (MTest, 2026-10-18: the 12.5-hour file analysed a second time).
-                var load = os.Dal.LibraryRoots(os.Machine.Id);
+                var load = os.Dal.LibraryRoots(os.Machine.LibraryMachineId(os.Dal));
                 if (origin?.RootPath != null)
                 {
                     bool Same(string a, string b) => string.Equals(a.Replace('/', '\\').TrimEnd('\\'), b.Replace('/', '\\').TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);

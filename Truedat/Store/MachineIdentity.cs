@@ -35,6 +35,14 @@ namespace Truedat.Store
             return mi;
         }
 
+        /// <summary>The machine whose primary roots are THIS host's library: the store's own id on the minting host; on another
+        /// host, the machine row <c>--machine-adopt</c> made for it (its roots were imported under that row), else the creator's
+        /// id, which <see cref="StoreDal.LibraryRoots"/> turns into "every primary root" when it has none of its own (a
+        /// metadata mirror). Reads used <see cref="Id"/> here and so published and scanned the creating machine's roots on an
+        /// adopting host, leaving the host's own out (codex review 2026-10-20 #6).</summary>
+        internal string LibraryMachineId(StoreDal dal)
+            => HostMatches ? Id : (dal.FindMachineByHost(CurrentHost) ?? Id);
+
         /// <summary>The machine id writes must be recorded under. On the minting host that is the store's
         /// own id. On another host it is a refusal unless --machine-adopt, and adopting means finding or
         /// MINTING a machine row for the current host — never writing the current host's roots under the
