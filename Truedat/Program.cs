@@ -15697,6 +15697,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Both helpers are one source: the DOM stamp equals the streamed stamp.
                 Assert(gbRoot["generatedBy"]!.GetValue<string>() == gbStreamed,
                     "generatedBy: streaming and DOM helpers produce the same value");
+                // The exe's own Product version (Explorer > Properties > Details, the win32 VERSIONINFO
+                // written from AssemblyInformationalVersion) carries the SAME stamp as --version and the
+                // catalog header. Before 2026-10-20 the SDK filled it with "1.0.0.0+<sha>" and the release
+                // label was nowhere in the file's properties.
+                var infoVer = typeof(Program).Assembly
+                    .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                    .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion;
+                Assert(infoVer == VersionInfo.Display,
+                    $"version: AssemblyInformationalVersion ('{infoVer}') == VersionInfo.Display ('{VersionInfo.Display}')");
 
                 // --- Multi-part catalog: split-write over the wall + multi-part read (supersedes
                 //     the old refuse-guard). An over-limit catalog can no longer be LOADED (a single

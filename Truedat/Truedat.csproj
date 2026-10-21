@@ -11,6 +11,9 @@
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
     <Copyright>Copyright (c) 2026 Halrad LLC</Copyright>
+    <!-- The SDK would append "+sha" to the informational version; GenerateBuildInfo
+         sets the whole string itself so the exe's Product version IS the release stamp. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <!-- Stamp git branch + COMMIT into a generated source file so VersionInfo.Display can
@@ -29,7 +32,11 @@
        The +dirty suffix is load-bearing: a build from a modified tree is NOT identified by
        its commit, and silently labelling one with a clean SHA is how a "verified" binary
        ends up containing something nobody reviewed. -->
-  <Target Name="GenerateBuildInfo" BeforeTargets="CoreCompile">
+  <!-- BeforeTargets includes GetAssemblyVersion so the InformationalVersion set below is in
+       place before the SDK writes the assembly attributes — that attribute becomes the exe's
+       win32 "Product version" (Explorer > Properties > Details). Until 2026-10-20 that field
+       showed the SDK default "1.0.0.0+sha" while the version switch showed the release stamp. -->
+  <Target Name="GenerateBuildInfo" BeforeTargets="GetAssemblyVersion;CoreCompile">
     <Exec Command="git rev-parse --abbrev-ref HEAD"
           ConsoleToMSBuild="true"
           ContinueOnError="true"
@@ -78,6 +85,14 @@
       <_GitDescribe Condition="'$(_GitDescribeRaw)' == ''">$(_GitCommit)</_GitDescribe>
       <_GitDirty Condition="'$(_GitDirtyRaw)' != ''">true</_GitDirty>
       <_GitDirty Condition="'$(_GitDirtyRaw)' == ''">false</_GitDirty>
+      <!-- Same composition as VersionInfo.ComputeDisplay (the self-test pins the two equal):
+           Version-[branch-]describe[+dirty], branch omitted on main/master/HEAD/unknown. -->
+      <_DisplayCommit>$(_GitDescribe)</_DisplayCommit>
+      <_DisplayCommit Condition="'$(_GitDirty)' == 'true'">$(_GitDescribe)+dirty</_DisplayCommit>
+      <_BranchLower>$(_GitBranch.ToLowerInvariant())</_BranchLower>
+      <_DisplayBranch></_DisplayBranch>
+      <_DisplayBranch Condition="'$(_BranchLower)' != 'main' and '$(_BranchLower)' != 'master' and '$(_BranchLower)' != 'head' and '$(_BranchLower)' != 'unknown'">$(_GitBranch.Replace('/', '-').Replace('\', '-'))-</_DisplayBranch>
+      <InformationalVersion>$(Version)-$(_DisplayBranch)$(_DisplayCommit)</InformationalVersion>
       <_BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_BuildInfoFile>
       <_BuildInfoContent>// &lt;auto-generated/&gt; — written by Truedat.csproj GenerateBuildInfo target.
 namespace Truedat { internal static class BuildInfo { internal const string Branch = "$(_GitBranch)"%3B internal const string Commit = "$(_GitCommit)"%3B internal const string Describe = "$(_GitDescribe)"%3B internal static readonly bool Dirty = $(_GitDirty)%3B } }</_BuildInfoContent>
