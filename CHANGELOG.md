@@ -37,9 +37,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `--no-store` / `--no-edges` turn it off for one run, `truedat --config store false` (and `edges false`) for an
   install. If SQLite is unavailable or the seed fails, the scan runs without a store and says why.
 - **Hi-res files scan 2-5x faster.** A file above 44.1 kHz is converted to 44.1 kHz once before analysis instead
-  of being resampled on every pass inside the extractor: measured 2x at 48 kHz, ~3x at 88.2/96 kHz, ~4-5x at
-  176.4/192 kHz. On 22 hi-res files no key, scale, tempo or speech verdict changed. The authenticity checks and
-  the identity hash still read the original file. Needs ffmpeg; without it nothing changes.
+  of being resampled on every pass inside the extractor: measured 2x at 48 kHz, 3x at 96 kHz and over 4x at
+  192 kHz, the conversion counted in. The higher the rate the more there is to recover, and a converted file
+  then analyses at the same speed as an ordinary CD-rate one. A library gains in proportion to its hi-res share
+  — one at 2.8% came in 3.6% faster over a 14-hour scan, a mostly hi-res library far more. On 22 hi-res files
+  no key, scale, tempo or speech verdict changed. The authenticity checks and the identity hash still read the
+  original file. Needs ffmpeg; without it nothing changes.
 
 ## [0.5.5.3-EV2.2.1] — 2026-10-18
 
