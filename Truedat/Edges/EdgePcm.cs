@@ -67,6 +67,12 @@ namespace Truedat.Edges
 
         /// <summary>One ffmpeg pipe over [startSec, startSec + lengthSec): mono f32le at 44.1 kHz, folded slice by slice; the
         /// decoded audio never touches disk. Null without ffmpeg, on a decode failure, or when under 1 s decodes.</summary>
+        /// <summary>How long the pipe may go without reaching EOF before ffmpeg is killed and the window reported null. The read
+        /// used to run to EOF with the 60 s WaitForExit after it, so an ffmpeg that stalled with stdout open (a NAS read that
+        /// never returns) blocked the worker, the scan's end and a graceful Ctrl+C for good (codex review 2026-10-20 #9).
+        /// Static, not const, so the self-test can shorten it.</summary>
+        internal static int StallTimeoutMs = 60_000;
+
         internal static EdgePcmResult? Analyze(string audioPath, string? ffmpegExe, double startSec, double lengthSec, bool outerAtStart)
         {
             if (string.IsNullOrEmpty(ffmpegExe) || lengthSec < 1) return null;
@@ -87,16 +93,26 @@ namespace Truedat.Edges
                 var samples = new List<float>((int)Math.Min(int.MaxValue / 8, (lengthSec + 1) * SampleRate));
                 var buf = new byte[64 * 1024]; int residue = 0;
                 var stream = proc.StandardOutput.BaseStream;
-                while (true)
+                // The drain runs under the deadline: a Read that never returns is ended by killing the child, which closes the pipe.
+                var drain = System.Threading.Tasks.Task.Run(() =>
                 {
-                    int got = stream.Read(buf, residue, buf.Length - residue);
-                    if (got <= 0) break;
-                    int total = residue + got, whole = total / 4;
-                    for (int i = 0; i < whole; i++) samples.Add(BitConverter.ToSingle(buf, i * 4));
-                    int used = whole * 4; residue = total - used;
-                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                    while (true)
+                    {
+                        int got = stream.Read(buf, residue, buf.Length - residue);
+                        if (got <= 0) break;
+                        int total = residue + got, whole = total / 4;
+                        for (int i = 0; i < whole; i++) samples.Add(BitConverter.ToSingle(buf, i * 4));
+                        int used = whole * 4; residue = total - used;
+                        if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                    }
+                });
+                if (!drain.Wait(StallTimeoutMs))
+                {
+                    try { proc.Kill(); } catch { }
+                    try { drain.Wait(5000); } catch { }
+                    return null;
                 }
-                if (!proc.WaitForExit(60000)) { try { proc.Kill(); } catch { } return null; }
+                if (!proc.WaitForExit(StallTimeoutMs)) { try { proc.Kill(); } catch { } return null; }
                 if (proc.ExitCode != 0 && samples.Count == 0) return null;
                 return FromSamples(samples.ToArray(), outerAtStart);
             }
