@@ -429,6 +429,21 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(r5.ContentRekeyed == 1 && os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';") == "2222222222222222222222222222222222222222222222222222222222222222",
                         $"a key move re-keys the description to the new hash without a drift conflict (rekeyed {r5.ContentRekeyed}, drift {r5.Drift})");
+
+                // 5. ...but the reverse is not a key move: an OLDER catalog carrying the pre-2026-07-21 TagLib-region hash for the same FLAC
+                // is the stale observation of a media the store already describes under its frame hash. It must not re-key the description
+                // back to the legacy hash or put the old values over the new (codex review 2026-10-20, #2).
+                var older = FixtureEntries(@"D:\Music");
+                older[@"D:\Music\old\legacy.flac"].Features!.Bpm = 77;   // the old catalog's (different) measurement
+                WriteCatalog(catalog, older);
+                var r6 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    var key6 = os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';");
+                    var bpm6 = os.Db.ExecScalar("SELECT c.bpm FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';");
+                    assert(r6.ContentRekeyed == 0 && key6 == "2222222222222222222222222222222222222222222222222222222222222222" && bpm6 != "770",
+                        $"an older catalog's legacy FLAC hash does not re-key or regress the frame-keyed description (rekeyed {r6.ContentRekeyed}, key {key6}, bpm {bpm6})");
+                }
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

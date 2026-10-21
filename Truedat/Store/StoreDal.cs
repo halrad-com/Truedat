@@ -397,14 +397,15 @@ namespace Truedat.Store
         {
             public object?[] Values = Array.Empty<object?>();
             public string ContentKey = "";
+            public string ContentKeyKind = "";
             public long? RunId; public string? ProducerKey; public string? ProducerVersion;
         }
 
         /// <summary>The stored description of a media with its content key and the producer that wrote it, or null when none (S2 C2).</summary>
         internal ContentRow? ReadContent(string entityId)
-            => Row("SELECT c.run_id, r.producer_key, r.producer_version, c.content_key, " + TrackEntryMapper.ContentColumnList("c") +
+            => Row("SELECT c.run_id, r.producer_key, r.producer_version, c.content_key, c.content_key_kind, " + TrackEntryMapper.ContentColumnList("c") +
                    " FROM track_content c LEFT JOIN run r ON r.id = c.run_id WHERE c.entity_id = ?;",
-                   s => (ContentRow?)new ContentRow { RunId = s.IsNull(0) ? (long?)null : s.GetInt64(0), ProducerKey = s.GetString(1), ProducerVersion = s.GetString(2), ContentKey = s.GetString(3) ?? "", Values = TrackEntryMapper.ReadContentValues(s, 4) },
+                   s => (ContentRow?)new ContentRow { RunId = s.IsNull(0) ? (long?)null : s.GetInt64(0), ProducerKey = s.GetString(1), ProducerVersion = s.GetString(2), ContentKey = s.GetString(3) ?? "", ContentKeyKind = s.GetString(4) ?? "", Values = TrackEntryMapper.ReadContentValues(s, 5) },
                    null, entityId);
 
         /// <summary>The stored copy facts of a location (copy-column order), or null when none (S2 C2).</summary>

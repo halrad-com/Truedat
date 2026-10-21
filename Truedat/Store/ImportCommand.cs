@@ -617,6 +617,20 @@ namespace Truedat.Store
             bool contentWritten = false, copyWritten = false, drifted = false;
 
             var existing = dal.ReadContent(entityId);
+            if (existing != null && contentKeyKind == FacetKinds.ShaTaglibRegion && existing.ContentKeyKind == FacetKinds.ShaFrames)
+            {
+                // A superseded alias, not a key move: the store already describes this FLAC under its frame hash and the arrival carries
+                // the pre-2026-07-21 TagLib-region hash — an OLDER observation of the same media. The resolver kept the frame hash primary;
+                // the description keeps it too, and the arriving values meet the ordinary rules below (drift recorded, nothing regressed).
+                // Its identity columns are the stored ones, so the alias itself never reads as a changed value.
+                contentKey = existing.ContentKey; contentKeyKind = existing.ContentKeyKind;
+                for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
+                {
+                    var name = TrackEntryMapper.ContentColumnName(k);
+                    if (name == "audioStreamSha256" || name == "audioStreamSha256Source") row[TrackEntryMapper.RowIndexOf(name)] = existing.Values[k];
+                }
+                StoreLog.Debug($"legacy FLAC hash arrival kept under the frame hash: {displayPath}");
+            }
             if (existing == null)
             {
                 dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
