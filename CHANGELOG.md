@@ -10,20 +10,15 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ## [0.5.5.3-EV2.2.3.2] — 2026-10-20
 
-A small one: the scan summary attributes itself, and one feature field is renamed to what it always measured.
-
 ### Changed
 
-- **The end-of-scan summary names the command and the build that ran** — what was typed, what
-  `truedat.config.json` added, this truedat, and the extractor it resolved. A long run leaves the startup banner
-  tens of thousands of progress lines above the tail you keep, so a saved summary could not say what produced it.
+- **The end-of-scan summary names the command and the build that ran**, so a saved summary says what produced
+  it.
 
 ### Fixed
 
-- **`spectralFlatness` is Essentia's Bark-band flatness**, not truedat's average of the Bark, ERB and Mel
-  values — a correction to what the field means, not a change to what it tells you: the two track each other
-  closely enough that refitting the mood model on the corrected field promoted nothing. Any scan corrects an
-  existing catalog, with no re-analysis.
+- **`spectralFlatness` is Essentia's Bark-band flatness**, not truedat's average of three bands. Corrected in
+  your catalog the next time you run a scan.
 
 ## [0.5.5.3-EV2.2.3.1] — 2026-10-19
 
