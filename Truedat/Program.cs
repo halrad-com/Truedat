@@ -11330,7 +11330,9 @@ namespace Truedat
         /// run again as it stands.</summary>
         internal static List<string> CommandSummaryLines(string[] typed, string[] fromConfig)
         {
-            static string Q(string a) => a.Length == 0 || a.IndexOfAny(new[] { ' ', '\t', '"' }) >= 0 ? "\"" + a.Replace("\"", "\\\"") + "\"" : a;
+            // Windows quoting (PathHelper.QuoteArg): a trailing backslash is doubled and an embedded quote escaped, so the line parses
+            // back to the same arguments (codex review 2026-10-20 #12: `"C:\My Music\" --refresh` came back as one argument).
+            static string Q(string a) => a.Length == 0 || a.IndexOfAny(new[] { ' ', '\t', '"' }) >= 0 ? PathHelper.QuoteArg(a) : a;
             var exe = typed.Length > 0 ? Path.GetFileName(typed[0]) : "truedat.exe";
             var lines = new List<string> { "Command:    " + exe + (typed.Length > 1 ? " " + string.Join(" ", typed.Skip(1).Select(Q)) : "") };
             if (fromConfig.Length > 0) lines.Add("            + config: " + string.Join(" ", fromConfig.Select(Q)));
@@ -21579,6 +21581,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var spaced = CommandSummaryLines(new[] { "truedat.exe", "--file-list", @"C:\My Music\list.txt" }, new string[0]);
                 Assert(spaced.Count == 1 && spaced[0] == "Command:    truedat.exe --file-list \"C:\\My Music\\list.txt\"",
                     $"command: an argument with a space is quoted so the line runs again as it stands ({string.Join(" | ", spaced)})");
+                // Codex review 2026-10-20 #12: a quoted argument ending in a backslash needs that backslash doubled, or the closing
+                // quote is escaped and the next flag is swallowed into the path (CommandLineToArgvW returned three arguments, not four).
+                var trailing = CommandSummaryLines(new[] { "truedat.exe", "--folder", @"C:\My Music\", "--refresh" }, new string[0]);
+                Assert(trailing[0] == @"Command:    truedat.exe --folder ""C:\My Music\\"" --refresh",
+                    $"command: a trailing backslash inside quotes is doubled so the line parses back to four arguments ({trailing[0]})");
+                var quoted = CommandSummaryLines(new[] { "truedat.exe", "--title", "say \"hi\"" }, new string[0]);
+                Assert(quoted[0] == @"Command:    truedat.exe --title ""say \""hi\""""", $"command: an embedded quote is escaped the Windows way ({quoted[0]})");
 
                 // ...and which build ran it, because the startup banner is hours of progress lines above the saved tail.
                 Assert(BuildSummaryLine("1.0.0.0-v0.5.5.3-EV2.2.3", "output-x64.5") == "Build:      truedat 1.0.0.0-v0.5.5.3-EV2.2.3, extractor output-x64.5",
