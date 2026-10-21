@@ -155,6 +155,18 @@ namespace Truedat.Store
                     $"rotation: with --keep-backups 1 beside a migration backup, the undo snapshot this restore just made survives ({Path.GetFileName(third.BackupPath ?? "(none)")}: {(third.BackupPath != null && File.Exists(third.BackupPath) ? "present" : "DELETED")})");
                 assert(Directory.GetFiles(d.Root, Path.GetFileName(store) + ".bak.*").Length == 1, "rotation: exactly one backup is kept, the newest");
 
+                // Execution review D2: --restore into a MISSING store floored the new generation on the replaced store only (there was none),
+                // so it republished the files at a generation LOWER than the catalog on disk — a consumer holding the higher one never
+                // looks again. The floor has to include what the published files already say.
+                int pubExit; using (StoreLog.Quiet()) pubExit = Program.RunStoreRestore(archive, store, catalog);
+                CatalogOrigin.TryRead(catalog, out var publishedOrigin);
+                foreach (var side in new[] { store, store + "-wal", store + "-shm" }) if (File.Exists(side)) File.Delete(side);
+                int missingExit; using (StoreLog.Quiet()) missingExit = Program.RunStoreRestore(archive, store, catalog);
+                var afterMissing = Collect(store);
+                CatalogOrigin.TryRead(catalog, out var originAfterMissing);
+                assert(pubExit == 0 && missingExit == 0 && afterMissing.Generation > publishedOrigin.Generation && originAfterMissing.Generation == afterMissing.Generation,
+                    $"restore into a missing store: the generation advances past the catalog on disk (files were at {publishedOrigin.Generation}; store now {afterMissing.Generation}, catalog now {originAfterMissing.Generation})");
+
                 // Rescan-2 R3: a RAW store given to --restore is read through SQLite, never file-copied. A WAL store whose main file holds
                 // an older checkpoint and whose -wal holds later committed changes (an interrupted process) copied as the older state —
                 // structurally valid, quick_check ok — and silently omitted the committed changes. VacuumInto's own doc says why a file

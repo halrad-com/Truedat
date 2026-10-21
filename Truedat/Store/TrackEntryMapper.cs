@@ -450,6 +450,24 @@ namespace Truedat.Store
         /// scan leaves CopyObserved null (all observed), so an id it reads still replaces the stored one.</summary>
         internal static ulong PerFileScanCopyObserved => AllCopyObservedExcept("trackId");
 
+        /// <summary>Every copy column observed.</summary>
+        internal static ulong AllCopyObserved => AllCopyObservedExcept();
+
+        /// <summary>What a store-backed VERB observes of a copy: everything the published catalog carries — i.e. every copy column except
+        /// the ones the field policy keeps out of the file (trackId). Those arrive as the type's default (0), a value nobody observed, and
+        /// marked observed they replaced a stored NULL (execution review 2026-10-21, D5).</summary>
+        internal static ulong VerbCopyObserved => AllCopyObservedExcept(System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(CopyColumnNames, FieldPolicy.IsExcluded)));
+
+        /// <summary>The copy columns a stored row has NO value for — the only ones a known-older arrival may touch (a fill, never a
+        /// replacement; execution review 2026-10-21, D4). No stored row at all = every column.</summary>
+        internal static ulong CopyMaskWhereNull(object?[]? storedCopy)
+        {
+            if (storedCopy == null) return AllCopyObserved;
+            ulong mask = 0;
+            for (int k = 0; k < CopyIdx.Length; k++) if (storedCopy[k] == null) mask |= 1UL << k;
+            return mask;
+        }
+
         static ulong AllCopyObservedExcept(params string[] names)
         {
             ulong mask = CopyIdx.Length >= 64 ? ulong.MaxValue : (1UL << CopyIdx.Length) - 1;

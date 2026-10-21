@@ -751,7 +751,12 @@ namespace Truedat.Store
             // writer's precision is the same observation (a 1-dp catalog duration downgraded the store's 6-dp one on any rewrite).
             var existingCopy = dal.ReadCopyValues(locationId);
             bool catalogImport = string.Equals(producerKey, "import", StringComparison.Ordinal);   // a scan's arrival is a fresh measurement (keeper 070)
-            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, entry.CopyObserved, catalogImport, out var copyDiff);
+            // D4 (execution review 2026-10-21): a legacy-hash alias is a KNOWN-OLDER observation — "newer wins" cannot apply to its copy
+            // facts either. It may fill a copy fact the store has no value for; it never replaces one (the older catalog's title and a
+            // fabricated head hash were going over the scan's).
+            ulong? observedCopy = entry.CopyObserved;
+            if (legacyAlias) observedCopy = (entry.CopyObserved ?? TrackEntryMapper.AllCopyObserved) & TrackEntryMapper.CopyMaskWhereNull(existingCopy);
+            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff);
             if (copyRow != null)
             {
                 StoreLog.Debug($"copy facts written for {displayPath}: {copyDiff}");

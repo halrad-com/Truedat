@@ -455,8 +455,14 @@ namespace Truedat.Store
                 scanned.AudioStreamSha256 = "2222222222222222222222222222222222222222222222222222222222222222";
                 scanned.AudioStreamSha256Source = "flac-frames";
                 scanned.Features!.Bpm = 150;   // beyond the 1 % noise band from the stored 120, so the scan's write (and its producer) actually lands
+                scanned.Features.Title = "Senjara"; scanned.Features.Genre = null!;   // the scan's copy facts: a title, and a genre it did not observe
                 ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\Music\old\legacy.flac"] = scanned },
                     @"D:\Music", "primary", true, "essentia", "output-x64.5", "scan", null, null);
+                // Execution review D4: the alias branch kept the DESCRIPTION but the copy merge still ran as "newer wins", so the older
+                // catalog's title and head hash replaced the scan's. A known-older arrival may only FILL a copy fact the store lacks.
+                older[@"D:\Music\old\legacy.flac"].Features!.Title = "Senjara (old catalog)";
+                older[@"D:\Music\old\legacy.flac"].Features!.Genre = "Jazz";
+                const string sqlCopy = "SELECT p.title || '|' || coalesce(p.genre, '<null>') FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';";
                 string bpmScan, runScan;
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"))) { bpmScan = os.Db.ExecScalar(sqlBpm) ?? ""; runScan = os.Db.ExecScalar(sqlRun) ?? ""; }
                 assert(bpmScan == "1500", $"fixture: the scan's description is in place (bpm {bpmScan}, expected 1500)");
@@ -468,6 +474,9 @@ namespace Truedat.Store
                     var key7 = os.Db.ExecScalar("SELECT c.content_key FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';");
                     assert(r7.ContentReplaced == 0 && r7.ContentRekeyed == 0 && key7 == "2222222222222222222222222222222222222222222222222222222222222222" && bpm7 == "1500" && run7 == runScan,
                         $"an older catalog's legacy FLAC hash leaves a scan's description and its run untouched (replaced {r7.ContentReplaced}, rekeyed {r7.ContentRekeyed}, key {key7}, bpm {bpm7} expected 1500, run {run7} expected {runScan})");
+                    var copy7 = os.Db.ExecScalar(sqlCopy);
+                    assert(copy7 == "Senjara|Jazz",
+                        $"an older catalog's legacy FLAC hash leaves the scan's copy facts in place and only fills what the store lacks (title|genre = {copy7}, expected Senjara|Jazz)");
                 }
             }
             finally { try { Directory.Delete(dir, true); } catch { } }

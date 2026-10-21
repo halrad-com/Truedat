@@ -148,7 +148,10 @@ namespace Truedat.Store
         /// extract beside the target, validate it, snapshot the store being replaced (<c>VACUUM INTO</c>, rotated),
         /// swap atomically, drop the replaced store's WAL pair, advance the generation. The files are NOT published
         /// here — the caller publishes from the restored store, so the triple still has one writer (T07).</summary>
-        internal static RestoreResult RestoreStore(string archivePath, string storePath, int keepBackups)
+        /// <param name="filesGeneration">The generation the PUBLISHED files beside the destination already carry (the catalog's origin, the
+        /// companion's), or 0. The restored store's generation must exceed this too: with the destination store MISSING there is no
+        /// replaced store to floor on, and the files still say what a consumer last saw (execution review 2026-10-21, D2).</param>
+        internal static RestoreResult RestoreStore(string archivePath, string storePath, int keepBackups, long filesGeneration = 0)
         {
             var store = Path.GetFullPath(storePath);
             var dir = Path.GetDirectoryName(store);
@@ -209,7 +212,7 @@ namespace Truedat.Store
             using (var os = OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
             using (var tx = os.Db.BeginTransaction())
             {
-                long replaced = replacedGeneration;
+                long replaced = Math.Max(replacedGeneration, filesGeneration);
                 generation = os.Dal.AdvanceGeneration();
                 if (generation <= replaced)
                 {

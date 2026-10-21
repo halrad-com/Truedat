@@ -2973,7 +2973,7 @@ namespace Truedat
                 // must not report (or recommend publishing) against a catalog nobody named — it reads beside the store, as it did before
                 // codex #8 (EV3 pre-tag review, M1). A store whose location was DERIVED from that catalog (--store-dir, a network library's
                 // local store) keeps it: the catalog is what selected the database (rescan-2 R6).
-                if (StoreInfoDropsGuessedCatalog(storeExplicit, IsBareCwdCatalog(analyzeFileMoods, xmlPath, ProbeCatalogBesideExe(AppContext.BaseDirectory))))
+                if (StoreInfoDropsGuessedCatalog(storeExplicit, catalogNamed: !string.IsNullOrEmpty(analyzeFileMoods) || !string.IsNullOrEmpty(xmlPath)))
                     _storeCatalogPath = null;
             }
             _storePath = storePath;
@@ -5395,7 +5395,16 @@ namespace Truedat
                     Environment.ExitCode = 2;
                     return;
                 }
-                var moodsForRemap = xmlPath ?? "mbxmoods.json";
+                // D1 (execution review 2026-10-21): this read the positional only — `--moods` was ignored and, with neither, the catalog
+                // was whatever sat in the current directory (the store's state was published THERE, twice, and the named catalog left
+                // behind the store). Same precedence and the same bare-cwd refusal as the other rewriting verbs.
+                var moodsForRemap = CatalogForVerb(analyzeFileMoods, xmlPath, DiscoverAnchorCatalog());
+                if (moodsForRemap == null)
+                {
+                    Console.Error.WriteLine(BareCwdRefusal("--fixup --remap", Path.Combine(Environment.CurrentDirectory, MoodsFileName)));
+                    Environment.ExitCode = 1;
+                    return;
+                }
                 if (_storePath != null)
                     Environment.ExitCode = RunStoreBackedVerb("remap", "--fixup --remap", moodsForRemap, () => { RunFixupRemap(moodsForRemap, parts[0], parts[1]); return Environment.ExitCode; },
                         remapOld: parts[0], remapNew: parts[1]);   // store-v3 T06
@@ -5423,9 +5432,16 @@ namespace Truedat
                 // Keeper P2-d on b4622f7: this returned with exit 0 and (since the record now begins first) a scan record saying completed —
                 // a false success. A refusal is a refusal: exit 2 like the other not-found cases whenever the operator NAMED the library or a
                 // store is in force; only the bare "truedat" with nothing found and no store keeps the help page + exit 0 (a separate call).
-                if (libraryScan && (xmlExplicit || _storePath != null))
+                if (XmlNotFoundRefuses(libraryScan, migrateMode || fixupMode, xmlExplicit, _storePath != null, !string.IsNullOrEmpty(analyzeFileMoods)))
                 {
-                    Environment.ExitCode = RefuseScan(_storePath, $"Error: iTunes library not found: {xmlPath} (run --paths to see what resolved)", 2);
+                    if (libraryScan) Environment.ExitCode = RefuseScan(_storePath, $"Error: iTunes library not found: {xmlPath} (run --paths to see what resolved)", 2);
+                    else
+                    {
+                        // D7: --migrate / --fixup given --moods but no positional printed the help page and exited 0 — a launcher read success.
+                        Console.Error.WriteLine($"Error: iTunes library not found: {xmlPath} (run --paths to see what resolved). " +
+                                                $"{(migrateMode ? "--migrate" : "--fixup")} takes the library — its iTunes XML, or the folder holding it — as the positional argument; --moods does not select it.");
+                        Environment.ExitCode = 2;
+                    }
                     return;
                 }
                 Console.WriteLine($"iTunes library not found: {xmlPath}");
@@ -10819,8 +10835,15 @@ namespace Truedat
 
             if (!File.Exists(archivePath)) return Fail($"Error: archive not found: {archivePath}", 2);
 
+            // D2: the generation the published files already carry is a floor too — with the destination store missing there is no
+            // replaced store to floor on, and republishing BELOW what the files say is the one thing the generation exists to prevent.
+            long filesGeneration = 0;
+            if (global::Truedat.Store.CatalogOrigin.TryRead(destCatalog, out var destOrigin)) filesGeneration = destOrigin.Generation;
+            var destCompanion = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(destCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
+            if (File.Exists(destCompanion) && global::Truedat.Store.CatalogOrigin.TryReadHead(destCompanion, global::Truedat.Store.CatalogOrigin.CompanionContractV1, out var destComp))
+                filesGeneration = Math.Max(filesGeneration, destComp.Generation);
             global::Truedat.Store.StoreTransfer.RestoreResult restored;
-            try { restored = global::Truedat.Store.StoreTransfer.RestoreStore(archivePath, storePath, _keepBackups); }
+            try { restored = global::Truedat.Store.StoreTransfer.RestoreStore(archivePath, storePath, _keepBackups, filesGeneration); }
             catch (global::Truedat.Store.StoreException ex) { return Fail("Error: restore refused: " + ex.Message, 1); }
             catch (Exception ex) { return Fail($"Error: restore failed: {ex.Message}", 1); }
 
@@ -11128,7 +11151,9 @@ namespace Truedat
                     if (b == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
                     // the published file lacks policy-cut fields; the verb never saw them, so the store's values stand
                     var entry = b != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, b) : kv.Value;
-                    entry.CopyObserved = null; changed[kv.Key] = entry;   // null = every copy column observed: the verb's result is exact
+                    // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
+                    // saw are not — marked observed, a trackId arriving as the type's 0 replaced a stored NULL (execution review D5).
+                    entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.VerbCopyObserved; changed[kv.Key] = entry;
                 }
 
             string? storeError = null; int moved = 0;
@@ -11720,8 +11745,22 @@ namespace Truedat
         /// stays a pure predicate the self-test can drive through every combination.
         /// </summary>
         /// <summary>Whether --store-info reads beside the store instead of against the resolved catalog: only when the store was named
-        /// explicitly AND the catalog is the cwd guess (EV3 pre-tag review M1; rescan-2 R6 for the derived-store half).</summary>
-        internal static bool StoreInfoDropsGuessedCatalog(bool storeExplicit, bool catalogGuessed) => storeExplicit && catalogGuessed;
+        /// explicitly AND no catalog was named (--moods or the positional). A catalog the cwd fallback or the exe's ancestor ladder found is
+        /// a GUESS either way — the ladder reached the repo's checked-in fixture four levels up and recommended importing it into an
+        /// unrelated store (EV3 pre-tag review M1; rescan-2 R6 for the derived-store half; execution review D3 for the ladder).</summary>
+        internal static bool StoreInfoDropsGuessedCatalog(bool storeExplicit, bool catalogNamed) => storeExplicit && !catalogNamed;
+
+        /// <summary>The catalog a rewriting verb acts on, in the order every other such verb uses: <c>--moods</c>, then the positional, then
+        /// the catalog discovered beside the installed exe (never the marker scan); null means nothing anchors it and the verb refuses
+        /// rather than act on the current directory (execution review 2026-10-21, D1).</summary>
+        internal static string? CatalogForVerb(string? moods, string? positional, string? discoveredAnchor)
+            => !string.IsNullOrEmpty(moods) ? moods : !string.IsNullOrEmpty(positional) ? positional : discoveredAnchor;
+
+        /// <summary>Whether an iTunes XML that did not resolve is a REFUSAL (exit 2) rather than the bare-command help page: for the
+        /// library scan when the library was named or a store is in force (keeper P2-d); for --migrate / --fixup also when <c>--moods</c>
+        /// was given — those printed the help page and exited 0 on a named input (execution review 2026-10-21, D7).</summary>
+        internal static bool XmlNotFoundRefuses(bool libraryScan, bool migrateOrFixup, bool xmlExplicit, bool storeInForce, bool moodsNamed)
+            => (libraryScan && (xmlExplicit || storeInForce)) || (migrateOrFixup && (xmlExplicit || storeInForce || moodsNamed));
 
         internal static bool IsBareCwdCatalog(string? explicitPath, string? libraryXmlPath, string? discoveredCatalog)
             => string.IsNullOrEmpty(explicitPath)
@@ -15600,17 +15639,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     };
                     using (global::Truedat.Store.StoreLog.Quiet())
                         global::Truedat.Store.ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = e }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                    // Execution review D5: the verb's result arrives with every copy column "observed", and trackId — policy-cut from the
+                    // published file, non-nullable in TrackEntry — arrives as 0, so a stored NULL (an id nobody observed) became an observed 0.
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                    using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        os.Db.Exec("UPDATE track_copy SET trackId = NULL;");
                     _storePath = store;
                     var saveOut = Console.Out; Console.SetOut(TextWriter.Null);
                     int exit;
                     try { using (global::Truedat.Store.StoreLog.Quiet()) exit = RunStoreBackedVerb("strip", "--strip-smfm", cat, () => { RunStripSmfm(cat, false); return Environment.ExitCode; }); }
                     finally { Console.SetOut(saveOut); }
-                    double[]? histBack = null; int[]? smfmBack = new int[0];
+                    double[]? histBack = null; int[]? smfmBack = new int[0]; string? trackIdNulls = null;
                     using (global::Truedat.Store.StoreLog.Quiet())
                     using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
                         foreach (var (_, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) { histBack = back.Features.BpmHistogram; smfmBack = back.Features.SmfmScores; }
+                        trackIdNulls = os.Db.ExecScalar("SELECT count(*) FROM track_copy WHERE trackId IS NULL;");
+                    }
                     Assert(exit == 0 && smfmBack == null && histBack != null && histBack.Length == 250 && histBack[60] == 0.75 && histBack[120] == 0.25,
                         $"store-backed verb: --strip-smfm clears SMFM in the store and keeps the policy-cut bpmHistogram (exit {exit}, smfm {(smfmBack == null ? "cleared" : "kept")}, histogram {(histBack == null ? "ERASED" : histBack.Length + " bins")})");
+                    Assert(trackIdNulls == "1", $"store-backed verb: an unobserved trackId (NULL) stays NULL — the verb never saw it (rows with NULL: {trackIdNulls}, expected 1)");
 
                     // The same result arriving under a RENAMED key — a --remap of a sub-folder, a path reconciled by --fixup — had no
                     // `before` row under that key to restore from, so the histogram went to the store as a clear after all (EV3 pre-tag
@@ -15756,9 +15804,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Rescan-2 R6: the cwd catalog is dropped for --store-info ONLY when the store was named explicitly (a store-only request);
                 // a store whose location was DERIVED from that catalog (--store-dir, a network library's local store) keeps it — the
                 // catalog is what selected the database. The rule is pinned; the arg block that applies it is read, not pinned.
-                Assert(StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogGuessed: true), "store-info catalog: explicit --store + cwd guess -> read beside the store");
-                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: false, catalogGuessed: true), "store-info catalog: store derived from the cwd catalog -> keep that catalog");
-                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogGuessed: false), "store-info catalog: a named or discovered catalog is always kept");
+                Assert(StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogNamed: false), "store-info catalog: explicit --store + no catalog named (cwd or ladder guess) -> read beside the store");
+                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: false, catalogNamed: false), "store-info catalog: store derived from the resolved catalog -> keep that catalog");
+                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogNamed: true), "store-info catalog: a named catalog is always kept");
+                // D1: a rewriting verb's catalog — --moods, then the positional, then the exe-anchored discovery; nothing = refuse.
+                Assert(CatalogForVerb(@"D:\m\mbxmoods.json", @"D:\x\mbxmoods.json", @"D:\e\mbxmoods.json") == @"D:\m\mbxmoods.json", "verb catalog: --moods wins over the positional and discovery");
+                Assert(CatalogForVerb(null, @"D:\x\mbxmoods.json", @"D:\e\mbxmoods.json") == @"D:\x\mbxmoods.json", "verb catalog: the positional wins over discovery");
+                Assert(CatalogForVerb(null, null, @"D:\e\mbxmoods.json") == @"D:\e\mbxmoods.json" && CatalogForVerb(null, null, null) == null, "verb catalog: discovery, else nothing (the verb refuses; never the cwd)");
+                // D7: a missing XML refuses (exit 2) for --migrate/--fixup when anything was named; the bare command keeps the help page.
+                Assert(XmlNotFoundRefuses(libraryScan: false, migrateOrFixup: true, xmlExplicit: false, storeInForce: false, moodsNamed: true), "xml not found: --migrate --moods <x> refuses");
+                Assert(!XmlNotFoundRefuses(libraryScan: false, migrateOrFixup: true, xmlExplicit: false, storeInForce: false, moodsNamed: false), "xml not found: bare --migrate keeps the help page");
+                Assert(XmlNotFoundRefuses(libraryScan: true, migrateOrFixup: false, xmlExplicit: false, storeInForce: true, moodsNamed: false) && !XmlNotFoundRefuses(true, false, false, false, false), "xml not found: the scan rule is unchanged (store in force refuses; bare does not)");
 
                 // --- Multi-part catalog: split-write over the wall + multi-part read (supersedes
                 //     the old refuse-guard). An over-limit catalog can no longer be LOADED (a single
