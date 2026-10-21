@@ -17,7 +17,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 ### Fixed
 
 - `spectralFlatness` is Essentia's Bark-band flatness, not truedat's average of three bands.
-  Any scan corrects an existing catalog.
+  Any scan corrects an existing catalog without re-analysis of the files.
 
 ## [0.5.5.3-EV2.2.3.1] — 2026-10-19
 

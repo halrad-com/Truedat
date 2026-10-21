@@ -4435,7 +4435,7 @@ namespace Truedat
                         // T18: store-authoritative — a cache hit is recorded as copy facts, a fresh analysis as a measurement; commit, then publish.
                         if (afHitTag == "analyzed") RecordPerFileScanEntry(afKey, trackEntry, afStagedSrc?.Path); else RecordPerFileCacheHit(afKey, trackEntry);
                         var afFinal = RunAuthoritativeFinal(null, analyzeFileMoods!, afMoodsTracks.Keys);
-                        if (afFinal.Store != FinalWrite.Written && Environment.ExitCode == 0) Environment.ExitCode = 1;
+                        ExitOnFinalWriteFailure(afFinal);
                     }
                     else SaveResults(analyzeFileMoods!, afMoodsTracks);
                     Console.Error.WriteLine($"Saved to: {analyzeFileMoods}");
@@ -4457,7 +4457,7 @@ namespace Truedat
                 foreach (var line in ThisCommand()) Console.Error.WriteLine(line);
                 Console.Error.WriteLine($"Done ({afHitTag}) in {afSw.Elapsed.TotalSeconds:F1}s");
                 if (_storePath != null) global::Truedat.Store.ScanSink.DropUntied();   // S2: an analysed file that recorded no entry (no --moods) leaves no stash behind
-                Environment.ExitCode = 0;
+                // No reset to 0 here: it used to follow the final-write check above and undo it (codex review #3).
                 }
                 finally { afStagedSrc?.Dispose(); KeepAwakeRelease(); }
                 return;
@@ -5364,6 +5364,7 @@ namespace Truedat
                 }
                 if (flFailed > 0) global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{flFailed} file(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = flFailed > 0 ? 1 : 0;
+                ExitOnFinalWriteFailure(flFinal);
                 if (flCheckpointFailure != null) ReportPersistentCheckpointFailure(flCheckpointFailure, flPeriodicSave, Volatile.Read(ref flNotStartedAfterCheckpointFailure), flFinal,
                     _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries + flFinal.StoreLost
                     : flFinal.Catalog == FinalWrite.Written || string.IsNullOrEmpty(analyzeFileMoods) ? 0 : NotInCatalogFile(analyzeFileMoods!, flMoodsTracks).Count);
@@ -6898,6 +6899,7 @@ namespace Truedat
                     global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{failed} track(s) failed analysis — see mbxmoods-errors.csv");
                 Environment.ExitCode = 1;
             }
+            ExitOnFinalWriteFailure(finalWrites);
             if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites,
                 _storePath != null ? global::Truedat.Store.ScanSink.PendingEntries + finalWrites.StoreLost : finalWrites.Catalog == FinalWrite.Written ? 0 : NotInCatalogFile(moodsPath, allTracks).Count);
 
@@ -11480,6 +11482,31 @@ namespace Truedat
             return w;
         }
 
+        /// <summary>Why the scan's END failed, or null: a final store flush or a final catalog write / publication that FAILED. A SKIPPED
+        /// stage belongs to the persistent-checkpoint report (which already fails the run); NotAttempted is "not in force". Until
+        /// 2026-10-20 a first failure AT THE END left exit 0 in every scan mode — the record said failed, the launcher saw success
+        /// (codex review #3).</summary>
+        internal static string? FinalWriteFailure(FinalWrites w)
+        {
+            if (w.Store == FinalWrite.Failed)
+                return $"the final store write failed ({w.StoreError}); {w.StoreLost} analyses never committed to the store (lost)";
+            if (w.Catalog == FinalWrite.Failed)
+                return w.Store == FinalWrite.NotAttempted
+                    ? $"the final catalog write failed ({(w.CatalogError != null ? CheckpointCause.Describe(w.CatalogError) : "unknown cause")})"
+                    : "the final publication from the store failed; the store is ahead of the files — run --store-export";
+            return null;
+        }
+
+        /// <summary>A failed final write is a failed run: the sentence, the record's outcome, exit 1 (a higher code already set stands).</summary>
+        internal static void ExitOnFinalWriteFailure(FinalWrites w)
+        {
+            var reason = FinalWriteFailure(w);
+            if (reason == null) return;
+            Console.Error.WriteLine("=== FAILED - " + reason + " ===");
+            global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
+            if (Environment.ExitCode == 0) Environment.ExitCode = 1;
+        }
+
         /// <summary>Survivor facts for the CURRENT staging (catalog saved before the store flush; T18's final order — store commit then
         /// derived publication — will restate these). Derived from what the end actually wrote. No recovery verb is promised:
         /// <c>--store-import</c> is the legacy / partial-initialisation action, not ordinary recovery for an initialised store, and a
@@ -15566,6 +15593,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         $"store-backed verb: --strip-smfm clears SMFM in the store and keeps the policy-cut bpmHistogram (exit {exit}, smfm {(smfmBack == null ? "cleared" : "kept")}, histogram {(histBack == null ? "ERASED" : histBack.Length + " bins")})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
+            }
+
+            // A failed FINAL write is a failed run (codex review 2026-10-20, #3). The exit-code wiring in the three scan modes is read,
+            // not pinned here — a function seam cannot pin its call sites; the rule itself is.
+            {
+                FinalWrites W(FinalWrite c, FinalWrite s) => new FinalWrites { Catalog = c, Store = s, StoreError = "disk full", StoreLost = 7 };
+                Assert(FinalWriteFailure(W(FinalWrite.Written, FinalWrite.Written)) == null, "final writes: both written -> no failure");
+                Assert(FinalWriteFailure(W(FinalWrite.Written, FinalWrite.NotAttempted)) == null, "final writes: catalog written, no store in force -> no failure");
+                var sf = FinalWriteFailure(W(FinalWrite.Skipped, FinalWrite.Failed));
+                Assert(sf != null && sf.Contains("store write failed") && sf.Contains("disk full") && sf.Contains("7 analyses"), $"final writes: a failed store flush is a failure naming the cause and the loss ({sf})");
+                var pf = FinalWriteFailure(W(FinalWrite.Failed, FinalWrite.Written));
+                Assert(pf != null && pf.Contains("publication") && pf.Contains("--store-export"), $"final writes: store committed but the publication failed -> a failure naming the remedy ({pf})");
+                var cf = FinalWriteFailure(new FinalWrites { Catalog = FinalWrite.Failed, Store = FinalWrite.NotAttempted, CatalogError = new IOException("no space") });
+                Assert(cf != null && cf.Contains("catalog write failed"), $"final writes: no store, the catalog save failed -> a failure ({cf})");
+                Assert(FinalWriteFailure(W(FinalWrite.Skipped, FinalWrite.Skipped)) == null, "final writes: skipped stages belong to the checkpoint-failure report, not counted twice");
             }
 
             // Hann cache: same array reference on repeat calls at the same size.

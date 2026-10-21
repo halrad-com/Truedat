@@ -1081,7 +1081,7 @@ Extended features are emitted as nullable JSON fields — absent/NaN Essentia pa
 | Key                | `tonal.key_edma.key`                 | Musical key (C, D, E...)          |
 | Mode               | `tonal.key_edma.scale`               | Major (bright) vs minor (dark)    |
 | Spectral centroid  | `lowlevel.spectral_centroid.mean`    | Brightness/timbre (Hz)            |
-| Spectral flatness  | `lowlevel.spectral_flatness_db.mean` | Tonal vs noise-like               |
+| Spectral flatness  | `lowlevel.barkbands_flatness_db.mean` (Essentia's `spectral_flatness_db`: flatness over the Bark bands) | Tonal vs noise-like |
 | Dissonance         | `lowlevel.dissonance.mean`           | Harmonic tension                  |
 | Pitch salience     | `lowlevel.pitch_salience.mean`       | Harmonic clarity (HNR proxy)      |
 | Chord changes rate | `tonal.chords_changes_rate`          | Rate of harmonic movement         |
