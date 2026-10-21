@@ -134,7 +134,9 @@ namespace Truedat.Store
                     return Fill(res, storeEntries, target);
                 }
                 return Refuse(res, "catalog-ahead",
-                    $"the catalog says generation {origin.Generation} but the store {Path.GetFullPath(storePath)} is at {res.Generation}: the catalog came from another store state. Nothing was scanned.");
+                    $"the catalog says generation {origin.Generation} but the store {Path.GetFullPath(storePath)} is at {res.Generation}: the catalog came from another store state. " +
+                    $"Move it aside and scan (the store publishes the whole library), or seed this store from it — truedat --store-import --moods \"{catalogPath}\" --store \"{storePath}\" — " +
+                    "and scan again (the store then supersedes the catalog and republishes it). Nothing was scanned.");
             }
 
             // No origin: a catalog written before T18, or by a catalog-only verb while the store was parked.

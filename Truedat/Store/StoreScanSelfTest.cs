@@ -98,6 +98,24 @@ namespace Truedat.Store
                 var r = Load(store, cat, out var t);
                 assert(!r.Refused && r.Case == "store-ahead" && t.Count == 3 && t.ContainsKey(@"D:\music\c.flac"), $"store ahead of the files -> the store wins, 3 entries ({r.Case}, {t.Count})");
             }
+            // catalog ahead: the catalog came from another store state -> refused. The remedy store-info names is --store-import; after
+            // it the store must be AHEAD of the catalog it absorbed, or the next scan refuses again (rescan-3 R5: an import that changes
+            // nothing visible advances nothing, so the generation stayed below the catalog's).
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db"); var cat = d.P("mbxmoods.json");
+                ImportCommand.ExecuteEntries(store, two, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                using (StoreLog.Quiet()) ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = cat });
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                using (var tx = os.Db.BeginTransaction()) { os.Dal.MetaSet(StoreDal.GenerationKey, "0"); tx.Complete(); }   // the catalog's origin is now ahead
+                CatalogOrigin.TryRead(cat, out var origin);
+                var refused = Load(store, cat, out _);
+                assert(refused.Refused && refused.Case == "catalog-ahead", $"catalog ahead of the store -> refused ({refused.Case})");
+                ImportReport imp; using (StoreLog.Quiet()) imp = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                var after = Load(store, cat, out var t2);
+                assert(!after.Refused && after.Case == "store-ahead" && after.Generation > origin.Generation && t2.Count == 2,
+                    $"after --store-import of a catalog that was ahead, the store supersedes it: the scan loads store-ahead (case {after.Case}, store generation {after.Generation} vs catalog {origin.Generation}, import generation {imp.Generation})");
+            }
             // no origin (a v1 catalog) that agrees exactly -> proceed; one that holds a NEWER value at a same path -> refuse (the I3 / same-path case)
             using (var d = new Dir())
             {

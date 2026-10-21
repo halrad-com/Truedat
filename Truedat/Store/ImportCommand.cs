@@ -450,6 +450,19 @@ namespace Truedat.Store
                     tx.Complete();
                 }
 
+                // 6. Rescan-3 R5: a catalog carrying another store state's origin at or past this store's generation has now been
+                // absorbed, so the store supersedes it — set PAST the catalog's generation, never merely advanced (an import that changed
+                // nothing visible advanced nothing, and the next scan refused the same catalog as catalog-ahead). The files are then
+                // behind the store, which the scan's precondition accepts and republishes.
+                if (CatalogOrigin.TryRead(catalog, out var origin) && origin.Generation >= dal.Generation())
+                    using (var tx = db.BeginTransaction())
+                    {
+                        long g = origin.Generation + 1;
+                        dal.MetaSet(StoreDal.GenerationKey, g.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        tx.Complete();
+                        StoreLog.Info($"the catalog's origin was at generation {origin.Generation}, at or past this store's: the store now supersedes it (generation {g}); the next scan republishes the files from the store");
+                    }
+
                 sw.Stop();
                 using (var tx = db.BeginTransaction())
                 {

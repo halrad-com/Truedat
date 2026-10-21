@@ -244,7 +244,7 @@ namespace Truedat.Store
                 i.FilesState = "catalog-ahead";
                 i.FilesWhy = $"catalog at generation {origin.Generation}, store at {i.Generation}: the catalog came from another store state; a scan refuses it";
                 i.NextCommand = "move the catalog aside and scan (the store publishes the whole library), or seed this store from it: "
-                              + "truedat --store-import --moods \"" + i.CatalogPath + "\" --store \"" + os.Path + "\"";
+                              + "truedat --store-import --moods \"" + i.CatalogPath + "\" --store \"" + os.Path + "\"   then scan (the store then supersedes the catalog and republishes it)";
             }
             else
             {
