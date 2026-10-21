@@ -11111,7 +11111,11 @@ namespace Truedat
             var changed = new Dictionary<string, TrackEntry>(PathComparer.Instance);
             foreach (var kv in after)
                 if (!before.TryGetValue(kv.Key, out var b) || !EntryBytes(kv.Key, b).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
-                { kv.Value.CopyObserved = null; changed[kv.Key] = kv.Value; }   // null = every copy column observed: the verb's result is exact
+                {
+                    // the published file lacks policy-cut fields; the verb never saw them, so the store's values stand
+                    var entry = b != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, b) : kv.Value;
+                    entry.CopyObserved = null; changed[kv.Key] = entry;   // null = every copy column observed: the verb's result is exact
+                }
 
             string? storeError = null; int moved = 0;
             long generationBefore = load.Generation;
@@ -15530,6 +15534,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
             global::Truedat.Store.StoreTransferSelfTest.Run(Assert); // T09 snapshot/restore, T10 store merge source, T12 state (architect-2)
+
+            // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
+            // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
+            // it changed (codex review 2026-10-20, #1). The store keeps every field; the policy governs the file only.
+            {
+                var dir = Path.Combine(Path.GetTempPath(), "truedat-verb-policy-selftest-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var savedStore = _storePath;
+                try
+                {
+                    var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, MoodsFileName);
+                    var hist = new double[250]; hist[60] = 0.75; hist[120] = 0.25;
+                    var e = new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120, Mfcc = new[] { 1.5, -2.25 }, BpmHistogram = hist, SmfmScores = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, SmfmChannel = 9, SmfmBpm = 120 },
+                        LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('h', 64),
+                    };
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                        global::Truedat.Store.ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = e }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                    _storePath = store;
+                    var saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                    int exit;
+                    try { using (global::Truedat.Store.StoreLog.Quiet()) exit = RunStoreBackedVerb("strip", "--strip-smfm", cat, () => { RunStripSmfm(cat, false); return Environment.ExitCode; }); }
+                    finally { Console.SetOut(saveOut); }
+                    double[]? histBack = null; int[]? smfmBack = new int[0];
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                    using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        foreach (var (_, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) { histBack = back.Features.BpmHistogram; smfmBack = back.Features.SmfmScores; }
+                    Assert(exit == 0 && smfmBack == null && histBack != null && histBack.Length == 250 && histBack[60] == 0.75 && histBack[120] == 0.25,
+                        $"store-backed verb: --strip-smfm clears SMFM in the store and keeps the policy-cut bpmHistogram (exit {exit}, smfm {(smfmBack == null ? "cleared" : "kept")}, histogram {(histBack == null ? "ERASED" : histBack.Length + " bins")})");
+                }
+                finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
+            }
 
             // Hann cache: same array reference on repeat calls at the same size.
             var h1 = Fft.Hann(4096);

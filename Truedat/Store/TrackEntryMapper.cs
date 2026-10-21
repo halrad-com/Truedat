@@ -572,6 +572,16 @@ namespace Truedat.Store
         /// value (one ulp off the decimal, "0.0028770000000000002" for 0.002877), which no column can carry.</summary>
         internal static TrackEntry AtStorePrecision(TrackEntry entry) => FromValues(ToRow(entry), entry.LastModified);
 
+        /// <summary>The entry with every field the catalog's field policy keeps out of the published file taken from <paramref name="stored"/>.
+        /// A store-backed verb reads its result back from that file, so a policy-cut field (bpmHistogram) is absent there by policy, not
+        /// cleared by the verb — written back as an exact arrival it would erase what the store holds.</summary>
+        internal static TrackEntry WithPolicyCutFrom(TrackEntry arriving, TrackEntry stored)
+        {
+            var row = ToRow(arriving); var s = ToRow(stored); bool any = false;
+            for (int i = 0; i < Cols.Length; i++) if (FieldPolicy.IsExcluded(Cols[i].Name)) { row[i] = s[i]; any = true; }
+            return any ? FromValues(row, arriving.LastModified) : arriving;
+        }
+
         internal static TrackEntry FromValues(object?[] values, DateTime lastModified)
         {
             var e = new TrackEntry { Features = new TrackFeatures(), LastModified = lastModified };
