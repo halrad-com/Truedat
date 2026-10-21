@@ -90,7 +90,10 @@ namespace Truedat.Store
         /// <summary>Extract the store out of a snapshot archive to <paramref name="destFile"/> (streaming).</summary>
         internal static void ExtractStoreTo(string archivePath, string destFile)
         {
-            if (LooksLikeStore(archivePath)) { File.Copy(archivePath, destFile, overwrite: true); return; }   // a raw store file: the undo backup
+            // A raw store file (the undo backup, or any store): a consistent SQLite snapshot, never a file copy — a WAL store's committed
+            // state spans the main file and its -wal, and a copy of the main file alone is an older checkpoint that passes every check
+            // (rescan-2 R3). VacuumInto's read snapshot is what makes the staged copy whole.
+            if (LooksLikeStore(archivePath)) { VacuumInto(archivePath, destFile); return; }
             using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
             var entry = FindStoreEntry(zip)

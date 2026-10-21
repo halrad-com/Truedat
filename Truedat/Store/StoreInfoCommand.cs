@@ -117,6 +117,29 @@ namespace Truedat.Store
         /// and the next command exported a second catalog into the database's folder (codex review 2026-10-20 #8).</summary>
         internal static StoreInfo Collect(string? storePath, string? catalogPath = null)
         {
+            var i = CollectOpen(storePath, catalogPath);
+            // Rescan-2 R5: a scan is the remedy only when it would RUN. A catalog with no origin is accepted by the T18i precondition when
+            // it agrees with the store and REFUSED when it does not — so store-info asks the precondition itself (the store is closed
+            // again by now: one connection at a time, the network stores are opened exclusively) and names the reconciliation instead of
+            // a scan that would refuse.
+            if (i.FilesState == "legacy" && storePath != null)
+            {
+                var target = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                StoreScan.LoadResult load;
+                using (StoreLog.Quiet()) load = StoreScan.LoadAuthoritative(storePath, i.CatalogPath, target);
+                if (load.Refused)
+                {
+                    i.FilesState = "legacy-disagree";
+                    i.FilesWhy = (load.Refusal ?? "").Replace("Error: ", "").Replace(" Nothing was scanned.", "");
+                    i.NextCommand = "none until reconciled — the scan refuses this catalog: " + i.FilesWhy;
+                }
+                else i.FilesWhy = "no store origin (written before the store was authoritative); it agrees with the store";
+            }
+            return i;
+        }
+
+        static StoreInfo CollectOpen(string? storePath, string? catalogPath)
+        {
             var i = new StoreInfo();
             using var os = OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
             var db = os.Db; var dal = os.Dal;
@@ -212,6 +235,16 @@ namespace Truedat.Store
                 // cannot be compared at all, so this is its own state rather than a guess at "behind".
                 i.FilesState = "legacy";
                 i.NextCommand = StoreScan.ScanPublishesCommand;
+            }
+            else if (origin.Generation > i.Generation)
+            {
+                // Rescan-2 R5: FilesBehind reads any generation mismatch as "behind", but a catalog AHEAD of the store came from another
+                // store state and the scan refuses it (StoreScan "catalog-ahead") — so a scan is not the remedy here.
+                i.PublishedGeneration = origin.Generation;
+                i.FilesState = "catalog-ahead";
+                i.FilesWhy = $"catalog at generation {origin.Generation}, store at {i.Generation}: the catalog came from another store state; a scan refuses it";
+                i.NextCommand = "move the catalog aside and scan (the store publishes the whole library), or seed this store from it: "
+                              + "truedat --store-import --moods \"" + i.CatalogPath + "\" --store \"" + os.Path + "\"";
             }
             else
             {

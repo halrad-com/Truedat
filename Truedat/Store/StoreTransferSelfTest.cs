@@ -154,6 +154,23 @@ namespace Truedat.Store
                 assert(third.BackupPath != null && File.Exists(third.BackupPath),
                     $"rotation: with --keep-backups 1 beside a migration backup, the undo snapshot this restore just made survives ({Path.GetFileName(third.BackupPath ?? "(none)")}: {(third.BackupPath != null && File.Exists(third.BackupPath) ? "present" : "DELETED")})");
                 assert(Directory.GetFiles(d.Root, Path.GetFileName(store) + ".bak.*").Length == 1, "rotation: exactly one backup is kept, the newest");
+
+                // Rescan-2 R3: a RAW store given to --restore is read through SQLite, never file-copied. A WAL store whose main file holds
+                // an older checkpoint and whose -wal holds later committed changes (an interrupted process) copied as the older state —
+                // structurally valid, quick_check ok — and silently omitted the committed changes. VacuumInto's own doc says why a file
+                // copy is unsafe; the raw-input path has to take the same snapshot.
+                var live = d.P("live.db");
+                Mint(live, Lib(@"D:\music", ("a.flac", 120, 'a')), @"D:\music");
+                var dest = d.P("restored.db");
+                StoreTransfer.RestoreResult raw;
+                using (var w = SqliteDb.Open(live, create: false))
+                {
+                    w.Exec("PRAGMA wal_autocheckpoint=0;");
+                    w.Exec($"UPDATE store_meta SET value = '777' WHERE key = '{StoreDal.GenerationKey}';");   // committed, in the WAL only
+                    using (StoreLog.Quiet()) raw = StoreTransfer.RestoreStore(live, dest, keepBackups: 5);     // the writer still open: nothing checkpointed yet
+                }
+                assert(raw.Restored.Generation == 777,
+                    $"raw restore: a committed change still in the source's WAL reaches the restored store (candidate generation {raw.Restored.Generation}, expected 777)");
             }
         }
 
@@ -308,11 +325,27 @@ namespace Truedat.Store
                 assert(behind.FilesState == "behind" && behind.PublishedGeneration < behind.Generation && behind.FilesWhy != null && ScanRemedy(behind.NextCommand),
                     $"state: a committed change -> behind, with the predicate's reason and the command that republishes ({behind.FilesState}: {behind.FilesWhy})");
 
-                // A v1 catalog (no origin header) cannot be compared by generation at all: its own state, not a guess.
+                // A v1 catalog (no origin header) cannot be compared by generation at all: its own state, not a guess. Rescan-2 R5: a scan
+                // is only the remedy when it would RUN — the T18i precondition refuses a no-origin catalog that disagrees with the store
+                // (here: the store holds b and c, the catalog does not), so store-info asks the same question and names the reconciliation.
                 StoreSelfTest.WriteCatalog(catalog, Lib(@"D:\music", ("a.flac", 120, 'a')));
                 var legacy = Collect(store);
-                assert(legacy.FilesState == "legacy" && legacy.PublishedGeneration == null && ScanRemedy(legacy.NextCommand),
-                    $"state: a catalog with no origin header -> legacy, never reported as at-generation ({legacy.FilesState})");
+                assert(legacy.FilesState == "legacy-disagree" && legacy.PublishedGeneration == null && !ScanRemedy(legacy.NextCommand) && legacy.NextCommand.Contains("--store-import"),
+                    $"state: a catalog with no origin header that disagrees with the store -> legacy-disagree, and the next command reconciles, not scans ({legacy.FilesState}: {legacy.NextCommand})");
+                StoreSelfTest.WriteCatalog(catalog, Lib(@"D:\music", ("a.flac", 120, 'a'), ("b.flac", 121, 'b'), ("c.flac", 122, 'c')));
+                var legacyAgree = Collect(store);
+                assert(legacyAgree.FilesState == "legacy" && legacyAgree.PublishedGeneration == null && ScanRemedy(legacyAgree.NextCommand),
+                    $"state: a catalog with no origin header that agrees with the store -> legacy, and a scan publishes it ({legacyAgree.FilesState}: {legacyAgree.FilesWhy}; next: {legacyAgree.NextCommand})");
+
+                // Rescan-2 R5, the other refusal: a catalog AHEAD of the store (it came from another store state). FilesBehind reads any
+                // generation mismatch as "behind", and the scan refuses a catalog-ahead load outright.
+                using (StoreLog.Quiet()) ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = catalog });
+                using (var os = OpenStore.Open(store, create: false, "selftest", DateTime.UtcNow.ToString("o")))
+                using (var tx = os.Db.BeginTransaction())
+                { os.Dal.MetaSet(StoreDal.GenerationKey, (os.Dal.Generation() - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)); tx.Complete(); }
+                var ahead = Collect(store);
+                assert(ahead.FilesState == "catalog-ahead" && ahead.PublishedGeneration == ahead.Generation + 1 && !ScanRemedy(ahead.NextCommand) && ahead.NextCommand.Contains("--store-import"),
+                    $"state: a catalog ahead of the store -> catalog-ahead, and the next command reconciles, not scans ({ahead.FilesState}: {ahead.FilesWhy}; next: {ahead.NextCommand})");
 
                 assert(legacy.EdgeArrayTracks == 0, "state: no edge arrays captured in a store with no edge rows");
             }

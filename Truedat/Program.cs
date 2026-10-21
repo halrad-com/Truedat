@@ -2948,7 +2948,8 @@ namespace Truedat
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
                 if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
-                storePath = global::Truedat.Store.StoreLocation.Resolve(string.IsNullOrEmpty(storePath) ? null : storePath, storeDir, storeCatalog!, out var storeWhy);
+                bool storeExplicit = !string.IsNullOrEmpty(storePath);
+                storePath = global::Truedat.Store.StoreLocation.Resolve(storeExplicit ? storePath : null, storeDir, storeCatalog!, out var storeWhy);
                 // A config default on an instance that has not scanned yet: the read verbs have no store to answer from, so they
                 // answer from the catalog exactly as without the key (a scan creates the store; a verb never does).
                 if (_storeFromConfig && !storeVerb && !File.Exists(storePath) && (statsMode || duplicatesMode))
@@ -2968,10 +2969,12 @@ namespace Truedat
                 if (storeAdopted && storePath != null)
                     Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 if (storePath != null) ApplyStoreLocation(storePath, storeCatalog);
-                // Nothing named and nothing discovered: the resolved catalog is the cwd GUESS. --store-info must not report (or
-                // recommend publishing) against a catalog nobody named; with only --store given it reads beside the store, as it did
-                // before codex #8 (EV3 pre-tag review, M1).
-                if (IsBareCwdCatalog(analyzeFileMoods, xmlPath, ProbeCatalogBesideExe(AppContext.BaseDirectory))) _storeCatalogPath = null;
+                // Nothing named and nothing discovered: the resolved catalog is the cwd GUESS. With the store named explicitly, --store-info
+                // must not report (or recommend publishing) against a catalog nobody named — it reads beside the store, as it did before
+                // codex #8 (EV3 pre-tag review, M1). A store whose location was DERIVED from that catalog (--store-dir, a network library's
+                // local store) keeps it: the catalog is what selected the database (rescan-2 R6).
+                if (StoreInfoDropsGuessedCatalog(storeExplicit, IsBareCwdCatalog(analyzeFileMoods, xmlPath, ProbeCatalogBesideExe(AppContext.BaseDirectory))))
+                    _storeCatalogPath = null;
             }
             _storePath = storePath;
             _storeExportRoot = storeExportRoot;
@@ -11716,6 +11719,10 @@ namespace Truedat
         /// drop-in install is NOT refused. Kept as a parameter rather than probed in here so this
         /// stays a pure predicate the self-test can drive through every combination.
         /// </summary>
+        /// <summary>Whether --store-info reads beside the store instead of against the resolved catalog: only when the store was named
+        /// explicitly AND the catalog is the cwd guess (EV3 pre-tag review M1; rescan-2 R6 for the derived-store half).</summary>
+        internal static bool StoreInfoDropsGuessedCatalog(bool storeExplicit, bool catalogGuessed) => storeExplicit && catalogGuessed;
+
         internal static bool IsBareCwdCatalog(string? explicitPath, string? libraryXmlPath, string? discoveredCatalog)
             => string.IsNullOrEmpty(explicitPath)
             && string.IsNullOrEmpty(libraryXmlPath)
@@ -15745,6 +15752,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion;
                 Assert(infoVer == VersionInfo.Display,
                     $"version: AssemblyInformationalVersion ('{infoVer}') == VersionInfo.Display ('{VersionInfo.Display}')");
+
+                // Rescan-2 R6: the cwd catalog is dropped for --store-info ONLY when the store was named explicitly (a store-only request);
+                // a store whose location was DERIVED from that catalog (--store-dir, a network library's local store) keeps it — the
+                // catalog is what selected the database. The rule is pinned; the arg block that applies it is read, not pinned.
+                Assert(StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogGuessed: true), "store-info catalog: explicit --store + cwd guess -> read beside the store");
+                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: false, catalogGuessed: true), "store-info catalog: store derived from the cwd catalog -> keep that catalog");
+                Assert(!StoreInfoDropsGuessedCatalog(storeExplicit: true, catalogGuessed: false), "store-info catalog: a named or discovered catalog is always kept");
 
                 // --- Multi-part catalog: split-write over the wall + multi-part read (supersedes
                 //     the old refuse-guard). An over-limit catalog can no longer be LOADED (a single
