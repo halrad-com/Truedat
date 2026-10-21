@@ -22,3 +22,4 @@ if [ $rc -eq 0 ]; then
 fi
 echo "END $(date)" >> "$LOG"
 echo "EXIT=$rc" >> "$LOG"
+exit "$rc"   # the caller (schtasks) must see a failed build as failed, not the echo's 0
