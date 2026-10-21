@@ -161,6 +161,26 @@ namespace Truedat.Store
                 assert(r3.Refused && r3.Case == "no-origin-disagree" && r3.Refusal!.Contains("1 with different values") && r3.Refusal.Contains("ulp.flac"),
                     $"no origin, a value one step beyond the declared precision -> still refused ({r3.Refusal})");
             }
+            // A catalog an older build wrote holds the old three-band spectralFlatness average; the store converts its own rows to
+            // Essentia's Bark value at open (StoreOpen.ConvertSpectralFlatness). The two hold the same facts — the conversion is a
+            // function of the stored Bark value — so the scan must proceed, not refuse every track naming a --store-import that
+            // cannot clear it.
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db"); var cat = d.P("mbxmoods.json");
+                var old = E("flat.flac", 120, 'f');
+                old.Features.SpectralFlatness = 0.2496; old.Features.BarkFlatness = 0.2396; old.Features.ErbFlatness = 0.2498; old.Features.MelFlatness = 0.2594;
+                StoreSelfTest.WriteCatalog(cat, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\flat.flac"] = old });
+                var fromCatalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(cat, fromCatalog);
+                using (StoreLog.Quiet()) ImportCommand.ExecuteEntries(store, fromCatalog, @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                // ...and put the old average back in the store's row, as an older build wrote it, so the open-time conversion runs too
+                using (StoreLog.Quiet()) using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    os.Db.Exec("UPDATE track_content SET spectralFlatness = 2496;");
+                var r = Load(store, cat, out var t);
+                assert(!r.Refused && r.Case == "no-origin-agree" && t.Count == 1 && t[@"D:\music\flat.flac"].Features.SpectralFlatness == 0.2396,
+                    $"no origin, a catalog holding the old flatness average beside a converted store -> proceeds with Essentia's value ({r.Case}: {r.Refusal})");
+            }
             // no origin + a store with no entries for the library -> refuse naming --store-import
             using (var d = new Dir())
             {

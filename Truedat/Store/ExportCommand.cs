@@ -242,7 +242,11 @@ namespace Truedat.Store
             string a = EntryJson(path, catalogEntry), b = EntryJson(path, storeEntry);
             if (a == b) return Agreement.Same;
             string store = EntryJson(path, TrackEntryMapper.AtStorePrecision(storeEntry));
-            if (EntryJson(path, TrackEntryMapper.AtStorePrecision(catalogEntry)) == store) { firstDifference = FirstDifference(a, b); return Agreement.SamePrecision; }
+            // The store converts an older build's spectralFlatness (the three-band average) to Essentia's Bark value at open
+            // (StoreOpen.ConvertSpectralFlatness); the catalog side gets the same conversion here, or every such entry reads as changed.
+            var catalogAtStore = TrackEntryMapper.AtStorePrecision(catalogEntry);
+            catalogAtStore.Features.SpectralFlatness = Program.HealSpectralFlatness(catalogAtStore.Features);
+            if (EntryJson(path, catalogAtStore) == store) { firstDifference = FirstDifference(a, b); return Agreement.SamePrecision; }
             if (nonPrimaryCopy)
             {
                 var h = EntryJson(path, TrackEntryMapper.WithContentOf(catalogEntry, storeEntry));
