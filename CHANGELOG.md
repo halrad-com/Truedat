@@ -22,9 +22,8 @@ A small one: the scan summary attributes itself, and one feature field is rename
 
 - **`spectralFlatness` is Essentia's Bark-band flatness**, not truedat's average of the Bark, ERB and Mel
   values — a correction to what the field means, not a change to what it tells you: the two track each other
-  closely enough that refitting the mood model on the corrected field promoted nothing. Existing catalogs are
-  corrected without re-analysis (cache hit, `--fixup`, or on store open); a store conversion advances the
-  generation, so `mbxmoods.json` reads as behind until the next scan or `truedat --store-export`.
+  closely enough that refitting the mood model on the corrected field promoted nothing. Any scan corrects an
+  existing catalog, with no re-analysis.
 
 ## [0.5.5.3-EV2.2.3.1] — 2026-10-19
 
