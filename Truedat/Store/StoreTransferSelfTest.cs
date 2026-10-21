@@ -135,6 +135,25 @@ namespace Truedat.Store
                 assert(StoreResult.TryRead(StoreResult.PathFor(store), out var rec) && rec.Verb == "restore" && rec.Outcome == StoreResult.OutcomeCompleted
                        && rec.Store.Generation == after.Generation && rec.Export.Performed,
                     "restore: store-result.json names the verb, the committed generation and the publication");
+
+                // Codex review 2026-10-20 #5: the undo backup is a raw SQLite store, and the documented undo is "the same command" — so
+                // --restore must take it. It was routed to the catalog-verb refusal because only a ZIP counted as carrying a store.
+                assert(StoreTransfer.ArchiveContainsStore(backups[0]), "undo: the raw .bak.<ts>.db backup is recognised as a store to restore");
+                int undoExit;
+                using (StoreLog.Quiet()) undoExit = Program.RunStoreRestore(backups[0], store, catalog);
+                var undone = Collect(store);
+                assert(undoExit == 0 && undone.Counts["track_location"] == 3,
+                    $"undo: restoring the backup --restore itself made puts the 3-location store back (exit {undoExit}, {undone.Counts["track_location"]} locations)");
+
+                // Codex review 2026-10-20 #4: rotation sorted by NAME, and a migration backup (truedat.db.bak.v2.<stamp>) sorts above every
+                // dated restore backup, so --keep-backups 1 deleted the undo snapshot the same restore had just made.
+                var migrationBackup = store + ".bak.v2.20261016.120000";
+                File.WriteAllText(migrationBackup, "an older migration backup");
+                StoreTransfer.RestoreResult third;
+                using (StoreLog.Quiet()) third = StoreTransfer.RestoreStore(archive, store, keepBackups: 1);
+                assert(third.BackupPath != null && File.Exists(third.BackupPath),
+                    $"rotation: with --keep-backups 1 beside a migration backup, the undo snapshot this restore just made survives ({Path.GetFileName(third.BackupPath ?? "(none)")}: {(third.BackupPath != null && File.Exists(third.BackupPath) ? "present" : "DELETED")})");
+                assert(Directory.GetFiles(d.Root, Path.GetFileName(store) + ".bak.*").Length == 1, "rotation: exactly one backup is kept, the newest");
             }
         }
 

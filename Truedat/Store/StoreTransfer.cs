@@ -67,9 +67,12 @@ namespace Truedat.Store
             return new StoreCopy(dest, new FileInfo(dest).Length, Sha256File(dest), schema, generation, entries);
         }
 
-        /// <summary>True when a ZIP archive carries a store. False for a gz or plain catalog, which cannot carry one.</summary>
+        /// <summary>True when a ZIP archive carries a store, or when the file IS a store — the raw <c>.bak.&lt;ts&gt;.db</c> a restore
+        /// makes of the store it replaces, whose documented undo is this same command (codex review 2026-10-20 #5). False for a gz or
+        /// plain catalog, which cannot carry one.</summary>
         internal static bool ArchiveContainsStore(string archivePath)
         {
+            if (LooksLikeStore(archivePath)) return true;
             try
             {
                 if (CatalogArchive.SniffFile(archivePath) != CatalogArchive.CatalogFormat.Zip) return false;
@@ -87,6 +90,7 @@ namespace Truedat.Store
         /// <summary>Extract the store out of a snapshot archive to <paramref name="destFile"/> (streaming).</summary>
         internal static void ExtractStoreTo(string archivePath, string destFile)
         {
+            if (LooksLikeStore(archivePath)) { File.Copy(archivePath, destFile, overwrite: true); return; }   // a raw store file: the undo backup
             using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
             var entry = FindStoreEntry(zip)
@@ -167,11 +171,13 @@ namespace Truedat.Store
             long replacedGeneration = 0;
             if (File.Exists(store))
             {
-                backup = store + ".bak." + DateTime.Now.ToString("yyyyMMdd.HHmmss") + ".db";
+                var stamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+                backup = store + ".bak." + stamp + ".db";
+                for (int n = 2; File.Exists(backup); n++) backup = store + ".bak." + stamp + "-" + n + ".db";   // two restores in one second (an undo) never collide
                 try
                 {
                     replacedGeneration = VacuumInto(store, backup).Generation;
-                    RotateStoreBackups(store, keepBackups);
+                    RotateStoreBackups(store, keepBackups, protect: backup);   // never the snapshot this restore just made (codex #4)
                 }
                 catch (Exception ex)
                 {
@@ -214,18 +220,24 @@ namespace Truedat.Store
 
         /// <summary>Keep the newest <paramref name="keepN"/> store snapshots beside a store (names matching
         /// "&lt;store file name&gt;.bak."). Rotation, never truncation: keepN &lt;= 0 keeps everything — the ruling
-        /// the catalog backups already follow.</summary>
-        internal static int RotateStoreBackups(string storePath, int keepN)
+        /// the catalog backups already follow. Two naming formats share the prefix — the migration's <c>.bak.v2.&lt;stamp&gt;</c> and the
+        /// restore's <c>.bak.&lt;stamp&gt;.db</c> — and by NAME every <c>v…</c> sorts above every dated one, so a name sort deleted the
+        /// undo snapshot a restore had just made (codex review 2026-10-20 #4). Newest is by write time; <paramref name="protect"/>
+        /// is never deleted.</summary>
+        internal static int RotateStoreBackups(string storePath, int keepN, string? protect = null)
         {
             if (keepN <= 0) return 0;
             var dir = Path.GetDirectoryName(Path.GetFullPath(storePath));
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return 0;
             var prefix = Path.GetFileName(storePath) + ".bak.";
+            var keep = protect == null ? null : Path.GetFullPath(protect);
             int deleted = 0;
             foreach (var old in Directory.GetFiles(dir!)
                          .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                         .OrderByDescending(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
-                         .Skip(keepN))
+                         .OrderByDescending(f => File.GetLastWriteTimeUtc(f))
+                         .ThenByDescending(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+                         .Skip(keepN)
+                         .Where(f => keep == null || !string.Equals(Path.GetFullPath(f), keep, StringComparison.OrdinalIgnoreCase)))
                 try { File.Delete(old); deleted++; } catch { }
             return deleted;
         }
