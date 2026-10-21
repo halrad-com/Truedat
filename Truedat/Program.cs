@@ -2930,17 +2930,17 @@ namespace Truedat
             // a populated store that the next plain `truedat` would not open, and with store-authoritative
             // scans the catalog and the store then diverge silently.
             bool storeAdopted = false;
-            if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, storeFileExists: false) || storePath == null)
+            if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, storeFileExists: false, ConfigSaysOff("store")) || storePath == null)
             {
                 var probeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out _);
                 if (probeCatalog != null)
                 {
                     var probe = global::Truedat.Store.StoreLocation.Resolve(null, storeDir, probeCatalog, out _);
-                    if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, probe != null && File.Exists(probe)))
+                    if (ShouldAdoptExistingStore(noStore, storePath != null, storeVerb, probe != null && File.Exists(probe), ConfigSaysOff("store")))
                     {
                         storePath = "";
                         storeAdopted = true;
-                        if (ShouldAdoptEdgesWithStore(true, noEdges)) _stageOpts.Edges = true;
+                        if (ShouldAdoptEdgesWithStore(true, noEdges, ConfigSaysOff("edges"))) _stageOpts.Edges = true;
                     }
                 }
             }
@@ -17183,6 +17183,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false), "adopt: edges come on with an adopted store");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: true), "adopt: --no-edges still wins");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: false, noEdges: false), "adopt: no adopted store means edges stay as they were");
+                // Codex review 2026-10-20 #7: the config file's `store false` / `edges false` render no argument, so adoption never saw
+                // them and a plain scan used the store with edges over the operator's standing no.
+                Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true, configStoreOff: true),
+                    "adopt: config store=false is a standing --no-store, an existing store is left alone");
+                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false, configEdgesOff: true), "adopt: config edges=false is a standing --no-edges");
                 Assert(FormatLacksRecordedDuration("X.AAC"), "adts: the check ignores case");
                 Assert(!FormatLacksRecordedDuration("x.m4a"), "adts: an .m4a container DOES record a duration");
                 Assert(!FormatLacksRecordedDuration("x.mp3"), "adts: .mp3 is not in this class");
@@ -22489,8 +22494,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static bool _noEdgesTyped;
         static string? _storeDirOpt;
 
-        internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists)
-            => !noStore && !storeAsked && !storeVerb && storeFileExists;
+        /// <summary>Adopt a store already at the resolved location when nothing on the command line asked for or refused one. The config
+        /// file's standing `store false` refuses too (<paramref name="configStoreOff"/>): a false boolean renders no argument, so until
+        /// 2026-10-20 it reached only the default-creation rule and an existing store was adopted over it (codex review #7).</summary>
+        internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists, bool configStoreOff = false)
+            => !noStore && !configStoreOff && !storeAsked && !storeVerb && storeFileExists;
 
         /// <summary>A scan with no store makes one (operator, 2026-10-18: "make it the default… if there is no store").
         /// Off by default made a fresh install analyse its library twice: edges can only be folded while the extractor
@@ -22595,8 +22603,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Edges follow an adopted store: a store built by the documented upgrade holds edge
         /// rows, and leaving edges off would let those go stale exactly as the store itself would.
         /// --no-edges is still the one-run way past it.</summary>
-        internal static bool ShouldAdoptEdgesWithStore(bool storeAdopted, bool noEdges)
-            => storeAdopted && !noEdges;
+        internal static bool ShouldAdoptEdgesWithStore(bool storeAdopted, bool noEdges, bool configEdgesOff = false)
+            => storeAdopted && !noEdges && !configEdgesOff;   // config `edges false` is the standing --no-edges (codex review #7)
 
         internal static bool FormatLacksRecordedDuration(string? path)
         {
