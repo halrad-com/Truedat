@@ -13660,7 +13660,11 @@ namespace Truedat
                 if (storeInfo != null)
                 {
                     accounted += storeInfo.FileBytes + storeInfo.WalBytes;
-                    SizeLine("Store:", storeInfo.FileBytes, $"{Path.GetFileName(storeInfo.Path)} (schema v{storeInfo.SchemaVersion}, {storeInfo.BytesPerTrack:N0} B/track)");
+                    // The schema version and the per-track figure are separate facts, printed apart: side by side they read as "schema
+                    // vN costs X B/track", and X is this file's size over its descriptions — the same schema and content measured
+                    // 8,407 and 7,948 on two instances (2026-10-22), the difference being unreclaimed space in the file.
+                    SizeLine("Store:", storeInfo.FileBytes, $"{Path.GetFileName(storeInfo.Path)} (schema v{storeInfo.SchemaVersion})");
+                    ReportNote($"{storeInfo.BytesPerTrack:N0} B/track = file size ÷ {storeInfo.Tracks:N0} descriptions");
                     // Both denominators, because they differ and the difference read as missing data: the
                     // store describes AUDIO (one row per distinct content), the catalog holds PATHS. They
                     // reconcile through the duplicate paths - say so only when they actually do.
