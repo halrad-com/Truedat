@@ -888,7 +888,7 @@ namespace Truedat
             Console.WriteLine("                      precision; key-moves.json beside it when hashes moved.");
             Console.WriteLine("  --store-roundtrip <catalog>");
             Console.WriteLine("                      Per-entry equality of store vs catalog at the store's precision; exit 1 on any difference.");
-            Console.WriteLine("  --store-info        Measurements (bytes/track, projection, speed, coverage, conflicts, edges) and state");
+            Console.WriteLine("  --store-info        Measurements (bytes/track, speed, coverage, conflicts, edges) and state");
             Console.WriteLine("                      (generation, whether the published files are behind it, the command that closes it).");
             Console.WriteLine("  --store-vacuum [--page-size N]");
             Console.WriteLine("                      Repack the store; --page-size sets the page size (default 16384).");
@@ -7924,7 +7924,7 @@ namespace Truedat
             // the content-hash index just below, and the reconcile loop's Unchanged test. They
             // used to ask the filesystem separately, so every catalog entry cost two identical
             // File.Exists calls for one piece of information — invisible on a local disk, and
-            // minutes of pure waiting on a 156k-entry library over SMB, where each call is a
+            // minutes of pure waiting on a large library over SMB, where each call is a
             // network round-trip. The sweep records the answer once and both consumers read it.
             //
             // Sampling existence up front (rather than per entry, later) is why the gone-branch
@@ -7988,7 +7988,7 @@ namespace Truedat
                     survivingByHash[sha!] = sweepEntries[i].Key;
             }
             // The rate is the diagnosis. Tens of thousands per second is a local disk; a few
-            // hundred is a network share, and on a 156k-entry library that is the whole run.
+            // hundred is a network share, and on a large library that is the whole run.
             var sweepRate = PhaseReport.Rate(swept, phase.Elapsed);
             Console.WriteLine($"On disk: {existsOnDisk.Count:N0} of {totalEntries:N0}"
                               + $"   ({timing.Mark("check files on disk", phase)}, {sweepRate})");
@@ -8759,7 +8759,7 @@ namespace Truedat
             if (loaded == 0) return 0;
 
             // --chunk: verify a deterministic hash-mod slice so an interrupted pass costs one
-            // slice instead of the whole run. A ~6 TB / 156k library over WiFi is an 18-24 hour
+            // slice instead of the whole run. A large library over WiFi is a many-hour
             // walk; a storm blips the NAS and, one-shot, all of it is lost. Each completed shard
             // writes its own CSV and is durably done, so the operator runs the pass in
             // restartable windows. Same ChunkOwns split the scan uses, so the shards partition
@@ -13661,8 +13661,7 @@ namespace Truedat
                 {
                     accounted += storeInfo.FileBytes + storeInfo.WalBytes;
                     // The schema version and the per-track figure are separate facts, printed apart: side by side they read as "schema
-                    // vN costs X B/track", and X is this file's size over its descriptions — the same schema and content measured
-                    // 8,407 and 7,948 on two instances (2026-10-22), the difference being unreclaimed space in the file.
+                    // vN costs X B/track", and X is this file's size over its descriptions, unreclaimed space included.
                     SizeLine("Store:", storeInfo.FileBytes, $"{Path.GetFileName(storeInfo.Path)} (schema v{storeInfo.SchemaVersion})");
                     ReportNote($"{storeInfo.BytesPerTrack:N0} B/track = file size ÷ {storeInfo.Tracks:N0} descriptions");
                     // Both denominators, because they differ and the difference read as missing data: the

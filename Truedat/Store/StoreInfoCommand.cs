@@ -19,7 +19,6 @@ namespace Truedat.Store
         public long ArtifactCount, ArtifactBytes;  // S2 C-A: aggregate artifacts (compressed extractor output) and their bytes on disk
         public Dictionary<string, long> ConflictsByKind = new Dictionary<string, long>(StringComparer.Ordinal);   // open conflicts per kind (review #6)
         public double BytesPerTrack;              // FileBytes / Tracks
-        public long ProjectedBytesAt156k;         // BytesPerTrack * 156000
         public double? MedianRtf;                 // analysisDuration / (durationMs/1000), median over rows with both
         public int RtfSamples;
         public Dictionary<string, long> FailedComponents = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -45,7 +44,7 @@ namespace Truedat.Store
     }
 
     /// <summary>--store-info: the measurements S1 owes, all derived from the store by query — bytes per
-    /// track and the 156k projection (spec §3 rule 6, decision 3), real-time factor from the imported
+    /// track (spec §3 rule 6, decision 3), real-time factor from the imported
     /// analysisDuration, failure rate by component, coverage by capture wave, content shared by several
     /// locations (the per-location vs per-hash decision), key moves. dbstat is absent on Win10, so
     /// per-table bytes are not reported; totals are.</summary>
@@ -77,7 +76,7 @@ namespace Truedat.Store
                 Console.WriteLine($"  schema v{i.SchemaVersion}, sqlite {i.SqliteVersion}, machine {i.MachineId} (created on {i.CreatedByHost})");
                 Console.WriteLine($"  roots: {string.Join(", ", i.Roots.Select(r => $"{r.Path} ({r.Role})"))}");
                 Console.WriteLine($"  size: {i.FileBytes:N0} bytes = {i.PageCount:N0} pages × {i.PageSize} ({i.FreePages:N0} free)" + (i.WalBytes > 0 ? $" + wal {i.WalBytes:N0}" : ""));
-                Console.WriteLine($"  descriptions: {i.Tracks:N0} (one per media), copies: {i.FeatureRows:N0} (one per location)  →  {i.BytesPerTrack:N0} bytes/track; projected at 156k tracks: {i.ProjectedBytesAt156k / (1024.0 * 1024):N0} MB");
+                Console.WriteLine($"  descriptions: {i.Tracks:N0} (one per media), copies: {i.FeatureRows:N0} (one per location)  →  {i.BytesPerTrack:N0} bytes/track (file size ÷ descriptions)");
                 Console.WriteLine("  rows: " + string.Join(", ", Tables.Select(t => $"{t} {i.Counts[t]:N0}")));
                 Console.WriteLine(i.MedianRtf.HasValue ? $"  analysis speed: median {i.MedianRtf:F1}× realtime over {i.RtfSamples:N0} tracks" : "  analysis speed: no analysisDuration data");
                 Console.WriteLine("  coverage: " + string.Join(", ", CoverageColumns.Select(c => $"{c.Key} {i.Coverage[c.Key]:N0}")));
@@ -161,7 +160,6 @@ namespace Truedat.Store
             i.FeatureRows = i.Counts["track_copy"];
             i.Tracks = i.Counts["track_content"];
             i.BytesPerTrack = i.Tracks > 0 ? (double)i.FileBytes / i.Tracks : 0;
-            i.ProjectedBytesAt156k = (long)(i.BytesPerTrack * 156_000);
 
             var rtfs = new List<double>();
             using (var st = db.Prepare("SELECT analysisDuration, fingerprint_v1_durationMs FROM track_copy WHERE analysisDuration IS NOT NULL AND fingerprint_v1_durationMs > 0;"))
@@ -275,7 +273,7 @@ namespace Truedat.Store
                 ["store"] = i.Path, ["storeSchema"] = i.SchemaVersion, ["sqlite"] = i.SqliteVersion, ["machine"] = i.MachineId, ["createdByHost"] = i.CreatedByHost,
                 ["roots"] = new JsonArray(i.Roots.Select(r => (JsonNode?)new JsonObject { ["path"] = r.Path, ["role"] = r.Role }).ToArray()),
                 ["fileBytes"] = i.FileBytes, ["walBytes"] = i.WalBytes, ["pageCount"] = i.PageCount, ["pageSize"] = i.PageSize, ["freePages"] = i.FreePages,
-                ["tracks"] = i.Tracks, ["featureRows"] = i.FeatureRows, ["bytesPerTrack"] = Math.Round(i.BytesPerTrack, 1), ["projectedBytesAt156k"] = i.ProjectedBytesAt156k,
+                ["tracks"] = i.Tracks, ["featureRows"] = i.FeatureRows, ["bytesPerTrack"] = Math.Round(i.BytesPerTrack, 1),
                 ["medianRtf"] = i.MedianRtf.HasValue ? Math.Round(i.MedianRtf.Value, 2) : (double?)null, ["rtfSamples"] = i.RtfSamples,
                 ["counts"] = counts, ["failedComponents"] = failed, ["coverage"] = cov,
                 ["contentKeysShared"] = i.ContentKeysShared, ["locationsOnSharedKeys"] = i.LocationsOnSharedKeys, ["splitConflicts"] = i.SplitConflicts,

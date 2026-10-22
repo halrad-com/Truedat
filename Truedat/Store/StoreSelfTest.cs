@@ -1095,7 +1095,7 @@ namespace Truedat.Store
                 assert(info.Tracks == 5 && info.FeatureRows == 6 && info.Counts["track_copy"] == 6 && info.Counts["track_content"] == 5 && info.Counts["file_entity"] == 7 && info.Counts["run"] >= 4,
                     $"counts: 5 tracks (distinct entities with features; d1/d2 share one), 6 feature rows, 7 entities, runs {info.Counts["run"]} ({info.Tracks}/{info.FeatureRows})");
                 assert(info.FileBytes > 100_000 && info.PageSize == SqliteDb.DefaultPageSize && info.PageCount * info.PageSize == info.FileBytes, $"file bytes == page_count × page_size at the default page size ({info.FileBytes} = {info.PageCount} × {info.PageSize})");
-                assert(info.BytesPerTrack == (double)info.FileBytes / 5 && info.ProjectedBytesAt156k == (long)(info.BytesPerTrack * 156_000), "bytes/track (per distinct track) and the 156k projection derive from the file size");
+                assert(info.BytesPerTrack == (double)info.FileBytes / 5, "bytes/track (per distinct track) derives from the file size");
                 assert(info.RtfSamples == 3 && info.MedianRtf.HasValue && Math.Abs(info.MedianRtf.Value - 10.0) < 1e-9, $"median RTF over the 3 rows with both durations = 10 (got {info.MedianRtf}, n={info.RtfSamples})");
                 assert(info.FailedComponents.TryGetValue("sha", out var fsha) && fsha == 1 && info.FailedComponents.TryGetValue("fingerprint", out var ffp) && ffp == 1, "failed components split on ';' and counted per component");
                 assert(info.ConflictsByKind.TryGetValue("sha-collision-props-differ", out var cc) && cc == 1 && info.ConflictsByKind.Count == 1, $"--store-info counts open conflicts by kind (review #6) ({string.Join(",", info.ConflictsByKind.Keys)})");

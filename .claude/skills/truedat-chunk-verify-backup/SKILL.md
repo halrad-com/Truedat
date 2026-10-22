@@ -32,8 +32,8 @@ fold is what makes it a proof rather than a tally: a skipped shard leaves a resi
 double-counted shard cancels itself. It attests to the **process**, not the audio.
 
 **`--verify` is the deliberate exception (2026-08-16)** — there, `--chunk` is what makes an
-interrupted pass restartable rather than a way to spread work across machines. A ~6 TB / 156k
-library over WiFi is an 18-24 hour walk, and one-shot means a NAS blip costs all of it. Each
+interrupted pass restartable rather than a way to spread work across machines. A large
+library over WiFi is a many-hour walk, and one-shot means a NAS blip costs all of it. Each
 shard verifies its `ChunkOwns` slice and writes its own
 `mbxmoods-verify.<host>.<M>of<N>.csv`, so a completed shard is durably done. **The shard filters
 the WALK ONLY, never `allTracks`** — under `--backfill` the save is

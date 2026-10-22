@@ -161,7 +161,7 @@ truedat.exe --store-roundtrip "X:\Library\mbxmoods.json" --store "D:\truedat\tru
 REM Write a catalog (+ .mbxs) back out; key-moves.json beside it lists any superseded content hash
 truedat.exe --store-export "D:\out\mbxmoods.json" --store "D:\truedat\truedat.db"
 
-REM Measurements: bytes per track, projection to 156k tracks, analysis speed, coverage by wave, shared content
+REM Measurements: bytes per track, analysis speed, coverage by wave, shared content
 truedat.exe --store-info --store "D:\truedat\truedat.db"
 
 REM Repack a store (a store created before 16 KB pages were the default shrinks ~29%; add --page-size N to re-tune)
