@@ -89,6 +89,13 @@ namespace Truedat
                    && CheckpointCause.IsRetryable(new Store.SqliteException(1032, "readonly dbmoved (extended 8)"))
                    && CheckpointCause.IsRetryable(new InvalidOperationException("wrapper", new Store.SqliteException(8, "readonly"))),
                 "retryable: SQLite READONLY 8 (another process holding the store open — a zipper, a copy, a backup — made this open read-only), also when wrapped");
+            // Review 2026-10-22 F3: the hint names the cause the code actually means — a moved store is not "another process holding it".
+            var hint8 = CheckpointCause.Hint(new Store.SqliteException(8, "readonly")) ?? "";
+            var hintMoved = CheckpointCause.Hint(new Store.SqliteException(1032, "readonly dbmoved")) ?? "";
+            var hintDir = CheckpointCause.Hint(new Store.SqliteException(1544, "readonly directory")) ?? "";
+            assert(hint8.Contains("another process") && hintMoved.Contains("moved") && !hintMoved.Contains("another process")
+                   && hintDir.Contains("folder") && !hintDir.Contains("another process"),
+                $"the READONLY hint follows the extended code (8: '{hint8}'; 1032: '{hintMoved}'; 1544: '{hintDir}')");
             assert(CheckpointCause.IsRetryable(Win32(32, "sharing violation")) && CheckpointCause.IsRetryable(Win32(33, "lock violation"))
                    && CheckpointCause.IsRetryable(new InvalidOperationException("wrapper", Win32(32, "inner sharing violation"))),
                 "retryable: Windows sharing 32 / lock 33, also when wrapped");

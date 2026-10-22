@@ -46,7 +46,12 @@ namespace Truedat
         {
             for (var e = ex; e != null; e = e.InnerException)
                 if (e is Store.SqliteException s && (s.ResultCode & 0xFF) == 8)
-                    return "another process is holding the store file open without write sharing (a zip, a copy, a backup), so this open was read-only";
+                    return s.ResultCode switch
+                    {
+                        1032 => "the store file was moved, renamed or deleted while this run had it open",              // SQLITE_READONLY_DBMOVED
+                        1544 => "the store's folder is not writable, so SQLite cannot create its journal beside the file",  // SQLITE_READONLY_DIRECTORY
+                        _ => "another process is holding the store file open without write sharing (a zip, a copy, a backup), so this open was read-only",
+                    };
             return null;
         }
 
