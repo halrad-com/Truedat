@@ -126,8 +126,27 @@ namespace Truedat.Store
             // nothing else would ever remove them, so the sweep covers the old place too (once, and only when it is
             // not the current one).
             var legacy = Path.Combine(ArtifactsDir(storeDir), "pending");
-            if (!string.Equals(legacy, PendingDir(storeDir), StringComparison.OrdinalIgnoreCase)) n += SweepOne(legacy, olderThan);
+            if (!string.Equals(legacy, PendingDir(storeDir), StringComparison.OrdinalIgnoreCase))
+            {
+                n += SweepOne(legacy, olderThan);
+                // Operator 2026-10-22: once the legacy place is empty it goes — the empty directory from 2026-10-18 sat in every upgraded
+                // instance. The artifacts parent goes with it when nothing else is in it (no producer writes there since b9b27ec).
+                TryRemoveEmptyDir(legacy);
+                TryRemoveEmptyDir(ArtifactsDir(storeDir));
+            }
             return n;
+        }
+
+        /// <summary>Removes <paramref name="dir"/> when it exists and holds nothing; any failure (a handle on it, a race) is ignored — the next sweep tries again.</summary>
+        static void TryRemoveEmptyDir(string dir)
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) return;
+                using (var e = Directory.EnumerateFileSystemEntries(dir).GetEnumerator()) if (e.MoveNext()) return;
+                Directory.Delete(dir);
+            }
+            catch { }
         }
 
         static int SweepOne(string dir, TimeSpan olderThan)

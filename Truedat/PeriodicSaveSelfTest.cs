@@ -81,6 +81,14 @@ namespace Truedat
             assert(CheckpointCause.IsRetryable(new Store.SqliteException(5, "database is locked")) && CheckpointCause.IsRetryable(new Store.SqliteException(6, "locked"))
                    && CheckpointCause.IsRetryable(new Store.SqliteException(517, "busy snapshot (extended 5)")),
                 "retryable: SQLite BUSY 5 / LOCKED 6 (extended codes by their primary)");
+            // Operator's NAS run 2026-10-22 (scan-1(10-19)_out.txt): WinRAR held truedat.db open over the share while the last checkpoint ran; SQLite's
+            // Windows layer fell back to a read-only handle and the write said "attempt to write a readonly database" (rc 8). The checkpoint
+            // classed it permanent and dropped 505 analyses. A READONLY from another process holding the file is as transient as a
+            // sharing violation — the zipper finishes — so it gets the same one retry.
+            assert(CheckpointCause.IsRetryable(new Store.SqliteException(8, "attempt to write a readonly database"))
+                   && CheckpointCause.IsRetryable(new Store.SqliteException(1032, "readonly dbmoved (extended 8)"))
+                   && CheckpointCause.IsRetryable(new InvalidOperationException("wrapper", new Store.SqliteException(8, "readonly"))),
+                "retryable: SQLite READONLY 8 (another process holding the store open — a zipper, a copy, a backup — made this open read-only), also when wrapped");
             assert(CheckpointCause.IsRetryable(Win32(32, "sharing violation")) && CheckpointCause.IsRetryable(Win32(33, "lock violation"))
                    && CheckpointCause.IsRetryable(new InvalidOperationException("wrapper", Win32(32, "inner sharing violation"))),
                 "retryable: Windows sharing 32 / lock 33, also when wrapped");

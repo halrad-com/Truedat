@@ -76,6 +76,14 @@ namespace Truedat.Store
 
     internal sealed class StoreResultCapture { public string EdgeArrays = "off"; public int StickyRowsRefreshed; }
 
+    internal static partial class StoreResult
+    {
+        /// <summary>The detail keys that partition `entries`: every entry a scan or import received is in exactly one, so they sum to
+        /// `entries` (operator 2026-10-22: every entry accounted for). `failures` are error rows, not entries, and stay beside them.</summary>
+        internal static readonly string[] EntryBuckets =
+            { "described", "rekeyed", "edited", "remeasured", "confirmed", "drift", "contentReplaced", "filled", "copyOnly", "unchanged", "stale", "unrooted", "unstorable" };
+    }
+
     internal sealed class StoreResultCoverage { public long Tracks, WithEdges, WithHpcp, SpeechLikely, Excluded; }
 
     internal sealed class StoreResultMessage
@@ -87,7 +95,7 @@ namespace Truedat.Store
         public string? Action;
     }
 
-    internal static class StoreResult
+    internal static partial class StoreResult
     {
         internal const string OutcomeCompleted = "completed", OutcomeInterrupted = "interrupted", OutcomeFailed = "failed";
 
@@ -211,7 +219,11 @@ namespace Truedat.Store
                 ["contentReplaced"] = r.ContentReplaced, ["entitiesCreated"] = r.EntitiesCreated, ["edges"] = r.Edges, ["edgesFailed"] = r.EdgesFailed,
                 ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs, ["checkpointFailures"] = r.CheckpointFailures, ["spillsLost"] = r.SpillsLost,
                 ["supersededPruned"] = r.SupersededPruned,
+                // Operator 2026-10-22: the outcome buckets — one per entry, summing to `entries` (EntryBuckets names them all).
+                ["described"] = r.Described, ["rekeyed"] = r.ContentRekeyed, ["edited"] = r.Edited, ["confirmed"] = r.Confirmed, ["filled"] = r.Filled,
+                ["copyOnly"] = r.CopyOnly, ["stale"] = r.Stale, ["unrooted"] = r.Unrooted, ["unstorable"] = r.Unstorable, ["cacheHitKeys"] = r.CacheHitKeys,
             };
+            if (r.Accounted != r.Entries) StoreLog.Warn($"store accounting: the outcome buckets sum to {r.Accounted} of {r.Entries} entries ({r.Buckets})");
             if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
             else if (r.SpillsLost > 0) _scanStoreFailure = $"store write lost {r.SpillsLost} edge fold(s): the spilled fold could not be read back when writing (recorded as failed edges runs; --refresh re-analyses them)";
             // Exit code stays NULL here either way: the process has not finished; FinishScan writes the real one.

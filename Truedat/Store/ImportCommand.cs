@@ -63,6 +63,27 @@ namespace Truedat.Store
         public int SpillsLost;
         /// <summary>Entries where a stored NULL content column gained a value under the same producer — written as a fill, never a conflict (review #4).</summary>
         public int Filled;
+        /// <summary>Operator 2026-10-22 (accounting): the remaining buckets, so that every entry lands in exactly one. Described = the media's
+        /// FIRST description; Edited = a verb's exact edit (<see cref="ExactArrival"/>) that changed the row; Confirmed = a fresh measurement from
+        /// a DIFFERENT producer that agrees within noise (the row is re-stamped to the measuring run with the fresh values — the description
+        /// is the scan's now, not the import's); CopyOnly = only copy facts (mtime, size, tags) were written; Unstorable = rejected before any
+        /// mutation (one failed run). <see cref="Accounted"/> sums them with the older buckets and must equal <see cref="Entries"/>.</summary>
+        public int Described, Edited, Confirmed, CopyOnly, Unstorable;
+        /// <summary>Every entry the batch received, by what happened to it — exactly one bucket each. Equals <see cref="Entries"/> when the
+        /// accounting is whole; the self-test pins it and the scan warns when it is not.</summary>
+        public long Accounted => Unrooted + Unstorable + Stale + Described + ContentRekeyed + Edited + Remeasured + Confirmed + Drift + ContentReplaced + Filled + CopyOnly + Unchanged;
+        /// <summary>The buckets as one line, for messages.</summary>
+        public string Buckets => $"described {Described}, re-keyed {ContentRekeyed}, edited {Edited}, remeasured {Remeasured}, confirmed {Confirmed}, drift {Drift}, replaced {ContentReplaced}, filled {Filled}, copy-only {CopyOnly}, unchanged {Unchanged}, stale {Stale}, unrooted {Unrooted}, unstorable {Unstorable}";
+        /// <summary>The non-zero buckets only, for the console (every entry still accounted: the zeros are simply not printed).</summary>
+        public string BucketsCompact => CompactBuckets(Described, ContentRekeyed, Edited, Remeasured, Confirmed, Drift, ContentReplaced, Filled, CopyOnly, Unchanged, Stale, Unrooted, Unstorable);
+        internal static string CompactBuckets(long described, long rekeyed, long edited, long remeasured, long confirmed, long drift, long replaced, long filled, long copyOnly, long unchanged, long stale, long unrooted, long unstorable)
+        {
+            var parts = new List<string>();
+            void P(long n, string name) { if (n != 0) parts.Add($"{n} {name}"); }
+            P(described, "described"); P(rekeyed, "re-keyed"); P(edited, "edited"); P(remeasured, "remeasured"); P(confirmed, "confirmed"); P(drift, "drift");
+            P(replaced, "replaced"); P(filled, "filled"); P(copyOnly, "copy facts only"); P(unchanged, "unchanged"); P(stale, "stale, skipped"); P(unrooted, "under no root, skipped"); P(unstorable, "unstorable, failed");
+            return parts.Count == 0 ? "none" : string.Join(", ", parts);
+        }
         /// <summary>Entries whose description was replaced by a fresh measurement from the SAME producer/version (T01, F2): the
         /// store holds the newest observation and its measuring run; a beyond-noise old/new pair is kept as a resolved value-drift record.</summary>
         public int Remeasured;
@@ -100,7 +121,7 @@ namespace Truedat.Store
                 // Wording (operator's MB3 import, 2026-10-12): "3138 unrecoverable" read as damage. It counts FLAC entries that carry only
                 // the current frame-anchored hash — i.e. a mirror catalog scanned before 2026-07-21 could not be matched to them. Normal.
                 Console.WriteLine($"  locations: {r.Locations} ({r.LocationsNew} new); sha collisions (same hash, different audio): {r.Conflicts}; FLAC hashes: {r.LegacySha} pre-2026-07 (kept as a facet), {r.LegacyShaUnrecoverable} current-only (a pre-2026-07 mirror would not match them; normal for a library scanned since)");
-                Console.WriteLine($"  descriptions: {r.Unchanged} unchanged (nothing written), {r.Remeasured} remeasured (fresh values stored), {r.Drift} drifted (value-drift conflict recorded, description kept), {r.ContentReplaced} replaced by a newer producer, {r.ContentRekeyed} re-keyed" + (r.Stale > 0 ? $", {r.Stale} stale arrivals skipped" : ""));
+                Console.WriteLine($"  entries: {r.BucketsCompact}" + (r.Accounted == r.Entries ? "" : $" — WARNING: {r.Accounted} of {r.Entries} accounted for"));
                 Console.WriteLine($"  ledgers: {r.ErrorsRows} errors, {r.SkippedRows} skipped, {r.ReviewRows} review, {r.VerifyRows} verify rows, {r.ReceiptRows} receipts" +
                                   (r.LedgerUnrooted > 0 ? $"; {r.LedgerUnrooted} ledger rows under no root (stream URLs, files outside the library) not imported" : ""));
                 Console.WriteLine($"  store: {r.StoreBytesBefore:N0} -> {r.StoreBytesAfter:N0} bytes; {r.ElapsedMs / 1000.0:F1} s; result: {r.ResultPath}");
@@ -274,7 +295,7 @@ namespace Truedat.Store
             catch (SqliteException ex) { StoreLog.Warn($"WAL checkpoint did not complete ({ex.Message}); the -wal file will fold on the next open"); }
             r.StoreBytesAfter = new FileInfo(os.Path).Length;
             if (resultPath != null) { r.ResultPath = resultPath; WriteResult(r, os.Path, role, producerKey + "@" + producerVersion); }
-            StoreLog.Info($"{producerKey}@{producerVersion} wrote {r.Entries} entries: {r.EntitiesCreated} entities created, {r.LocationsNew} new locations, {r.Unchanged} unchanged, {r.Remeasured} remeasured, {r.Drift} drift, {r.ContentReplaced} replaced, {r.ErrorsRows} failures, {r.ElapsedMs} ms");
+            StoreLog.Info($"{producerKey}@{producerVersion} wrote {r.Entries} entries: {r.EntitiesCreated} entities created, {r.LocationsNew} new locations; {r.Buckets}; {r.ErrorsRows} failures, {r.ElapsedMs} ms");
             return r;
         }
 
@@ -337,7 +358,7 @@ namespace Truedat.Store
                         // artifact refusal, a DAL error — propagates as before and the whole batch transaction rolls back: a half-written
                         // entry (new content beside an old copy, an ok run) must never survive.
                         dal.InsertRun(producerKey, producerVersion, null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", "store", "unrepresentable", $"{keys[i]}: {ex.Message}", source);
-                        r.ErrorsRows++;
+                        r.ErrorsRows++; r.Unstorable++;
                         StoreLog.Warn($"{keys[i]}: not stored — {ex.Message}");
                     }
                     processed++;
@@ -565,14 +586,15 @@ namespace Truedat.Store
             var locBefore = existingLoc != null ? dal.LocationVisible(existingLoc.Value) : null;
             long loc = dal.UpsertLocation(res.EntityId, rf.Value.Id, rel, canon, key, entry.LastModified.ToString("o"), now);
             r.Locations++; if (isNewLocation) r.LocationsNew++;
-            if (isNewLocation || !Nullable.Equals(dal.LocationVisible(loc), locBefore)) r.VisibleChanges++;   // T07: the location is part of what an export shows
+            bool locationChanged = isNewLocation || !Nullable.Equals(dal.LocationVisible(loc), locBefore);
+            if (locationChanged) r.VisibleChanges++;   // T07: the location is part of what an export shows
             // A scan records one run per analysed entry (the observation: who measured, how long, on which copy);
             // an import shares one run for the whole catalog.
             long runId = runPerEntry
                 ? dal.InsertRun(producerKey, producerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
-            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r);
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged);
             // T19: the verdict projection, from the rows AS STORED, for every copy of this media (a content change re-derives them all).
             VerdictStore.DeriveForEntity(dal, res.EntityId, now);
 
@@ -628,10 +650,10 @@ namespace Truedat.Store
         /// Copy facts describe the file, so the newer observation wins, exactly — per column, for the columns the arrival observed
         /// (<see cref="TrackEntryMapper.MergeCopy"/>). Equal arrivals write nothing at all.</summary>
         internal static void WriteDescriptionAndCopy(StoreDal dal, long locationId, string entityId, string contentKey, string contentKeyKind,
-            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r)
+            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r, bool locationChanged = false)
         {
             var row = TrackEntryMapper.ToRow(entry);
-            bool contentWritten = false, copyWritten = false, drifted = false;
+            bool contentWritten = false, copyWritten = locationChanged, drifted = false;   // a new or changed location (mtime, state) is a copy fact too
 
             var existing = dal.ReadContent(entityId);
             bool legacyAlias = existing != null && contentKeyKind == FacetKinds.ShaTaglibRegion && existing.ContentKeyKind == FacetKinds.ShaFrames;
@@ -654,7 +676,7 @@ namespace Truedat.Store
             if (existing == null)
             {
                 dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
-                contentWritten = true;
+                contentWritten = true; r.Described++;
             }
             else if (legacyAlias)
             {
@@ -675,7 +697,7 @@ namespace Truedat.Store
                 bool anyDiffers = false;
                 for (int k = 0; k < TrackEntryMapper.ContentColumnCount && !anyDiffers; k++)
                     if (!TrackEntryMapper.ContentEqualExact(k, existing.Values[k], TrackEntryMapper.ContentValue(row, k))) anyDiffers = true;
-                if (anyDiffers) { dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now); contentWritten = true; }
+                if (anyDiffers) { dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now); contentWritten = true; r.Edited++; }
             }
             else
             {
@@ -740,6 +762,18 @@ namespace Truedat.Store
                         StoreLog.Warn($"description replaced on {displayPath}: {existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion} ({drift.Count} field(s) changed; the pair is recorded as a resolved content-replaced conflict)");
                     }
                 }
+                else if (!isImport && !sameProducer && !ArrivalIsOlder(existing.ProducerKey, existing.ProducerVersion, producerKey, producerVersion))
+                {
+                    // Operator 2026-10-22 (provenance): a fresh measurement from a DIFFERENT producer that AGREES within noise CONFIRMS the
+                    // description — the fresh values and the measuring run take the row, exactly as a remeasure does, so a description a
+                    // catalog import seeded becomes the scan's once the scan has measured it (MB3: 6,147 of 7,538 still read import@1 after
+                    // the EV3 pass had measured every one). Agreement is not information: no conflict row. Columns the arrival did not
+                    // observe keep their stored values (the remeasure rule).
+                    dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentWhereUnobserved(row, existing.Values), now);
+                    foreach (var k in changed) dal.CloseOpenDrift(entityId, TrackEntryMapper.ContentColumnName(k));
+                    contentWritten = true; r.Confirmed++;
+                    StoreLog.Debug($"description confirmed on {displayPath} by {producerKey}@{producerVersion} (was {existing.ProducerKey}@{existing.ProducerVersion}, agreeing within noise): fresh values and run stored");
+                }
                 if (!contentWritten && fills.Count > 0)
                 {
                     // T01: a fill never re-stamps the row — the retained columns keep the run that measured them (existing.RunId);
@@ -769,7 +803,11 @@ namespace Truedat.Store
             }
 
             if (!contentWritten && !copyWritten && !drifted) r.Unchanged++;
-            else r.VisibleChanges++;   // T07: a description, copy fact or drift record a reader can see
+            else
+            {
+                r.VisibleChanges++;   // T07: a description, copy fact or drift record a reader can see
+                if (!contentWritten && !drifted) r.CopyOnly++;   // only copy facts moved (mtime, size, tags): its own bucket, never unnamed
+            }
         }
 
         /// <summary>True when both are the same producer and both versions are known extractor builds (<c>output-x64.N</c>) with

@@ -237,7 +237,7 @@ namespace Truedat.Store
                     var root = os.Dal.ListRoots().First(x => x.Role == "primary").Id;
                     exported = os.Dal.ReadEntries(root).Select(x => x.DisplayPath).OrderBy(x => x).ToList();
                 }
-                assert(rep.Ok && rep.CopyOnly == 2 && rep.Retired == 1, $"one flush: 2 cache-hit refreshes as copy facts, 1 location retired ({rep.Ok}/{rep.CopyOnly}/{rep.Retired}: {rep.Error})");
+                assert(rep.Ok && rep.CacheHitKeys == 2 && rep.Retired == 1, $"one flush: 2 cache-hit refreshes as copy facts, 1 location retired ({rep.Ok}/{rep.CacheHitKeys}/{rep.Retired}: {rep.Error})");
                 assert(essentiaRunsAfter == essentiaRunsBefore, $"cache hits are never recorded as Essentia measurements (essentia runs {essentiaRunsBefore} -> {essentiaRunsAfter})");
                 assert(aLm != null && aLm.StartsWith("2026-06-01"), $"the cache hit's copy fact reached the store (lastModified {aLm})");
                 assert(exported.SequenceEqual(new[] { @"D:\music\a.flac", @"D:\music\moved\b.flac" }), $"the export reads present locations only: the moved file's old path is gone ({string.Join(", ", exported)})");

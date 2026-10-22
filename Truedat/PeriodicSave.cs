@@ -24,8 +24,10 @@ namespace Truedat
 
     /// <summary>Cause classification for a failed checkpoint (operator: one retry, and a retry is not a root-cause fix — the actual
     /// cause is identified and logged). Retryable = a NAMED class where waiting for the next checkpoint can change the outcome:
-    /// SQLite BUSY (5) / LOCKED (6) — another connection holds the store — and a Windows sharing (32) or lock (33) violation — another
-    /// process holds the file. Everything else (disk full, access denied, SQLite FULL / IOERR / CORRUPT, an unknown exception) is
+    /// SQLite BUSY (5) / LOCKED (6) — another connection holds the store — SQLite READONLY (8) — another PROCESS held the store file
+    /// open without write sharing (a zip, a copy, a backup) so SQLite's Windows layer opened it read-only; the operator's NAS run of
+    /// 2026-10-22 lost its last 505 analyses to WinRAR this way — and a Windows sharing (32) or lock (33) violation — another process
+    /// holds the file. Everything else (disk full, access denied, SQLite FULL / IOERR / CORRUPT, an unknown exception) is
     /// not retried: repeating it cannot change it.</summary>
     internal static class CheckpointCause
     {
@@ -33,10 +35,19 @@ namespace Truedat
         {
             for (var e = ex; e != null; e = e.InnerException)
             {
-                if (e is Store.SqliteException s) { int primary = s.ResultCode & 0xFF; return primary == 5 || primary == 6; }
+                if (e is Store.SqliteException s) { int primary = s.ResultCode & 0xFF; return primary == 5 || primary == 6 || primary == 8; }
                 if (e is IOException) { int win32 = e.HResult & 0xFFFF; if (win32 == 32 || win32 == 33) return true; }
             }
             return false;
+        }
+
+        /// <summary>The likely cause behind a retryable failure, for the checkpoint message — null when there is nothing to add.</summary>
+        internal static string? Hint(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+                if (e is Store.SqliteException s && (s.ResultCode & 0xFF) == 8)
+                    return "another process is holding the store file open without write sharing (a zip, a copy, a backup), so this open was read-only";
+            return null;
         }
 
         /// <summary>Disk full (TDA 120 — the commonest real cause, and the action is the operator's, not a retry): Windows
@@ -170,7 +181,8 @@ namespace Truedat
                 _consecutiveFailures++;
                 bool retry = _consecutiveFailures == 1 && CheckpointCause.IsRetryable(outcome.Error);
                 var since = new DateTime(Interlocked.Read(ref _lastDurableUtcTicks), DateTimeKind.Utc).ToString("o");
-                var facts = $"stage {outcome.Stage}; cause {CheckpointCause.Describe(outcome.Error)}{(outcome.Detail != null ? "; " + outcome.Detail : "")}; " +
+                var hint = CheckpointCause.Hint(outcome.Error);
+                var facts = $"stage {outcome.Stage}; cause {CheckpointCause.Describe(outcome.Error)}{(hint != null ? " — " + hint : "")}{(outcome.Detail != null ? "; " + outcome.Detail : "")}; " +
                             $"attempt {_consecutiveFailures}; last durable checkpoint {since}; {pending} analyses completed since it";
                 if (retry)
                 {

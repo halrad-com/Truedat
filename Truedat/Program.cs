@@ -2944,7 +2944,8 @@ namespace Truedat
                     }
                 }
             }
-            if (storeVerb || storePath != null)
+            // --help resolves nothing: the store block printed its resolution line and the adoption banner above the usage text (MB3 EV3 pass).
+            if (!showHelp && (storeVerb || storePath != null))
             {
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
                 if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
@@ -2966,7 +2967,11 @@ namespace Truedat
                 }
                 else
                 global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
-                if (storeAdopted && storePath != null)
+                // The adoption banner is a SCAN's line (it says what this run will write to); on a read verb it is noise and its
+                // "--no-edges leaves it alone" clause means nothing (operator's MB3 EV3 pass, 2026-10-22). The resolution INFO line above stays:
+                // a read verb answering from a store should say which one.
+                bool readVerb = statsMode || duplicatesMode || storeVerb || verifyMode || previewMode || listReviewMode || listSpeechMode;
+                if (storeAdopted && storePath != null && !readVerb)
                     Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 if (storePath != null) ApplyStoreLocation(storePath, storeCatalog);
                 // Nothing named and nothing discovered: the resolved catalog is the cwd GUESS. With the store named explicitly, --store-info
@@ -11359,7 +11364,23 @@ namespace Truedat
             }
             p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
+            if (!checkpoint) CompactStoreAfterScan(_storePath);
             return true;
+        }
+
+        /// <summary>Operator 2026-10-22: routine maintenance at the end of every scan, after the final publication — a plain VACUUM in WAL
+        /// mode when at least a tenth of the store's pages are free (the prune of superseded edge versions, retired rows, a drop). Below
+        /// that nothing is touched; a failure is a warning, never a failed scan (the store's contents are already committed and published).</summary>
+        internal const double CompactMinFreeFraction = 0.10;
+        internal static void CompactStoreAfterScan(string storePath)
+        {
+            try
+            {
+                var c = global::Truedat.Store.VacuumCommand.Compact(storePath, CompactMinFreeFraction);
+                if (c != null)
+                    Console.WriteLine($"  [store compacted: {c.BytesBefore:N0} -> {c.BytesAfter:N0} bytes ({100.0 * (c.BytesAfter - c.BytesBefore) / Math.Max(1, c.BytesBefore):+0.0;-0.0;0.0}%) in {c.Seconds:F1} s]");
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"  WARNING: store not compacted ({ex.Message}); the next scan retries"); }
         }
 
         /// <summary>The options truedat.config.json added to this run (after a typed flag overrode any of them); empty without a config.</summary>
@@ -11624,7 +11645,9 @@ namespace Truedat
                     t.SupersededPruned += swept;
                 }
                 catch (Exception ex) { Console.Error.WriteLine($"  WARNING: superseded edge rows not pruned ({ex.Message}); the next scan retries"); }
-                Console.WriteLine($"  store: {t.Entries} analysed entries written ({t.EntitiesCreated} new media, {t.Unchanged} unchanged, {t.Remeasured} remeasured, {t.Drift} drift, {t.ContentReplaced} replaced), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}");
+                // Operator 2026-10-22: every entry in exactly one bucket, and the buckets sum to the entries (store-result detail carries them all).
+                Console.WriteLine($"  store: {t.Entries} entries written ({t.BucketsCompact}; {t.EntitiesCreated} new media), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}"
+                                  + (t.Accounted == t.Entries ? "" : $" — WARNING: {t.Accounted} of {t.Entries} accounted for"));
                 if (edgesOn) Console.WriteLine($"  edges: {t.Edges} tracks folded, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs), {t.SupersededPruned} superseded-version rows pruned");
                 else if (t.SupersededPruned > 0) Console.WriteLine($"  edges: {t.SupersededPruned} superseded-version rows pruned");
                 // S2 C7: the companion reflects the store after every run that added edges. A null companionPath is the

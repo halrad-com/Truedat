@@ -14,7 +14,14 @@ namespace Truedat.Store
     {
         public bool Ok; public string? Error;
         /// <summary>T18: store locations retired by this flush (moved files' old paths) and cache-hit refreshes written as copy facts.</summary>
-        public int Retired, CopyOnly;
+        /// <summary>Locations retired this flush / cache-hit entries the scan handed over as copy-fact refreshes (keys, not an outcome bucket).</summary>
+        public int Retired, CacheHitKeys;
+        /// <summary>Operator 2026-10-22 (accounting): the outcome buckets beside Unchanged / Remeasured / Drift / ContentReplaced / ContentRekeyed —
+        /// one per entry, summing to <see cref="Entries"/> (<see cref="Accounted"/>). See ImportReport for each bucket's meaning.</summary>
+        public int Described, Edited, Confirmed, Filled, CopyOnly, Unrooted, Unstorable;
+        public long Accounted => Unrooted + Unstorable + Stale + Described + ContentRekeyed + Edited + Remeasured + Confirmed + Drift + ContentReplaced + Filled + CopyOnly + Unchanged;
+        public string Buckets => $"described {Described}, re-keyed {ContentRekeyed}, edited {Edited}, remeasured {Remeasured}, confirmed {Confirmed}, drift {Drift}, replaced {ContentReplaced}, filled {Filled}, copy-only {CopyOnly}, unchanged {Unchanged}, stale {Stale}, unrooted {Unrooted}, unstorable {Unstorable}";
+        public string BucketsCompact => ImportReport.CompactBuckets(Described, ContentRekeyed, Edited, Remeasured, Confirmed, Drift, ContentReplaced, Filled, CopyOnly, Unchanged, Stale, Unrooted, Unstorable);
         /// <summary>T18: entries a FAILED FINAL flush did not write — under a store-authoritative scan they existed only in memory, so they are
         /// lost (exact). A failed checkpoint re-queues instead and counts nothing here.</summary>
         public int LostEntries;
@@ -42,7 +49,8 @@ namespace Truedat.Store
             Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
             Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
             Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost; StickyRowsRefreshed += r.StickyRowsRefreshed;
-            SupersededPruned += r.SupersededPruned; Retired += r.Retired; CopyOnly += r.CopyOnly;
+            SupersededPruned += r.SupersededPruned; Retired += r.Retired; CacheHitKeys += r.CacheHitKeys;
+            Described += r.Described; Edited += r.Edited; Confirmed += r.Confirmed; Filled += r.Filled; CopyOnly += r.CopyOnly; Unrooted += r.Unrooted; Unstorable += r.Unstorable;
         }
     }
 
@@ -278,7 +286,9 @@ namespace Truedat.Store
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
                 report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost; report.StickyRowsRefreshed = r.StickyRowsRefreshed;
-                report.SupersededPruned = r.SupersededPruned; report.StorePath = storePath; report.Retired = r.Retired; report.CopyOnly = copyOnly.Count;
+                report.SupersededPruned = r.SupersededPruned; report.StorePath = storePath; report.Retired = r.Retired; report.CacheHitKeys = copyOnly.Count;
+                report.Described = r.Described; report.Edited = r.Edited; report.Confirmed = r.Confirmed; report.Filled = r.Filled; report.CopyOnly = r.CopyOnly;
+                report.Unrooted = r.Unrooted; report.Unstorable = r.Unstorable;
             }
             catch (Exception ex)
             {

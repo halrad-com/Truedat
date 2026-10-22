@@ -165,6 +165,22 @@ namespace Truedat.Store
                 assert(r6.Ok && Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length == 0 && !File.Exists(stale),
                     $"the flush drops every untied stash and sweeps stale pending files from a killed scan ({Directory.GetFiles(ArtifactStore.PendingDir(dir)).Length} left)");
                 assert(ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1)) == 0, "nothing stale remains to sweep");
+                // Operator 2026-10-22: the pre-1c7b8dd spill place (<store>\artifacts\pending) is removed once it is empty — an empty
+                // directory from 2026-10-18 sat in every upgraded instance; a legacy dir that still holds a fresh file stays.
+                var prevWork = ArtifactStore.WorkRoot;
+                ArtifactStore.WorkRoot = Path.Combine(dir, "stage");
+                try
+                {
+                    var legacy = Path.Combine(dir, "artifacts", "pending");
+                    Directory.CreateDirectory(legacy);
+                    ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1));
+                    assert(!Directory.Exists(legacy), "the sweep removes the legacy spill directory once it is empty");
+                    Directory.CreateDirectory(legacy);
+                    File.WriteAllText(Path.Combine(legacy, "fresh.z"), "x");
+                    ArtifactStore.SweepPending(dir, TimeSpan.FromDays(1));
+                    assert(Directory.Exists(legacy) && File.Exists(Path.Combine(legacy, "fresh.z")), "a legacy spill directory holding a fresh file is left alone");
+                }
+                finally { ArtifactStore.WorkRoot = prevWork; }
             }
             finally { ScanSink.Reset(); ScanSink.StoreDirectory = null; try { Directory.Delete(dir, true); } catch { } }
         }
@@ -319,6 +335,45 @@ namespace Truedat.Store
                 var r10 = ScanSink.Flush(store, "md5:deadbeef0123", entries.Keys);
                 assert(r10.Ok && r10.Unchanged == 1 && r10.Remeasured == 0 && r10.Drift == 0,
                     $"re-flushing the remeasured entry unchanged writes nothing ({r10.Unchanged} unchanged, {r10.Remeasured} remeasured, {r10.Drift} drift)");
+                // Operator 2026-10-22 ("can we fix the accounting"): every entry a flush receives lands in EXACTLY ONE bucket, and the buckets
+                // sum to the entries — the MB3 EV3 record named 1,399 of 7,655. The earlier reports of this block are checked the same way.
+                foreach (var (name, rep) in new[] { ("r6", r6), ("r7", r7), ("r8", r8), ("r9", r9), ("r10", r10) })
+                    assert(rep.Accounted == rep.Entries, $"{name}: the buckets sum to the entries ({rep.Accounted} of {rep.Entries}: {rep.Buckets})");
+                // A fresh measurement from a DIFFERENT producer that AGREES within noise: today it wrote nothing, so a description a catalog
+                // import seeded stayed stamped import@1 after the scan had measured it (MB3: 6,147 of 7,538). Now it is CONFIRMED — the fresh
+                // values and the measuring run take the row, exactly as a remeasure does; no conflict row (agreement is not information).
+                string ProducerOf(OpenStore os) => os.Db.ExecScalar("SELECT r.producer_version FROM track_content c JOIN run r ON r.id = c.run_id JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") ?? "";
+                string conflictsBefore;
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"))) conflictsBefore = os.Db.ExecScalar("SELECT count(*) FROM conflict;") ?? "";
+                var agree = FixtureEntries(@"D:\Music");
+                agree[@"D:\Music\Tool\a.flac"].Features!.Bpm = noBits[@"D:\Music\Tool\a.flac"].Features!.Bpm * 1.0005;   // within noise of the stored value
+                agree[@"D:\Music\Tool\a.flac"].Features!.BitUsage = null;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", agree[@"D:\Music\Tool\a.flac"]);
+                var c1 = ScanSink.Flush(store, "md5:cafe0000cafe", entries.Keys);   // a build the store cannot order against md5:deadbeef0123
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(c1.Ok && c1.Confirmed == 1 && c1.Unchanged == 0 && c1.ContentReplaced == 0 && c1.Drift == 0 && c1.Accounted == c1.Entries
+                           && ProducerOf(os) == "md5:cafe0000cafe"
+                           && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == TrackEntryMapper.FormatContent(bpmCol, TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(agree[@"D:\Music\Tool\a.flac"]), bpmCol))
+                           && os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == "9"
+                           && os.Db.ExecScalar("SELECT count(*) FROM conflict;") == conflictsBefore,
+                        $"an agreeing measurement from another producer CONFIRMS the description: counted once, re-stamped to the measuring run (now {ProducerOf(os)}), fresh values stored, unobserved columns kept, no conflict row ({c1.Buckets})");
+                ScanSink.Record(@"D:\Music\Tool\a.flac", agree[@"D:\Music\Tool\a.flac"]);
+                var c2 = ScanSink.Flush(store, "md5:cafe0000cafe", entries.Keys);
+                assert(c2.Ok && c2.Unchanged == 1 && c2.Confirmed == 0 && c2.CopyOnly == 0 && c2.Accounted == c2.Entries, $"the same arrival again is Unchanged ({c2.Buckets})");
+                // Copy facts only (a tag touch moved the mtime; the description agrees): its own bucket, never 'unchanged' and never unnamed.
+                var touched = FixtureEntries(@"D:\Music");
+                touched[@"D:\Music\Tool\a.flac"].Features!.Bpm = agree[@"D:\Music\Tool\a.flac"].Features!.Bpm;
+                touched[@"D:\Music\Tool\a.flac"].Features!.BitUsage = null;
+                touched[@"D:\Music\Tool\a.flac"].LastModified = agree[@"D:\Music\Tool\a.flac"].LastModified.AddHours(1);
+                ScanSink.Record(@"D:\Music\Tool\a.flac", touched[@"D:\Music\Tool\a.flac"]);
+                var c3 = ScanSink.Flush(store, "md5:cafe0000cafe", entries.Keys);
+                assert(c3.Ok && c3.CopyOnly == 1 && c3.Unchanged == 0 && c3.Confirmed == 0 && c3.Accounted == c3.Entries, $"a copy-facts-only write is its own bucket ({c3.Buckets})");
+                // A first description (new media) is 'described', not merely 'entities created' (an existing media can gain its first description too).
+                var fresh = FixtureEntries(@"D:\Music");
+                var newEntry = fresh[@"D:\Music\Tool\a.flac"]; newEntry.AudioStreamSha256 = new string('7', 64);
+                ScanSink.Record(@"D:\Music\Tool\brand-new.flac", newEntry);
+                var c4 = ScanSink.Flush(store, "md5:cafe0000cafe", entries.Keys);
+                assert(c4.Ok && c4.Described == 1 && c4.EntitiesCreated == 1 && c4.Unchanged == 0 && c4.Accounted == c4.Entries, $"a first description is 'described' ({c4.Buckets})");
                 // Review finding 5: once the description is replaced, an OPEN drift row for that field is stale — it is closed.
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'open' AND field = 'bpm';") == "0",
@@ -980,6 +1035,30 @@ namespace Truedat.Store
 
                 var r2 = VacuumCommand.Execute(store, 8192);
                 assert(r2.PageSizeBefore == SqliteDb.DefaultPageSize && r2.PageSizeAfter == 8192, "an explicit --page-size re-tunes an already-repacked store");
+
+                // Operator 2026-10-22 ("can we do a vacuum at the end as routine maintenance"): the scan's end-of-run compaction is a plain
+                // VACUUM in WAL mode — the verb's journal-mode switch fails with "database is locked" while the hub holds the store open
+                // (measured on an MB3 copy), a plain VACUUM does not. It runs only when the free pages are worth it (>= the fraction given)
+                // and reports before/after; below the threshold it returns null and touches nothing.
+                using (var db = SqliteDb.Open(store, create: false))
+                {
+                    db.Exec("CREATE TABLE junk(x BLOB); INSERT INTO junk VALUES (zeroblob(3000000)); DELETE FROM junk; DROP TABLE junk;");
+                }
+                long freeBefore, pagesBefore;
+                using (var db = SqliteDb.Open(store, create: false)) { freeBefore = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "0"); pagesBefore = long.Parse(db.ExecScalar("PRAGMA page_count;") ?? "0"); }
+                assert(freeBefore * 10 >= pagesBefore, $"fixture: the junk left at least 10% free pages ({freeBefore} of {pagesBefore})");
+                using (var holder = SqliteDb.Open(store, create: false))   // a second connection holding the store open, as the hub does
+                {
+                    holder.ExecScalar("SELECT count(*) FROM track_copy;");
+                    var c = VacuumCommand.Compact(store, 0.10);
+                    string journal; long freeAfter;
+                    using (var db = SqliteDb.Open(store, create: false)) { journal = db.ExecScalar("PRAGMA journal_mode;") ?? ""; freeAfter = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "-1"); }
+                    assert(c != null && c.BytesAfter < c.BytesBefore && c.PagesAfter < c.PagesBefore && freeAfter == 0 && string.Equals(journal, "wal", StringComparison.OrdinalIgnoreCase),
+                        $"routine compaction reclaims the free pages in WAL mode with another connection open ({(c == null ? "null" : $"{c.BytesBefore:N0} -> {c.BytesAfter:N0} bytes, {c.PagesBefore} -> {c.PagesAfter} pages")}; free after {freeAfter}; journal {journal})");
+                    assert(VacuumCommand.Compact(store, 0.10) == null, "below the threshold the compaction is skipped (null), nothing rewritten");
+                }
+                var rt2 = ExportCommand.Roundtrip(store, catalog, null);
+                assert(rt2.Equal && rt2.Same == entries.Count, $"round-trip is EQUAL after the routine compaction (same {rt2.Same}, different {rt2.Different})");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

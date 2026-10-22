@@ -638,6 +638,11 @@ namespace Truedat.Store
                     var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started); StoreResult.FinishScan(0);
                     assert(fin.Ok && fin.Entries == 2 && fin.Edges == 2 && fin.SpillsLost == 0 && fin.Failures == 1 && rows == 2 && failRows == 1 && path != null && StoreResult.TryRead(path!, out rec) && rec.Outcome == "completed" && rec.Detail != null && rec.Detail["spillsLost"] == 0 && rec.Detail["failures"] == 1,
                         $"the clean retry commits entries, edges AND the failure row together, no lost fold: ok {fin.Ok}, entries {fin.Entries}, edges {fin.Edges}, lost {fin.SpillsLost}, failures {fin.Failures}, rows {rows}, failed runs {failRows}, record {rec.Outcome}");
+                    // Operator 2026-10-22: the record's detail accounts for EVERY entry — the buckets it names sum to `entries` (MB3's EV3 record named 1,399 of 7,655).
+                    long Det(string k) => rec.Detail != null && rec.Detail.TryGetValue(k, out var v) ? v : -1;
+                    long bucketSum = 0; foreach (var k in StoreResult.EntryBuckets) bucketSum += Det(k);
+                    assert(rec.Detail != null && bucketSum == Det("entries") && Det("entries") == 2,
+                        $"store-result detail buckets sum to entries ({bucketSum} of {Det("entries")}: {string.Join(", ", System.Linq.Enumerable.Select(StoreResult.EntryBuckets, k => k + "=" + Det(k)))})");
                 }
                 finally { ImportCommand.FailBeforeCommitForTest = false; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             }
