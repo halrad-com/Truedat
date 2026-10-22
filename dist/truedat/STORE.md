@@ -41,7 +41,7 @@ One row of file facts per copy, one audio description per media:
 | `track_copy` | copy | tags as found in the copy, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` |
 | `run` | attempt | producer + version, entity, content hash, location, outcome, duration, failed components, reason, source |
 | `producer` | producer | key, current version, kind |
-| `edge` | (content key, producer version, head / tail) | the typed edge row (below): scalars + the edge's HPCP; the opt-in arrays when captured |
+| `edge` | (content key, producer version, head / tail) | the typed edge row (below): scalars + the edge's HPCP; the opt-in arrays when captured. One version per track: when a fold at the current producer version lands, the track's rows at every other version (`edge`, `segment`, whole-track `value`) are pruned, and every scan sweeps the store for residue an earlier version bump left — the `run` rows are the history. Every scan ends with a routine compaction (a plain VACUUM in WAL mode, safe with the hub attached) when at least a tenth of the file's pages are free, so the file shrinks on its own; `--store-vacuum` is for changing the page size |
 | `value`, `segment` | content key (+ segment) | the edge's whole-track words (status, duration, extractor, head-vs-tail divergence) and windows; any future measurement that is a function of the audio |
 | `verdict` | copy | the catalog's `truedat` block, derived from the stored rows (below) — a row iff the catalog writes the block |
 | `artifact` | (content key, build) | where the compressed extractor output sits, bytes, sha |
