@@ -779,7 +779,8 @@ namespace Truedat.Store
                     // T01: a fill never re-stamps the row — the retained columns keep the run that measured them (existing.RunId);
                     // the filling run exists as its own run row, so nothing is lost by not moving the stamp.
                     dal.UpsertContent(entityId, contentKey, contentKeyKind, existing.RunId, TrackEntryMapper.WithStoredContentExcept(row, existing.Values, fills), now);
-                    contentWritten = true; r.Filled++;
+                    contentWritten = true;
+                    if (!drifted) r.Filled++;   // a drifting arrival that also fills is one entry, already counted as drift (review 2026-10-22 F1)
                     StoreLog.Info($"description filled on {displayPath}: {fills.Count} column(s) that were null now have values ({TrackEntryMapper.ContentColumnName(fills[0])}{(fills.Count > 1 ? ", …" : "")})");
                 }
             }

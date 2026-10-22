@@ -378,6 +378,20 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                     assert(os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'open' AND field = 'bpm';") == "0",
                         $"a remeasure closes the stale open drift rows for the field it replaced ({os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND state = 'open' AND field = 'bpm';")} still open)");
+                // Review 2026-10-22 F1: an arrival that DRIFTS beyond noise on one column and FILLS a null on another (an older build here) is
+                // one entry: counted once, as drift. The fill still lands (null -> value loses nothing); the stored description is kept.
+                const string dfPath = @"D:\Music\Tool\drift-fill.flac";
+                var df1 = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; df1.AudioStreamSha256 = new string('8', 64); df1.Features!.BitUsage = null;
+                ScanSink.Record(dfPath, df1);
+                ScanSink.Flush(store, "output-x64.5", entries.Keys);
+                var df2 = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"]; df2.AudioStreamSha256 = new string('8', 64); df2.Features!.Bpm = df1.Features.Bpm * 1.5;
+                ScanSink.Record(dfPath, df2);
+                var c5 = ScanSink.Flush(store, "output-x64.3", entries.Keys);
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(c5.Ok && c5.Drift == 1 && c5.Filled == 0 && c5.Accounted == c5.Entries
+                           && os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\drift-fill.flac';") == TrackEntryMapper.FormatContent(TrackEntryMapper.ContentIndexOf("bitUsage_lowestNonZeroBit"), TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(df2), TrackEntryMapper.ContentIndexOf("bitUsage_lowestNonZeroBit")))
+                           && StoredText(os, dfPath, "bpm") == TrackEntryMapper.FormatContent(bpmCol, TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(df1), bpmCol)),
+                        $"drift + fill is ONE entry, counted as drift; the null is filled and the stored bpm kept ({c5.Accounted} of {c5.Entries}: {c5.Buckets}; bitUsage {os.Db.ExecScalar("SELECT c.bitUsage_lowestNonZeroBit FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\drift-fill.flac';") ?? "null"}; bpm {StoredText(os, dfPath, "bpm")} vs first {TrackEntryMapper.FormatContent(bpmCol, TrackEntryMapper.ContentValue(TrackEntryMapper.ToRow(df1), bpmCol))})");
 
                 // A store that cannot be opened: reported, never thrown.
                 ScanSink.Record(@"D:\Music\Tool\a.flac", entries[@"D:\Music\Tool\a.flac"]);
