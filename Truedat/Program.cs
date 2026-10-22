@@ -5299,7 +5299,7 @@ namespace Truedat
                 {
                     // Keeper 132: a persistently failed stage is not attempted again here; the other half still writes.
                     flFinal = _storePath != null
-                        ? RunAuthoritativeFinal(flCheckpointFailure, analyzeFileMoods!, flMoodsTracks.Keys)   // T18
+                        ? RunAuthoritativeFinal(flCheckpointFailure, analyzeFileMoods!, flMoodsTracks.Keys, compactAfter: folderMode)   // T18
                         : RunFinalWrites(flCheckpointFailure, true, () =>
                         {
                             SaveResults(analyzeFileMoods!, flMoodsTracks);
@@ -6723,7 +6723,7 @@ namespace Truedat
             // Keeper 132: a persistently failed operation is not tried again at the end — only the half that did NOT fail is written.
             // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
             var finalWrites = _storePath != null
-                ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys)
+                ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys, compactAfter: true)
                 : RunFinalWrites(checkpointFailure, true, () => SaveResults(moodsPath, allTracks), () => FlushStoreSink(allTracks.Keys));
             finalSaveSw.Stop();   // the WHOLE final-write phase: catalog, store flush, sidecar, companion
             // Stamped after the writes, not at sw.Stop(). It used to be taken before them, so a run that
@@ -11364,7 +11364,6 @@ namespace Truedat
             }
             p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
-            if (!checkpoint) CompactStoreAfterScan(_storePath);
             return true;
         }
 
@@ -11529,7 +11528,9 @@ namespace Truedat
 
         /// <summary>T18a-d: the store-authoritative END — the final store flush (unless the store stage failed persistently: keeper 132, not
         /// attempted again), then ONE publication of the triple derived from the store. <c>Catalog</c> reports the publication.</summary>
-        internal static FinalWrites RunAuthoritativeFinal(CheckpointOutcome? failure, string catalogPath, IEnumerable<string> keys)
+        /// <param name="compactAfter">Whole-library passes only (the library scan, --folder). A VACUUM rewrites the whole store, so a
+        /// per-file run (--file-list, the autoscan path; --analyze-file) leaves it to the next library scan.</param>
+        internal static FinalWrites RunAuthoritativeFinal(CheckpointOutcome? failure, string catalogPath, IEnumerable<string> keys, bool compactAfter = false)
         {
             var w = new FinalWrites();
             if (!FinalStageAllowed(failure, "store")) w.Store = FinalWrite.Skipped;
@@ -11542,6 +11543,7 @@ namespace Truedat
             if (w.Store == FinalWrite.Written || w.Store == FinalWrite.Skipped)
                 w.Catalog = PublishFromStore(catalogPath, checkpoint: false) ? FinalWrite.Written : FinalWrite.Failed;
             else w.Catalog = FinalWrite.Skipped;
+            if (compactAfter && w.Catalog == FinalWrite.Written && _storePath != null) CompactStoreAfterScan(_storePath);
             return w;
         }
 
@@ -13662,7 +13664,7 @@ namespace Truedat
                     // The schema version and the per-track figure are separate facts, printed apart: side by side they read as "schema
                     // vN costs X B/track", and X is this file's size over its descriptions, unreclaimed space included.
                     SizeLine("Store:", storeInfo.FileBytes, $"{Path.GetFileName(storeInfo.Path)} (schema v{storeInfo.SchemaVersion})");
-                    ReportNote($"{storeInfo.BytesPerTrack:N0} B/track = file size ÷ {storeInfo.Tracks:N0} descriptions");
+                    if (storeInfo.Tracks > 0) ReportNote($"{storeInfo.BytesPerTrack:N0} B/track = file size ÷ {storeInfo.Tracks:N0} descriptions");
                     // Both denominators, because they differ and the difference read as missing data: the
                     // store describes AUDIO (one row per distinct content), the catalog holds PATHS. They
                     // reconcile through the duplicate paths - say so only when they actually do.
