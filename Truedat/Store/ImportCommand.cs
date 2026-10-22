@@ -55,6 +55,9 @@ namespace Truedat.Store
         /// <summary>Keeper 099: edge rows written WITH arrays only because the track already held them while the scan's array flag was
         /// off ("sticky per track") — the store-result's capture.stickyRowsRefreshed.</summary>
         public int StickyRowsRefreshed;
+        /// <summary>Operator 2026-10-22: edge/segment/value rows at a SUPERSEDED producer version removed because the current version now
+        /// holds the track (EdgeStore.PruneSupersededVersions) — the store-result's detail.supersededPruned.</summary>
+        public int SupersededPruned;
         /// <summary>Edge spills that could not be read back at write time — counted in EdgesFailed too, and separately because they are a
         /// store-side loss, not an audio condition.</summary>
         public int SpillsLost;
@@ -609,7 +612,8 @@ namespace Truedat.Store
             // Sticky per MEDIA (TDA F8): a media that holds arrays under any of its content hashes keeps capturing at the current one, so a key
             // move does not drop to the default row. Otherwise the scan's flag decides (Write's own per-content sticky still applies).
             bool media = global::Truedat.Edges.EdgeStore.MediaHoldsArrays(dal, entityId);
-            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null, out int arrayRows);
+            global::Truedat.Edges.EdgeStore.Write(dal, contentKey, contentKeyKind, edgesRun, edges, media ? true : (bool?)null, out int arrayRows, out int pruned);
+            if (r != null) r.SupersededPruned += pruned;
             // Keeper 099/109: with the flag OFF, edge rows THIS write stored with arrays can only be the sticky rule's (the track already
             // held them) — the record's capture.stickyRowsRefreshed. Counted from what Write wrote, never from what the table holds: an
             // 'unavailable' fold writes no edge row and must count 0.

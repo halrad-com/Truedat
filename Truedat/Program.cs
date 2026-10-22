@@ -11611,8 +11611,22 @@ namespace Truedat
                 // TDA 092: the RUN's totals — checkpoints included. Gating on the final flush alone left the companion behind the store
                 // whenever the checkpoints had already committed every edge row (a long --store --edges scan) and the final flush was empty.
                 var t = total;
+                // Operator 2026-10-22 ("prune, we don't want to keep dead wood"): every write already prunes the track's other versions; this
+                // store-wide sweep is for the residue an earlier version bump left behind (edges@v3 kept MB3's whole edges@v2 set). It runs
+                // whether or not this scan folded edges — the dead rows are there either way — and its count joins the per-write tally so
+                // the summary and the record name every row removed. Nothing a reader serves changes, so no generation advance.
+                try
+                {
+                    using var os = global::Truedat.Store.OpenStore.Open(storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                    long swept;
+                    using (var tx = os.Db.BeginTransaction()) { swept = global::Truedat.Edges.EdgeStore.PruneSupersededVersions(os.Dal, settings.ProducerVersion); tx.Complete(); }
+                    if (swept > 0) global::Truedat.Store.StoreLog.Info($"edges: {swept} row(s) at superseded producer versions pruned (store-wide sweep)");
+                    t.SupersededPruned += swept;
+                }
+                catch (Exception ex) { Console.Error.WriteLine($"  WARNING: superseded edge rows not pruned ({ex.Message}); the next scan retries"); }
                 Console.WriteLine($"  store: {t.Entries} analysed entries written ({t.EntitiesCreated} new media, {t.Unchanged} unchanged, {t.Remeasured} remeasured, {t.Drift} drift, {t.ContentReplaced} replaced), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}");
-                if (edgesOn) Console.WriteLine($"  edges: {t.Edges} tracks folded, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs)");
+                if (edgesOn) Console.WriteLine($"  edges: {t.Edges} tracks folded, {t.EdgesFailed} folds failed (see the store's failed 'edges' runs), {t.SupersededPruned} superseded-version rows pruned");
+                else if (t.SupersededPruned > 0) Console.WriteLine($"  edges: {t.SupersededPruned} superseded-version rows pruned");
                 // S2 C7: the companion reflects the store after every run that added edges. A null companionPath is the
                 // T18 caller saying "the publication that follows writes it with the catalog and sidecar" — not a missing
                 // argument, so it is not an error. Calling through printed "Error: no catalog beside which to write

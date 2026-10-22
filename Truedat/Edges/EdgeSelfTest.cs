@@ -181,7 +181,12 @@ namespace Truedat.Edges
                 var backV1 = EdgeStore.Read(dal, ShaVer, r.ProducerVersion);
                 assert(EdgeStore.ArraysCaptured(dal, ShaVer, rV2.ProducerVersion) && backV2 != null && backV2.Head.MomentaryCentiDb.Length == 300 && backV2.Head.MomentaryCentiDb[3] == -1234,
                     $"sticky across a producer-version change: the V2 default write keeps capturing, with V2's values (V2 arrays {EdgeStore.ArraysCaptured(dal, ShaVer, rV2.ProducerVersion)}, series {backV2?.Head.MomentaryCentiDb.Length}, [3] {(backV2 != null && backV2.Head.MomentaryCentiDb.Length > 3 ? backV2.Head.MomentaryCentiDb[3] : 0)} (-1234))");
-                assert(backV1 != null && backV1.Head.MomentaryCentiDb.Length == 300 && backV1.Head.MomentaryCentiDb[3] == -3827, "the V1 row is kept as it was (versions coexist; nothing discarded as a substitute)");
+                // Operator 2026-10-22 ("prune, we don't want to keep dead wood"): once the track holds the version just written, the rows at
+                // every OTHER version are dead — no reader selects them — and the write removes them: edge, segment and value rows alike.
+                // The run rows stay (history). The sticky decision above was read BEFORE the prune, so the capture still carried.
+                assert(backV1 == null && dal.CountSegments(ShaVer, r.ProducerVersion) == 0 && dal.CountValues(ShaVer, EdgeStore.ProducerKey, r.ProducerVersion) == 0
+                       && os.Db.ExecScalar("SELECT count(*) FROM edge WHERE content_hash = '" + ShaVer + "' AND producer_version <> '" + rV2.ProducerVersion + "';") == "0",
+                    $"the superseded V1 rows are pruned once V2 holds the track (V1 read {(backV1 == null ? "null" : "a row")}, segments {dal.CountSegments(ShaVer, r.ProducerVersion)}, values {dal.CountValues(ShaVer, EdgeStore.ProducerKey, r.ProducerVersion)})");
 
                 // The explicit discard verb: dry-run names what it would remove and changes nothing; the real run removes exactly those.
                 long withArrays = long.Parse(os.Db.ExecScalar("SELECT count(arrays) FROM edge;") ?? "0");
@@ -201,10 +206,41 @@ namespace Truedat.Edges
                 using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r, captureArrays: true); tx.Complete(); }
                 assert(dal.CountSegments(Sha1, r.ProducerVersion) == 2 && dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion) == vrows, "a second write of the same version adds no rows");
                 var r2 = SyntheticFold(dir); r2.ProducerVersion = "edges@v1;e20;p10";
-                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r2); tx.Complete(); }
-                assert(dal.CountSegments(Sha1, r2.ProducerVersion) == 2 && dal.CountSegments(Sha1, r.ProducerVersion) == 2 && EdgeStore.Read(dal, Sha1, r.ProducerVersion)?.Head.MomentaryCentiDb.Length == 300,
-                    "a different producer version coexists: its own 2 segments, the first version's rows untouched");
+                long runsBefore = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run;") ?? "0");
+                int pruned; using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, Sha1, ShaKind, null, r2, null, out _, out pruned); tx.Complete(); }
+                assert(dal.CountSegments(Sha1, r2.ProducerVersion) == 2 && dal.CountSegments(Sha1, r.ProducerVersion) == 0 && EdgeStore.Read(dal, Sha1, r.ProducerVersion) == null
+                       && dal.CountValues(Sha1, EdgeStore.ProducerKey, r.ProducerVersion) == 0 && pruned == 2 + 2 + vrows
+                       && long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run;") ?? "0") == runsBefore,
+                    $"a different producer version REPLACES the track's rows: its own 2 segments, the earlier version's edge/segment/value rows pruned and counted ({pruned} = 2 edges + 2 segments + {vrows} values), run rows untouched");
                 assert(EdgeStore.Read(dal, Sha1, "edges@v9;e30;p10") == null, "an unknown version reads as null");
+
+                // The store-wide sweep for stores that already carry superseded rows (every instance that ran the edges@v3 --refresh kept its
+                // edges@v2 set — 27% of MB3's file): a track that holds the CURRENT version loses its other versions; a track that holds only
+                // an old version keeps it (nothing current has replaced it yet; --refresh will). Legacy rows are planted by SQL at a version
+                // no fold writes any more.
+                const string ShaSweep = "5555555555555555555555555555555555555555555555555555555555555555";
+                const string ShaLegacyOnly = "6666666666666666666666666666666666666666666666666666666666666666";
+                const string Legacy = "edges@v2;e30;p10";
+                using (var tx = os.Db.BeginTransaction()) { EdgeStore.Write(dal, ShaSweep, ShaKind, null, r, captureArrays: false); tx.Complete(); }
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    foreach (var sha in new[] { ShaSweep, ShaLegacyOnly })
+                    {
+                        dal.ExecBound("INSERT INTO value(content_hash, content_hash_kind, segment_id, field, producer_key, producer_version, txt) VALUES (?, ?, 0, 'edges.status', 'edges', ?, 'ok');", sha, ShaKind, Legacy);
+                        dal.ExecBound("INSERT INTO segment(content_hash, content_hash_kind, set_key, kind, ordinal, start_ms, end_ms) VALUES (?, ?, ?, 'head', 0, 0, 30000);", sha, ShaKind, Legacy);
+                        dal.ExecBound("INSERT INTO edge(content_hash, content_hash_kind, producer_version, kind, status, start_ms, end_ms, updated_utc) VALUES (?, ?, ?, 'head', 'ok', 0, 30000, '2026-10-21T00:00:00Z');", sha, ShaKind, Legacy);
+                    }
+                    tx.Complete();
+                }
+                long sweptRows; using (var tx = os.Db.BeginTransaction()) { sweptRows = EdgeStore.PruneSupersededVersions(dal, r.ProducerVersion); tx.Complete(); }
+                string legacyLeft(string sha) => os.Db.ExecScalar("SELECT (SELECT count(*) FROM edge WHERE content_hash = '" + sha + "' AND producer_version = '" + Legacy + "') || '/' || " +
+                    "(SELECT count(*) FROM segment WHERE content_hash = '" + sha + "' AND set_key = '" + Legacy + "') || '/' || " +
+                    "(SELECT count(*) FROM value WHERE content_hash = '" + sha + "' AND producer_version = '" + Legacy + "');") ?? "?";
+                assert(sweptRows == 3 && legacyLeft(ShaSweep) == "0/0/0" && legacyLeft(ShaLegacyOnly) == "1/1/1"
+                       && dal.CountSegments(ShaSweep, r.ProducerVersion) == 2 && EdgeStore.Read(dal, ShaSweep, r.ProducerVersion)?.Status == "ok",
+                    $"the sweep prunes superseded versions only where the current one holds the track ({sweptRows} rows; sweep-track legacy left {legacyLeft(ShaSweep)}, legacy-only track {legacyLeft(ShaLegacyOnly)}; current rows intact)");
+                long sweptAgain; using (var tx = os.Db.BeginTransaction()) { sweptAgain = EdgeStore.PruneSupersededVersions(dal, r.ProducerVersion); tx.Complete(); }
+                assert(sweptAgain == 0, $"a second sweep finds nothing ({sweptAgain})");
 
                 // Unavailable: no edge rows, the whole-track word only. Failed: nothing at all.
                 const string Sha2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

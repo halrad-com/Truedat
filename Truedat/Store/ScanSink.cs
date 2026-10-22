@@ -32,6 +32,9 @@ namespace Truedat.Store
         public int SpillsLost;
         /// <summary>Keeper 099: edge rows written with arrays only by the sticky rule while the array flag was off (capture.stickyRowsRefreshed).</summary>
         public int StickyRowsRefreshed;
+        /// <summary>Operator 2026-10-22: rows at a superseded edge producer version removed because the current version holds the track
+        /// (per-write prunes plus the scan's end-of-run sweep over the residue an earlier version bump left).</summary>
+        public long SupersededPruned;
         public long ElapsedMs; public string? ResultPath; public string? StorePath;
 
         internal void Add(ScanSinkReport r)
@@ -39,7 +42,7 @@ namespace Truedat.Store
             Entries += r.Entries; Failures += r.Failures; Unchanged += r.Unchanged; Drift += r.Drift; ContentReplaced += r.ContentReplaced; ContentRekeyed += r.ContentRekeyed;
             Remeasured += r.Remeasured; Stale += r.Stale; EntitiesCreated += r.EntitiesCreated; Artifacts += r.Artifacts; ArtifactsShared += r.ArtifactsShared; ArtifactBytes += r.ArtifactBytes;
             Edges += r.Edges; EdgesFailed += r.EdgesFailed; ElapsedMs += r.ElapsedMs; SpillsLost += r.SpillsLost; StickyRowsRefreshed += r.StickyRowsRefreshed;
-            Retired += r.Retired; CopyOnly += r.CopyOnly;
+            SupersededPruned += r.SupersededPruned; Retired += r.Retired; CopyOnly += r.CopyOnly;
         }
     }
 
@@ -275,7 +278,7 @@ namespace Truedat.Store
                 report.EntitiesCreated = r.EntitiesCreated; report.ElapsedMs = r.ElapsedMs; report.ResultPath = r.ResultPath;
                 report.Artifacts = r.Artifacts; report.ArtifactsShared = r.ArtifactsShared; report.ArtifactBytes = r.ArtifactBytes;
                 report.Edges = r.Edges; report.EdgesFailed = r.EdgesFailed; report.SpillsLost = r.SpillsLost; report.StickyRowsRefreshed = r.StickyRowsRefreshed;
-                report.StorePath = storePath; report.Retired = r.Retired; report.CopyOnly = copyOnly.Count;
+                report.SupersededPruned = r.SupersededPruned; report.StorePath = storePath; report.Retired = r.Retired; report.CopyOnly = copyOnly.Count;
             }
             catch (Exception ex)
             {

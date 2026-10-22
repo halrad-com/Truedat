@@ -35,7 +35,9 @@ namespace Truedat.Edges
     ///                 11 x f32 spectral spread, u8 keyPresent, [u8-len name, u8-len scale, u8-len code, f32 strength,
     ///                 u8 agreement, u8 votesPresent].
     /// </code>
-    /// Rows are upserted: the same producer version rewrites itself, a different version (a settings change) coexists. An
+    /// Rows are upserted: the same producer version rewrites itself; a different version (a settings change, a corrected fold) REPLACES
+    /// the track's rows — the other versions' edge/segment/value rows are pruned once the new one holds the track (operator 2026-10-22,
+    /// <see cref="PruneSupersededVersions"/>; the run rows stay as history). An
     /// unavailable track writes no edge rows, only the whole-track status; a failed edge writes nothing at all (constraint
     /// 2 — no partial row) and the caller records the failed run.</summary>
     internal static class EdgeStore
@@ -60,8 +62,12 @@ namespace Truedat.Edges
         /// <summary>As <see cref="Write(StoreDal, string, string, long?, EdgeFoldResult, bool?)"/>, also reporting the edge rows THIS call
         /// wrote with arrays (keeper 109: a count of rows that merely exist overcounted an 'unavailable' fold, which never touches them).</summary>
         internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r, bool? captureArrays, out int arrayRowsWritten)
+            => Write(dal, contentKey, contentKeyKind, runId, r, captureArrays, out arrayRowsWritten, out _);
+
+        /// <summary>As above, also reporting the rows at OTHER producer versions this write pruned (see <see cref="PruneSupersededVersions"/>).</summary>
+        internal static int Write(StoreDal dal, string contentKey, string contentKeyKind, long? runId, EdgeFoldResult r, bool? captureArrays, out int arrayRowsWritten, out int supersededPruned)
         {
-            arrayRowsWritten = 0;
+            arrayRowsWritten = 0; supersededPruned = 0;
             if (r.Status == "failed") return 0;
             dal.EnsureProducer(ProducerKey, r.ProducerVersion, "analysis", needsAudio: true);
             int n = 0;
@@ -70,7 +76,7 @@ namespace Truedat.Edges
             Put(WholeTrack, "edges.status", null, r.Status, null, null, null);
             Put(WholeTrack, "edges.durationMs", r.DurationMs, null, null, null, null);
             if (!string.IsNullOrEmpty(r.Extractor)) Put(WholeTrack, "edges.extractor", null, r.Extractor, null, null, null);   // the frames depend on the build (review M4)
-            if (r.Status == "unavailable") return n;
+            if (r.Status == "unavailable") { supersededPruned = (int)PruneSupersededVersions(dal, r.ProducerVersion, contentKey); return n; }
             if (r.HeadTail != null)
             {
                 var d = r.HeadTail;
@@ -89,6 +95,8 @@ namespace Truedat.Edges
                 if (arrays != null) arrayRowsWritten++;
                 n++;
             }
+            // The sticky test above read the OLD version's rows; now that this version holds the track, the others are dead wood.
+            supersededPruned = (int)PruneSupersededVersions(dal, r.ProducerVersion, contentKey);
             return n;
         }
 
@@ -167,6 +175,33 @@ namespace Truedat.Edges
             tx.Complete();
             StoreLog.Info($"edges: selected version {(before == null ? "stamped" : $"changed from {before} to")} {producerVersion} (generation {g})");
             return true;
+        }
+
+        /// <summary>Operator 2026-10-22 ("prune, we don't want to keep dead wood"): the rows of every OTHER producer version for each track
+        /// that holds <paramref name="currentVersion"/> — its whole-track <c>edges.status</c> value row is the mark of a completed fold,
+        /// 'unavailable' included — are removed: <c>edge</c>, <c>segment</c> (set_key = the version) and the whole-track <c>value</c> rows.
+        /// No reader selects them (the companion, <c>--store-info</c> and the hub serve the selected version only), so once the
+        /// current fold holds the track they are dead weight: the edges@v3 bump left MB3 carrying its whole edges@v2 set, 27% of the
+        /// file. A track that holds ONLY an older version keeps it — nothing current has replaced it; <c>--refresh</c> will. Run rows are
+        /// history and stay. <paramref name="contentKey"/> scopes it to one track (the per-write call from <see cref="Write"/>); null is the
+        /// store-wide sweep the scan runs at its end for stores that already carry the residue. Returns the rows removed. The caller
+        /// owns the transaction. The freed pages go to the freelist (<c>--store-info</c> shows them); <c>--store-vacuum</c> compacts the file.</summary>
+        internal static long PruneSupersededVersions(StoreDal dal, string currentVersion, string? contentKey = null)
+        {
+            string held = "SELECT content_hash FROM value WHERE producer_key = '" + ProducerKey + "' AND segment_id = 0 AND field = 'edges.status' AND producer_version = ?1" +
+                          (contentKey != null ? " AND content_hash = ?2" : "");
+            long n = 0;
+            foreach (var sql in new[]
+            {
+                "DELETE FROM value WHERE producer_key = '" + ProducerKey + "' AND producer_version <> ?1 AND content_hash IN (" + held + ");",
+                "DELETE FROM edge WHERE producer_version <> ?1 AND content_hash IN (" + held + ");",
+                "DELETE FROM segment WHERE set_key LIKE '" + ProducerKey + "@%' AND set_key <> ?1 AND content_hash IN (" + held + ");",
+            })
+            {
+                if (contentKey != null) dal.ExecBound(sql, currentVersion, contentKey); else dal.ExecBound(sql, currentVersion);
+                n += dal.ScalarLong("SELECT changes();");
+            }
+            return n;
         }
 
         internal sealed class DropArraysResult { public long Rows, Tracks, Bytes; }

@@ -210,6 +210,7 @@ namespace Truedat.Store
                 ["entries"] = r.Entries, ["failures"] = r.Failures, ["unchanged"] = r.Unchanged, ["remeasured"] = r.Remeasured, ["drift"] = r.Drift,
                 ["contentReplaced"] = r.ContentReplaced, ["entitiesCreated"] = r.EntitiesCreated, ["edges"] = r.Edges, ["edgesFailed"] = r.EdgesFailed,
                 ["edgesOn"] = edgesOn ? 1 : 0, ["elapsedMs"] = r.ElapsedMs, ["checkpointFailures"] = r.CheckpointFailures, ["spillsLost"] = r.SpillsLost,
+                ["supersededPruned"] = r.SupersededPruned,
             };
             if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
             else if (r.SpillsLost > 0) _scanStoreFailure = $"store write lost {r.SpillsLost} edge fold(s): the spilled fold could not be read back when writing (recorded as failed edges runs; --refresh re-analyses them)";
