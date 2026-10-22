@@ -558,8 +558,28 @@ namespace Truedat.Store
                     var path = StoreResult.WriteScan(store, ScanSink.Total, true, null, started); StoreResult.FinishScan(0);
                     assert(path != null && StoreResult.TryRead(path!, out rec) && rec.Outcome == "failed" && rec.ExitCode == 0 && rec.Reason != null && rec.Reason.StartsWith("store write lost 1 edge fold") && rec.Detail != null && rec.Detail["spillsLost"] == 1,
                         $"the record is NOT completed when a fold was lost: {rec.Outcome} / {rec.Reason}");
+
+                    // (4) a fold that could not be SPILLED at all (disk full, the pending directory unwritable): the same rule as (3) — a failed
+                    //     edges run naming the cause, counted as lost, the track still lacking edges. Before: StashEdges warned and dropped the
+                    //     fold, so the entry arrived with no fold, no edges run was written, the summary said "0 folds failed", and the track had
+                    //     no edges with nothing in the store saying why.
+                    ScanSink.Reset(); StoreResult.ResetScanForTest();
+                    const string k4 = @"D:\music\rb4.flac"; var sha4 = new string('b', 64);
+                    ScanSink.FailEdgeStashForTest = "There is not enough space on the disk.";
+                    try { ScanSink.StashEdges(k4, Fold(114)); } finally { ScanSink.FailEdgeStashForTest = null; }
+                    ScanSink.Record(k4, E(sha4), k4);
+                    var unspilled = ScanSink.Flush(store, "output-x64.5", new[] { k4 }, final: true);
+                    long failedRuns4; bool lacking4; string? component4;
+                    using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
+                        failedRuns4 = long.Parse(os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND content_hash = '" + sha4 + "' AND error_text LIKE '%not enough space%';") ?? "0");
+                        component4 = os.Db.ExecScalar("SELECT failed_components FROM run WHERE producer_key = 'edges' AND outcome = 'failed' AND content_hash = '" + sha4 + "';");
+                        lacking4 = os.Dal.ContentKeysLackingEdges(global::Truedat.Edges.EdgeStore.ProducerKey, settings.ProducerVersion, includeFailed: false).Contains(sha4);
+                    }
+                    assert(unspilled.Ok && unspilled.Entries == 1 && unspilled.Edges == 0 && unspilled.EdgesFailed == 1 && unspilled.SpillsLost == 1 && failedRuns4 == 1 && component4 == "spill-lost" && lacking4,
+                        $"a fold that could not be spilled is a FAILED edges run naming the cause, never silently dropped (edges {unspilled.Edges}, failed {unspilled.EdgesFailed}, lost {unspilled.SpillsLost}, failed runs naming it {failedRuns4}, component '{component4}', still lacking {lacking4})");
                 }
-                finally { ImportCommand.FailAfterEntriesForTest = 0; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
+                finally { ImportCommand.FailAfterEntriesForTest = 0; ScanSink.FailEdgeStashForTest = null; ScanSink.StoreDirectory = prevDir; ScanSink.Reset(); StoreResult.ResetScanForTest(); }
             }
         }
 

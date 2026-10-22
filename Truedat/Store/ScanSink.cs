@@ -99,12 +99,16 @@ namespace Truedat.Store
 
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
         /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
+        /// <summary>Self-test seam: when set, the next spill write fails with this message (a full disk, an unwritable pending directory).</summary>
+        internal static string? FailEdgeStashForTest;
+
         internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges)
         {
             var dir = StoreDirectory;
             if (dir == null) return;
             try
             {
+                if (FailEdgeStashForTest != null) throw new System.IO.IOException(FailEdgeStashForTest);
                 var pending = ArtifactStore.PendingDir(dir);
                 System.IO.Directory.CreateDirectory(pending);
                 var path = System.IO.Path.Combine(pending, Guid.NewGuid().ToString("N") + ".edges");
@@ -112,8 +116,19 @@ namespace Truedat.Store
                 if (_stashedEdges.TryGetValue(analysedPath, out var previous)) TryDelete(previous);
                 _stashedEdges[analysedPath] = path;
             }
-            catch (Exception ex) { StoreLog.Warn($"could not stash the edge fold for {analysedPath}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                // Never dropped: the entry still gets its fold, as a marker the import loop reads back as a FAILED edges run naming this
+                // cause (the same path as a spill that went missing). Dropping it here left the track with no edges, no failed run, and a
+                // summary saying 0 folds failed.
+                if (_stashedEdges.TryGetValue(analysedPath, out var previous)) TryDelete(previous);
+                _stashedEdges[analysedPath] = UnspilledPrefix + ex.Message;
+                StoreLog.Warn($"could not stash the edge fold for {analysedPath}: {ex.Message} (recorded as a failed edges run)");
+            }
         }
+
+        /// <summary>Marks a fold whose spill file could not be written; what follows the prefix is the cause.</summary>
+        const string UnspilledPrefix = "unspilled:";
 
 
         /// <summary>Reads a spilled fold. READ ONLY — the file is deleted by the import loop after the transaction that wrote its rows has
@@ -123,6 +138,7 @@ namespace Truedat.Store
         internal static global::Truedat.Edges.EdgeFoldResult? ReadEdges(string file, out string? error)
         {
             error = null;
+            if (file.StartsWith(UnspilledPrefix, StringComparison.Ordinal)) { error = "edge fold could not be spilled: " + file.Substring(UnspilledPrefix.Length); return null; }
             try { return global::Truedat.Edges.EdgeStore.UnpackResult(System.IO.File.ReadAllBytes(file)); }
             catch (Exception ex) { error = $"spilled edge fold unreadable ({file}): {ex.Message}"; StoreLog.Warn(error); return null; }
         }
@@ -190,7 +206,7 @@ namespace Truedat.Store
             return n;
         }
 
-        static void TryDelete(string path) { try { System.IO.File.Delete(path); } catch { } }
+        static void TryDelete(string path) { if (path.StartsWith(UnspilledPrefix, StringComparison.Ordinal)) return; try { System.IO.File.Delete(path); } catch { } }
 
         /// <summary><paramref name="analysedPath"/> is the path the extractor was given (staged copy or original); it ties the
         /// stashed main JSON to this catalog entry so the flush can file it under the entry's content key.</summary>
