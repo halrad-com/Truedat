@@ -11369,15 +11369,14 @@ namespace Truedat
         }
 
         /// <summary>Operator 2026-10-22: routine maintenance at the end of every scan, after the final publication — a plain VACUUM in WAL
-        /// mode when at least a tenth of the store's pages are free (the prune of superseded edge versions, retired rows, a drop). Below
-        /// that nothing is touched; a failure is a warning, never a failed scan (the store's contents are already committed and published).</summary>
-        internal const double CompactMinFreeFraction = 0.10;
+        /// mode, every scan (see VacuumCommand.Compact for why there is no free-page gate). Printed only when the file shrank; a failure
+        /// is a warning, never a failed scan (the store's contents are already committed and published).</summary>
         internal static void CompactStoreAfterScan(string storePath)
         {
             try
             {
-                var c = global::Truedat.Store.VacuumCommand.Compact(storePath, CompactMinFreeFraction);
-                if (c != null)
+                var c = global::Truedat.Store.VacuumCommand.Compact(storePath);
+                if (c != null && c.BytesAfter < c.BytesBefore)
                     Console.WriteLine($"  [store compacted: {c.BytesBefore:N0} -> {c.BytesAfter:N0} bytes ({100.0 * (c.BytesAfter - c.BytesBefore) / Math.Max(1, c.BytesBefore):+0.0;-0.0;0.0}%) in {c.Seconds:F1} s]");
             }
             catch (Exception ex) { Console.Error.WriteLine($"  WARNING: store not compacted ({ex.Message}); the next scan retries"); }

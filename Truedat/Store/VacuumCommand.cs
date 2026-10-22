@@ -48,11 +48,12 @@ namespace Truedat.Store
 
         /// <summary>Operator 2026-10-22 ("can we do a vacuum at the end as routine maintenance"): the scan's end-of-run compaction. A plain
         /// VACUUM in WAL mode — NOT the verb's journal-mode switch, which needs the store closed everywhere and fails with "database is
-        /// locked" while the hub holds it (measured on an MB3 copy; a plain VACUUM with an idle reader open took 0.2 s). Runs only when the
-        /// free pages are at least <paramref name="minFreeFraction"/> of the file (null = skipped, nothing touched); skipped with a warning
-        /// when the volume has less than twice the store free, because VACUUM in WAL mode writes the whole database into the WAL first.
-        /// The WAL is checkpointed and truncated afterwards so the file IS the store again. Nothing stored changes (round-trip pinned).</summary>
-        internal static VacuumReport? Compact(string storePath, double minFreeFraction)
+        /// locked" while the hub holds it (a plain VACUUM with an idle reader open does not). Runs every time — no
+        /// freelist gate: most reclaimable space is half-empty pages, which freelist_count cannot see, so a free-page
+        /// threshold skipped stores that were mostly reclaimable. Skipped (null) with a warning only when the volume has
+        /// less than twice the store free, because VACUUM in WAL mode writes the whole database into the WAL first. The WAL is
+        /// checkpointed and truncated afterwards so the file IS the store again. Nothing stored changes (round-trip pinned).</summary>
+        internal static VacuumReport? Compact(string storePath)
         {
             var r = new VacuumReport();
             var sw = Stopwatch.StartNew();
@@ -61,22 +62,19 @@ namespace Truedat.Store
             os.Dal.ResetAll();                                       // VACUUM refuses while any statement is mid-step
             r.PageSizeBefore = r.PageSizeAfter = int.Parse(os.Db.ExecScalar("PRAGMA page_size;") ?? "0");
             r.PagesBefore = long.Parse(os.Db.ExecScalar("PRAGMA page_count;") ?? "0");
-            long free = long.Parse(os.Db.ExecScalar("PRAGMA freelist_count;") ?? "0");
             r.BytesBefore = r.PagesBefore * r.PageSizeBefore;
-            if (free <= 0 || r.PagesBefore <= 0 || free < minFreeFraction * r.PagesBefore) return null;
+            if (r.PagesBefore <= 0) return null;
             long? avail = AvailableBytesOn(os.Path);
             if (avail.HasValue && avail.Value < r.BytesBefore * 2)
             {
-                StoreLog.Warn($"compaction skipped: {free:N0} free pages to reclaim but only {avail.Value:N0} bytes free on the volume (a VACUUM needs about twice the store, {r.BytesBefore * 2:N0})");
+                StoreLog.Warn($"compaction skipped: only {avail.Value:N0} bytes free on the volume (a VACUUM needs about twice the store, {r.BytesBefore * 2:N0})");
                 return null;
             }
-            StoreLog.Info($"compacting {os.Path}: {free:N0} of {r.PagesBefore:N0} pages free");
             os.Db.Exec("VACUUM;");
             os.Db.Exec("PRAGMA wal_checkpoint(TRUNCATE);");
             r.PagesAfter = long.Parse(os.Db.ExecScalar("PRAGMA page_count;") ?? "0");
             r.BytesAfter = r.PagesAfter * r.PageSizeAfter;
             r.Seconds = sw.Elapsed.TotalSeconds;
-            StoreLog.Info($"compaction done: {r.BytesBefore:N0} -> {r.BytesAfter:N0} bytes in {r.Seconds:F1} s");
             return r;
         }
 

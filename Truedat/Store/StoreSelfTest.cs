@@ -1038,8 +1038,8 @@ namespace Truedat.Store
 
                 // Operator 2026-10-22 ("can we do a vacuum at the end as routine maintenance"): the scan's end-of-run compaction is a plain
                 // VACUUM in WAL mode — the verb's journal-mode switch fails with "database is locked" while the hub holds the store open
-                // (measured on an MB3 copy), a plain VACUUM does not. It runs only when the free pages are worth it (>= the fraction given)
-                // and reports before/after; below the threshold it returns null and touches nothing.
+                // , a plain VACUUM does not. It runs every scan (no free-page gate)
+                // and reports before/after.
                 using (var db = SqliteDb.Open(store, create: false))
                 {
                     db.Exec("CREATE TABLE junk(x BLOB); INSERT INTO junk VALUES (zeroblob(3000000)); DELETE FROM junk; DROP TABLE junk;");
@@ -1050,15 +1050,34 @@ namespace Truedat.Store
                 using (var holder = SqliteDb.Open(store, create: false))   // a second connection holding the store open, as the hub does
                 {
                     holder.ExecScalar("SELECT count(*) FROM track_copy;");
-                    var c = VacuumCommand.Compact(store, 0.10);
+                    var c = VacuumCommand.Compact(store);
                     string journal; long freeAfter;
                     using (var db = SqliteDb.Open(store, create: false)) { journal = db.ExecScalar("PRAGMA journal_mode;") ?? ""; freeAfter = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "-1"); }
                     assert(c != null && c.BytesAfter < c.BytesBefore && c.PagesAfter < c.PagesBefore && freeAfter == 0 && string.Equals(journal, "wal", StringComparison.OrdinalIgnoreCase),
                         $"routine compaction reclaims the free pages in WAL mode with another connection open ({(c == null ? "null" : $"{c.BytesBefore:N0} -> {c.BytesAfter:N0} bytes, {c.PagesBefore} -> {c.PagesAfter} pages")}; free after {freeAfter}; journal {journal})");
-                    assert(VacuumCommand.Compact(store, 0.10) == null, "below the threshold the compaction is skipped (null), nothing rewritten");
+                    var again = VacuumCommand.Compact(store);
+                    assert(again != null && again.BytesAfter == again.BytesBefore, $"compacting an already-compact store changes nothing ({(again == null ? "skipped" : $"{again.BytesBefore:N0} -> {again.BytesAfter:N0} bytes")})");
                 }
                 var rt2 = ExportCommand.Roundtrip(store, catalog, null);
                 assert(rt2.Equal && rt2.Same == entries.Count, $"round-trip is EQUAL after the routine compaction (same {rt2.Same}, different {rt2.Different})");
+
+                // 2026-10-22: a store can be mostly reclaimable with almost nothing on the freelist —
+                // the rest was half-empty pages, which freelist_count cannot see — so a freelist gate skipped both. Deleting every other
+                // row reproduces that shape: pages half full, almost none free. The scan's compaction must still shrink the file.
+                using (var db = SqliteDb.Open(store, create: false))
+                {
+                    db.Exec("CREATE TABLE slack(id INTEGER PRIMARY KEY, b BLOB);");
+                    db.Exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 6000) INSERT INTO slack SELECT i, randomblob(300) FROM n;");
+                    db.Exec("PRAGMA wal_checkpoint(TRUNCATE);");
+                }
+                VacuumCommand.Compact(store);
+                using (var db = SqliteDb.Open(store, create: false)) { db.Exec("DELETE FROM slack WHERE id % 2 = 0; PRAGMA wal_checkpoint(TRUNCATE);"); }
+                long slackFree, slackPages;
+                using (var db = SqliteDb.Open(store, create: false)) { slackFree = long.Parse(db.ExecScalar("PRAGMA freelist_count;") ?? "0"); slackPages = long.Parse(db.ExecScalar("PRAGMA page_count;") ?? "0"); }
+                assert(slackFree * 10 < slackPages, $"fixture: the space is half-empty pages, not free ones ({slackFree} free of {slackPages})");
+                var cs = VacuumCommand.Compact(store);
+                assert(cs != null && cs.BytesAfter < cs.BytesBefore,
+                    $"routine compaction reclaims half-empty pages the freelist cannot see ({(cs == null ? "skipped" : $"{cs.BytesBefore:N0} -> {cs.BytesAfter:N0} bytes")}; {slackFree} of {slackPages} pages free before)");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }
