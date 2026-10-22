@@ -225,8 +225,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   batches, with a mirror catalog resolving to the same entities. `--store-export` writes a
   catalog and `.mbxs` back out through the unchanged writer, plus `key-moves.json` whenever a
   content hash was superseded. `--store-roundtrip` proves per-entry byte equality of store
-  against catalog; on a 72,477-track catalog it reports EQUAL. `--store-info` reports bytes per
-  track, the projection to 156k tracks, analysis speed, coverage by wave and shared content.
+  against catalog. `--store-info` reports bytes per track, analysis speed, coverage by wave and
+  shared content.
   `--stats --store` and `--duplicates --store` answer from the store. Uses Windows' built-in
   SQLite (`winsqlite3.dll`, 3.40+, checked at open with a plain refusal when missing); nothing is
   installed or shipped. `mbxmoods.json` stays what MBXHub reads; every existing mode is unchanged;
@@ -237,8 +237,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
   `track_copy` (tags, `fingerprint.v1`, `fileMd5`, SMFM, `analysisDuration` — once per location). A v1
   store migrates on first open; the first-imported copy's description wins, differences within the
   extractor's run-to-run noise are counted and differences beyond it become queryable `conflict` rows
-  (`field`, `value_a`, `value_b`). On a 72,477-track catalog: 787 extra copies of duplicate audio, 559
-  within noise, 32 beyond (128 conflicts, led by one genuine sha collision). `--store-roundtrip` reports
+  (`field`, `value_a`, `value_b`). `--store-roundtrip` reports
   merged copies apart from unexplained differences and stays EQUAL for every single-copy entry.
   `value` gains `segment_id`; `conflict` gains `field`, `run_a`/`run_b`, `value_a`/`value_b`.
 
@@ -285,9 +284,9 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 - **`fingerprint.v1.pathTail` recorded the staging copy, not the track.** Any scan of a
   library over a UNC path, a mapped network drive, or a non-ASCII local path wrote the temp
-  copy's name (`temp\.truedat-stage\<guid>.flac`) as the track's path witness — 1,367 of
-  72,477 entries in one catalog. `--migrate` re-derives the tail from each entry's own key:
-  catalog-only, no library XML, no file access, ~30 s on a 262 MB catalog. `--fixup` repairs
+  copy's name (`temp\.truedat-stage\<guid>.flac`) as the track's path witness. `--migrate`
+  re-derives the tail from each entry's own key: catalog-only, no library XML, no file access.
+  `--fixup` repairs
   it too, after reconciliation.
 - **A locked fingerprint read gets retried instead of losing the track.** The sha and tags
   reads retry a sharing violation; the fingerprint read, opened the same way in the same
@@ -532,7 +531,7 @@ Covers everything since RC3 — `v0.5.4.9-RC4` shipped without its own section, 
   `--preview` makes. `--paths --json` emits the same data for MBXHub's status page.
 
 - **`--verify --chunk M/N`** — verify in restartable slices. A whole-catalog verify re-reads
-  every file's audio; on a ~6 TB / 156k library over WiFi that is an 18-24 hour one-shot pass.
+  every file's audio; on a large library over WiFi that is a many-hour one-shot pass.
   Each chunk now verifies its own hash-mod slice and writes
   `mbxmoods-verify.<host>.<M>of<N>.csv`, so a finished shard is durably done. Under `--backfill`
   shards must run one at a time — each save rewrites the whole catalog from its own copy, and
