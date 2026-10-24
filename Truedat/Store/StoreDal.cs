@@ -101,6 +101,14 @@ namespace Truedat.Store
         internal long EnsureRoot(string machineId, string path, string role, string nowUtc)
         {
             var existing = Row("SELECT id FROM library_root WHERE machine_id = ? AND path = ?;", s => (long?)s.GetInt64(0), null, machineId, path);
+            // codex rescan 2026-10-23 R1: the same machine's row under ANOTHER role is not this root. Returning it sent a primary write
+            // under a mirror root; (machine, path) is unique, so the collision is refused rather than relabelled.
+            if (existing.HasValue)
+            {
+                var held = Row("SELECT role FROM library_root WHERE id = ?;", s => s.GetString(0), null, existing.Value);
+                if (!string.Equals(held, role, StringComparison.OrdinalIgnoreCase))
+                    throw new StoreException($"Root {path} is already registered on this machine as a {held} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {held}.");
+            }
             if (!existing.HasValue && role == "primary")
                 existing = Row("SELECT id FROM library_root WHERE role = 'primary' AND lower(rtrim(replace(path, '/', '\'), '\')) = ? ORDER BY id LIMIT 1;",
                                s => (long?)s.GetInt64(0), null, path.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant());
@@ -132,6 +140,25 @@ namespace Truedat.Store
         {
             var list = new List<(long, string, string)>();
             var st = Stmt("SELECT id, path, role FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
+            finally { st.Reset(); }
+            return list;
+        }
+
+        /// <summary>
+        /// The roots a write of <paramref name="role"/> may land under (codex rescan 2026-10-23 R1). A primary write — a scan, a
+        /// catalog import, a store-backed verb's result — belongs to the library, so its roots are <see cref="LibraryRoots"/>: the
+        /// same set publication reads. Routing it over EVERY root let the longest-prefix pick land on an older MIRROR root over the
+        /// same path, so --strip-smfm cleared the mirror's scores and --prune-entry retired the mirror's location while the published
+        /// primary kept both, exit 0. A mirror or endpoint write sees only that role's roots on the writing machine (a mirror root is
+        /// one machine's view; <see cref="EnsureRoot"/> keeps them per machine).
+        /// </summary>
+        internal List<(long Id, string Path, string Role)> RootsForWrites(string machineId, string role)
+        {
+            if (role == "primary") return LibraryRoots();
+            var list = new List<(long, string, string)>();
+            var st = Stmt("SELECT id, path, role FROM library_root WHERE role = ? AND machine_id = ? ORDER BY id;");
+            BindAll(st, new object?[] { role, machineId });
             try { while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
             finally { st.Reset(); }
             return list;

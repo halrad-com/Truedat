@@ -1944,6 +1944,13 @@ namespace Truedat.Store
                 long r2 = dal.EnsureRoot(m1.Id, @"D:\Music", "primary", now);
                 long r3 = dal.EnsureRoot(m1.Id, @"X:\Library", "mirror", now);
                 assert(r1 == r2 && r3 != r1 && dal.Count("library_root") == 2, "EnsureRoot is idempotent per (machine, path) and distinct per path");
+                // codex rescan 2026-10-23 R1 (TDA R1b): the same machine registering the same path under ANOTHER role got the existing
+                // row back — a primary write then landed under the mirror root, which is R1 in a second coat, and the schema keys
+                // (machine, path) so both cannot exist. A role collision is a refusal naming the root and the role it holds.
+                string? collision = null;
+                try { dal.EnsureRoot(m1.Id, @"X:\Library", "primary", now); } catch (StoreException ex) { collision = ex.Message; }
+                assert(collision != null && collision.Contains(@"X:\Library") && collision.Contains("mirror") && dal.Count("library_root") == 2,
+                    $"R1b: registering a path this machine holds as a MIRROR as a primary is refused, naming the root and its role, nothing written ({collision ?? "no refusal"}; roots {dal.Count("library_root")})");
 
                 // Codex review 2026-10-20 #6: after --machine-adopt the adopting host's roots live under ITS machine row, but default
                 // export and the scan selected roots by the creating machine's id, so the host's own library was left out (and a scan

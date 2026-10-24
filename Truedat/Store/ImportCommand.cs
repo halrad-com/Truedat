@@ -201,7 +201,9 @@ namespace Truedat.Store
                 }
                 else
                 {
-                    foreach (var ex in dal.ListRoots()) rootIds.Add((ex.Path, ex.Id));
+                    // The roots of this write's ROLE, never every root: a primary write over every root could land under an older
+                    // mirror root of the same path (codex rescan 2026-10-23 R1, StoreDal.RootsForWrites).
+                    foreach (var ex in dal.RootsForWrites(writerMachine, role)) rootIds.Add((ex.Path, ex.Id));
                     var uncovered = allPaths.Where(p => RootFor(rootIds, p) == null).ToList();
                     if (uncovered.Count > 0)
                     {

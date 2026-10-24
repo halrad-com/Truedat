@@ -15786,6 +15786,77 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }
 
+            // codex rescan 2026-10-23 R1: a MIRROR root and a PRIMARY root over the same path (another box's mirror catalog imported, then
+            // the same folder registered here as primary). The verb's write routed over EVERY root and RootFor took the first equally
+            // specific one — the older mirror — so --strip-smfm cleared the mirror's scores and --prune-entry retired the mirror's
+            // location while the published primary kept both, exit 0. A primary write's roots are the library's (LibraryRoots), in
+            // either registration order.
+            foreach (var mirrorFirst in new[] { true, false })
+            {
+                var dir = Path.Combine(Path.GetTempPath(), "truedat-verb-mixed-roots-selftest-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var savedStore = _storePath;
+                try
+                {
+                    var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, MoodsFileName);
+                    var one = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+                    {
+                        [@"D:\music\t.flac"] = new TrackEntry
+                        {
+                            Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120, Mfcc = new[] { 1.5, -2.25 }, SmfmScores = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, SmfmChannel = 9, SmfmBpm = 120 },
+                            LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('h', 64),
+                        }
+                    };
+                    const string other = "00000000-0000-7000-8000-00000000beef";
+                    string now = DateTime.UtcNow.ToString("o");
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                    {
+                        if (mirrorFirst)
+                        {
+                            // the other box's mirror arrives first: registered here, then re-homed to that box's machine row
+                            global::Truedat.Store.ImportCommand.ExecuteEntries(store, one, @"D:\music", "mirror", true, "import", "1", "fixture-mirror", null, null);
+                            using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, now))
+                                os.Db.Exec($"INSERT INTO machine(id, hostname, created_utc) VALUES ('{other}', 'OTHER', '{now}'); UPDATE library_root SET machine_id = '{other}' WHERE role = 'mirror';");
+                            global::Truedat.Store.ImportCommand.ExecuteEntries(store, one, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                        }
+                        else
+                        {
+                            global::Truedat.Store.ImportCommand.ExecuteEntries(store, one, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                            // the other box's mirror of the same path, registered after: the primary's location + copy rows duplicated under a mirror root
+                            using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, now))
+                                os.Db.Exec($"INSERT INTO machine(id, hostname, created_utc) VALUES ('{other}', 'OTHER', '{now}');" +
+                                           $"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{other}', 'D:\\music', 'mirror', '{now}');" +
+                                           "CREATE TEMP TABLE tl AS SELECT * FROM track_location; UPDATE tl SET id = id + 1000, root_id = (SELECT id FROM library_root WHERE role = 'mirror'); INSERT INTO track_location SELECT * FROM tl; DROP TABLE tl;" +
+                                           "CREATE TEMP TABLE tc AS SELECT * FROM track_copy; UPDATE tc SET location_id = location_id + 1000; INSERT INTO track_copy SELECT * FROM tc; DROP TABLE tc;");
+                        }
+                    }
+                    string order = mirrorFirst ? "mirror first" : "primary first";
+                    string Q(string sql) { using (global::Truedat.Store.StoreLog.Quiet()) using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) return os.Db.ExecScalar(sql) ?? "none"; }
+                    string Smfm(string role) => Q($"SELECT CASE WHEN c.smfmScores IS NULL THEN 'cleared' ELSE 'kept' END FROM track_copy c JOIN track_location l ON l.id = c.location_id JOIN library_root r ON r.id = l.root_id WHERE r.role = '{role}';");
+                    string State(string role) => Q($"SELECT l.state FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE r.role = '{role}';");
+                    Assert(Smfm("primary") == "kept" && Smfm("mirror") == "kept" && State("primary") == "present" && State("mirror") == "present" && Q("SELECT count(*) FROM library_root;") == "2",
+                        $"mixed roots fixture ({order}): one primary + one mirror root over the same path, both locations present with scores (roots {Q("SELECT count(*) FROM library_root;")})");
+
+                    _storePath = store;
+                    var saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                    int exit;
+                    try { using (global::Truedat.Store.StoreLog.Quiet()) exit = RunStoreBackedVerb("strip", "--strip-smfm", cat, () => { RunStripSmfm(cat, false); return Environment.ExitCode; }); }
+                    finally { Console.SetOut(saveOut); }
+                    Assert(exit == 0 && Smfm("primary") == "cleared" && Smfm("mirror") == "kept",
+                        $"R1 ({order}): --strip-smfm clears the PRIMARY copy's scores and leaves the mirror's alone (exit {exit}, primary {Smfm("primary")}, mirror {Smfm("mirror")})");
+
+                    int exit2;
+                    saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                    try { using (global::Truedat.Store.StoreLog.Quiet()) exit2 = RunStoreBackedVerb("prune", "--prune-entry", cat, () => { RunPruneEntry(cat, new List<string> { @"D:\music\t.flac" }, false); return Environment.ExitCode; }); }
+                    finally { Console.SetOut(saveOut); }
+                    var published = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    LoadExistingMoods(cat, published);
+                    Assert(exit2 == 0 && State("primary") == "retired" && State("mirror") == "present" && published.Count == 0,
+                        $"R1 ({order}): --prune-entry retires the PRIMARY location, the mirror's stays, and the published catalog no longer holds the track (exit {exit2}, primary {State("primary")}, mirror {State("mirror")}, published {published.Count})");
+                }
+                finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
+            }
+
             // A failed FINAL write is a failed run (codex review 2026-10-20, #3). The exit-code wiring in the three scan modes is read,
             // not pinned here — a function seam cannot pin its call sites; the rule itself is.
             {
