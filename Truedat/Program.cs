@@ -15329,6 +15329,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Returns null on ffmpeg absence / decode failure / silent file — never throws.
         /// Designed to run concurrently with Essentia (single ffmpeg child process,
         /// ~5.5 MB total decoded payload, typically completes in 1–3s warm).</summary>
+        /// <summary>The bitUsage sample tally, out of the ffmpeg drain so it can be pinned: one s32 sample into the trailing-zero histogram
+        /// (33 buckets: 0..31 for non-zero samples, 32 for zero), the counts and the energy sum.</summary>
+        internal static class BitUsageTally
+        {
+            internal static void Add(int s, long[] tzHistogram, ref long count, ref long countNonZero, ref double signalSqSum)
+            {
+                count++;
+                signalSqSum += (double)s * s;
+                if (s == 0) { tzHistogram[32]++; return; }
+                countNonZero++;
+                // The bit pattern itself (codex perf review 2026-10-23 F5): negation keeps a non-zero value's trailing-zero count, and
+                // the old "Math.Abs(int.MinValue) overflows — clamp to int.MaxValue" turned 0x80000000's 31 trailing zeros into 0, so one
+                // full-scale negative clip forced LowestNonZeroBit to 0 for the whole window.
+                tzHistogram[TrailingZeroCountUInt32(unchecked((uint)s))]++;
+            }
+
+            /// <summary>The lowest set bit over the window: the first non-zero bucket below 32 (0 when none).</summary>
+            internal static int LowestNonZeroBit(long[] tzHistogram)
+            {
+                for (int i = 0; i < 32; i++) if (tzHistogram[i] > 0) return i;
+                return 0;
+            }
+        }
+
         static BitUsageSummary? ComputeBitUsage(string filePath, double durationSec, string? ffmpegExe)
             => ComputeBitUsage(filePath, durationSec, ffmpegExe, out _);
 
@@ -15410,17 +15434,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (got <= 0) break;
                     int total = residue + got;
                     int wholeSamples = total / 4;
-                    for (int i = 0; i < wholeSamples; i++)
-                    {
-                        int s = BitConverter.ToInt32(buf, i * 4);
-                        count++;
-                        signalSqSum += (double)s * s;
-                        if (s == 0) { tzHistogram[32]++; continue; }
-                        countNonZero++;
-                        // Math.Abs(int.MinValue) overflows — clamp.
-                        uint abs = s == int.MinValue ? (uint)int.MaxValue : (uint)Math.Abs(s);
-                        tzHistogram[TrailingZeroCountUInt32(abs)]++;
-                    }
+                    for (int i = 0; i < wholeSamples; i++) BitUsageTally.Add(BitConverter.ToInt32(buf, i * 4), tzHistogram, ref count, ref countNonZero, ref signalSqSum);
                     int used = wholeSamples * 4;
                     residue = total - used;
                     if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
@@ -15439,11 +15453,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (count == 0 || countNonZero == 0) { notApplicable = true; return null; }
 
                 // Lowest non-zero bit across the 30s window.
-                int lowestNonZeroBit = 0;
-                for (int i = 0; i < 32; i++)
-                {
-                    if (tzHistogram[i] > 0) { lowestNonZeroBit = i; break; }
-                }
+                int lowestNonZeroBit = BitUsageTally.LowestNonZeroBit(tzHistogram);
 
                 // Activity at the resolution boundary — fraction of non-silent samples
                 // whose lowest set bit is at the boundary position.
@@ -22153,6 +22163,27 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"workers: a config-set count names the config ({WorkersSummaryLine(32, new[] { "truedat.exe" }, new[] { "--parallel", "32" })})");
                 Assert(WorkersSummaryLine(22, new[] { "truedat.exe", "--parallel", "max" }, new string[0]) == "Workers:    22 (--parallel max)",
                     $"workers: --parallel max is named as typed ({WorkersSummaryLine(22, new[] { "truedat.exe", "--parallel", "max" }, new string[0])})");
+
+                // codex perf review 2026-10-23 F5: one full-scale NEGATIVE clipped sample (int.MinValue, bit pattern 0x80000000, 31
+                // trailing zeros) was clamped to int.MaxValue (0x7fffffff, 0 trailing zeros) before the count, forcing LowestNonZeroBit to
+                // 0 for the whole window — the padded-depth evidence of any clipped master read as full-depth content. In s32 output,
+                // genuine 24-bit alignment is 8 trailing zeros and 16-bit padded to 24 is 16 (codex x6 plan review, 8).
+                {
+                    int Lnz(params int[] samples)
+                    {
+                        var h = new long[33]; long c = 0, nz = 0; double sq = 0;
+                        foreach (var s in samples) BitUsageTally.Add(s, h, ref c, ref nz, ref sq);
+                        return BitUsageTally.LowestNonZeroBit(h);
+                    }
+                    Assert(Lnz(1 << 8, -(3 << 8), 7 << 8) == 8 && Lnz(1 << 8, -(3 << 8), 7 << 8, int.MinValue) == 8,
+                        $"F5: 24-bit-aligned s32 samples read 8 trailing zeros with and without a full-scale negative clip ({Lnz(1 << 8, -(3 << 8), 7 << 8)} / {Lnz(1 << 8, -(3 << 8), 7 << 8, int.MinValue)})");
+                    Assert(Lnz(1 << 16, -(5 << 16)) == 16 && Lnz(1 << 16, -(5 << 16), int.MinValue) == 16,
+                        $"F5: 16-bit padded to 24 reads 16 trailing zeros with and without a full-scale negative clip ({Lnz(1 << 16, -(5 << 16))} / {Lnz(1 << 16, -(5 << 16), int.MinValue)})");
+                    var h0 = new long[33]; long c0 = 0, nz0 = 0; double sq0 = 0;
+                    BitUsageTally.Add(int.MinValue, h0, ref c0, ref nz0, ref sq0); BitUsageTally.Add(0, h0, ref c0, ref nz0, ref sq0);
+                    Assert(c0 == 2 && nz0 == 1 && h0[32] == 1 && sq0 == (double)int.MinValue * int.MinValue,
+                        $"F5: the counts and the energy sum are from the signed sample itself (count {c0}, non-zero {nz0}, zeros {h0[32]})");
+                }
 
                 var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
                 Assert(hints.Contains(@"C:\t\real\r.mp3"), "root hints: the scan's whole work list joins the catalog's keys");
