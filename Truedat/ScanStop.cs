@@ -75,7 +75,9 @@ namespace Truedat
                 if (s == State.Active) { _state = State.FinalOwned; return true; }
             }
             if (s == State.StopOwned) { done?.Wait(); return false; }
-            return s == State.FinalOwned;   // Settled: nothing to redo
+            // FinalOwned again: true, because each scan mode calls BeginFinal exactly once (library :6759, per-file :5323), so a second call
+            // in one session cannot come from a second writer — only from the same caller re-asking. Settled: nothing to redo (labs 026).
+            return s == State.FinalOwned;
         }
 
         /// <summary>The final writes are done: the session settles and a stop arriving now (or later) gets that answer. A stop that JOINED the

@@ -254,7 +254,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = "truedat-v1-fft-rategate-2026-08-28";  // Phase 5 corpus1 thresholds UNCHANGED (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8) + the 2026-08-28 rate gate: hiresGenuine requires sampleRate > 44100, since a 24/44.1 file makes no hi-res claim and the panel has no bandwidth evidence at CD rate. Tag bumped because the same file can now answer differently than it did under corpus1 — that is an algorithm generation change, not a retune
+        public string Method = Program.HfStructureMethodCurrent;  // Phase 5 corpus1 thresholds UNCHANGED (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8) + the 2026-08-28 rate gate: hiresGenuine requires sampleRate > 44100, since a 24/44.1 file makes no hi-res claim and the panel has no bandwidth evidence at CD rate. Tag bumped because the same file can now answer differently than it did under corpus1 — that is an algorithm generation change, not a retune
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
         public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";
@@ -2286,13 +2286,22 @@ namespace Truedat
         /// negative clip no longer zeroes the trailing-zero count, so a clipped master's stored LowestNonZeroBit from the old method is not
         /// this method's answer. The HF tags did not move — F4 changed only when a decode counts as a measurement, not the measurement.</summary>
         internal const string BitUsageMethodCurrent = "ffmpeg-s32le-30s-mid-native-v2";
+        /// <summary>The HF method tags this build writes. Bumped from "managed-fft-radix2-30s-mid-native" / "truedat-v1-fft-rategate-2026-08-28"
+        /// by F4 (labs 2026-10-24, 026): before it the HF path judged whatever PCM arrived, so a short or partial decode could store a ratio
+        /// and a structure that look valid — values this build would not produce. Same thresholds, same maths; the tag names what counts as a
+        /// measurement, which is what the opt-in route keys on.</summary>
+        internal const string HfEnergyMethodCurrent = "managed-fft-radix2-30s-mid-native-v2";
+        internal const string HfStructureMethodCurrent = "truedat-v1-fft-rategate-2026-08-28-v2";
 
         /// <summary>codex x6 plan review 5 / plan Part A row R: the opt-in remeasurement route. Nothing compared the stored authenticity
         /// method tags to this build's, so a corrected measurement reached only new or changed tracks — "a --refresh recomputes them" was
         /// false. Stale = a STORED bitUsage whose method is not this build's; an entry with no bitUsage was not applicable and is not
         /// stale. Read only under <c>--refresh-authenticity</c> — never by --refresh, never automatically (the plan's single refresh decision).</summary>
         internal static bool AuthenticityStale(TrackFeatures? f)
-            => f?.BitUsage != null && !string.Equals(f.BitUsage.Method, BitUsageMethodCurrent, StringComparison.Ordinal);
+            => f != null
+               && ((f.BitUsage != null && !string.Equals(f.BitUsage.Method, BitUsageMethodCurrent, StringComparison.Ordinal))
+                   || (f.HfEnergyMethod != null && !string.Equals(f.HfEnergyMethod, HfEnergyMethodCurrent, StringComparison.Ordinal))
+                   || (f.HfSpectralStructure != null && !string.Equals(f.HfSpectralStructure.Method, HfStructureMethodCurrent, StringComparison.Ordinal)));
         internal static bool _refreshAuthenticity;
 
         /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges, plus (under --refresh-authenticity)
@@ -15809,7 +15818,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return (null, null, null);
             }
 
-            const string method = "managed-fft-radix2-30s-mid-native";
+            const string method = HfEnergyMethodCurrent;
             if (windowsValid == 0)
             {
                 var outcome = HfNoValidWindowsOutcome(sumHfEnergy, sumTotalEnergy, method);
@@ -22263,6 +22272,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(AuthenticityStale(old) && !AuthenticityStale(cur) && !AuthenticityStale(none) && !AuthenticityStale(null),
                         $"R: stale = a stored bitUsage with an older method; current, absent and null are not ({AuthenticityStale(old)}/{AuthenticityStale(cur)}/{AuthenticityStale(none)})");
                     Assert(BitUsageMethodCurrent != "ffmpeg-s32le-30s-mid-native", "R: F5 moved the bitUsage method tag — the old one is not this build's");
+                    // labs 2026-10-24 (026): before F4 the HF path judged whatever PCM arrived, so a short or partial decode could store a
+                    // ratio and a structure that look valid — values this build would not produce, the same situation as a clipped master's
+                    // LowestNonZeroBit. The HF tags move too, and the route finds them; an entry with no HF (44.1 kHz) is not stale.
+                    var oldHf = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, HfEnergyRatio = 0.01, HfEnergyMethod = "managed-fft-radix2-30s-mid-native" };
+                    var oldHfs = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, HfSpectralStructure = new HfSpectralStructure { Method = "truedat-v1-fft-rategate-2026-08-28" } };
+                    var curHf = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, HfEnergyRatio = 0.01, HfEnergyMethod = HfEnergyMethodCurrent, HfSpectralStructure = new HfSpectralStructure { Method = HfStructureMethodCurrent } };
+                    Assert(AuthenticityStale(oldHf) && AuthenticityStale(oldHfs) && !AuthenticityStale(curHf),
+                        $"R: an older hfEnergyMethod or hfSpectralStructure.method is stale too; the current pair is not ({AuthenticityStale(oldHf)}/{AuthenticityStale(oldHfs)}/{AuthenticityStale(curHf)})");
+                    Assert(HfEnergyMethodCurrent != "managed-fft-radix2-30s-mid-native" && HfStructureMethodCurrent != "truedat-v1-fft-rategate-2026-08-28",
+                        "R: F4 moved both HF tags — a pre-F4 value from a failed or short decode is not this build's");
                     bool savedRA = _refreshAuthenticity;
                     try
                     {
