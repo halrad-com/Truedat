@@ -192,8 +192,8 @@ series, beats, sub-window summaries and MFCC/spectral vectors. Captured arrays a
 leave only through `--edge-arrays-drop [--dry-run]`. Roughly 0.2 s of fold plus PCM per track beside the
 analysis. `--store-info` reports the coverage
 (eligible, captured, missing), bytes per track and median time. In
-`--analyze-file` and `--file-list` the flag needs `--moods`, because the store is written after the
-catalog entry.
+`--analyze-file` and `--file-list` the flag needs `--moods`, because the store publishes the catalog
+and has to know which one.
 
 **Filling the gap (`--refresh`).** A library imported into the store has descriptions but no edge rows,
 and a cache hit never folds. `--refresh` closes that gap inside the normal scan: a track the store lists
@@ -208,7 +208,8 @@ divergences and the PCM `rms` block, and per track the head-vs-tail divergence; 
 HPCP and sub-window summaries stay in the store. It is
 written from the store, compactly (about 1.8 KB per track), after any `--edges` scan
 that added rows, and on demand by `--edges-export [path]`. Media without a sha are counted and omitted.
-Absent means not yet. The hub never reads the store.
+Absent means not yet. MBXHub reads the store directly when one sits beside the catalog, and falls
+back to these files when there is none.
 
 **Limits.** The fold reads each descriptor whole, so a multi-hour file costs several hundred MB of
 transient memory per worker. `--file-list` records `analysisDuration` 0, so `--store-info`'s speed line
@@ -594,8 +595,8 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Incremental** - Skips tracks already processed (by file path + last-modified timestamp).
 - **Tag-edit resilient** - When mtime drifts but the audio bytes are unchanged (e.g. tag editor rewrote a frame), the cache reuses Essentia features by recomputing only `audioStreamSha256` (~50ms managed SHA per file) and refreshing the tag-affected identity fields. No full re-extraction.
 - **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
-- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`, which takes a shard's **store** (`truedat.db`) as a source as readily as its catalog — a store source is read across every root, since a shard store names its own. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
-- **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks.
+- **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Shards run without a store (a store-backed `--chunk` is refused), so the merge takes the shard catalogs; a store can also be a source — read across every root, carrying descriptions and copy facts but not edge rows or history. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
+- **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks. A second Ctrl+C, a closed console window, logoff or shutdown saves what has completed before the process ends; only a hard kill falls back to the last 5-minute save.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches disk, writing `mbxmoods-verify.csv` and exiting 1 on any drift / missing / error (CI-friendly). FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`); FLACs whose tags were rewritten *before* upgrading are re-keyed automatically during a normal scan (props-gated, reported as `FLAC re-key`), or by `--verify --backfill --accept-flac-tag-drift` without a scan. `--backfill` repairs missing fields in place with no Essentia re-run: the identity tier (TagLib-driven, fast) and the features tier (ffmpeg-driven, ~30 s per applicable lossless 24-bit track) both run by default — narrow with `--backfill-level identity|features`. Every tier is gated by the drift check, so drifted entries are flagged `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - The progress line shows estimated completion, running average per track, and live throughput as `Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
