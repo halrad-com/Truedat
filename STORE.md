@@ -1,8 +1,10 @@
 ﻿# The truedat store (preview, v2)
 
 A SQLite database, `truedat.db`, that holds everything `mbxmoods.json` holds and more, keyed by
-identity rather than by path. `mbxmoods.json` stays exactly what MBXHub reads; the store is a second
-sink beside it and the source for everything that is not in the catalog: provenance, the edge rows,
+identity rather than by path. With a store in force it is the authority: every scan and every
+catalog-changing verb writes the store, and `mbxmoods.json` — still exactly what MBXHub reads — is
+published from it, with the sidecar and the edges companion. The store is also the source for
+everything that is not in the catalog: provenance, the edge rows,
 the identity history. Nothing in the store changes how a scan without `--store`
 behaves, and nothing is installed: truedat uses the SQLite that ships with Windows (`winsqlite3.dll`,
 3.40 or newer, checked at open with a plain refusal when missing).
@@ -85,13 +87,13 @@ makes the migration refuse and roll back, naming the column, rather than round i
 | Verb | Does |
 |---|---|
 | `--store-import` with `--moods <catalog>` | loads the catalog and the ledgers beside it (errors, skipped, review, verify, receipts), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
-| a scan with `--store` | writes the entries it analysed this run (never cache hits) after the catalog is saved, as producer `essentia@<build>`, one run row per entry; failures become failed runs |
+| a scan (the store is on by default) | commits every entry it touched — analysed ones as producer `essentia@<build>` with one run row each, cache hits as copy facts — at each checkpoint and at the end, then publishes the catalog, sidecar and companion from the store; failures become failed runs. A stop (second Ctrl+C, console closed, logoff, shutdown) commits and publishes what has completed before the process ends |
 | `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
 | `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
 | `--store-info` | bytes per track, analysis speed, failure rate by component, coverage by wave, shared content, key moves, conflicts by kind and edges coverage — plus the **state**: the store's generation, the generation the published catalog carries, whether the files are behind it and why, how many descriptions hold the opt-in edge arrays, and the one command that closes the gap; `store-info.json` beside the store carries the same under `state` |
 | `--snapshot [path]` with a store | the catalog, the manifest, the exclusion file **and the store** in one restorable ZIP — the store as a `VACUUM INTO` copy, so it is consistent even while a scan reads it |
 | `--restore <archive>` with a store | restores the **store** from a snapshot that carries one, then republishes the catalog, sidecar and companion from it at a new generation; an archive without a store still refuses |
-| `--merge-moods` with a store | merges catalogs **and other stores** (a `--chunk` shard's `truedat.db`), writes the merged result into the store exactly and republishes the files from it |
+| `--merge-moods` with a store | merges catalogs **and other stores**: another store's live entries, read across every root, carry its descriptions, copy facts and the fields the catalog writer cuts — not its edge rows, identity aliases or run history. The merged result is written into the store exactly and the files republished from it |
 | `--store-vacuum [--page-size N]` | repacks the file (16 KB pages by default) |
 | `--stats --store`, `--duplicates --store` | the existing reports answering from the store instead of the catalog |
 
@@ -155,11 +157,14 @@ are different acts, and only the second one is a backup of the thing the files c
 - **An archive with no store cannot restore one.** That case still refuses, and names the archive that
   would have worked. To put a catalog's entries into a store, `--store-import` seeds or extends it;
   that is not a restore and it never removes store entries the catalog lacks.
-- **Merging across machines** works on stores as well as catalogs: a `--chunk` shard's `truedat.db` can
-  be a `--merge-source`. Its live entries are read across *every* root — a shard store minted on
-  another machine names its own, and reading only the primary root would drop exactly that shard's
-  share — and rendered through the same catalog writer, so a store source and a catalog source merge
-  identically.
+- **Merging across machines** works on stores as well as catalogs: another store can be a
+  `--merge-source`. Its live entries are read across *every* root — a store minted on another machine
+  names its own, and reading only the primary root would drop exactly that machine's share — and
+  rendered through the same catalog writer, so a store source and a catalog source merge identically;
+  the fields the writer cuts come across from the store itself. What does not come across: the source
+  store's edge rows, identity aliases, conflicts and run history — a store source carries descriptions
+  and copy facts. `--chunk` shards run without a store (a store-backed shard is refused), so a shard
+  merge is a merge of catalogs.
 
 ## Looking inside
 
