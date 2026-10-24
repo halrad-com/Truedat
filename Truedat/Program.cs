@@ -2297,6 +2297,22 @@ namespace Truedat
         /// method tags to this build's, so a corrected measurement reached only new or changed tracks — "a --refresh recomputes them" was
         /// false. Stale = a STORED bitUsage whose method is not this build's; an entry with no bitUsage was not applicable and is not
         /// stale. Read only under <c>--refresh-authenticity</c> — never by --refresh, never automatically (the plan's single refresh decision).</summary>
+        /// <summary>The HF structure as the producer builds it: it carries the STRUCTURE tag (codex recheck 2026-10-24 C1 — the producer wrote
+        /// the energy tag into it, so every fresh analysis read as stale and --refresh-authenticity re-analysed the library on every run).</summary>
+        internal static HfSpectralStructure HfStructureOf(double flatness, double peakToMean, double imagingSymmetry)
+            => new HfSpectralStructure { Flatness = flatness, PeakToMean = peakToMean, ImagingSymmetry = imagingSymmetry, Method = HfStructureMethodCurrent };
+
+        /// <summary>The bitUsage probe window: the start offset (25 % in when the track is longer than a minute) and the seconds available
+        /// after it, from the FILE's own duration when TagLib has it, else the caller's claim (codex recheck 2026-10-24 C2: a valid 5 s
+        /// file with a stale 20 s XML duration was judged against 16 s of coverage and failed). The window is what the coverage floor is
+        /// measured against, so it must describe the file, not the library's note about it.</summary>
+        internal static (double StartSec, double AvailableSec) BitUsageWindow(double fileDurationSec, double suppliedDurationSec)
+        {
+            double d = fileDurationSec > 0 ? fileDurationSec : suppliedDurationSec;
+            double start = d > 60 ? d * 0.25 : 0;
+            return (start, d > 0 ? d - start : 0);
+        }
+
         internal static bool AuthenticityStale(TrackFeatures? f)
             => f != null
                && ((f.BitUsage != null && !string.Equals(f.BitUsage.Method, BitUsageMethodCurrent, StringComparison.Ordinal))
@@ -7540,6 +7556,12 @@ namespace Truedat
         /// move. The probes are parameters so the rule is pinned without an offline share.</summary>
         internal static MovedOutcome RemoveIfMoved(ConcurrentDictionary<string, TrackEntry> dict, string oldKey, Func<string, bool>? rootReachable = null, Func<string, bool>? fileExists = null)
         {
+            bool stillThere;
+            try { stillThere = (fileExists ?? File.Exists)(oldKey); }
+            catch { stillThere = false; }
+            if (stillThere) return MovedOutcome.KeptDuplicate;
+            // Absent — or the share dropped DURING that existence request, which also answers false. The root is probed AFTER it, fresh
+            // (codex recheck 2026-10-24 C5: probed before, a disconnect discovered by a slow File.Exists was read as a confirmed move).
             var root = ReachabilityRoot(oldKey);
             bool reachable;
             try { reachable = rootReachable != null ? rootReachable(root) : ProbeRootReachable(root, out _); }
@@ -7549,10 +7571,7 @@ namespace Truedat
                 Interlocked.Increment(ref _movedKeptUnreachable); _movedUnreachableRoot = root;
                 return MovedOutcome.KeptUnreachable;
             }
-            bool stillThere;
-            try { stillThere = (fileExists ?? File.Exists)(oldKey); }
-            catch { stillThere = false; }   // unreadable path on a reachable root → gone (old behavior)
-            if (!stillThere && dict.TryRemove(oldKey, out _))
+            if (dict.TryRemove(oldKey, out _))
             {
                 if (_storePath != null) global::Truedat.Store.ScanSink.RecordRetire(oldKey);   // T18: the store retires the old location in the same flush
                 return MovedOutcome.Retired;
@@ -15511,12 +15530,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // can't be opened or the codec/bitDepth can't be derived, fall through to
             // the analysis rather than silently dropping a potentially-applicable file.
             int peekRate = 0;   // the decode's own rate (no -ar below): the F4 coverage floor is judged at it
+            double peekDuration = 0;   // the FILE's duration, for the window (C2: the caller's XML claim can be stale)
             try
             {
                 using var peek = TagLib.File.Create(filePath);
                 var (peekCodec, _) = NormalizeCodec(peek);
                 int peekBitDepth = peek.Properties?.BitsPerSample ?? 0;
                 peekRate = peek.Properties?.AudioSampleRate ?? 0;
+                peekDuration = peek.Properties?.Duration.TotalSeconds ?? 0;
                 bool applicable = IsLosslessCodecForHiresCheck(peekCodec) && peekBitDepth >= 24;
                 if (!applicable) { notApplicable = true; return null; }
             }
@@ -15527,8 +15548,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             // Sample 25% into the track when it's long enough — skips intros / fades.
-            // For short tracks fall back to decoding from the start.
-            double startSec = durationSec > 60 ? durationSec * 0.25 : 0;
+            // For short tracks fall back to decoding from the start. The window is the FILE's (C2), the caller's claim only without it.
+            var (startSec, availableSec) = BitUsageWindow(peekDuration, durationSec);
             string ssArg = startSec > 0 ? $"-ss {startSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} " : "";
             // NOTE: No -ar argument. The whole point of bit-usage measurement is to inspect
             // the SOURCE's bit depth as it lands in the s32le output. Resampling
@@ -15559,7 +15580,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var drained = DrainS32Le(psi, s => BitUsageTally.Add(s, tzHistogram, ref count, ref countNonZero, ref signalSqSum), CompanionDecodeDeadlineMs);
                 // F4: a failed, killed or short decode is not a measurement — null and APPLICABLE, so the health gate fails the track
                 // (it used to tolerate a non-zero exit once any sample arrived). The silence rule below judges only a complete decode.
-                if (!DecodeCovers(drained.Exit, drained.TimedOut, drained.Samples, peekRate, 30, durationSec > 0 ? durationSec - startSec : 0)) return null;
+                if (!DecodeCovers(drained.Exit, drained.TimedOut, drained.Samples, peekRate, 30, availableSec)) return null;
 
                 // Pure silence — can't infer bit depth. A content limitation, not a
                 // defect: must read as not-applicable, or the health gate would fail
@@ -15854,15 +15875,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (hfRatio < 0) hfRatio = 0;
             if (hfRatio > 2) hfRatio = 2;
 
-            var structure = new HfSpectralStructure
-            {
-                Flatness = Math.Round(sumFlatness / windowsValid, FieldPrecision.Dp("hfSpectralStructure_flatness")),
-                PeakToMean = Math.Round(sumPeakToMean / windowsValid, FieldPrecision.Dp("hfSpectralStructure_peakToMean")),
-                ImagingSymmetry = windowsValidImaging > 0
-                    ? Math.Round(sumImaging / windowsValidImaging, FieldPrecision.Dp("hfSpectralStructure_imagingSymmetry"))
-                    : 0.0,
-                Method = method,
-            };
+            var structure = HfStructureOf(   // C1: the structure's own tag, never the energy method's
+                Math.Round(sumFlatness / windowsValid, FieldPrecision.Dp("hfSpectralStructure_flatness")),
+                Math.Round(sumPeakToMean / windowsValid, FieldPrecision.Dp("hfSpectralStructure_peakToMean")),
+                windowsValidImaging > 0 ? Math.Round(sumImaging / windowsValidImaging, FieldPrecision.Dp("hfSpectralStructure_imagingSymmetry")) : 0.0);
             if (_audit)
             {
                 Console.Error.WriteLine($"[AUDIT] hfAnalysis file=\"{Path.GetFileName(filePath)}\" sr={sourceSampleRate} hfStart={hfStart} bins=[{hfStart}..{halfBins}) hfRatioRaw={hfRatio:E4} winValid={windowsValid} winValidSym={windowsValidImaging} sumHF={sumHfEnergy:E4} sumTot={sumTotalEnergy:E4}");
@@ -22306,6 +22322,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         $"R: an older hfEnergyMethod or hfSpectralStructure.method is stale too; the current pair is not ({AuthenticityStale(oldHf)}/{AuthenticityStale(oldHfs)}/{AuthenticityStale(curHf)})");
                     Assert(HfEnergyMethodCurrent != "managed-fft-radix2-30s-mid-native" && HfStructureMethodCurrent != "truedat-v1-fft-rategate-2026-08-28",
                         "R: F4 moved both HF tags — a pre-F4 value from a failed or short decode is not this build's");
+                    // codex recheck 2026-10-24 C1: the producer wrote the ENERGY tag into the structure, so every freshly analysed track
+                    // failed the staleness check and --refresh-authenticity re-analysed it on every run — it never converged.
+                    var produced = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, HfEnergyRatio = 0.01, HfEnergyMethod = HfEnergyMethodCurrent, HfSpectralStructure = HfStructureOf(0.3, 2.0, 0.1) };
+                    Assert(produced.HfSpectralStructure!.Method == HfStructureMethodCurrent && !AuthenticityStale(produced),
+                        $"C1: a structure built the way the producer builds it carries the STRUCTURE tag and a fresh analysis is not stale ({produced.HfSpectralStructure.Method})");
+                    // codex recheck 2026-10-24 C2: the bitUsage window came from the caller's XML duration; a valid 5 s file with a stale 20 s
+                    // XML claim was judged against 16 s and "failed". The FILE's duration decides when TagLib has it.
+                    var w1 = BitUsageWindow(fileDurationSec: 5, suppliedDurationSec: 20);
+                    var w2 = BitUsageWindow(fileDurationSec: 300, suppliedDurationSec: 0);
+                    var w3 = BitUsageWindow(fileDurationSec: 0, suppliedDurationSec: 240);
+                    Assert(w1.StartSec == 0 && w1.AvailableSec == 5, $"C2: the file's 5 s beats a 20 s XML claim ({w1.StartSec}/{w1.AvailableSec})");
+                    Assert(w2.StartSec == 75 && w2.AvailableSec == 225, $"C2: a long file seeks 25 % in and the rest is available ({w2.StartSec}/{w2.AvailableSec})");
+                    Assert(w3.StartSec == 60 && w3.AvailableSec == 180, $"C2: with no file duration the supplied claim stands ({w3.StartSec}/{w3.AvailableSec})");
                     bool savedRA = _refreshAuthenticity;
                     try
                     {
@@ -22349,6 +22378,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         var o4b = RemoveIfMoved(d4, @"Z:\gone\old2.flac", rootReachable: Flaky, fileExists: _ => false);
                         Assert(o4a == MovedOutcome.Retired && o4b == MovedOutcome.KeptUnreachable && d4.Count == 1 && probes == 2,
                             $"F3: the root is probed at EVERY retirement decision — a drop between two decisions keeps the second ({o4a}/{o4b}, probes {probes})");
+                        // codex recheck 2026-10-24 C5: the root was probed BEFORE the existence check, so a share that dropped during a slow
+                        // File.Exists answered "absent" and the old entry was retired on the earlier probe. Absence first, then a fresh probe.
+                        bool dropped = false; var d5 = D();
+                        var o5 = RemoveIfMoved(d5, @"Z:\gone\old.flac", rootReachable: _ => !dropped, fileExists: _ => { dropped = true; return false; });
+                        Assert(o5 == MovedOutcome.KeptUnreachable && d5.Count == 1, $"C5: a volume that drops during the existence check keeps the entry ({o5}, entries {d5.Count})");
                     }
                     finally { _storePath = savedStoreF3; }
                 }

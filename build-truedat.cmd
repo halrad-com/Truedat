@@ -29,7 +29,9 @@ set TD_BRANCH=unknown
 set TD_DIRTY=
 for /f "delims=" %%d in ('git describe --tags --always 2^>nul') do set TD_DESC=%%d
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set TD_BRANCH=%%b
-for /f "delims=" %%s in ('git status --porcelain --untracked-files=no -- Truedat 2^>nul') do set TD_DIRTY=1
+REM The same inputs the exe's own dirty stamp watches (Truedat.csproj): sources, project, targets, schema SQL, resources, the
+REM parent-dir schema — untracked included, scratch files and dist/ excluded (codex recheck 2026-10-24 C6).
+for /f "delims=" %%s in ('git status --porcelain --untracked-files=all -- "Truedat/*.cs" "Truedat/*.csproj" "Truedat/*.targets" "Truedat/Store/Schema/*.sql" "Truedat/Resources/*" "mbxmoods-schema.json" 2^>nul') do set TD_DIRTY=1
 echo Source:  %TD_DESC%  (branch %TD_BRANCH%)
 if defined TD_DIRTY (
     echo.

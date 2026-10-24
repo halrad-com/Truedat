@@ -74,7 +74,7 @@
          which would cost us the one case it exists for. Double quotes: MSBuild Exec runs
          through cmd.exe, where single quotes are literal; a git pathspec wildcard matches
          across directories. -->
-    <Exec Command="git status --porcelain --untracked-files=all -- &quot;*.cs&quot; &quot;*.csproj&quot; &quot;Store/Schema/*.sql&quot; &quot;../mbxmoods-schema.json&quot;"
+    <Exec Command="git status --porcelain --untracked-files=all -- &quot;*.cs&quot; &quot;*.csproj&quot; &quot;*.targets&quot; &quot;Store/Schema/*.sql&quot; &quot;Resources/*&quot; &quot;../mbxmoods-schema.json&quot;"
           ConsoleToMSBuild="true"
           ContinueOnError="true"
           IgnoreExitCode="true"

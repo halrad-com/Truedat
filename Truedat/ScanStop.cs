@@ -44,7 +44,11 @@ namespace Truedat
         static bool _stopJoinedFinal; static int? _joinedExit;   // a stop that arrived during FinalOwned, and the exit code it knows
         static bool _finalSettled, _sealed;                      // the final writes settled the session; the record was sealed for a stop
         static string _finalResult = FinalSavedIt;               // what the final writes did, for every stop that joins or follows them
+        static Exception? _finalError;                           // the final writes' failure, so a later seal says FAILED with its cause (C4)
         static ManualResetEventSlim? _sealEvent;                 // set when a seal started AFTER the final writes has been written
+        /// <summary>Self-test seams: fired between EndFinal's two gate holds (the window codex recheck C3 names); seals attempted so far.</summary>
+        internal static Action? BetweenFinalLocksForTest;
+        internal static int SealsForTest;
 
         /// <summary>Arm for one scan. <paramref name="saveNow"/> takes the exit code the caller knows (130 from the scan's own Ctrl+C
         /// handler; null for a native close, which the OS ends) and returns what happened, for the console. <paramref name="handleCtrlC"/>
@@ -55,7 +59,7 @@ namespace Truedat
             lock (_gate)
             {
                 _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null;
-                _finalSettled = false; _sealed = false; _finalResult = FinalSavedIt;
+                _finalSettled = false; _sealed = false; _finalResult = FinalSavedIt; _finalError = null;
                 _sealEvent?.Dispose(); _sealEvent = null;
                 _done?.Dispose(); _done = new ManualResetEventSlim(false);
                 if (_routine != null) return;
@@ -95,17 +99,29 @@ namespace Truedat
         /// the session is still FinalOwned, so a stop arriving mid-seal waits for it as well.</summary>
         internal static void EndFinal(Exception? error = null)
         {
-            ManualResetEventSlim? done; bool sealForStop; int? exit;
+            ManualResetEventSlim? done;
             lock (_gate)
             {
                 if (_done == null) return;   // never armed
                 if (_state != State.FinalOwned) { _save = null; return; }   // a stop owned it, or already ended
-                sealForStop = _stopJoinedFinal && !_sealed; exit = _joinedExit;
-                if (sealForStop) _sealed = true;
+                _finalError = error;   // kept for a stop that arrives after the settle (codex recheck C4)
                 _finalResult = error == null ? FinalSavedIt : $"the scan's final writes failed ({error.Message}); the periodic saves hold what they wrote";
             }
-            if (sealForStop) SealAfterFinal(exit, error, "during");
-            lock (_gate) { _state = State.Settled; _finalSettled = true; _result ??= _finalResult; done = _done; _save = null; }
+            BetweenFinalLocksForTest?.Invoke();
+            // Seal for every stop that joined — including one that joins while a seal is being written — and only then settle. The
+            // decision "nothing to seal" and the transition out of FinalOwned happen under ONE gate hold (codex recheck C3: a snapshot
+            // taken earlier let a stop that joined in between be released without its record).
+            while (true)
+            {
+                bool sealForStop; int? exit;
+                lock (_gate)
+                {
+                    sealForStop = _stopJoinedFinal && !_sealed; exit = _joinedExit;
+                    if (sealForStop) _sealed = true;
+                    else { _state = State.Settled; _finalSettled = true; _result ??= _finalResult; done = _done; _save = null; break; }
+                }
+                SealAfterFinal(exit, error, "during");
+            }
             done?.Set();
         }
 
@@ -113,6 +129,7 @@ namespace Truedat
         /// the process ends without Main's finally after it. A failed final write seals FAILED with its cause. Never throws.</summary>
         static void SealAfterFinal(int? exitCode, Exception? error, string when)
         {
+            Interlocked.Increment(ref SealsForTest);
             try
             {
                 string reason;
@@ -161,7 +178,8 @@ namespace Truedat
             {
                 // The process ends past Main's finally after this returns, so the record is sealed here with the final flush's facts and the
                 // exit code the stop knows.
-                SealAfterFinal(exitCode, null, "after");
+                Exception? finalError; lock (_gate) finalError = _finalError;
+                SealAfterFinal(exitCode, finalError, "after");   // C4: a final write that threw seals FAILED with its cause, not "saved it"
                 _sealEvent?.Set();
             }
             else if (sealWait != null) sealWait.Wait();

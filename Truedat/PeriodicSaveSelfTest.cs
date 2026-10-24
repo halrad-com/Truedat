@@ -35,6 +35,7 @@ namespace Truedat
                 TestStopDuringFinalWaits(assert);
                 TestNothingRestartsAfterSettled(assert);
                 TestStopMessageNeverInventsAFailure(assert);
+                TestStopJoiningBetweenEndFinalLocksIsSealed(assert);
             }
             catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -198,6 +199,31 @@ namespace Truedat
             assert(again == "saved 3" && !finalOwned && n == 1,
                 $"after a stop settled nothing restarts persistence: a repeated stop gets the settled answer, the final writes stand down (again '{again}', final owned {finalOwned}, saves {n})");
             ScanStop.EndFinal();
+        }
+
+        // codex recheck 2026-10-24 C3: EndFinal decided "no stop joined, nothing to seal" under its first gate hold, released the gate while
+        // still FinalOwned, and a stop arriving in that window registered, waited, and was released by the settle WITHOUT a sealed record.
+        static void TestStopJoiningBetweenEndFinalLocksIsSealed(Action<bool, string> assert)
+        {
+            var previous = ScanStop.BetweenFinalLocksForTest;
+            Thread? joiner = null; string? joinerResult = null; var joinerReturned = new ManualResetEventSlim(false);
+            try
+            {
+                ScanStop.Arm(_ => "unexpected emergency save", handleCtrlC: false);
+                assert(ScanStop.BeginFinal(), "fixture: the final writes own the session");
+                ScanStop.BetweenFinalLocksForTest = () =>
+                {
+                    joiner = new Thread(() => { try { joinerResult = ScanStop.Fire(130); } finally { joinerReturned.Set(); } }) { IsBackground = true };
+                    joiner.Start();
+                    SpinWait.SpinUntil(() => joinerReturned.IsSet || (joiner.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, 5000);
+                };
+                int sealsBefore = ScanStop.SealsForTest;
+                ScanStop.EndFinal();
+                bool returned = joinerReturned.Wait(5000);
+                assert(returned && ScanStop.SealsForTest == sealsBefore + 1 && joinerResult != null,
+                    $"C3: a stop that joins between EndFinal's gate holds is sealed before it is released (returned {returned}, seals {ScanStop.SealsForTest - sealsBefore}, answer '{joinerResult}')");
+            }
+            finally { ScanStop.BetweenFinalLocksForTest = previous; ScanStop.EndFinal(); if (joiner == null || joiner.Join(5000)) joinerReturned.Dispose(); }
         }
 
         // labs code review 2026-10-24 finding 3: the stop sampled the pending count BEFORE taking the save lock, so a stop that waited

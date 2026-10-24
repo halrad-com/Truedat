@@ -301,6 +301,18 @@ namespace Truedat.Store
                 assert(finAfter == null && afterOk && after.Outcome == "interrupted" && after.ExitCode == 130,
                     $"R7: a later boundary finish is a no-op — the stopped record is never rewritten completed/0 ({finAfter}/{after.Outcome}/{after.ExitCode})");
 
+                // codex recheck 2026-10-24 C4: EndFinal(error) with NO stop joined kept the failure only as console text; a stop arriving
+                // after the settle (before Main's finally) sealed "interrupted; the final writes saved it" over a final write that threw.
+                StoreResult.BeginScan(store, started);
+                ScanStop.Arm(_ => "unexpected emergency save", handleCtrlC: false);
+                assert(ScanStop.BeginFinal(), "C4 fixture: the final writes own the session");
+                ScanStop.EndFinal(new IOException("boom: catalog held open"));
+                var late = ScanStop.Fire(130);
+                var c4 = new StoreResultFile(); bool c4Ok = StoreResult.TryRead(StoreResult.PathFor(store), out c4);
+                assert(c4Ok && c4.Outcome == "failed" && c4.ExitCode == 130 && (c4.Reason ?? "").Contains("boom") && (late ?? "").Contains("failed"),
+                    $"C4: a late stop after a THROWING final write seals FAILED with the write's cause and exit 130 ({c4.Outcome}/{c4.ExitCode}/{c4.Reason}; answer '{late}')");
+                StoreResult.ResetScanForTest();
+
                 // a native close: the OS ends the process, the exit code is not ours to know
                 StoreResult.BeginScan(store, started);
                 var path2 = StoreResult.FinishStoppedScan(store, OkReport(store), edgesOn: false, companionPath: null, exitCode: null, reason: "console closed: saved");
