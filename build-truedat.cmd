@@ -49,7 +49,15 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\
+REM The exe copy is checked like the doc copies below (codex perf review 2026-10-23 F10): unchecked, a locked or
+REM unwritable dist\truedat\ left the OLD exe in place while the script announced success, and a later doc copy's
+REM errorlevel 0 hid the failure for good.
+copy /Y Truedat\bin\Release\net48\truedat.exe dist\truedat\ >nul
+if errorlevel 1 (
+    echo ERROR: could not update dist\truedat\truedat.exe - is it open or locked?
+    pause
+    exit /b 1
+)
 echo Done: truedat.exe
 
 REM Ship the docs alongside the binary so the distributed bundle is self-documenting.

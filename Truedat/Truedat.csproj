@@ -62,14 +62,19 @@
           WorkingDirectory="$(MSBuildProjectDirectory)">
       <Output TaskParameter="ConsoleOutput" PropertyName="_GitDescribeRaw" />
     </Exec>
-    <!-- Scoped to `.` — this Exec runs in the project directory, so it only sees changes
-         under Truedat/, i.e. the sources actually compiled into this binary. Deliberately
-         excludes dist/: dist/truedat/truedat.exe is a TRACKED file, so an already-rebuilt
-         but not-yet-committed exe would otherwise mark the next build +dirty even when
-         every source file is committed. A stale dist binary says nothing about the source
-         going into a new one, and a marker that cries wolf gets ignored — which would cost
-         us the one case it exists for. -->
-    <Exec Command="git status --porcelain --untracked-files=no -- ."
+    <!-- Scoped to the ACTUAL build inputs — the C# sources, this project file, the embedded
+         schema SQL and the parent-directory mbxmoods-schema.json — untracked files INCLUDED
+         (codex perf review 2026-10-23 F11: the SDK's compile glob picks up a new .cs before
+         Git tracks it, and `untracked-files=no` let such a build stamp itself clean). Not
+         every untracked file under Truedat/ (a stray .orig or a scratch note would stamp
+         +dirty), and deliberately not dist/: dist/truedat/truedat.exe is a TRACKED file, so
+         an already-rebuilt but not-yet-committed exe would otherwise mark the next build
+         +dirty even when every source file is committed. A stale dist binary says nothing
+         about the source going into a new one, and a marker that cries wolf gets ignored —
+         which would cost us the one case it exists for. Double quotes: MSBuild Exec runs
+         through cmd.exe, where single quotes are literal; a git pathspec wildcard matches
+         across directories. -->
+    <Exec Command="git status --porcelain --untracked-files=all -- &quot;*.cs&quot; &quot;*.csproj&quot; &quot;Store/Schema/*.sql&quot; &quot;../mbxmoods-schema.json&quot;"
           ConsoleToMSBuild="true"
           ContinueOnError="true"
           IgnoreExitCode="true"
