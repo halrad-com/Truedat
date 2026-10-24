@@ -687,6 +687,13 @@ namespace Truedat.Edges
             assert(EdgePcm.FromSamples(new float[EdgePcm.SliceSamples * 9], false) == null, "under ten slices (1 s) is null");
             // Without ffmpeg: null, never a substitute.
             assert(EdgePcm.Analyze("nowhere.flac", null, 0, 30, false) == null, "no ffmpeg -> null");
+            // codex 2026-10-23 F7: a decode that failed, or stopped well short of the window, is not that window's measurement.
+            int full = 30 * EdgePcm.SampleRate;
+            assert(EdgePcm.Covers(0, full, 30) && EdgePcm.Covers(0, (int)(full * 0.85), 30),
+                "a clean decode of the window, or of most of it (a container overstating its length by seconds), is accepted");
+            assert(!EdgePcm.Covers(1, full, 30), "a nonzero ffmpeg exit is refused even with a full window's samples before the failure");
+            assert(!EdgePcm.Covers(1, 5 * EdgePcm.SampleRate, 30), "several seconds of a 30 s tail and then a failure: refused, the EBU answer stands");
+            assert(!EdgePcm.Covers(0, (int)(full * 0.5), 30), "a clean exit that delivered half the window is refused");
 
             // The real pipe, on a WAV we write (found beside the test binary, as the scan finds it); skipped when ffmpeg is absent.
             var ffmpeg = Program.FindFfmpegForTests();

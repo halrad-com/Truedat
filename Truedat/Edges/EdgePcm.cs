@@ -73,6 +73,17 @@ namespace Truedat.Edges
         /// Static, not const, so the self-test can shorten it.</summary>
         internal static int StallTimeoutMs = 60_000;
 
+        /// <summary>The least of the requested window a decode must deliver to count as that window. A container that overstates its
+        /// length by a second or two (a VBR MP3 with no Xing header) still decodes most of a 30 s tail; a decode that stopped well short
+        /// did not measure the window it was asked for.</summary>
+        internal const double MinWindowCoverage = 0.8;
+
+        /// <summary>codex 2026-10-23 F7: a failed decode is not a measurement however many samples came out before it failed — accepted,
+        /// the truncated prefix's end became the track's "tail" and plausible silence/transition values went to the store for the wrong
+        /// ending. Likewise a decode that delivered materially less than the window. Either leaves the EBU answer standing (null).</summary>
+        internal static bool Covers(int exitCode, int samples, double lengthSec)
+            => exitCode == 0 && samples >= (long)(lengthSec * SampleRate * MinWindowCoverage);
+
         internal static EdgePcmResult? Analyze(string audioPath, string? ffmpegExe, double startSec, double lengthSec, bool outerAtStart)
         {
             if (string.IsNullOrEmpty(ffmpegExe) || lengthSec < 1) return null;
@@ -113,7 +124,7 @@ namespace Truedat.Edges
                     return null;
                 }
                 if (!proc.WaitForExit(StallTimeoutMs)) { try { proc.Kill(); } catch { } return null; }
-                if (proc.ExitCode != 0 && samples.Count == 0) return null;
+                if (!Covers(proc.ExitCode, samples.Count, lengthSec)) return null;
                 return FromSamples(samples.ToArray(), outerAtStart);
             }
             catch { return null; }
