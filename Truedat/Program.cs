@@ -15234,11 +15234,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // decoded materially more, so a genuinely truncated source (whose transcode is
             // also short) still fails the gate downstream rather than being papered over.
             {
-                double refDurSec = FormatLacksRecordedDuration(src.SourcePath)
-                    ? 0.0   // no recorded length -> nothing to under-decode against
-                    : (knownDurationSec > 0
-                        ? knownDurationSec
-                        : (fingerprintTask.Result.fp?.DurationMs ?? 0) / 1000.0);
+                // F9: the gate's reference (the smaller positive claim), not the XML's first — one rule, one answer to "under-decoded?".
+                double refDurSec = UnderDecodeReferenceSec(FormatLacksRecordedDuration(src.SourcePath), knownDurationSec, (fingerprintTask.Result.fp?.DurationMs ?? 0) / 1000.0);
                 if (ShouldRetryUnderDecode(features?.AnalyzedLengthSec, refDurSec, DecodeCoverageMinFraction)
                     && _ffmpegPath.Value != null)
                 {
@@ -22235,6 +22232,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(DecodeCovers(0, false, 1000, 0, 30, 0) && !DecodeCovers(0, false, 0, 0, 30, 0),
                         "F4: with the rate unknown the floor is 'exited 0 with output' (stated, not invented)");
                 }
+                // codex perf review 2026-10-23 F9: the under-decode RETRY preferred the XML duration while the health GATE (acb6604) uses the
+                // smaller positive claim — XML 240 s / fingerprint 180 s / decoded 180 s transcoded and ran the extractor again although the
+                // original decode passes the gate. One reference for both: the smaller positive claim; 0 for a format with no recorded length.
+                Assert(UnderDecodeReferenceSec(false, 240, 180) == 180 && UnderDecodeReferenceSec(false, 180, 240) == 180,
+                    $"F9: the reference is the SMALLER positive claim whichever side it comes from ({UnderDecodeReferenceSec(false, 240, 180)} / {UnderDecodeReferenceSec(false, 180, 240)})");
+                Assert(UnderDecodeReferenceSec(false, 0, 180) == 180 && UnderDecodeReferenceSec(false, 240, 0) == 240 && UnderDecodeReferenceSec(false, 0, 0) == 0,
+                    "F9: one claim alone is the reference; none is 0 (never retries)");
+                Assert(UnderDecodeReferenceSec(true, 240, 180) == 0, "F9: a format with no recorded length (raw ADTS) has no reference — the exception stands");
+                Assert(!ShouldRetryUnderDecode(180, UnderDecodeReferenceSec(false, 240, 180), DecodeCoverageMinFraction) && ShouldRetryUnderDecode(120, UnderDecodeReferenceSec(false, 240, 180), DecodeCoverageMinFraction),
+                    "F9: XML 240 / fp 180 / decoded 180 -> no transcode; decoded 120 still retries");
                 // codex perf review 2026-10-23 F3: a cross-SHA reuse retired the old copy's catalog entry on File.Exists == false — which an
                 // OFFLINE share also answers. A reachable duplicate of a track whose old copy sits on an unmounted volume retired that
                 // old location although its file was never deleted. Retirement needs a FRESH successful root probe at the decision (the
@@ -23321,7 +23328,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>The decode-coverage reference: <see cref="GateClaimedSec"/>, except that a format
         /// recording no duration yields 0 - "no basis to judge" - rather than an invented claim.</summary>
         internal static double GateCoverageReferenceSec(string? path, int? fingerprintDurationMs, int xmlTotalTimeMs)
-            => FormatLacksRecordedDuration(path) ? 0.0 : GateClaimedSec(fingerprintDurationMs, xmlTotalTimeMs);
+            => UnderDecodeReferenceSec(FormatLacksRecordedDuration(path), xmlTotalTimeMs > 0 ? xmlTotalTimeMs / 1000.0 : 0.0,
+                                       fingerprintDurationMs.HasValue && fingerprintDurationMs.Value > 0 ? fingerprintDurationMs.Value / 1000.0 : 0.0);   // F9: the retry's rule and the gate's are one function
 
         internal static double GateClaimedSec(int? fingerprintDurationMs, int xmlTotalTimeMs)
         {
@@ -23340,6 +23348,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// "no basis to judge" → false (never retry blindly).</summary>
         internal static bool ShouldRetryUnderDecode(double? decodedSec, double refDurationSec, double minFraction)
             => decodedSec is double d && refDurationSec > 0 && d < minFraction * refDurationSec;
+
+        /// <summary>The ONE coverage reference for both the under-decode retry and the health gate (codex perf review 2026-10-23 F9): the
+        /// smaller positive claim of the library's (XML) duration and the fingerprint's, 0 when neither is known or the format records no
+        /// length (raw ADTS — acb6604). The retry used to prefer the XML claim, so XML 240 s / fingerprint 180 s / decoded 180 s transcoded
+        /// and re-ran the extractor although the same decode passes the gate.</summary>
+        internal static double UnderDecodeReferenceSec(bool formatLacksRecordedDuration, double knownSec, double fingerprintSec)
+        {
+            if (formatLacksRecordedDuration) return 0.0;
+            if (knownSec > 0 && fingerprintSec > 0) return Math.Min(knownSec, fingerprintSec);
+            return knownSec > 0 ? knownSec : fingerprintSec > 0 ? fingerprintSec : 0.0;
+        }
 
         /// <summary>The `--preview` Estimate line for the no-ETA case. A negative EtaSecs means
         /// two very different things and must not share one message (I3): when there is no new
