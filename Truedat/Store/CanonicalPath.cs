@@ -78,6 +78,11 @@ namespace Truedat.Store
                 && i.StartsWith(o, StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>A root path in the one spelling two roots are compared by: separators folded to '\' and trailing separators
+        /// dropped, for a caller that compares case-insensitively. <c>X:/mirror</c>, <c>X:\mirror\</c> and <c>x:\MIRROR</c> name one
+        /// root, and a store that fails to see that holds one path as two rows under two roles.</summary>
+        internal static string Root(string path) => Backslashes(path).TrimEnd('\\');
+
         static string Backslashes(string path) => path.Replace('/', '\\');
     }
 }

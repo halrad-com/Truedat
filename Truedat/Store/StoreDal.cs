@@ -100,30 +100,45 @@ namespace Truedat.Store
         /// publication dedupes and maintenance edits half of. A mirror root is one machine's view and stays per (machine, path).</summary>
         internal long EnsureRoot(string machineId, string path, string role, string nowUtc)
         {
-            var existing = Row("SELECT id FROM library_root WHERE machine_id = ? AND path = ?;", s => (long?)s.GetInt64(0), null, machineId, path);
+            // The same path in another spelling is the same root, so the request is matched against this machine's roots in
+            // canonical form and under EVERY role — the role policy below then reads a held row that is really there. Matched in
+            // C#, not SQL: '=' is byte-exact and SQLite's lower() is ASCII-only (labs 2026-10-24 finding 1 — the earlier SQL form
+            // also sat in a non-verbatim literal, where '\' is an escaped quote, so it normalised nothing). An exact-string lookup
+            // over one role is what let `x:\MIRROR`, `X:/mirror` and `X:\mirror\` walk past a held MIRROR row and insert a second
+            // row for one path, leaving the store with the same path as both a mirror and a primary.
+            var want = CanonicalPath.Root(path);
+            long? existing = null;
+            string? held = null;
+            foreach (var r in RootsForMachine(machineId))
+                if (string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; held = r.Role; break; }
             // codex rescan 2026-10-23 R1: the same machine's row under ANOTHER role is not this root. Returning it sent a primary write
-            // under a mirror root; (machine, path) is unique, so the collision is refused rather than relabelled.
-            if (existing.HasValue)
-            {
-                var held = Row("SELECT role FROM library_root WHERE id = ?;", s => s.GetString(0), null, existing.Value);
-                if (!string.Equals(held, role, StringComparison.OrdinalIgnoreCase))
-                    throw new StoreException($"Root {path} is already registered on this machine as a {held} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {held}.");
-            }
+            // under a mirror root, so the collision is refused rather than relabelled.
+            if (existing.HasValue && !string.Equals(held, role, StringComparison.OrdinalIgnoreCase))
+                throw new StoreException($"Root {path} is already registered on this machine as a {held} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {held}.");
             if (!existing.HasValue && role == "primary")
             {
                 // A primary root is a path of the LIBRARY, whichever machine registered it (codex 2026-10-23 F1): the same path in any
-                // spelling — separators, trailing separator, case — is the same root, oldest row first. Compared here, not in SQL
-                // (labs 2026-10-24 finding 1: the SQL form was written in a non-verbatim literal, where '\' is an escaped quote, so SQLite
-                // normalised nothing and only a stored path already in canonical shape ever matched; and SQLite's lower() is ASCII-only).
-                static string Norm(string p) => p.Replace('/', '\\').TrimEnd('\\');
-                var want = Norm(path);
+                // spelling — separators, trailing separator, case — is the same root, oldest row first.
                 foreach (var r in LibraryRoots())
-                    if (string.Equals(Norm(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; break; }
+                    if (string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; break; }
             }
             if (existing.HasValue) return existing.Value;
             Exec("INSERT INTO library_root(machine_id, path, role, created_utc) VALUES (?, ?, ?, ?);", machineId, path, role, nowUtc);
             StoreLog.Info($"root registered: {path} ({role})");
             return Db.LastInsertRowId;
+        }
+
+        /// <summary>Every root this machine registered, whatever its role — the set <see cref="EnsureRoot"/> matches a request
+        /// against, because a path already held under one role must not be registered again under another. Roots are a handful of
+        /// rows and <see cref="EnsureRoot"/> runs once per root, never per track.</summary>
+        internal List<(long Id, string Path, string Role)> RootsForMachine(string machineId)
+        {
+            var list = new List<(long, string, string)>();
+            var st = Stmt("SELECT id, path, role FROM library_root WHERE machine_id = ? ORDER BY id;");
+            BindAll(st, new object?[] { machineId });
+            try { while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
+            finally { st.Reset(); }
+            return list;
         }
 
         internal List<(long Id, string Path, string Role)> ListRoots()
