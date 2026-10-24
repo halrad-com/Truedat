@@ -600,7 +600,21 @@ namespace Truedat.Store
         internal static TrackEntry WithPolicyCutFrom(TrackEntry arriving, TrackEntry? first, TrackEntry? second)
         {
             var row = ToRow(arriving); var f = first != null ? ToRow(first) : null; var s = second != null ? ToRow(second) : null; bool any = false;
-            for (int i = 0; i < Cols.Length; i++) if (FieldPolicy.IsExcluded(Cols[i].Name)) { row[i] = f?[i] ?? s?[i]; any = true; }
+            // The arriving row's OWN value first (labs 2026-10-24 defect 3: a foreign catalog that carries bpmHistogram was ignored), then
+            // the supplies in order; a NULL is "not present", never a clear (the plan's null rule).
+            for (int i = 0; i < Cols.Length; i++) if (FieldPolicy.IsExcluded(Cols[i].Name)) { row[i] = row[i] ?? f?[i] ?? s?[i]; any = true; }
+            return any ? FromValues(row, arriving.LastModified) : arriving;
+        }
+
+        /// <summary>Every CONTENT column the arriving entry does not carry (NULL) taken from <paramref name="first"/>, else
+        /// <paramref name="second"/> — for a MERGE's winning entry under the same content identity (labs 2026-10-24 defect 1: the verb's
+        /// exact-arrival rule made a catalog that lacked mfcc clear the stored blob). Present values are untouched. The caller has already
+        /// bound both supplies to the winner's identity; this never looks across it.</summary>
+        internal static TrackEntry WithContentWhereNullFrom(TrackEntry arriving, TrackEntry? first, TrackEntry? second)
+        {
+            if (first == null && second == null) return arriving;
+            var row = ToRow(arriving); var f = first != null ? ToRow(first) : null; var s = second != null ? ToRow(second) : null; bool any = false;
+            foreach (int i in ContentIdx) if (row[i] == null) { var v = f?[i] ?? s?[i]; if (v != null) { row[i] = v; any = true; } }
             return any ? FromValues(row, arriving.LastModified) : arriving;
         }
 

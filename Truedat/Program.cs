@@ -11252,6 +11252,9 @@ namespace Truedat
                     if (src != null && !SameContentIdentity(src, kv.Value, kv.Key)) src = null;
                 }
                 var entry = src != null || own != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, src, own) : kv.Value;
+                // A merge's winning entry is another library's catalog entry: a content measurement it does NOT carry is unobserved, and
+                // the exact-arrival write below would otherwise clear it (labs 2026-10-24 defect 1). Plain verbs keep NULL = clear.
+                if (merge) entry = global::Truedat.Store.TrackEntryMapper.WithContentWhereNullFrom(entry, src, own);
                 // R3: the catalog bytes cannot show a policy-cut difference; the supplied fields are compared on their own.
                 if (!publicChanged && b0 != null && global::Truedat.Store.TrackEntryMapper.ExcludedContentEqual(b0, entry)) continue;
                 // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
@@ -16078,6 +16081,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     string title; using (global::Truedat.Store.StoreLog.Quiet()) using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) title = os.Db.ExecScalar("SELECT c.title FROM track_copy c JOIN track_location l ON l.id = c.location_id WHERE l.display_path LIKE '%p.flac';") ?? "none";
                     Assert(exit == 0 && title == "Retitled" && Smfm() == "kept" && Bins(r.Hist) == "40",
                         $"a merge's winning catalog entry that OMITS a copy fact leaves the stored one alone: title updated, smfm kept, histogram kept (exit {exit}, title {title}, smfm {Smfm()}, bins {Bins(r.Hist)})");
+
+                    // labs 2026-10-24 (025) defect 1, the CONTENT half: the verb's exact-arrival rule makes an arriving NULL a clear — right for
+                    // strip/migrate, wrong for a merge whose winning catalog simply lacks a measurement. The stored MFCC blob went empty.
+                    var catM = CatalogWith("m", new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "A", Title = "Retitled again", Bpm = 120, Mfcc = null },
+                        LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = shaA,
+                    });
+                    exit = Merge(catM);
+                    double[]? mfccBack = null; string title2 = "none";
+                    using (global::Truedat.Store.StoreLog.Quiet()) using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                    {
+                        foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots().Select(x => x.Id))) if (string.Equals(p, @"D:\music\p.flac", StringComparison.OrdinalIgnoreCase)) { mfccBack = back.Features.Mfcc; title2 = back.Features.Title; }
+                    }
+                    Assert(exit == 0 && title2 == "Retitled again" && mfccBack != null && mfccBack.Length == 2 && mfccBack[0] == 1.5,
+                        $"a merge's winning catalog entry that OMITS a content measurement (mfcc) leaves the stored one alone while its present values land (exit {exit}, title {title2}, mfcc {(mfccBack == null ? "ERASED" : string.Join(",", mfccBack))})");
+
+                    // labs 2026-10-24 (025) defect 3: a foreign catalog that CARRIES bpmHistogram (the writer cuts it; a hand-made or older
+                    // catalog may not) had its value ignored — the supply order never consulted the arriving row's own value.
+                    var savedPolicy = FieldPolicy.ExcludedFieldNames.ToArray();
+                    string catH;
+                    try { FieldPolicy.OverrideForTest(new string[0]); catH = CatalogWith("h", Mk(shaA, H(60), "Retitled again")); }
+                    finally { FieldPolicy.OverrideForTest(savedPolicy); }
+                    exit = Merge(catH); r = P();
+                    Assert(exit == 0 && Bins(r.Hist) == "60",
+                        $"a merge's winning catalog entry that CARRIES bpmHistogram supplies it — the arriving value wins over any fallback (exit {exit}, bins {Bins(r.Hist)})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }
