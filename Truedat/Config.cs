@@ -103,6 +103,9 @@ namespace Truedat
             // is on disk" is a standing policy, not a per-invocation decision — and it removes
             // nothing a hand-run --fixup would not, with the same guards and the same refusals.
             new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Default = "false", Help = "reconcile the catalog against disk after a full scan" },
+            // Operator 2026-10-23: the end-of-scan summary is what gets saved and compared; saving it by hand was a copy, a notepad
+            // and a file name every run. Beside the catalog as mbxmoods-scan-<start date>-<n>.txt (Program.ScanSummaryFileName).
+            new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the end-of-scan summary beside the catalog as mbxmoods-scan-<date>-<n>.txt. false turns it off" },
         };
 
         private static readonly Dictionary<string, Setting> ByKey =

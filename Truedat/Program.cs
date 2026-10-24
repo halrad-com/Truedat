@@ -976,6 +976,8 @@ namespace Truedat
             "edges", "budget", "edges-export", "no-store", "no-edges",
             // store-v3 T05: the opt-in edge-array capture (config key `edge-arrays`, default off) and its explicit discard verb.
             "edge-arrays", "edge-arrays-drop", "no-edge-arrays",
+            // the saved end-of-scan summary (config key `scan-summary`, default true; the parser accepts the injected flag, the scan reads the value)
+            "scan-summary",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -2813,6 +2815,7 @@ namespace Truedat
                 else if (canonical == "edges") _stageOpts.Edges = true;
                 else if (canonical == "no-edges") noEdges = true;
                 else if (canonical == "edge-arrays") edgeArrays = true;
+                else if (canonical == "scan-summary") { }   // the config injects it when true; the scan reads ConfigSaysOff("scan-summary") itself
                 else if (canonical == "no-edge-arrays") noEdgeArrays = true;
                 else if (canonical == "edge-arrays-drop") edgeArraysDropMode = true;
                 else if (canonical == "no-store") noStore = true;
@@ -6768,6 +6771,20 @@ namespace Truedat
                 global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "the library went away mid-scan; work up to that point was saved: " + scanSourceLostDetail);
                 Environment.ExitCode = 3;
             }
+            // Operator 2026-10-23: the summary from here to the Output lines is SAVED beside the catalog (config `scan-summary`, default
+            // true) — teed, so the file is exactly what the console shows. A failure to open it costs a note, never the summary.
+            TeeWriter? summaryTee = null; string? summaryFile = null; var summaryPrevOut = Console.Out;
+            if (!ConfigSaysOff("scan-summary"))
+            {
+                try
+                {
+                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    summaryFile = Path.Combine(summaryDir, ScanSummaryFileName(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), startTime));
+                    summaryTee = new TeeWriter(summaryPrevOut, summaryFile);
+                    Console.SetOut(summaryTee);
+                }
+                catch (Exception ex) { summaryTee = null; summaryFile = null; Console.Error.WriteLine($"  note: the scan summary is not being saved ({ex.Message})"); }
+            }
             foreach (var line in ThisCommand()) Console.WriteLine(line);   // what this run was, where the operator reads after it
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
@@ -6776,6 +6793,7 @@ namespace Truedat
             // scrollback and what the operator saves is the TAIL. Two scans compared side by side could not
             // say which truedat or which extractor produced either one (operator, 2026-10-20).
             Console.WriteLine(ThisBuild(essentiaExe));
+            Console.WriteLine(WorkersSummaryLine(parallelism, Environment.GetCommandLineArgs(), _argsFromConfig));
             Console.WriteLine();
             void PrintScanTallies()
             {
@@ -6936,6 +6954,11 @@ namespace Truedat
                 if (alsoWrote.Count > 0) Console.WriteLine($"        + {string.Join(", ", alsoWrote)}");
             }
             if (auditLog) Console.WriteLine($"Log:    {logPath}");
+            if (summaryTee != null)
+            {
+                Console.SetOut(summaryPrevOut); summaryTee.Dispose();
+                Console.WriteLine($"Summary:    {summaryFile}");
+            }
             tee?.Dispose();
 
             if (failed > 0)
@@ -11182,8 +11205,11 @@ namespace Truedat
             int verbExit = runVerb();
 
             // (4) its result -> the store, one transaction
+            bool merge = hubVerb == "merge-moods";
             var after = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            if (File.Exists(catalogPath) || File.Exists(catalogPath + ".1")) LoadExistingMoods(catalogPath, after);
+            // A merge's result is another library's entries: a copy fact its winning entry does not carry is UNOBSERVED (the import's
+            // own rule), never the verb's "every field is exact" (codex 2026-10-24: a winning catalog that omitted smfm wrote NULL over it).
+            if (File.Exists(catalogPath) || File.Exists(catalogPath + ".1")) { if (merge) LoadExistingMoodsForStore(catalogPath, after); else LoadExistingMoods(catalogPath, after); }
             var removed = before.Keys.Where(k => !after.ContainsKey(k)).ToList();
             var changed = new Dictionary<string, TrackEntry>(PathComparer.Instance);
             // A verb that RENAMED the path (--remap of a sub-folder, a --fixup reconciliation) leaves no `before` row under the new
@@ -11192,7 +11218,9 @@ namespace Truedat
             foreach (var kv in before) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
             // codex 2026-10-23 F3: a --merge-moods source that is a STORE carries the fields the catalog writer cuts; a track new to this
             // store has no `before` row, so the source store's own entry supplies them — by path, then by content hash.
-            var mergeSource = _mergeStoreSourceEntries; _mergeStoreSourceEntries = null;
+            // A merge that FAILED wrote no catalog and supplies nothing — its half-read source entries are dropped (codex 2026-10-24: they were
+            // kept, and the cut-field comparison below then applied an unfinished merge's histogram over the destination's).
+            var mergeSource = verbExit == 0 ? _mergeStoreSourceEntries : null; _mergeStoreSourceEntries = null;
             var mergeBySha = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
             if (mergeSource != null) foreach (var kv in mergeSource) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
             // codex rescan 2026-10-23 R2/R3. The published file lacks the policy-cut fields, so the verb's result never carries them and
@@ -11200,10 +11228,10 @@ namespace Truedat
             // by sha after a rename). A MERGE can put DIFFERENT content at a path, so there the supply is bound to the winner's content
             // identity (sha + hash kind): the merge source's entry first (its non-null values), the destination's row behind it, and
             // neither across identities — a path match alone attached an earlier store's histogram to a later catalog's content.
-            bool merge = hubVerb == "merge-moods";
             foreach (var kv in after)
             {
                 before.TryGetValue(kv.Key, out var b0);
+                var observedByFile = kv.Value.CopyObserved;   // the merged file's own mask (merge only); WithPolicyCutFrom returns a fresh entry
                 bool publicChanged = b0 == null || !EntryBytes(kv.Key, b0).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value));
                 TrackEntry? own = b0;
                 if (own == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out own);
@@ -11219,7 +11247,9 @@ namespace Truedat
                 if (!publicChanged && b0 != null && global::Truedat.Store.TrackEntryMapper.ExcludedContentEqual(b0, entry)) continue;
                 // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
                 // saw are not — marked observed, a trackId arriving as the type's 0 replaced a stored NULL (execution review D5).
-                entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.VerbCopyObserved; changed[kv.Key] = entry;
+                // A merge's observed set is what its winning entry carries.
+                entry.CopyObserved = merge ? (observedByFile ?? global::Truedat.Store.TrackEntryMapper.VerbCopyObserved) : global::Truedat.Store.TrackEntryMapper.VerbCopyObserved;
+                changed[kv.Key] = entry;
             }
 
             string? storeError = null; int moved = 0;
@@ -11468,6 +11498,40 @@ namespace Truedat
         /// compared, and two 14-hour summaries side by side could not say which build produced either one.</summary>
         internal static string BuildSummaryLine(string version, string? extractorBuild) =>
             "Build:      truedat " + version + ", extractor " + (extractorBuild ?? "NOT FOUND");
+
+        /// <summary>Where the end-of-scan summary is saved (operator 2026-10-23: "I keep having to copy the text, open notepad, save it
+        /// as this file"): <c>mbxmoods-scan-&lt;start date&gt;-&lt;n&gt;.txt</c> beside the catalog, n = the scan's number that day, from the names
+        /// already there. mbxmoods-* so the Reports line and every existing cleanup glob cover it. The config key <c>scan-summary</c>
+        /// (default true) turns it off.</summary>
+        internal static string ScanSummaryFileName(IEnumerable<string> existingNames, DateTime start)
+        {
+            var prefix = $"mbxmoods-scan-{start:yyyy-MM-dd}-";
+            int max = 0;
+            foreach (var name in existingNames)
+            {
+                if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) continue;
+                var middle = name.Substring(prefix.Length, name.Length - prefix.Length - 4);
+                if (int.TryParse(middle, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) && n > max) max = n;
+            }
+            return $"{prefix}{max + 1}.txt";
+        }
+
+        /// <summary>The end-of-scan "Workers:" line — the count every run, with where it came from. It rode the "+ config:" line only
+        /// when the config set it, so a default run's summary named no count at all (operator 2026-10-23: "i thought we did").</summary>
+        internal static string WorkersSummaryLine(int parallelism, string[] typed, string[] fromConfig)
+        {
+            string? Named(string[] a, int from)   // typed args carry the exe at 0; the config's injected args do not
+            {
+                for (int i = from; i < a.Length - 1; i++)
+                {
+                    var t = a[i].TrimStart('-').ToLowerInvariant();
+                    if (t == "p" || t == "parallel") return "--parallel " + a[i + 1];
+                }
+                return null;
+            }
+            var origin = Named(typed, 1) ?? (Named(fromConfig, 0) is string c ? "config: " + c.Substring(2) : "default: cores-2");
+            return $"Workers:    {parallelism} ({origin})";
+        }
 
         /// <summary><see cref="BuildSummaryLine"/> for THIS process. The MD5 read is one hash of a ~10 MB exe, at end of scan.</summary>
         static string ThisBuild(string? essentiaExe) =>
@@ -15973,6 +16037,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     exit = Merge(srcR); r = P();
                     Assert(exit == 0 && Bins(r.Hist) == "40" && r.Gen == genFilled,
                         $"R3: repeating the identical merge writes nothing and advances no generation (exit {exit}, bins {Bins(r.Hist)}, generation {genFilled} -> {r.Gen})");
+
+                    // codex 2026-10-24 on 3a1e446: a merge that FAILS after reading a store source left that source's entries behind, and the
+                    // cut-field comparison then wrote the failed merge's histogram over the destination's — the byte-equality gate used to
+                    // hide this because a failed merge leaves the catalog unchanged. A failed merge supplies nothing.
+                    var srcZ = StoreWith("srcZ.db", Mk(shaA, H(50)));
+                    var broken = Path.Combine(dir, "broken.json"); File.WriteAllText(broken, "{}");   // valid JSON, no tracks object: the merge exits 1 after srcZ was read
+                    exit = Merge(srcZ, broken); r = P();
+                    Assert(exit != 0 && Bins(r.Hist) == "40" && r.Gen == genFilled,
+                        $"a FAILED merge supplies nothing: the earlier store source's histogram is not applied and no generation advances (exit {exit}, bins {Bins(r.Hist)}, generation {genFilled} -> {r.Gen})");
+
+                    // codex 2026-10-24 on 3a1e446: the verb mask marks every copy fact observed (right for strip/prune — the result is exact), so
+                    // a merge whose WINNING source simply omits a copy fact wrote NULL over the stored one. In a merge, observed = what the
+                    // winning entry carries (ObservedCopyMask), as a catalog import does.
+                    var srcS = StoreWith("srcS.db", new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120, Mfcc = new[] { 1.5, -2.25 }, BpmHistogram = H(40), SmfmScores = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, SmfmChannel = 9, SmfmBpm = 120 },
+                        LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = shaA,
+                    });
+                    exit = Merge(srcS);
+                    string Smfm() { using (global::Truedat.Store.StoreLog.Quiet()) using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) return os.Db.ExecScalar("SELECT CASE WHEN c.smfmScores IS NULL THEN 'null' ELSE 'kept' END FROM track_copy c JOIN track_location l ON l.id = c.location_id WHERE l.display_path LIKE '%p.flac';") ?? "none"; }
+                    Assert(exit == 0 && Smfm() == "kept", $"fixture: a store source carrying SMFM gives the destination copy its scores (exit {exit}, smfm {Smfm()})");
+                    var catO = CatalogWith("o", Mk(shaA, null, "Retitled"));   // same content, new title, no smfm keys at all
+                    exit = Merge(catO); r = P();
+                    string title; using (global::Truedat.Store.StoreLog.Quiet()) using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) title = os.Db.ExecScalar("SELECT c.title FROM track_copy c JOIN track_location l ON l.id = c.location_id WHERE l.display_path LIKE '%p.flac';") ?? "none";
+                    Assert(exit == 0 && title == "Retitled" && Smfm() == "kept" && Bins(r.Hist) == "40",
+                        $"a merge's winning catalog entry that OMITS a copy fact leaves the stored one alone: title updated, smfm kept, histogram kept (exit {exit}, title {title}, smfm {Smfm()}, bins {Bins(r.Hist)})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }
@@ -21999,6 +22089,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"build: the summary names this truedat and the extractor it resolved ({BuildSummaryLine("1.0.0.0-v0.5.5.3-EV2.2.3", "output-x64.5")})");
                 Assert(BuildSummaryLine("1.0.0.0", null) == "Build:      truedat 1.0.0.0, extractor NOT FOUND",
                     $"build: no extractor resolved says so rather than printing a blank ({BuildSummaryLine("1.0.0.0", null)})");
+
+                // Operator 2026-10-23: the end-of-scan summary is saved beside the catalog, named by the START date and the scan's number
+                // that day — "I keep having to copy the text, open notepad, save it as this file". mbxmoods-* so the Reports line and every
+                // existing cleanup glob already cover it.
+                var day = new DateTime(2026, 10, 23, 19, 19, 39);
+                Assert(ScanSummaryFileName(new string[0], day) == "mbxmoods-scan-2026-10-23-1.txt",
+                    $"scan summary file: the first scan of the day is -1 ({ScanSummaryFileName(new string[0], day)})");
+                Assert(ScanSummaryFileName(new[] { "mbxmoods-scan-2026-10-23-1.txt", "mbxmoods-scan-2026-10-23-3.txt", "mbxmoods-scan-2026-10-22-7.txt", "mbxmoods-errors.csv", "mbxmoods-scan-2026-10-23-x.txt" }, day) == "mbxmoods-scan-2026-10-23-4.txt",
+                    $"scan summary file: the next number after the day's highest; other days, other reports and malformed names ignored ({ScanSummaryFileName(new[] { "mbxmoods-scan-2026-10-23-1.txt", "mbxmoods-scan-2026-10-23-3.txt", "mbxmoods-scan-2026-10-22-7.txt", "mbxmoods-errors.csv", "mbxmoods-scan-2026-10-23-x.txt" }, day)})");
+                Assert(ScanSummaryFileName(new[] { "MBXMOODS-SCAN-2026-10-23-2.TXT" }, day) == "mbxmoods-scan-2026-10-23-3.txt",
+                    $"scan summary file: existing names match case-insensitively ({ScanSummaryFileName(new[] { "MBXMOODS-SCAN-2026-10-23-2.TXT" }, day)})");
+                // ...and the worker count, every run: it rode the "+ config:" line only when set, so a default run showed none ("i thought we did").
+                Assert(WorkersSummaryLine(20, new[] { "truedat.exe", "--refresh" }, new string[0]) == "Workers:    20 (default: cores-2)",
+                    $"workers: the default count says it is the default ({WorkersSummaryLine(20, new[] { "truedat.exe", "--refresh" }, new string[0])})");
+                Assert(WorkersSummaryLine(32, new[] { "truedat.exe", "-p", "32" }, new string[0]) == "Workers:    32 (--parallel 32)",
+                    $"workers: a typed -p is named ({WorkersSummaryLine(32, new[] { "truedat.exe", "-p", "32" }, new string[0])})");
+                Assert(WorkersSummaryLine(32, new[] { "truedat.exe" }, new[] { "--parallel", "32" }) == "Workers:    32 (config: parallel 32)",
+                    $"workers: a config-set count names the config ({WorkersSummaryLine(32, new[] { "truedat.exe" }, new[] { "--parallel", "32" })})");
+                Assert(WorkersSummaryLine(22, new[] { "truedat.exe", "--parallel", "max" }, new string[0]) == "Workers:    22 (--parallel max)",
+                    $"workers: --parallel max is named as typed ({WorkersSummaryLine(22, new[] { "truedat.exe", "--parallel", "max" }, new string[0])})");
 
                 var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
                 Assert(hints.Contains(@"C:\t\real\r.mp3"), "root hints: the scan's whole work list joins the catalog's keys");
