@@ -158,21 +158,46 @@ namespace Truedat.Store
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
 
             var staged = store + ".restore.tmp";
-            try { File.Delete(staged); } catch { }
+            DeleteStaged(staged);
             StoreCopy candidate;
+            long generation;
+            // The restored store's generation must exceed the one it REPLACES, not just its own. A snapshot taken at
+            // generation 1 and restored over a store at generation 2 would otherwise republish generation 2 with
+            // different content, and a consumer holding 2 would never look again — the one thing the generation
+            // exists to prevent. The floor is read now; a writer advancing the live store under a restore is the
+            // single-writer rule broken, and the swap below re-checks it anyway.
+            long floor = Math.Max(File.Exists(store) ? ReadGenerationOf(store) : 0, filesGeneration);
             try
             {
                 ExtractStoreTo(archivePath, staged);
-                candidate = Validate(staged);
+                candidate = Validate(staged);   // the archive's store as it was written: its schema, its generation
+                // codex 2026-10-23 F2: everything this build does when it opens a store — the schema migration, the root fold, the
+                // flatness conversion, the verdict derivation — runs on the STAGED copy, so a candidate the validator accepts but this
+                // build cannot open is refused while the working store is still in place. It used to be installed first and opened
+                // second, and the refusal left an unopenable store where the working one had been. The generation is set here too,
+                // so the restored store is never opened again after the swap.
+                using (var os = OpenStore.Open(staged, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    generation = os.Dal.AdvanceGeneration();
+                    if (generation <= floor)
+                    {
+                        generation = floor + 1;
+                        os.Dal.MetaSet(StoreDal.GenerationKey, generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                    tx.Complete();
+                }
+                foreach (var side in Directory.GetFiles(dir ?? ".", Path.GetFileName(staged) + ".bak.*"))   // a migration's own backup, of a copy
+                    try { File.Delete(side); } catch { }
             }
-            catch (Exception)
+            catch (StoreException) { DeleteStaged(staged); throw; }
+            catch (Exception ex)
             {
-                try { File.Delete(staged); } catch { }
-                throw;
+                DeleteStaged(staged);
+                throw new StoreException($"the store in the archive cannot be opened by this build ({ex.Message}); nothing was replaced.");
             }
 
-            // The store being replaced becomes a snapshot of its own, so this is reversible by the same command. Its
-            // generation is kept: the restored store has to advance past it (see below), never merely past its own.
+            // The store being replaced becomes a snapshot of its own, so this is reversible by the same command.
             string? backup = null;
             long replacedGeneration = 0;
             if (File.Exists(store))
@@ -187,7 +212,7 @@ namespace Truedat.Store
                 }
                 catch (Exception ex)
                 {
-                    try { File.Delete(staged); } catch { }
+                    DeleteStaged(staged);
                     throw new StoreException($"could not snapshot the store being replaced ({ex.Message}); nothing was replaced.");
                 }
             }
@@ -195,7 +220,7 @@ namespace Truedat.Store
             try { Program.AtomicReplace(staged, store); }
             catch (Exception ex)
             {
-                try { File.Delete(staged); } catch { }
+                DeleteStaged(staged);
                 throw new StoreException($"could not install the restored store ({ex.Message}); the store was left as it was"
                     + (backup != null ? $" and its snapshot is {backup}" : "") + ".");
             }
@@ -204,24 +229,35 @@ namespace Truedat.Store
             foreach (var side in new[] { store + "-wal", store + "-shm" })
                 try { if (File.Exists(side)) File.Delete(side); } catch { }
 
-            // The restored store's generation must exceed the one it REPLACED, not just its own. A snapshot taken at
-            // generation 1 and restored over a store at generation 2 would otherwise republish generation 2 with
-            // different content, and a consumer holding 2 would never look again — the one thing the generation
-            // exists to prevent.
-            long generation;
-            using (var os = OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
-            using (var tx = os.Db.BeginTransaction())
+            // The live store moved past the floor between the read above and its snapshot: set the generation past what was replaced.
+            if (replacedGeneration >= generation)
             {
-                long replaced = Math.Max(replacedGeneration, filesGeneration);
-                generation = os.Dal.AdvanceGeneration();
-                if (generation <= replaced)
-                {
-                    generation = replaced + 1;
-                    os.Dal.MetaSet(StoreDal.GenerationKey, generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                }
+                using var os = OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
+                using var tx = os.Db.BeginTransaction();
+                generation = replacedGeneration + 1;
+                os.Dal.MetaSet(StoreDal.GenerationKey, generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 tx.Complete();
             }
             return new RestoreResult(candidate, backup, generation);
+        }
+
+        /// <summary>The staging file and whatever opening it left beside it (its WAL pair, a migration's backup of it).</summary>
+        static void DeleteStaged(string staged)
+        {
+            foreach (var f in new[] { staged, staged + "-wal", staged + "-shm" })
+                try { if (File.Exists(f)) File.Delete(f); } catch { }
+            try
+            {
+                foreach (var f in Directory.GetFiles(Path.GetDirectoryName(staged) ?? ".", Path.GetFileName(staged) + ".bak.*"))
+                    try { File.Delete(f); } catch { }
+            }
+            catch { }
+        }
+
+        static long ReadGenerationOf(string storePath)
+        {
+            using var db = SqliteDb.Open(storePath, create: false);
+            return ReadGeneration(db);
         }
 
         /// <summary>Keep the newest <paramref name="keepN"/> store snapshots beside a store (names matching

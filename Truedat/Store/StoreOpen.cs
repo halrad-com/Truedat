@@ -45,11 +45,12 @@ namespace Truedat.Store
                 StoreLog.Warn($"store on a network path: {full} — not recommended (every page read and write is a round trip); opening with exclusive locking, one process only");
 
             SqliteDb? db = null;
+            StoreDal? dal = null;
             try
             {
                 db = SqliteDb.Open(full, create, exclusiveLocking: network);
                 SchemaMigrator.Apply(db, truedatVersion);
-                var dal = new StoreDal(db);
+                dal = new StoreDal(db);
                 var machine = MachineIdentity.EnsureMinted(dal, Environment.MachineName, nowUtc);
                 FoldNestedRoots(db, dal, nowUtc);   // a store left with nested primary roots is repaired before anything reads it
                 ConvertSpectralFlatness(db, dal);   // rows an older build wrote with the three-band average get Essentia's value
@@ -60,10 +61,12 @@ namespace Truedat.Store
             catch (SqliteException ex)
             {
                 // Not a database, locked, read-only share: one plain sentence, never an escaping stack trace (review #6).
-                db?.Dispose();
+                // The DAL's cached statements go first: a connection closed under live statements stays open, and the file
+                // stayed locked — a refused restore could not delete its staging copy (codex 2026-10-23 F2 follow-up).
+                dal?.Dispose(); db?.Dispose();
                 throw new StoreException($"The store {full} could not be opened: {ex.Message}");
             }
-            catch { db?.Dispose(); throw; }
+            catch { dal?.Dispose(); db?.Dispose(); throw; }
         }
 
         /// <summary>The repair half of <see cref="StoreDal.FoldNestedRoots"/>: a store written before the fold ran at root minting

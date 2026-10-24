@@ -232,6 +232,32 @@ namespace Truedat.Store
                 assert(why != null && why.Contains($"v{StoreSchema.CurrentVersion + 1}") && why.Contains("nothing was replaced"),
                     $"future schema: refused naming the schema and that nothing was replaced ({why})");
             }
+            // codex 2026-10-23 F2: a candidate the validator accepts (quick_check ok, schema current) that this build cannot OPEN —
+            // everything the application does at open runs then: migration, the root fold, the flatness conversion, the verdict
+            // derivation. The restore used to install the candidate first and open it second, so the refusal left an unopenable
+            // store where the working one had been. The staged copy is opened before anything is replaced.
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                var catalog = d.P(Program.MoodsFileName);
+                Mint(store, Lib(@"D:\music", ("a.flac", 120, 'a')), @"D:\music");
+                using (StoreLog.Quiet()) ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = catalog });
+                var liveSha = StoreTransfer.Sha256File(store);
+                var poison = d.P("poison.db");
+                Mint(poison, Lib(@"D:\music", ("b.flac", 121, 'b')), @"D:\music");
+                using (var db = SqliteDb.Open(poison, create: false)) { db.Exec("PRAGMA foreign_keys = OFF;"); db.Exec("DROP TABLE library_root;"); }
+                StoreTransfer.Validate(poison);   // setup: the validator accepts it
+                int exit = -1; string? thrown = null;
+                try { using (StoreLog.Quiet()) exit = Program.RunStoreRestore(poison, store, catalog); }
+                catch (Exception ex) { thrown = ex.GetType().Name + ": " + ex.Message; }
+                assert(exit == 1 && thrown == null, $"unopenable candidate: refused with exit 1, no exception escapes (exit {exit}{(thrown != null ? ", threw " + thrown : "")})");
+                assert(StoreTransfer.Sha256File(store) == liveSha, "unopenable candidate: the working store is byte-identical — nothing was replaced");
+                assert(Directory.GetFiles(d.Root, Path.GetFileName(store) + ".bak.*").Length == 0 && Directory.GetFiles(d.Root, "*.restore.tmp*").Length == 0,
+                    $"unopenable candidate: no backup churned, no staging file or staging-side migration backup left behind ({string.Join(", ", Directory.GetFiles(d.Root).Select(Path.GetFileName))})");
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(os.Dal.ListRoots().Count == 1, "unopenable candidate: the working store still opens");
+            }
             // A catalog-only snapshot is not a store snapshot.
             using (var d = new Dir())
             {
