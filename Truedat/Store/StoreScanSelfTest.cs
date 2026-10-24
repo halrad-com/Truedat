@@ -26,6 +26,11 @@ namespace Truedat.Store
             }
             try { TestEquivalentMirrorRoleCollision(assert); }
             catch (Exception ex) { assert(false, $"StoreScan.MirrorRoleSpelling: threw {ex.GetType().Name}: {ex.Message}"); }
+            foreach (bool mirrorFirst in new[] { true, false })
+            {
+                try { TestLegacyRootAliasRepair(assert, mirrorFirst); }
+                catch (Exception ex) { assert(false, $"StoreScan.LegacyRootAliasRepair ({(mirrorFirst ? "mirror-first" : "primary-first")}): threw {ex.GetType().Name}: {ex.Message}"); }
+            }
             StoreStopSelfTest.Run(assert);
             StoreStopCliSelfTest.Run(assert);
         }
@@ -342,6 +347,99 @@ namespace Truedat.Store
                     $"StoreScan.MirrorRoleSpelling {shape.Name}: equivalent paths match the exact-path {(controlAccepted.Value ? "promotion" : "refusal")} and preserve one root"
                     + $" (accepted {accepted}; roots {roots.Count}; equivalent {equivalent}; roles {string.Join(",", roots.Select(r => r.Role))})");
             }
+        }
+
+        /// <summary>The repair half of the spelling fix (8884c86 prevents; this heals): a store an earlier build left with one path as two
+        /// roots on one machine — a mirror and a primary in two spellings, child rows under both — opens as one root. The PRIMARY row
+        /// survives whichever is older (nothing published may vanish), the mirror's locations move under it, a path recorded under both
+        /// keeps the newer copy and takes the older copy's facts where it had none, run and check history move, another machine's mirror
+        /// at the same path is untouched, the generation advances once, and a second open is a read.</summary>
+        static void TestLegacyRootAliasRepair(Action<bool, string> assert, bool mirrorFirst)
+        {
+            string label = $"StoreScan.LegacyRootAliasRepair ({(mirrorFirst ? "mirror-first" : "primary-first")})";
+            using var d = new Dir();
+            using var quiet = StoreLog.Quiet();
+            string now = DateTime.UtcNow.ToString("o");
+            var store = d.P("truedat.db");
+            const string held = @"X:\lib", alias = "x:/LIB/", other = "00000000-0000-7000-8000-00000000a11a";
+            string firstRole = mirrorFirst ? "mirror" : "primary", secondRole = mirrorFirst ? "primary" : "mirror";
+            var entries = new Dictionary<string, TrackEntry>(PathComparer.Instance)
+            {
+                [held + @"\t1.flac"] = E("t1", 120, 'a'),
+                [held + @"\t2.flac"] = E("t2", 100, 'b'),
+            };
+            ImportCommand.ExecuteEntries(store, entries, held, firstRole, true, "import", "1", "alias-test", null, null);
+            long firstRoot, secondRoot, t1, dup, t2, bOnly, generation;
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, now))
+            {
+                var db = os.Db;
+                firstRoot = os.Dal.ListRoots().Single().Id;
+                t1 = long.Parse(db.ExecScalar($"SELECT id FROM track_location WHERE display_path = '{held}\\t1.flac';")!);
+                t2 = long.Parse(db.ExecScalar($"SELECT id FROM track_location WHERE display_path = '{held}\\t2.flac';")!);
+                db.Exec($"UPDATE track_copy SET smfmBpm = NULL WHERE location_id = {t1};" +
+                        // the broken state, as an earlier EnsureRoot left it: the same path again, another spelling, the OTHER role, same machine
+                        $"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{os.Machine.Id}', '{alias}', '{secondRole}', '2026-10-23T00:00:01Z');" +
+                        // t1 recorded under both roots; the alias copy is the newer observation but lacks the artist the older one has
+                        "INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT id + 1000, entity_id, (SELECT max(id) FROM library_root), rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {t1};" +
+                        $"CREATE TEMP TABLE tc AS SELECT * FROM track_copy WHERE location_id = {t1};" +
+                        $"UPDATE tc SET location_id = {t1 + 1000}, updated_utc = '2099-01-01T00:00:00.0000000Z', artist = NULL, smfmBpm = 130;" +
+                        "INSERT INTO track_copy SELECT * FROM tc; DROP TABLE tc;" +
+                        // a path only the alias root holds
+                        "INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT id + 1000, entity_id, (SELECT max(id) FROM library_root), 'b-only.flac', 'b-only.flac', '{held}\\b-only.flac', last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {t2};" +
+                        $"CREATE TEMP TABLE tc2 AS SELECT * FROM track_copy WHERE location_id = {t2};" +
+                        $"UPDATE tc2 SET location_id = {t2 + 1000};" +
+                        "INSERT INTO track_copy SELECT * FROM tc2; DROP TABLE tc2;" +
+                        // history hanging off the alias's duplicate location
+                        $"INSERT INTO run(producer_key, producer_version, location_id, started_utc, outcome) VALUES ('verify', '1', {t1 + 1000}, '2026-10-23T00:00:02Z', 'ok');" +
+                        $"INSERT INTO check_result(location_id, kind, result, checked_utc) VALUES ({t1 + 1000}, 'verify', 'OK', '2026-10-23T00:00:03Z');" +
+                        // another machine's mirror of the same path: legitimate, that box's view, must not move
+                        $"INSERT INTO machine(id, hostname, created_utc) VALUES ('{other}', 'OTHER', '{now}');" +
+                        $"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{other}', '{held}', 'mirror', '2026-10-23T00:00:04Z');" +
+                        "INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT id + 2000, entity_id, (SELECT max(id) FROM library_root), rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {t1};" +
+                        $"CREATE TEMP TABLE tc3 AS SELECT * FROM track_copy WHERE location_id = {t1};" +
+                        $"UPDATE tc3 SET location_id = {t1 + 2000};" +
+                        "INSERT INTO track_copy SELECT * FROM tc3; DROP TABLE tc3;");
+                secondRoot = long.Parse(db.ExecScalar($"SELECT id FROM library_root WHERE path = '{alias}';")!);
+                dup = t1 + 1000; bOnly = t2 + 1000;
+                generation = os.Dal.Generation();
+                assert(db.ExecScalar($"SELECT count(*) FROM library_root WHERE machine_id = '{os.Machine.Id}';") == "2"
+                       && db.ExecScalar($"SELECT count(*) FROM track_location WHERE display_path = '{held}\\t1.flac';") == "3",
+                    $"{label}: the broken state — one path as two roots on one machine, t1 recorded under both and under another machine's mirror");
+            }
+            long survivor = mirrorFirst ? secondRoot : firstRoot, folded = mirrorFirst ? firstRoot : secondRoot;
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, now))
+            {
+                var db = os.Db;
+                var mine = os.Dal.ListRoots().Where(r => r.Id != folded).ToList();
+                string own = db.ExecScalar($"SELECT group_concat(id || ':' || role, ',') FROM library_root WHERE machine_id = '{os.Machine.Id}';") ?? "none";
+                assert(own == $"{survivor}:primary" && os.Dal.ListRoots().Count == 2,
+                    $"{label}: opening the store folds the alias into the PRIMARY row whichever is older, and the other machine's mirror stays (mine {own}; roots {os.Dal.ListRoots().Count})");
+                assert(db.ExecScalar($"SELECT count(*) FROM track_location WHERE root_id = {survivor};") == "3"
+                       && db.ExecScalar($"SELECT id FROM track_location WHERE root_id = {survivor} AND canonical_path = 't1.flac';") == dup.ToString()
+                       && db.ExecScalar($"SELECT root_id FROM track_location WHERE id = {bOnly};") == survivor.ToString(),
+                    $"{label}: t1 is one location under the survivor (the newer copy's, {dup}), t2 and the alias-only path sit beside it");
+                assert(db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};") == "A|130|2099-01-01T00:00:00.0000000Z",
+                    $"{label}: the kept copy takes the artist it lacked from the dropped copy and keeps its own bpm and stamp ({db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};")})");
+                assert(db.ExecScalar($"SELECT location_id FROM run WHERE producer_key = 'verify';") == dup.ToString()
+                       && db.ExecScalar("SELECT location_id FROM check_result;") == dup.ToString(),
+                    $"{label}: the dropped location's run and check history moved onto the survivor");
+                assert(db.ExecScalar($"SELECT count(*) FROM track_location WHERE id = {t1 + 2000} AND root_id = (SELECT id FROM library_root WHERE machine_id = '{other}');") == "1"
+                       && db.ExecScalar($"SELECT count(*) FROM track_copy WHERE location_id = {t1 + 2000};") == "1",
+                    $"{label}: the other machine's mirror keeps its own location and copy");
+                assert(db.ExecScalar("SELECT count(*) FROM track_copy;") == db.ExecScalar("SELECT count(*) FROM track_location;")
+                       && db.ExecScalar("SELECT count(*) FROM track_copy WHERE location_id NOT IN (SELECT id FROM track_location);") == "0"
+                       && db.ExecScalar("SELECT count(*) FROM verdict WHERE location_id NOT IN (SELECT id FROM track_location);") == "0"
+                       && db.ExecScalar("PRAGMA foreign_key_check;") == null,
+                    $"{label}: one copy per location, nothing dangling, no foreign key broken");
+                assert(os.Dal.Generation() == generation + 1 && os.Dal.LibraryRoots().Select(r => r.Id).SequenceEqual(new[] { survivor }),
+                    $"{label}: the repair is one mutation ({generation} -> {os.Dal.Generation()}) and the library is the survivor alone");
+            }
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, now))
+                assert(os.Dal.Generation() == generation + 1 && os.Dal.ListRoots().Count == 2 && !os.Dal.HasNestedRoots(),
+                    $"{label}: a second open is a read — nothing left to repair, generation {os.Dal.Generation()}");
         }
 
         static void TestCacheHitAndRetire(Action<bool, string> assert)

@@ -233,40 +233,107 @@ namespace Truedat.Store
                         outer = p;
                 if (outer == null) continue;
                 gone.Add(inner.Id);
-                var fold = new RootFold { InnerId = inner.Id, Inner = inner.Path, OuterId = outer.Value.Id, Outer = outer.Value.Path };
-                var locs = new List<(long Id, string Display)>();
-                using (var ls = Db.Prepare("SELECT id, display_path FROM track_location WHERE root_id = ? ORDER BY id;"))
-                {
-                    ls.Bind(1, inner.Id);
-                    while (ls.Step()) locs.Add((ls.GetInt64(0), ls.GetString(1)!));
-                }
-                foreach (var (locId, display) in locs)
-                {
-                    CanonicalPath.Split(outer.Value.Path, display, out var rel, out var canon);
-                    var dup = FindLocation(outer.Value.Id, canon, out _);
-                    long keep = locId;
-                    if (dup.HasValue)
+                folds.Add(FoldRootInto(inner.Id, inner.Path, outer.Value.Id, outer.Value.Path, "is inside"));
+            }
+            // The same path registered twice by ONE machine in two spellings — under two roles, or under one — is one root held as
+            // two rows (EnsureRoot matched byte-exact and swept only primaries until 8884c86, so `x:\MIRROR` beside a held `X:\mirror`
+            // mirror row inserted a primary beside it). The survivor is the PRIMARY row when the group holds one, else the oldest:
+            // a primary root is the library's, and nothing that was published may stop being published because a repair picked the
+            // mirror. No row changes role — this chooses which existing row stays, not a promotion (R1b/D3 is the operator's).
+            foreach (var group in AliasGroups())
+            {
+                var survivor = group.FirstOrDefault(r => r.Role == "primary");
+                if (survivor.Path == null) survivor = group[0];
+                foreach (var r in group)
+                    if (r.Id != survivor.Id && !gone.Contains(r.Id))
                     {
-                        keep = NewerCopy(locId, dup.Value);
-                        long drop = keep == locId ? dup.Value : locId;
-                        Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
-                        Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
-                        Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
-                        Exec("DELETE FROM track_copy WHERE location_id = ?;", drop);
-                        Exec("DELETE FROM track_location WHERE id = ?;", drop);
-                        fold.Merged++;
+                        gone.Add(r.Id);
+                        folds.Add(FoldRootInto(r.Id, r.Path, survivor.Id, survivor.Path, $"({r.Role}) is the same path as", survivor.Role));
                     }
-                    // Only now (the duplicate, if any, is gone) can the inner location take its place under the outer root.
-                    if (keep == locId)
-                    {
-                        Exec("UPDATE track_location SET root_id = ?, rel_path = ?, canonical_path = ? WHERE id = ?;", outer.Value.Id, rel, canon, locId);
-                        fold.Moved++;
-                    }
-                }
-                Exec("DELETE FROM library_root WHERE id = ?;", inner.Id);
-                folds.Add(fold);
             }
             return folds;
+        }
+
+        /// <summary>This machine's roots that spell one path more than once, grouped — every role, oldest row first within a group.
+        /// Only groups of two or more are returned, and a mirror root on ANOTHER machine is never in one: that is that machine's view.</summary>
+        internal List<List<(long Id, string Path, string Role)>> AliasGroups()
+        {
+            var rows = new List<(long Id, string Machine, string Path, string Role)>();
+            var st = Stmt("SELECT id, machine_id, path, role FROM library_root ORDER BY id;");
+            try { while (st.Step()) rows.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "", st.GetString(3) ?? "")); }
+            finally { st.Reset(); }
+            var groups = new Dictionary<string, List<(long, string, string)>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in rows)
+            {
+                var key = r.Machine + "\n" + CanonicalPath.Root(r.Path);
+                if (!groups.TryGetValue(key, out var g)) groups[key] = g = new List<(long, string, string)>();
+                g.Add((r.Id, r.Path, r.Role));
+            }
+            return groups.Values.Where(g => g.Count > 1).ToList();
+        }
+
+        /// <summary>Fold root <paramref name="innerId"/> into <paramref name="outerId"/>: its locations move under the survivor (root-relative
+        /// paths recomputed with the same <see cref="CanonicalPath.Split"/> the insert uses); a path recorded under BOTH keeps the location
+        /// whose copy is newer and merges the other's copy into it field by field — a value the newer copy lacks is taken from the older,
+        /// never cleared (the merge's null rule, 2026-10-24) — while the dropped location's run and check history move onto the survivor
+        /// and its verdict and location row go. Then the inner root row is deleted.</summary>
+        RootFold FoldRootInto(long innerId, string innerPath, long outerId, string outerPath, string reason, string? outerRole = null)
+        {
+            var fold = new RootFold { InnerId = innerId, Inner = innerPath, OuterId = outerId, Outer = outerPath, Reason = reason, OuterRole = outerRole };
+            var locs = new List<(long Id, string Display)>();
+            using (var ls = Db.Prepare("SELECT id, display_path FROM track_location WHERE root_id = ? ORDER BY id;"))
+            {
+                ls.Bind(1, innerId);
+                while (ls.Step()) locs.Add((ls.GetInt64(0), ls.GetString(1)!));
+            }
+            foreach (var (locId, display) in locs)
+            {
+                CanonicalPath.Split(outerPath, display, out var rel, out var canon);
+                var dup = FindLocation(outerId, canon, out _);
+                long keep = locId;
+                if (dup.HasValue)
+                {
+                    keep = NewerCopy(locId, dup.Value);
+                    long drop = keep == locId ? dup.Value : locId;
+                    MergeCopyInto(keep, drop);
+                    Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
+                    Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
+                    Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
+                    Exec("DELETE FROM track_copy WHERE location_id = ?;", drop);
+                    Exec("DELETE FROM track_location WHERE id = ?;", drop);
+                    fold.Merged++;
+                }
+                // Only now (the duplicate, if any, is gone) can the inner location take its place under the outer root.
+                if (keep == locId)
+                {
+                    Exec("UPDATE track_location SET root_id = ?, rel_path = ?, canonical_path = ? WHERE id = ?;", outerId, rel, canon, locId);
+                    fold.Moved++;
+                }
+            }
+            Exec("DELETE FROM library_root WHERE id = ?;", innerId);
+            return fold;
+        }
+
+        /// <summary>Every copy fact the kept location's copy lacks is taken from the dropped location's copy; a value the kept copy holds is
+        /// never replaced and never cleared. <c>location_id</c>, <c>run_id</c> and <c>updated_utc</c> stay the kept copy's — it is the newer
+        /// observation, that is why it was kept. A dropped location with no copy row supplies nothing.</summary>
+        void MergeCopyInto(long keep, long drop)
+        {
+            if (ScalarLong("SELECT count(*) FROM track_copy WHERE location_id = ?;", drop) == 0) return;
+            if (ScalarLong("SELECT count(*) FROM track_copy WHERE location_id = ?;", keep) == 0)
+            {
+                Exec("UPDATE track_copy SET location_id = ? WHERE location_id = ?;", keep, drop);
+                return;
+            }
+            var cols = new List<string>();
+            using (var ti = Db.Prepare("PRAGMA table_info(track_copy);"))
+                while (ti.Step())
+                {
+                    var name = ti.GetString(1)!;
+                    if (name != "location_id" && name != "run_id" && name != "updated_utc") cols.Add(name);
+                }
+            var sets = string.Join(", ", cols.Select(c => $"\"{c}\" = COALESCE(\"{c}\", (SELECT \"{c}\" FROM track_copy WHERE location_id = {drop}))"));
+            Exec($"UPDATE track_copy SET {sets} WHERE location_id = ?;", keep);
         }
 
         /// <summary>Whether <paramref name="innerPath"/>'s root is redundant beside <paramref name="outerPath"/>'s: inside it, or the same
@@ -286,7 +353,7 @@ namespace Truedat.Store
             foreach (var a in primaries)
                 foreach (var b in primaries)
                     if (a.Id != b.Id && Redundant(a.Path, a.Id, b.Path, b.Id)) return true;
-            return false;
+            return AliasGroups().Count > 0;
         }
 
         /// <summary>Of two locations for one path, the one whose copy was written last (ISO-8601 'o' sorts as text). A location
@@ -743,6 +810,11 @@ namespace Truedat.Store
         internal int Moved;
         /// <summary>Paths that were recorded under BOTH roots and are now one location.</summary>
         internal int Merged;
-        public override string ToString() => $"{Inner} is inside {Outer}: folded into it ({Moved:N0} locations moved, {Merged:N0} merged)";
+        /// <summary>Why the inner root was redundant: "is inside" (nested), or "(role) is the same path as" (one machine, two spellings).</summary>
+        internal string Reason = "is inside";
+        /// <summary>The survivor's role when the fold was an alias fold, so the log says which row stayed.</summary>
+        internal string? OuterRole;
+        public override string ToString()
+            => $"{Inner} {Reason} {Outer}{(OuterRole == null ? "" : $" ({OuterRole})")}: folded into it ({Moved:N0} locations moved, {Merged:N0} merged)";
     }
 }
