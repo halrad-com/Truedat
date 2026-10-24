@@ -15329,6 +15329,65 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Returns null on ffmpeg absence / decode failure / silent file — never throws.
         /// Designed to run concurrently with Essentia (single ffmpeg child process,
         /// ~5.5 MB total decoded payload, typically completes in 1–3s warm).</summary>
+        /// <summary>The whole life of a companion decoder child (bitUsage, HF), start to exit — one absolute deadline, not one wait per phase
+        /// (codex perf review 2026-10-23 F1: the drains blocked on Read until EOF and only then waited 60 s, so a child that stayed alive
+        /// with stdout open never returned, and the worker awaits these tasks). 30 s of audio decodes in seconds; two minutes is generous.</summary>
+        internal const int CompanionDecodeDeadlineMs = 120_000;
+
+        /// <summary>Start <paramref name="psi"/> and drain its stdout as s32le samples into <paramref name="onSample"/> under ONE deadline over
+        /// the child's whole life: a timer kills it at the deadline whatever phase it is in, the remaining time covers the exit, and this
+        /// method owns the pipe and the child. Returns the exit code (null when the child was killed), the whole samples delivered, and
+        /// whether the deadline fired.</summary>
+        internal static (int? Exit, long Samples, bool TimedOut) DrainS32Le(ProcessStartInfo psi, Action<int> onSample, int deadlineMs)
+        {
+            var sw = Stopwatch.StartNew();
+            using var proc = Process.Start(psi);
+            if (proc == null) return (null, 0, false);
+            try { ApplyCpuLimit(proc); DisableEcoQos(proc.Handle); } catch { }
+            var stderrTask = proc.StandardError.ReadToEndAsync();   // a chatty child must not deadlock the pipe
+            int timedOut = 0;
+            void KillOnce() { if (Interlocked.Exchange(ref timedOut, 1) == 0) try { proc.Kill(); } catch { } }
+            using var deadline = new System.Threading.Timer(_ => KillOnce(), null, deadlineMs, Timeout.Infinite);
+            long samples = 0;
+            var buf = new byte[64 * 1024]; var stream = proc.StandardOutput.BaseStream; int residue = 0;
+            try
+            {
+                while (true)
+                {
+                    int got = stream.Read(buf, residue, buf.Length - residue);
+                    if (got <= 0) break;
+                    int total = residue + got, whole = total / 4;
+                    for (int i = 0; i < whole; i++) onSample(BitConverter.ToInt32(buf, i * 4));
+                    samples += whole;
+                    int used = whole * 4; residue = total - used;
+                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
+                }
+            }
+            catch (IOException) { }   // the pipe closed under the kill
+            int remaining = (int)Math.Max(0, deadlineMs - sw.ElapsedMilliseconds);
+            if (!proc.WaitForExit(remaining)) { KillOnce(); try { proc.WaitForExit(5000); } catch { } }
+            deadline.Change(Timeout.Infinite, Timeout.Infinite);
+            try { stderrTask.Wait(2000); } catch { }
+            bool killed = Volatile.Read(ref timedOut) == 1;
+            int? exit = null;
+            if (!killed) { try { exit = proc.ExitCode; } catch { } }
+            return (exit, samples, killed);
+        }
+
+        /// <summary>Did a companion decode MEASURE the window it was asked for (codex perf review 2026-10-23 F4)? Exit 0, not killed, and
+        /// at least 80 % of the window's samples at the decode's OWN rate (these pipes decode at the native rate; the edge pipe's 44.1k
+        /// constant would accept 18 % of a 192 kHz window). The window is the smaller of what was requested and what the file has after
+        /// the start offset. With the rate unknown the floor is "exited 0 with output" — stated, not invented. Anything else is a
+        /// FAILED measurement: null and applicable, so the health gate fails the track and the scan retries it once; never silence,
+        /// never data.</summary>
+        internal static bool DecodeCovers(int? exitCode, bool timedOut, long samples, int sampleRate, double requestedSec, double availableSec)
+        {
+            if (timedOut || exitCode != 0) return false;
+            if (sampleRate <= 0) return samples > 0;
+            double window = availableSec > 0 ? Math.Min(requestedSec, availableSec) : requestedSec;
+            return samples >= (long)(sampleRate * window * 0.8);
+        }
+
         /// <summary>The bitUsage sample tally, out of the ffmpeg drain so it can be pinned: one s32 sample into the trailing-zero histogram
         /// (33 buckets: 0..31 for non-zero samples, 32 for zero), the counts and the energy sum.</summary>
         internal static class BitUsageTally
@@ -15373,11 +15432,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // can't tell us anything about hi-res authenticity). Fail-safe: if TagLib
             // can't be opened or the codec/bitDepth can't be derived, fall through to
             // the analysis rather than silently dropping a potentially-applicable file.
+            int peekRate = 0;   // the decode's own rate (no -ar below): the F4 coverage floor is judged at it
             try
             {
                 using var peek = TagLib.File.Create(filePath);
                 var (peekCodec, _) = NormalizeCodec(peek);
                 int peekBitDepth = peek.Properties?.BitsPerSample ?? 0;
+                peekRate = peek.Properties?.AudioSampleRate ?? 0;
                 bool applicable = IsLosslessCodecForHiresCheck(peekCodec) && peekBitDepth >= 24;
                 if (!applicable) { notApplicable = true; return null; }
             }
@@ -15412,40 +15473,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             try
             {
-                using var proc = Process.Start(psi);
-                if (proc == null) return null;
-                ApplyCpuLimit(proc);
-                DisableEcoQos(proc.Handle);
-                // Drain stderr async so a chatty ffmpeg can't deadlock the pipe.
-                var stderrTask = proc.StandardError.ReadToEndAsync();
-
                 // 33 buckets: 0..31 for trailing-zero counts of nonzero samples; index 32 for fully-zero samples.
                 var tzHistogram = new long[33];
                 double signalSqSum = 0;   // double to avoid int-overflow accumulation
                 long count = 0;
                 long countNonZero = 0;
-
-                var buf = new byte[64 * 1024];  // 16 K samples per read
-                var stream = proc.StandardOutput.BaseStream;
-                int residue = 0;
-                while (true)
-                {
-                    int got = stream.Read(buf, residue, buf.Length - residue);
-                    if (got <= 0) break;
-                    int total = residue + got;
-                    int wholeSamples = total / 4;
-                    for (int i = 0; i < wholeSamples; i++) BitUsageTally.Add(BitConverter.ToInt32(buf, i * 4), tzHistogram, ref count, ref countNonZero, ref signalSqSum);
-                    int used = wholeSamples * 4;
-                    residue = total - used;
-                    if (residue > 0) Buffer.BlockCopy(buf, used, buf, 0, residue);
-                }
-
-                if (!proc.WaitForExit(60000))
-                {
-                    try { proc.Kill(); } catch { }
-                    return null;
-                }
-                if (proc.ExitCode != 0 && count == 0) return null;  // tolerate non-zero exit if we got data
+                var drained = DrainS32Le(psi, s => BitUsageTally.Add(s, tzHistogram, ref count, ref countNonZero, ref signalSqSum), CompanionDecodeDeadlineMs);
+                // F4: a failed, killed or short decode is not a measurement — null and APPLICABLE, so the health gate fails the track
+                // (it used to tolerate a non-zero exit once any sample arrived). The silence rule below judges only a complete decode.
+                if (!DecodeCovers(drained.Exit, drained.TimedOut, drained.Samples, peekRate, 30, durationSec > 0 ? durationSec - startSec : 0)) return null;
 
                 // Pure silence — can't infer bit depth. A content limitation, not a
                 // defect: must read as not-applicable, or the health gate would fail
@@ -15708,52 +15744,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             };
             try
             {
-                using var proc = Process.Start(psi);
-                if (proc == null) return (null, null, null);
-                ApplyCpuLimit(proc);
-                DisableEcoQos(proc.Handle);
-                var stderrTask = proc.StandardError.ReadToEndAsync();
-
-                var buf = new byte[64 * 1024];
-                var stream = proc.StandardOutput.BaseStream;
-                int byteResidue = 0;
-                while (true)
+                var drained = DrainS32Le(psi, s =>
                 {
-                    int got = stream.Read(buf, byteResidue, buf.Length - byteResidue);
-                    if (got <= 0) break;
-                    int total = byteResidue + got;
-                    int wholeSamples = total / 4;
-                    int srcIdx = 0;
-                    while (srcIdx < wholeSamples)
+                    rolling[rollingFill++] = s * SampleScale;
+                    if (rollingFill == FftSize)
                     {
-                        int room = FftSize - rollingFill;
-                        int take = Math.Min(room, wholeSamples - srcIdx);
-                        for (int i = 0; i < take; i++)
-                        {
-                            int s = BitConverter.ToInt32(buf, (srcIdx + i) * 4);
-                            rolling[rollingFill + i] = s * SampleScale;
-                        }
-                        rollingFill += take;
-                        srcIdx += take;
-                        if (rollingFill == FftSize)
-                        {
-                            ProcessWindow();
-                            // Shift back half to front for 50% overlap: next window starts
-                            // FftSize-Hop samples back. One memmove per window.
-                            Buffer.BlockCopy(rolling, Hop * sizeof(double), rolling, 0, (FftSize - Hop) * sizeof(double));
-                            rollingFill = FftSize - Hop;
-                        }
+                        ProcessWindow();
+                        // Shift back half to front for 50% overlap: next window starts FftSize-Hop samples back. One memmove per window.
+                        Buffer.BlockCopy(rolling, Hop * sizeof(double), rolling, 0, (FftSize - Hop) * sizeof(double));
+                        rollingFill = FftSize - Hop;
                     }
-                    int used = wholeSamples * 4;
-                    byteResidue = total - used;
-                    if (byteResidue > 0) Buffer.BlockCopy(buf, used, buf, 0, byteResidue);
-                }
-                if (!proc.WaitForExit(60000))
-                {
-                    try { proc.Kill(); } catch { }
-                    return (null, null, null);
-                }
-                stderrTask.Wait(5000);
+                }, CompanionDecodeDeadlineMs);
+                // F4: the exit code was never checked here, and a decode that produced no energy read as "silence -> not applicable".
+                // A failed, killed or short decode is a FAILED measurement (null, applicable); only a complete decode is judged below.
+                if (!DecodeCovers(drained.Exit, drained.TimedOut, drained.Samples, sourceSampleRate, 30, durationSec > 0 ? durationSec - startSec : 0)) return (null, null, null);
             }
             catch
             {
@@ -22183,6 +22187,42 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     BitUsageTally.Add(int.MinValue, h0, ref c0, ref nz0, ref sq0); BitUsageTally.Add(0, h0, ref c0, ref nz0, ref sq0);
                     Assert(c0 == 2 && nz0 == 1 && h0[32] == 1 && sq0 == (double)int.MinValue * int.MinValue,
                         $"F5: the counts and the energy sum are from the signed sample itself (count {c0}, non-zero {nz0}, zeros {h0[32]})");
+                }
+
+                // codex perf review 2026-10-23 F4: HF never checked ffmpeg's exit, bitUsage accepted a non-zero exit once any sample arrived,
+                // and a decode that produced zero energy read as "silence -> not applicable". A measurement is valid only when the child
+                // exited 0 and delivered the window it was asked for — at the NATIVE rate these pipes decode at (codex x6 plan review 3:
+                // EdgePcm.Covers is 44.1k because EdgePcm asks ffmpeg for 44.1k; at 192 kHz that constant accepts 18 % of the window).
+                {
+                    long At(int rate, double secs) => (long)(rate * secs * 0.8);
+                    Assert(DecodeCovers(0, false, At(44100, 30), 44100, 30, 30) && !DecodeCovers(0, false, At(44100, 30) - 1, 44100, 30, 30),
+                        "F4: 80 % of the requested window at the decode's rate is the floor");
+                    Assert(!DecodeCovers(0, false, At(44100, 30), 192000, 30, 30) && DecodeCovers(0, false, At(192000, 30), 192000, 30, 30),
+                        "F4: at 192 kHz the 44.1k sample count is 18 % of the window and is refused; the native-rate count passes");
+                    Assert(DecodeCovers(0, false, At(96000, 5), 96000, 30, 5) && !DecodeCovers(0, false, At(96000, 5) - 1, 96000, 30, 5),
+                        "F4: a short valid file is judged against what it HAS (5 s), not the 30 s asked for");
+                    Assert(!DecodeCovers(1, false, At(44100, 30), 44100, 30, 30) && !DecodeCovers(null, true, At(44100, 30), 44100, 30, 30) && !DecodeCovers(1, false, 0, 44100, 30, 30),
+                        "F4: a non-zero exit, a timed-out child, or no output is never a measurement however many samples arrived");
+                    Assert(DecodeCovers(0, false, 1000, 0, 30, 0) && !DecodeCovers(0, false, 0, 0, 30, 0),
+                        "F4: with the rate unknown the floor is 'exited 0 with output' (stated, not invented)");
+                }
+                // codex perf review 2026-10-23 F1: the drains blocked on Read until EOF and only then waited 60 s; a child that stayed alive
+                // with stdout open never returned, and the worker awaits these tasks. ONE absolute deadline over the child's whole life.
+                {
+                    // ping writes a line, then one per second for 29 s, holding stdout open the whole time (a direct child, like ffmpeg — a cmd
+                    // wrapper would leave a grandchild holding the pipe after the kill, which is not the shape under test).
+                    var hold = new ProcessStartInfo { FileName = "ping.exe", Arguments = "-n 30 127.0.0.1", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                    long seen = 0; var sw = Stopwatch.StartNew();
+                    var r1 = DrainS32Le(hold, _ => seen++, deadlineMs: 1500);
+                    sw.Stop();
+                    Assert(r1.TimedOut && r1.Exit == null && r1.Samples > 0 && seen == r1.Samples && sw.Elapsed.TotalSeconds < 10,
+                        $"F1: a child that keeps stdout open is killed at the deadline: timed out, no exit code, what arrived counted (timedOut {r1.TimedOut}, exit {r1.Exit}, samples {r1.Samples}, {sw.Elapsed.TotalSeconds:F1} s)");
+                    var partial = new ProcessStartInfo { FileName = "cmd.exe", Arguments = "/c \"echo abcdefgh& exit 1\"", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                    var r2 = DrainS32Le(partial, _ => { }, deadlineMs: 10000);
+                    Assert(!r2.TimedOut && r2.Exit == 1 && r2.Samples == 2, $"F1: a child that exits 1 after a prefix reports exit 1 and the prefix (timedOut {r2.TimedOut}, exit {r2.Exit}, samples {r2.Samples})");
+                    var clean = new ProcessStartInfo { FileName = "cmd.exe", Arguments = "/c \"exit 0\"", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                    var r3 = DrainS32Le(clean, _ => { }, deadlineMs: 10000);
+                    Assert(!r3.TimedOut && r3.Exit == 0 && r3.Samples == 0, $"F1: a child that exits 0 with no output reports exactly that (timedOut {r3.TimedOut}, exit {r3.Exit}, samples {r3.Samples})");
                 }
 
                 var hints = ScanRootHints(new[] { @"C:\t\anchors\a.flac" }, new[] { @"C:\t\anchors\a.flac", @"C:\t\real\r.mp3" }).ToList();
