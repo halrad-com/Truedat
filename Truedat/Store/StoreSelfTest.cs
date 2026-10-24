@@ -1404,6 +1404,46 @@ namespace Truedat.Store
                     assert(db.ExecScalar("PRAGMA foreign_key_check;") == null, "no foreign key left dangling");
                 }
 
+                // 6b. THE SAME PATH UNDER TWO MACHINES (codex 2026-10-23 F1 / F6). A copied store imported on the adopting host with
+                //     --machine-adopt registered the library's root a second time under that host, so every path under it was two
+                //     locations: publication kept one, --store-roundtrip counted both and failed, --strip-smfm / --prune-entry edited
+                //     the one the export did not show. On open the later row folds into the older: one root, one location per path.
+                string keep = Raw($"SELECT id FROM track_location WHERE display_path = '{Inner}\\a1.flac';")!;
+                RawExec("INSERT INTO machine(id, hostname, created_utc) VALUES ('01a10000-0000-7000-8000-00000000beef', 'PRODBOX', '2026-10-23T00:00:00Z');" +
+                        $"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('01a10000-0000-7000-8000-00000000beef', '{Outer}', 'primary', '2026-10-23T00:00:01Z');" +
+                        "INSERT INTO track_location(entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT entity_id, (SELECT max(id) FROM library_root), rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {keep};" +
+                        $"CREATE TEMP TABLE tc2 AS SELECT * FROM track_copy WHERE location_id = {keep};" +
+                        "UPDATE tc2 SET location_id = (SELECT max(id) FROM track_location), updated_utc = '2000-01-01T00:00:00.0000000Z';" +
+                        "INSERT INTO track_copy SELECT * FROM tc2; DROP TABLE tc2;" +
+                        "INSERT INTO track_location(entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT entity_id, (SELECT max(id) FROM library_root), 'extra/e1.flac', 'extra/e1.flac', '{Outer}\\extra\\e1.flac', last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {keep};" +
+                        $"CREATE TEMP TABLE tc3 AS SELECT * FROM track_copy WHERE location_id = {keep};" +
+                        "UPDATE tc3 SET location_id = (SELECT max(id) FROM track_location);" +
+                        "INSERT INTO track_copy SELECT * FROM tc3; DROP TABLE tc3;");
+                assert(Raw("SELECT count(*) FROM library_root WHERE role = 'primary';") == "2" && Raw($"SELECT count(*) FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == "2",
+                    "the broken state: the library root twice, under two machines, and a1 recorded under both");
+                using (var os = OpenStore.Open(store, false, "selftest", Now()))
+                {
+                    var db = os.Db;
+                    var roots = os.Dal.ListRoots();
+                    assert(roots.Count == 1 && roots[0].Path == Outer, $"opening the store folds the later same-path root into the older, whichever machine registered it ({roots.Count} roots)");
+                    assert(db.ExecScalar($"SELECT count(*) FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == "1"
+                           && db.ExecScalar($"SELECT id FROM track_location WHERE display_path = '{Inner}\\a1.flac';") == keep,
+                        "a1 is one location again, the one holding the newer copy");
+                    assert(db.ExecScalar("SELECT root_id FROM track_location WHERE rel_path = 'extra/e1.flac';") == roots[0].Id.ToString()
+                           && db.ExecScalar("SELECT count(*) FROM track_copy WHERE location_id NOT IN (SELECT id FROM track_location);") == "0"
+                           && db.ExecScalar("PRAGMA foreign_key_check;") == null,
+                        "the path only the duplicate root held moved under the survivor; no copy or foreign key left dangling");
+                }
+                var rt = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = outPath });
+                var rr = ExportCommand.Roundtrip(store, outPath, null);
+                assert(rt.Entries == 6 && rr.Equal && rr.StoreEntries == 6,
+                    $"F6: the export holds every path once and the roundtrip against it is EQUAL ({rt.Entries} exported, store {rr.StoreEntries}, catalog {rr.CatalogEntries}, different {rr.Different})");
+                RawExec("DELETE FROM verdict WHERE location_id = (SELECT id FROM track_location WHERE rel_path = 'extra/e1.flac');" +
+                        "DELETE FROM track_copy WHERE location_id = (SELECT id FROM track_location WHERE rel_path = 'extra/e1.flac');" +
+                        "DELETE FROM track_location WHERE rel_path = 'extra/e1.flac';");   // back to the five the sections below count
+
                 // 7. A LIBRARY ON TWO DRIVES. Files can sit anywhere — MusicBee and the hub serve them all — so a library whose
                 //    tracks are on D: and E: is one library: two roots, never folded, both published, both loaded by every scan.
                 var twoDrives = new Dictionary<string, TrackEntry>(second, PathComparer.Instance)
@@ -1876,6 +1916,12 @@ namespace Truedat.Store
                 var lib = dal.LibraryRoots();
                 assert(lib.Count == 2 && lib.Any(x => x.Id == r1) && lib.Any(x => x.Id == rB) && !lib.Any(x => x.Id == r3),
                     $"the library is every primary root, the creating machine's and the adopting host's, never a mirror root ({string.Join(", ", lib.Select(x => x.Path))})");
+                // codex 2026-10-23 F1: the adopting host importing the same catalog registered D:\Music a second time under its own
+                // machine, so every path under it was two locations — publication kept one, maintenance verbs edited the other.
+                assert(dal.EnsureRoot(w3, @"d:\music\", "primary", now) == r1 && dal.Count("library_root") == 3,
+                    $"a primary root is a path of the library: registering it again from another machine (any case, trailing slash) reuses the row ({dal.Count("library_root")} roots)");
+                long rM = dal.EnsureRoot(w3, @"X:\Library", "mirror", now);
+                assert(rM != r3 && dal.Count("library_root") == 4, "a mirror root is one machine's view and stays per machine");
             }
             finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
         }

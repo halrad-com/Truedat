@@ -95,9 +95,15 @@ namespace Truedat.Store
         internal string? FindMachineByHost(string hostname)
             => Row("SELECT id FROM machine WHERE hostname = ? COLLATE NOCASE ORDER BY created_utc LIMIT 1;", s => s.GetString(0), null, hostname);
 
+        /// <summary>A primary root is a PATH of the library, not a machine's: the same path registered again from another machine (a
+        /// copied store imported on the adopting host, codex 2026-10-23 F1) reuses the row, so a path is never two locations that
+        /// publication dedupes and maintenance edits half of. A mirror root is one machine's view and stays per (machine, path).</summary>
         internal long EnsureRoot(string machineId, string path, string role, string nowUtc)
         {
             var existing = Row("SELECT id FROM library_root WHERE machine_id = ? AND path = ?;", s => (long?)s.GetInt64(0), null, machineId, path);
+            if (!existing.HasValue && role == "primary")
+                existing = Row("SELECT id FROM library_root WHERE role = 'primary' AND lower(rtrim(replace(path, '/', '\'), '\')) = ? ORDER BY id LIMIT 1;",
+                               s => (long?)s.GetInt64(0), null, path.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant());
             if (existing.HasValue) return existing.Value;
             Exec("INSERT INTO library_root(machine_id, path, role, created_utc) VALUES (?, ?, ?, ?);", machineId, path, role, nowUtc);
             StoreLog.Info($"root registered: {path} ({role})");
@@ -147,8 +153,9 @@ namespace Truedat.Store
         }
 
         /// <summary>
-        /// A primary root inside another primary root on the same machine is redundant — every path under it is already under the
-        /// outer one — so it is folded into it: its locations move under the containing root (root-relative paths recomputed with
+        /// A primary root inside another primary root — or at the SAME path as an older one, registered from another machine before
+        /// <see cref="EnsureRoot"/> reused rows across machines (codex 2026-10-23 F1) — is redundant: every path under it is already
+        /// under the other, so it is folded into it: its locations move under the surviving root (root-relative paths recomputed with
         /// the same <see cref="CanonicalPath.Split"/> the insert uses) and the inner row is dropped. A fresh scan used to mint a
         /// sub-folder as a root at its first checkpoint and the real parent later (MTest, 2026-10-18), and a catalog import then
         /// wrote every entry under the old root a second time under the new one. A library may have any number of DISJOINT
@@ -164,15 +171,18 @@ namespace Truedat.Store
             try { while (st.Step()) primaries.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
             finally { st.Reset(); }
             var folds = new List<RootFold>();
+            var gone = new HashSet<long>();
             foreach (var inner in primaries)
             {
                 // The OUTERMOST container, so A > B > C folds B and C straight into A (an outermost root is never itself inner).
+                // Two rows at the same path: the older survives. A row already folded away this pass is no candidate.
                 (long Id, string Machine, string Path)? outer = null;
                 foreach (var p in primaries)
-                    if (p.Id != inner.Id && p.Machine == inner.Machine && CanonicalPath.Contains(p.Path, inner.Path)
+                    if (p.Id != inner.Id && !gone.Contains(p.Id) && Redundant(p.Path, p.Id, inner.Path, inner.Id)
                         && (outer == null || CanonicalPath.Contains(p.Path, outer.Value.Path)))
                         outer = p;
                 if (outer == null) continue;
+                gone.Add(inner.Id);
                 var fold = new RootFold { InnerId = inner.Id, Inner = inner.Path, OuterId = outer.Value.Id, Outer = outer.Value.Path };
                 var locs = new List<(long Id, string Display)>();
                 using (var ls = Db.Prepare("SELECT id, display_path FROM track_location WHERE root_id = ? ORDER BY id;"))
@@ -209,17 +219,23 @@ namespace Truedat.Store
             return folds;
         }
 
-        /// <summary>Whether any primary root lies inside another on the same machine — the read-only question asked before
-        /// <see cref="FoldNestedRoots"/> takes a write transaction, so a healthy store's open stays a read.</summary>
+        /// <summary>Whether <paramref name="innerPath"/>'s root is redundant beside <paramref name="outerPath"/>'s: inside it, or the same
+        /// path registered later (the lower id is the older row). Which machine registered either plays no part.</summary>
+        static bool Redundant(string outerPath, long outerId, string innerPath, long innerId)
+            => CanonicalPath.Contains(outerPath, innerPath)
+               || (outerId < innerId && string.Equals(outerPath.Replace('/', '\\').TrimEnd('\\'), innerPath.Replace('/', '\\').TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>Whether any primary root is redundant beside another (nested, or the same path twice) — the read-only question
+        /// asked before <see cref="FoldNestedRoots"/> takes a write transaction, so a healthy store's open stays a read.</summary>
         internal bool HasNestedRoots()
         {
-            var primaries = new List<(string Machine, string Path)>();
-            var st = Stmt("SELECT machine_id, path FROM library_root WHERE role = 'primary' ORDER BY id;");
-            try { while (st.Step()) primaries.Add((st.GetString(0) ?? "", st.GetString(1) ?? "")); }
+            var primaries = new List<(long Id, string Path)>();
+            var st = Stmt("SELECT id, path FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) primaries.Add((st.GetInt64(0), st.GetString(1) ?? "")); }
             finally { st.Reset(); }
             foreach (var a in primaries)
                 foreach (var b in primaries)
-                    if (a.Machine == b.Machine && CanonicalPath.Contains(a.Path, b.Path)) return true;
+                    if (a.Id != b.Id && Redundant(a.Path, a.Id, b.Path, b.Id)) return true;
             return false;
         }
 
