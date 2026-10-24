@@ -152,6 +152,21 @@ namespace Truedat
         /// <summary>Non-null once checkpoints have stopped on a persistent failure: the failure that stopped them.</summary>
         internal CheckpointOutcome? PersistentFailure => _persistent;
 
+        /// <summary>Operator 2026-10-23: "a pause and exit, even a terminate, still writes what it has — never lose more than 5 minutes".
+        /// The scan is stopping (second Ctrl+C, console window closed, logoff, shutdown): save the completed analyses NOW. The period
+        /// does not apply; a checkpoint already running is waited for, not skipped (its analyses are then saved, and nothing is written
+        /// twice); nothing completed since the last durable save means nothing to write; a stage that failed persistently is not tried
+        /// again. Returns the outcome, or null when nothing was attempted.</summary>
+        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save)
+        {
+            if (_persistent != null) return null;
+            lock (_lock)
+            {
+                if (_persistent != null || Volatile.Read(ref _sinceDurable) == 0) return null;
+                return Attempt(save);
+            }
+        }
+
         /// <summary>Call after an analysis completes. Attempts a checkpoint when a period has passed since the last durable one and no
         /// other worker is saving; returns true when this call made a DURABLE checkpoint. Never throws: an exception from
         /// <paramref name="save"/> is a failed checkpoint (stage <c>checkpoint</c>), classified like any other.</summary>
@@ -165,6 +180,15 @@ namespace Truedat
             try
             {
                 if (_persistent != null || _clock.ElapsedTicks < Interlocked.Read(ref _dueTicks)) return false;
+                return Attempt(save).IsDurable;
+            }
+            finally { Monitor.Exit(_lock); }
+        }
+
+        /// <summary>One checkpoint attempt, under <see cref="_lock"/>: run the save, settle the counters, classify a failure.</summary>
+        CheckpointOutcome Attempt(Func<CheckpointOutcome> save)
+        {
+            {
                 Interlocked.Increment(ref _attempts);
                 int pending = Volatile.Read(ref _sinceDurable), pendingCatalog = Volatile.Read(ref _sinceCatalogHalf);
                 CheckpointOutcome outcome;
@@ -178,7 +202,7 @@ namespace Truedat
                     Interlocked.Add(ref _sinceCatalogHalf, -pendingCatalog);
                     Interlocked.Exchange(ref _lastDurableUtcTicks, DateTime.UtcNow.Ticks);
                     Interlocked.Exchange(ref _dueTicks, _clock.ElapsedTicks + _periodTicks);   // period measured save-end to save-start
-                    return true;
+                    return outcome;
                 }
                 // The callers run the catalog half first and return a "store" outcome only after it succeeded, so a store-stage failure
                 // means the catalog DOES hold this checkpoint's analyses (keeper 136).
@@ -201,9 +225,8 @@ namespace Truedat
                          (_consecutiveFailures > 1 ? "Second consecutive failure" : "Not a retryable cause") +
                          ": no further checkpoints this run and no new analysis; the failed stage is not attempted again at the end.");
                 }
-                return false;
+                return outcome;
             }
-            finally { Monitor.Exit(_lock); }
         }
     }
 }

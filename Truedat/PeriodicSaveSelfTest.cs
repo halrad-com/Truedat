@@ -27,6 +27,8 @@ namespace Truedat
                 TestPriorCatalogHalfSurvives(assert);
                 TestCompletionDuringSaveIsNotLost(assert);
                 TestInPlaceChangeIsCaught(assert);
+                TestSaveNowOnStop(assert);
+                TestStopHookFiresOnce(assert);
             }
             catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -54,6 +56,56 @@ namespace Truedat
             var after = clock.Elapsed.TotalSeconds;
             Wait(clock, after + 0.25);
             assert(p.AfterAnalysis(save) && n == 2 && p.Saves == 2, "one more period later, the next completion saves again");
+        }
+
+        /// <summary>Operator 2026-10-23: "a pause and exit, even a terminate, still writes what it has — never lose more than 5 minutes".
+        /// A stop (second Ctrl+C, console closed, logoff, shutdown) saves NOW: the period does not apply, a save already running is
+        /// waited for rather than skipped, nothing is written twice, and a stage that failed persistently is not tried again.</summary>
+        static void TestSaveNowOnStop(Action<bool, string> assert)
+        {
+            var clock = Stopwatch.StartNew();
+            var p = new PeriodicSave(clock, 3600, _ => { });
+            int n = 0;
+            Func<CheckpointOutcome> save = () => { n++; return CheckpointOutcome.Durable; };
+            p.AfterAnalysis(save); p.AfterAnalysis(save);
+            var o = p.SaveNow(save);
+            assert(n == 1 && o != null && o.IsDurable && p.Saves == 1 && p.SinceDurable == 0,
+                $"a stop saves the completed analyses at once, an hour before the period is due (saves {n}, pending after {p.SinceDurable})");
+            var again = p.SaveNow(save);
+            assert(n == 1 && again == null, $"a stop with nothing completed since the last save writes nothing (saves {n})");
+
+            var p2 = new PeriodicSave(clock, 0, _ => { });
+            int m = 0;
+            using (var inSave = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                var saver = Task.Run(() => p2.AfterAnalysis(() => { inSave.Set(); release.Wait(5000); m++; return CheckpointOutcome.Durable; }));
+                inSave.Wait(5000);
+                var stop = Task.Run(() => p2.SaveNow(() => { m++; return CheckpointOutcome.Durable; }));
+                bool waited = !stop.Wait(150);
+                release.Set();
+                saver.Wait(5000); stop.Wait(5000);
+                assert(waited && m == 1 && p2.Saves == 1,
+                    $"a stop during a running checkpoint waits for it instead of skipping, and does not write the same analyses again (waited {waited}, saves {m})");
+            }
+
+            var p3 = new PeriodicSave(clock, 0, _ => { }, retryDelaySecs: 0);
+            p3.AfterAnalysis(() => CheckpointOutcome.Failed("catalog", new IOException("disk full", unchecked((int)0x80070070))));
+            int k = 0;
+            var after = p3.SaveNow(() => { k++; return CheckpointOutcome.Durable; });
+            assert(p3.PersistentFailure != null && k == 0 && after == null, $"after a persistent failure a stop does not try the failed save again (tried {k})");
+        }
+
+        static void TestStopHookFiresOnce(Action<bool, string> assert)
+        {
+            int n = 0;
+            ScanStop.Arm(() => { n++; return "saved"; }, handleCtrlC: false);
+            var first = ScanStop.Fire(); var second = ScanStop.Fire();
+            assert(first == "saved" && second == null && n == 1, $"the stop hook saves once however many stop signals arrive (ran {n})");
+            ScanStop.Disarm();
+            ScanStop.Arm(() => { n++; return "saved"; }, handleCtrlC: false);
+            ScanStop.Disarm();
+            assert(ScanStop.Fire() == null && n == 1, "after the scan's loop disarms it, a stop signal saves nothing (the final writes own the rest)");
         }
 
         static void TestSkipWhileSaving(Action<bool, string> assert)

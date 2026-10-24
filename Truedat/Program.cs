@@ -4854,6 +4854,28 @@ namespace Truedat
                 int flSourceLost = 0;
                 string flSourceLostDetail = "";
 
+                // ONE checkpoint for the periodic save and for a stop (ScanStop), as in MoodsMode. This mode has no Ctrl+C prompt, so
+                // Ctrl+C saves first and then ends the process as it always did.
+                Func<CheckpointOutcome> flCheckpoint = () =>
+                {
+                    var saveSw = System.Diagnostics.Stopwatch.StartNew();
+                    if (_storePath != null)
+                    {
+                        var authFailure = AuthoritativeCheckpoint(analyzeFileMoods!, flMoodsTracks.Keys);   // T18
+                        if (authFailure != null) return authFailure;
+                    }
+                    else
+                    {
+                        var catalogFailure = TrySaveCheckpointCatalog(analyzeFileMoods!, flMoodsTracks);
+                        if (catalogFailure != null) return catalogFailure;
+                    }
+                    saveSw.Stop();
+                    Console.Error.WriteLine($"  [Saved {flMoodsTracks.Count} entries in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(flSw.Elapsed)} elapsed]");
+                    return CheckpointOutcome.Durable;
+                };
+                if (!string.IsNullOrEmpty(analyzeFileMoods))
+                    ScanStop.Arm(() => ScanStop.SaveNow(flPeriodicSave, flCheckpoint), handleCtrlC: true);
+
                 // Two-lane triage (see MoodsMode for the rationale): the per-file body below
                 // is IDENTICAL to the single loop it replaces. Split dispatch only, so cheap
                 // cache hits catch up fast while the slow analyses spread evenly across threads.
@@ -5231,23 +5253,7 @@ namespace Truedat
                         // A failed checkpoint is the checkpoint's failure, not this file's: PeriodicSave classifies and logs it and never
                         // throws into this worker, so a file that analysed fine is never counted as a [FAIL].
                         if (!string.IsNullOrEmpty(analyzeFileMoods))
-                            flPeriodicSave.AfterAnalysis(() =>
-                            {
-                                var saveSw = System.Diagnostics.Stopwatch.StartNew();
-                                if (_storePath != null)
-                                {
-                                    var authFailure = AuthoritativeCheckpoint(analyzeFileMoods!, flMoodsTracks.Keys);   // T18
-                                    if (authFailure != null) return authFailure;
-                                }
-                                else
-                                {
-                                    var catalogFailure = TrySaveCheckpointCatalog(analyzeFileMoods!, flMoodsTracks);
-                                    if (catalogFailure != null) return catalogFailure;
-                                }
-                                saveSw.Stop();
-                                Console.Error.WriteLine($"  [Saved {flMoodsTracks.Count} entries in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(flSw.Elapsed)} elapsed]");
-                                return CheckpointOutcome.Durable;
-                            });
+                            flPeriodicSave.AfterAnalysis(flCheckpoint);
                     }
                     catch (Exception ex)
                     {
@@ -5291,6 +5297,7 @@ namespace Truedat
                     flOptions, processFile);
 
                 flSw.Stop();
+                ScanStop.Disarm();   // the final writes below own the rest
 
                 // Save moods file if --moods specified
                 var flCheckpointFailure = flPeriodicSave.PersistentFailure;
@@ -5890,6 +5897,28 @@ namespace Truedat
             var sw = Stopwatch.StartNew();
             var periodicSave = new PeriodicSave(sw, SavePeriodSecs);   // the existing rescan rule (configured period; the bound is measured)
             int notStartedAfterCheckpointFailure = 0;   // tracks not started once checkpoints failed persistently (TDA 120 / keeper 132)
+            // ONE checkpoint for the periodic save and for a stop (ScanStop): the same writes, so a stop saves exactly what a checkpoint would.
+            Func<CheckpointOutcome> checkpoint = () =>
+            {
+                var saveSw = Stopwatch.StartNew();
+                if (_storePath != null)
+                {
+                    // T18: store-authoritative — commit the store, then publish the files derived from it (no JSON-first sink).
+                    var authFailure = AuthoritativeCheckpoint(moodsPath, allTracks.Keys);
+                    if (authFailure != null) return authFailure;
+                }
+                else
+                {
+                    var catalogFailure = TrySaveCheckpointCatalog(moodsPath, allTracks);
+                    if (catalogFailure != null) return catalogFailure;
+                }
+                saveSw.Stop();
+                Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
+                Interlocked.Increment(ref _saveCount);
+                Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
+                PrintAnalysisTimings();
+                return CheckpointOutcome.Durable;
+            };
 
             var cts = new CancellationTokenSource();
             var cancelRequested = 0;
@@ -5911,7 +5940,9 @@ namespace Truedat
                 // abort now, unchanged: leaving e.Cancel false lets the runtime terminate.
                 if (Interlocked.Exchange(ref cancelRequested, 1) != 0)
                 {
-                    Console.WriteLine("Force exit.");
+                    Console.WriteLine("Force exit - saving what has completed...");
+                    var what = ScanStop.Fire();
+                    if (what != null) Console.WriteLine($"  {what}");
                     return;
                 }
 
@@ -5948,7 +5979,9 @@ namespace Truedat
                             if (dk.Key == ConsoleKey.C && (dk.Modifiers & ConsoleModifiers.Control) != 0)
                             {
                                 Console.WriteLine();
-                                Console.WriteLine("Aborting now (no save).");
+                                Console.WriteLine("Stopping now - saving what has completed; the in-flight tracks are not.");
+                                var what = ScanStop.Fire();
+                                if (what != null) Console.WriteLine($"  {what}");
                                 Environment.Exit(130);
                             }
                         }
@@ -5961,7 +5994,7 @@ namespace Truedat
 
                     while (true)
                     {
-                        Console.Write("[E]xit & save    [C]ontinue    (Ctrl+C = abort now) > ");
+                        Console.Write("[E]xit & save    [C]ontinue    (Ctrl+C = stop now, saving what has completed) > ");
                         ConsoleKeyInfo k;
                         try { k = Console.ReadKey(intercept: true); }
                         catch { Console.WriteLine(); cts.Cancel(); return; }   // can't read -> graceful stop
@@ -5969,8 +6002,10 @@ namespace Truedat
                         bool ctrl = (k.Modifiers & ConsoleModifiers.Control) != 0;
                         if (k.Key == ConsoleKey.C && ctrl)
                         {
-                            Console.WriteLine("Aborting now (no save).");
-                            Environment.Exit(130);   // 2nd Ctrl+C -> abort without saving (unchanged intent)
+                            Console.WriteLine("Stopping now - saving what has completed...");
+                            var what = ScanStop.Fire();
+                            if (what != null) Console.WriteLine($"  {what}");
+                            Environment.Exit(130);   // 2nd Ctrl+C -> stop now; the drained analyses are saved first (operator 2026-10-23)
                         }
                         if (k.Key == ConsoleKey.E)
                         {
@@ -5993,6 +6028,8 @@ namespace Truedat
                     pauseEvent.Set();   // Continue resumes; Exit unblocks parked workers to see the cancel
                 }
             };
+            // Console closed / logoff / shutdown, and the stop paths above: save the completed analyses now (operator 2026-10-23).
+            ScanStop.Arm(() => ScanStop.SaveNow(periodicSave, checkpoint), handleCtrlC: false);
 
             WarnLowDiskSpace(outputDir);
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
@@ -6639,27 +6676,7 @@ namespace Truedat
                         // a pure cache-hit stretch never rewrites the catalog.
                         // T1 (2026-07-30): TryEnter + skip, not lock — the rule and its reasons live in PeriodicSave, now shared
                         // with --file-list / --folder (T18 defect 1).
-                        periodicSave.AfterAnalysis(() =>
-                        {
-                            var saveSw = Stopwatch.StartNew();
-                            if (_storePath != null)
-                            {
-                                // T18: store-authoritative — commit the store, then publish the files derived from it (no JSON-first sink).
-                                var authFailure = AuthoritativeCheckpoint(moodsPath, allTracks.Keys);
-                                if (authFailure != null) return authFailure;
-                            }
-                            else
-                            {
-                                var catalogFailure = TrySaveCheckpointCatalog(moodsPath, allTracks);
-                                if (catalogFailure != null) return catalogFailure;
-                            }
-                            saveSw.Stop();
-                            Interlocked.Add(ref _saveTicksTotal, saveSw.ElapsedTicks);
-                            Interlocked.Increment(ref _saveCount);
-                            Console.WriteLine($"  [Saved {allTracks.Count} tracks in {saveSw.Elapsed.TotalSeconds:F1}s · {FormatTimeSpan(sw.Elapsed)} elapsed]");
-                            PrintAnalysisTimings();
-                            return CheckpointOutcome.Durable;
-                        });
+                        periodicSave.AfterAnalysis(checkpoint);
                     }
                     catch (Exception ex)
                     {
@@ -6714,6 +6731,7 @@ namespace Truedat
             }
             catch (OperationCanceledException) { }
             budgetTimer?.Dispose();   // also keeps the timer reachable until here (a local-only Timer can be collected before it fires)
+            ScanStop.Disarm();   // the final writes below own the rest
 
             sw.Stop();   // the SCAN clock, and the divisor for every rate below — it stops with the analysis
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
