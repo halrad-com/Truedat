@@ -274,13 +274,21 @@ namespace Truedat.Store
                             if (loc != null && d.RetireLocation(loc.Value, now)) { r.Retired++; r.VisibleChanges++; }
                         }
                     };
+                // codex 2026-10-23 F5: the shared run's and the cache-only run's outcomes are written in the LAST batch's transaction, with
+                // the entries. Written in their own transactions after it, a failure there reached ScanSink.Flush as a failed flush, which
+                // re-queued a batch that had committed and deleted its edge spills — false spill-loss failures and duplicate observation
+                // runs on the retry. Inside the transaction, a failure rolls the whole batch back and the retry is a true retry.
+                var finalize = beforeCommit;
+                beforeCommit = d =>
+                {
+                    finalize?.Invoke(d);
+                    if (FailRunOutcomeForTest) throw new InvalidOperationException("fail-run-outcome seam fired inside the last batch's transaction");
+                    if (!runPerEntry) d.UpdateRunOutcome(sharedRun, "ok", sw.ElapsedMilliseconds, null);
+                    if (anyCopyOnly) d.UpdateRunOutcome(copyOnlyRun, "ok", sw.ElapsedMilliseconds, null);
+                };
                 ImportEntriesCore(dal, db, batchSize, FailAfterEntriesForTest, rootIds, mirror, entries, sharedRun, producerKey, producerVersion, runPerEntry, source, now, r,
                     pendingArtifacts, Path.GetDirectoryName(os.Path) ?? ".", pendingEdges, beforeCommit, anyCopyOnly ? copyOnlyKeys : null, copyOnlyRun);
                 sw.Stop();
-                if (!runPerEntry)
-                    using (var tx = db.BeginTransaction()) { dal.UpdateRunOutcome(sharedRun, "ok", sw.ElapsedMilliseconds, null); tx.Complete(); }
-                if (anyCopyOnly)
-                    using (var tx = db.BeginTransaction()) { dal.UpdateRunOutcome(copyOnlyRun, "ok", sw.ElapsedMilliseconds, null); tx.Complete(); }
             }
             catch (Exception ex)
             {
@@ -390,6 +398,9 @@ namespace Truedat.Store
         /// <summary>T06: set by a catalog-changing verb around its store write — the arriving entries are the verb's EXACT result (content
         /// and copy facts, nulls included: a strip or a migrate clears). Never set by a scan or an import. Single-threaded verbs only.</summary>
         [ThreadStatic] internal static bool ExactArrival;
+
+        /// <summary>Test seam (codex 2026-10-23 F5): fail inside the last batch's transaction, where the run outcomes are written.</summary>
+        internal static bool FailRunOutcomeForTest;
 
         /// <summary>Self-test seam: runs right after the store opened (schema and generation known) and before any entry is written,
         /// so a test can fail the verb there and prove the record keeps the at-open facts and carries no counts. Null in production.</summary>
@@ -756,7 +767,10 @@ namespace Truedat.Store
                     }
                     else
                     {
-                        dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, row, now);
+                        // codex 2026-10-23 F4: the replacement wrote the raw row, so a column the arrival did not observe (bitUsage / HF from a
+                        // scan without ffmpeg) was wiped — while the same arrival agreeing within noise would have kept it. The unobserved
+                        // rule is the remeasure's and the confirmation's; a replacement is no different.
+                        dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentWhereUnobserved(row, existing.Values), now);
                         dal.InsertReplacedConflict(entityId, $"{existing.ProducerKey}@{existing.ProducerVersion}", $"{producerKey}@{producerVersion}", existing.RunId, runId, displayPath, now);
                         contentWritten = true; r.ContentReplaced++;
                         StoreLog.Warn($"description replaced on {displayPath}: {existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion} ({drift.Count} field(s) changed; the pair is recorded as a resolved content-replaced conflict)");

@@ -252,6 +252,46 @@ namespace Truedat.Store
                 ScanSink.Record(@"D:\Music\Tool\b.mp3", entries[@"D:\Music\Tool\b.mp3"]);
                 var r2 = ScanSink.Flush(store, "output-x64.4", entries.Keys);
                 assert(r2.Ok && r2.Unchanged == 2 && r2.Drift == 0, $"re-flushing equal entries writes nothing ({r2.Unchanged} unchanged, {r2.Drift} drift, {r2.ContentReplaced} replaced, {r2.ContentRekeyed} rekeyed, {r2.Stale} stale, {r2.Entries} entries, {r2.EntitiesCreated} created, ok {r2.Ok} {r2.Error})");
+
+                // codex 2026-10-23 F5: the shared/cache-only run outcomes used to be written AFTER the entries' transaction committed, so a
+                // failure there read as a failed flush and re-queued a batch that had committed (spills gone). They are written in the last
+                // batch's transaction: a failure there rolls the whole batch back, and the retry is a true retry.
+                var f5store = Path.Combine(Path.GetDirectoryName(store)!, "f5.db");
+                foreach (var kv in FixtureEntries(@"D:\Music")) ScanSink.Record(kv.Key, kv.Value);
+                assert(ScanSink.Flush(f5store, "output-x64.4", entries.Keys).Ok, "F5 setup: a store with the fixture");
+                var seamEntry = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
+                seamEntry.Features!.Bpm = 199;
+                ScanSink.Record(@"D:\Music\Tool\a.flac", seamEntry);
+                ImportCommand.FailRunOutcomeForTest = true;
+                ScanSinkReport rs;
+                try { rs = ScanSink.Flush(f5store, "output-x64.4", entries.Keys, final: false); } finally { ImportCommand.FailRunOutcomeForTest = false; }   // a checkpoint: a failed batch is kept for the next flush
+                using (var os = OpenStore.Open(f5store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(!rs.Ok && ScanSink.Pending == 1 && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") != Canon1(199)
+                           && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND field = 'bpm';") == "0",
+                        $"a failure where the run outcomes are written rolls the WHOLE batch back: nothing of it committed, the batch is re-queued (ok {rs.Ok}, pending {ScanSink.Pending}, bpm {StoredText(os, @"D:\Music\Tool\a.flac", "bpm")})");
+                var rs2 = ScanSink.Flush(f5store, "output-x64.4", entries.Keys);
+                using (var os = OpenStore.Open(f5store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(rs2.Ok && rs2.Remeasured == 1 && StoredText(os, @"D:\Music\Tool\a.flac", "bpm") == Canon1(199)
+                           && os.Db.ExecScalar("SELECT count(*) FROM conflict WHERE kind = 'value-drift' AND field = 'bpm';") == "1"
+                           && os.Db.ExecScalar("SELECT count(*) FROM run WHERE outcome = 'ok' AND location_id IS NULL AND producer_key = 'essentia';") == os.Db.ExecScalar("SELECT count(*) FROM run WHERE location_id IS NULL AND producer_key = 'essentia';"),
+                        $"the retry is a true retry: the value lands once, one history row, and no shared run is left 'failed' from the rolled-back attempt ({rs2.Buckets})");
+
+                // codex 2026-10-23 F4: a replacement from a DIFFERENT producer wrote the raw arriving row, so a column the arrival did not
+                // observe (bitUsage / HF from a scan without ffmpeg) was wiped — while the same arrival agreeing within noise kept it.
+                var f4store = Path.Combine(Path.GetDirectoryName(store)!, "f4.db");
+                foreach (var kv in FixtureEntries(@"D:\Music")) ScanSink.Record(kv.Key, kv.Value);
+                assert(ScanSink.Flush(f4store, "output-x64.4", entries.Keys).Ok, "F4 setup: a store with the fixture");
+                using (var os = OpenStore.Open(f4store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                using (var tx = os.Db.BeginTransaction())
+                { os.Db.Exec("UPDATE track_content SET hfEnergyRatio = 123456 WHERE entity_id = (SELECT entity_id FROM track_location WHERE display_path = 'D:\\Music\\Tool\\a.flac');"); tx.Complete(); }
+                var f4arrival = FixtureEntries(@"D:\Music")[@"D:\Music\Tool\a.flac"];
+                f4arrival.Features!.Bpm = f4arrival.Features!.Bpm * 1.5;   // beyond noise: a replacement, not a confirmation
+                f4arrival.Features!.HfEnergyRatio = null;                   // not observed by this arrival
+                ScanSink.Record(@"D:\Music\Tool\a.flac", f4arrival);
+                var rf4 = ScanSink.Flush(f4store, "output-x64.5", entries.Keys);
+                using (var os = OpenStore.Open(f4store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    assert(rf4.Ok && rf4.ContentReplaced == 1 && os.Db.ExecScalar("SELECT hfEnergyRatio FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") == "123456",
+                        $"a newer producer's replacement keeps the stored columns the arrival did not observe ({rf4.ContentReplaced} replaced; hfEnergyRatio {os.Db.ExecScalar("SELECT hfEnergyRatio FROM track_content c JOIN track_location l ON l.entity_id = c.entity_id WHERE l.display_path = 'D:\\Music\\Tool\\a.flac';") ?? "NULL"})");
                 // A NEWER extractor build with a changed value replaces the description, with a resolved 'content-replaced' conflict as the trace (review #5).
                 var newer = FixtureEntries(@"D:\Music");
                 var bpm5 = newer[@"D:\Music\Tool\a.flac"].Features!.Bpm * 1.5;
