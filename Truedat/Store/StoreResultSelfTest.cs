@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace Truedat.Store
 {
@@ -312,6 +313,28 @@ namespace Truedat.Store
                 assert(c4Ok && c4.Outcome == "failed" && c4.ExitCode == 130 && (c4.Reason ?? "").Contains("boom") && (late ?? "").Contains("failed"),
                     $"C4: a late stop after a THROWING final write seals FAILED with the write's cause and exit 130 ({c4.Outcome}/{c4.ExitCode}/{c4.Reason}; answer '{late}')");
                 StoreResult.ResetScanForTest();
+
+                // codex recheck-2 (C3 coverage): the PeriodicSave test proves the seal is ATTEMPTED for a stop joining between EndFinal's
+                // gate holds; this proves the record is ON DISK, sealed with that stop's exit, before the stop returns — a real store.
+                StoreResult.BeginScan(store, started);
+                var previousHook = ScanStop.BetweenFinalLocksForTest;
+                StoreResultFile? atReturn = null; Thread? joiner = null; var joinerReturned = new ManualResetEventSlim(false); bool joinerWaited = false;
+                try
+                {
+                    ScanStop.Arm(_ => "unexpected emergency save", handleCtrlC: false);
+                    assert(ScanStop.BeginFinal(), "C3 disk fixture: the final writes own the session");
+                    ScanStop.BetweenFinalLocksForTest = () =>
+                    {
+                        joiner = new Thread(() => { try { ScanStop.Fire(130); if (StoreResult.TryRead(StoreResult.PathFor(store), out var rec)) atReturn = rec; } finally { joinerReturned.Set(); } }) { IsBackground = true };
+                        joiner.Start();
+                        joinerWaited = SpinWait.SpinUntil(() => joinerReturned.IsSet || (joiner.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, 5000) && !joinerReturned.IsSet;
+                    };
+                    ScanStop.EndFinal();
+                    bool returned = joinerReturned.Wait(5000);
+                    assert(joinerWaited && returned && atReturn != null && atReturn.Outcome == "interrupted" && atReturn.ExitCode == 130 && atReturn.Reason != StoreResult.ProvisionalReason,
+                        $"C3: a stop joining between EndFinal's gate holds finds its record ON DISK when it returns (waited {joinerWaited}, returned {returned}, {atReturn?.Outcome}/{atReturn?.ExitCode})");
+                }
+                finally { ScanStop.BetweenFinalLocksForTest = previousHook; ScanStop.EndFinal(); if (joiner == null || joiner.Join(5000)) joinerReturned.Dispose(); StoreResult.ResetScanForTest(); }
 
                 // a native close: the OS ends the process, the exit code is not ours to know
                 StoreResult.BeginScan(store, started);

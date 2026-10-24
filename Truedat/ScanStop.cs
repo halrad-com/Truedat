@@ -156,7 +156,11 @@ namespace Truedat
                 if (_done == null) return null;   // never armed
                 s = _state; done = _done;
                 if (s == State.Active) { _state = State.StopOwned; save = _save; }
-                else if (s == State.FinalOwned) { _stopJoinedFinal = true; _joinedExit ??= exitCode; }   // the strongest known exit stays
+                // The strongest known exit stays. A stop that joins while the record is ALREADY being sealed does not reopen it: the seal
+                // writes the exit known when it started, and that later caller's code — 130 after a native null — is not recorded
+                // (codex recheck-2 P3, a documented limit: the termination that follows is decided by whichever signal wins; the save
+                // facts in the record are right either way).
+                else if (s == State.FinalOwned) { _stopJoinedFinal = true; _joinedExit ??= exitCode; }
                 else if (s == State.Settled && _finalSettled)
                 {
                     // A stop AFTER the final writes, before Main's finally: the first one seals the record; a second one arriving while
