@@ -20,7 +20,7 @@ namespace Truedat.Store
         internal static void Run(Action<bool, string> assert)
         {
             Console.WriteLine("Store-stop CLI self-test (unarmed scan, throwing final write, persistent failure handoff)");
-            foreach (var mode in new[] { "unarmed", "exception", "persistent" })
+            foreach (var mode in new[] { "unarmed", "exception", "persistent", "cache-close" })
             {
                 try { RunCase(assert, mode); }
                 catch (Exception ex) { assert(false, $"StoreStop.Cli.{mode}: fixture threw {ex.GetType().Name}: {ex.Message}"); }
@@ -36,7 +36,7 @@ namespace Truedat.Store
             {
                 string missing = Path.Combine(dir, "absent.flac"), list = Path.Combine(dir, "files.txt");
                 File.WriteAllText(list, missing + Environment.NewLine);
-                // FindTool checks existence. Every input is absent, so this sentinel is NEVER executed.
+                // FindTool checks existence. Inputs are absent or proven cache hits; this sentinel must NEVER execute.
                 File.WriteAllText(Path.Combine(dir, "essentia_streaming_extractor_music.exe"), "self-test sentinel; must never execute");
                 Directory.CreateDirectory(Path.Combine(dir, "temp"));
                 var start = new ProcessStartInfo
@@ -85,6 +85,17 @@ namespace Truedat.Store
                         assert(Flag("returned") && !Flag("claimedSaved"),
                             "StoreStop.Cli.Exception: the throwing production final-write path releases the stop without claiming a successful save (" + Detail("stop") + ")");
                         assert(Flag("unchanged"), "StoreStop.Cli.Exception: failed replacement preserves the original catalog bytes");
+                    }
+                    else if (mode == "cache-close")
+                    {
+                        assert(Flag("cached") && Flag("zeroPending"),
+                            "StoreStop.Cli.NoStoreCacheClose: real Main reaches a tag-refresh cache hit with zero new analyses and no earlier checkpoint");
+                        assert(Flag("handled") && Flag("savedAtReturn"),
+                            "StoreStop.Cli.NoStoreCacheClose: directly invoked close handler saves refreshed catalog tags before it returns");
+                        assert(Flag("preserved"),
+                            "StoreStop.Cli.NoStoreCacheClose: the saved cache update preserves prior audio identity and MFCC values");
+                        assert(Flag("oneAttempt") && Flag("unchangedAfterMain") && Flag("noStore"),
+                            "StoreStop.Cli.NoStoreCacheClose: repeated close and Main cleanup do not write again or create a store (" + Detail("details") + ")");
                     }
                     else
                     {
@@ -150,6 +161,7 @@ namespace Truedat.Store
                     }
                     else if (mode == "exception") ExceptionProbe(dir, report);
                     else if (mode == "persistent") PersistentProbe(dir, report);
+                    else if (mode == "cache-close") NoStoreCacheCloseProbe(dir, report);
                     else throw new ArgumentException("Unknown stop CLI probe: " + mode);
                 }
                 catch (Exception ex) { report["probeError"] = ex.ToString(); }
@@ -247,6 +259,54 @@ namespace Truedat.Store
                 report["stop"] = stop.Result ?? stop.Error ?? "still waiting before cleanup";
                 report["unchanged"] = (File.ReadAllText(catalog) == original).ToString();
             }
+        }
+
+        // Invoke only the handler method, not an OS event: actual Windows close delivery remains a separate integration check.
+        static void NoStoreCacheCloseProbe(string dir, Dictionary<string, string> report)
+        {
+            string path = Path.Combine(dir, "cached.mp3"), catalog = Path.Combine(dir, "mbxmoods.json");
+            string resource = typeof(Program).Assembly.GetManifestResourceNames().Single(n => n.EndsWith("stub.mp3", StringComparison.Ordinal));
+            using (var input = typeof(Program).Assembly.GetManifestResourceStream(resource)!)
+            using (var output = File.Create(path)) input.CopyTo(output);
+            using (var audio = TagLib.File.Create(path))
+            {
+                audio.Tag.Title = "Refreshed cached title"; audio.Tag.Performers = new[] { "Cache fixture" }; audio.Save();
+            }
+            var entry = Entry("Prior cached title");
+            entry.Features!.DynamicRange = 1; entry.Features.LoudnessMomentary = -14;
+            entry.LastModified = File.GetLastWriteTimeUtc(path);
+            Program.SaveResultsForStore(catalog, new ConcurrentDictionary<string, TrackEntry>(new[] { new KeyValuePair<string, TrackEntry>(path, entry) }));
+            PeriodicSave? periodic = null; string? stoppedHash = null; FileStream? heldCatalog = null; int observed = 0;
+            void Observe(string line)
+            {
+                if (!line.StartsWith("[CACHED]", StringComparison.Ordinal) || Interlocked.Exchange(ref observed, 1) != 0) return;
+                report["cached"] = true.ToString();
+                var save = (Delegate?)typeof(ScanStop).GetField("_save", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null);
+                var target = save?.Target ?? throw new InvalidOperationException("Main did not arm the no-store checkpoint.");
+                periodic = target.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .Select(f => f.GetValue(target)).OfType<PeriodicSave>().Single();
+                report["zeroPending"] = (periodic.SinceDurable == 0 && periodic.Attempts == 0).ToString();
+                var onCtrl = typeof(ScanStop).GetMethod("OnCtrl", BindingFlags.Static | BindingFlags.NonPublic)!;
+                report["handled"] = ((bool)onCtrl.Invoke(null, new object[] { 2 })!).ToString(); // CTRL_CLOSE_EVENT handler only
+                var loaded = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(catalog, loaded);
+                bool found = loaded.TryGetValue(path, out var saved);
+                report["savedAtReturn"] = (found && saved!.Features?.Title == "Refreshed cached title").ToString();
+                report["preserved"] = (found && saved!.AudioStreamSha256 == entry.AudioStreamSha256
+                    && saved.Features?.Mfcc?.SequenceEqual(entry.Features.Mfcc!) == true && saved.LastModified == entry.LastModified).ToString();
+                stoppedHash = Publication.Sha256Hex(catalog);
+                // Deny replacement until Main returns: even a byte-identical second write must fail the fixture.
+                heldCatalog = new FileStream(catalog, FileMode.Open, FileAccess.Read, FileShare.Read);
+                onCtrl.Invoke(null, new object[] { 2 }); // another handler call must join the already settled save
+            }
+            Console.SetIn(new OnePathReader(path, () => Console.SetError(new LineHook(Console.Error, Observe))));
+            try { InvokeMain(dir, catalog); }
+            finally { heldCatalog?.Dispose(); }
+            report["oneAttempt"] = (periodic?.Attempts == 1 && periodic.LastAttemptPending == 0).ToString();
+            report["unchangedAfterMain"] = (stoppedHash != null && Publication.Sha256Hex(catalog) == stoppedHash).ToString();
+            report["noStore"] = (typeof(Program).GetField("_storePath", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null) == null
+                && Directory.GetFiles(dir, "*.db", SearchOption.AllDirectories).Length == 0).ToString();
+            report["details"] = $"attempts={periodic?.Attempts}, pending={periodic?.LastAttemptPending}, exit={Environment.ExitCode}";
         }
 
         static void PersistentProbe(string dir, Dictionary<string, string> report)

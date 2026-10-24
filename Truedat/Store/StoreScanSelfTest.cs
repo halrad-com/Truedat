@@ -19,6 +19,13 @@ namespace Truedat.Store
             try { TestCacheHitAndRetire(assert); }
             catch (Exception ex) { assert(false, $"StoreScan.CacheHitRetire: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ScanSink.Reset(); }
+            foreach (bool foreignFirst in new[] { true, false })
+            {
+                try { TestMirrorWritesStayOnWriter(assert, foreignFirst); }
+                catch (Exception ex) { assert(false, $"StoreScan.MirrorWriter ({(foreignFirst ? "foreign-first" : "writer-first")}): threw {ex.GetType().Name}: {ex.Message}"); }
+            }
+            try { TestEquivalentMirrorRoleCollision(assert); }
+            catch (Exception ex) { assert(false, $"StoreScan.MirrorRoleSpelling: threw {ex.GetType().Name}: {ex.Message}"); }
             StoreStopSelfTest.Run(assert);
             StoreStopCliSelfTest.Run(assert);
         }
@@ -209,6 +216,131 @@ namespace Truedat.Store
                 StoreSelfTest.WriteCatalog(cat, two);
                 var r = Load(store, cat, out _);
                 assert(r.Refused && r.Case == "no-origin-store-empty" && r.Refusal!.Contains("--store-import"), $"no origin, an empty store -> refused naming --store-import ({r.Case})");
+            }
+        }
+
+        // Synthetic machine rows exercise the real import write path locally. They do not simulate a second OS host,
+        // network delivery, concurrent two-box writes, or decide R1b/D3's same-host mirror-to-primary policy.
+        static void TestMirrorWritesStayOnWriter(Action<bool, string> assert, bool foreignFirst)
+        {
+            using var d = new Dir();
+            using var quiet = StoreLog.Quiet();
+            const string mirror = @"X:\mirror", nested = @"X:\mirror\nested";
+            const string a = @"X:\mirror\a.flac", b = @"X:\mirror\b.flac", c = @"X:\mirror\nested\c.flac";
+            const string failed = @"X:\mirror\nested\failed.flac";
+            string label = "StoreScan.MirrorWriter " + (foreignFirst ? "foreign-first" : "writer-first");
+            string store = d.P("truedat.db"), now = DateTime.UtcNow.ToString("o"), foreign = Uuid7.New();
+            var originalTime = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            var updatedTime = originalTime.AddDays(1);
+            var primary = Lib(("a.flac", 120, 'a'), ("b.flac", 120, 'b'), (@"nested\c.flac", 120, 'c'));
+            foreach (var entry in primary.Values) { entry.AudioStreamSha256Source = "flac-frames"; entry.Features.SmfmBpm = 100; }
+            ImportCommand.ExecuteEntries(store, primary, @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+            Dictionary<string, TrackEntry> MirrorEntries(double copyBpm)
+            {
+                var entries = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                foreach (var item in new[] { (a, 'a'), (b, 'b'), (c, 'c') })
+                {
+                    var entry = E(Path.GetFileName(item.Item1), 120, item.Item2);
+                    entry.AudioStreamSha256Source = "flac-frames"; entry.Features.SmfmBpm = copyBpm;
+                    entries.Add(item.Item1, entry);
+                }
+                return entries;
+            }
+            void SeedWriter() => ImportCommand.ExecuteEntries(store, MirrorEntries(110), mirror, "mirror", true, "import", "1", "fixture", null, null);
+            long foreignRoot = 0, foreignNested = 0;
+            void SeedForeign()
+            {
+                using var os = OpenStore.Open(store, false, VersionInfo.Display, now);
+                using var tx = os.Db.BeginTransaction();
+                os.Dal.InsertMachine(foreign, "selftest-foreign-" + foreign, now);
+                foreignRoot = os.Dal.EnsureRoot(foreign, mirror, "mirror", now);
+                foreignNested = os.Dal.EnsureRoot(foreign, nested, "mirror", now);
+                foreach (var pair in MirrorEntries(90))
+                {
+                    bool deep = pair.Key == c;
+                    long root = deep ? foreignNested : foreignRoot;
+                    CanonicalPath.Split(deep ? nested : mirror, pair.Key, out var relative, out var canonical);
+                    var entity = EntityResolver.Resolve(os.Dal, pair.Value.AudioStreamSha256, FacetKinds.ShaFrames, root, canonical, "fixture", now);
+                    long location = os.Dal.UpsertLocation(entity.EntityId, root, relative, canonical, pair.Key, originalTime.ToString("o"), now);
+                    os.Dal.UpsertCopy(location, null, TrackEntryMapper.ToRow(pair.Value), now);
+                }
+                tx.Complete();
+            }
+            if (foreignFirst) { SeedForeign(); SeedWriter(); } else { SeedWriter(); SeedForeign(); }
+            long writerRoot, generation;
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, now))
+            {
+                writerRoot = os.Dal.RootsForWrites(os.Machine.Id, "mirror").Single().Id;
+                generation = os.Dal.Generation();
+                assert(os.Dal.Count("machine") == 2 && os.Dal.Count("library_root") == 4 && os.Dal.Count("file_entity") == 3
+                    && (foreignRoot < writerRoot) == foreignFirst, $"{label}: two machine IDs, separate same-path mirrors, a nested foreign mirror, and three shared audio identities");
+            }
+
+            var update = MirrorEntries(130); update.Remove(b);
+            foreach (var entry in update.Values) entry.LastModified = updatedTime;
+            var failures = new[] { new ScanFailure { Path = failed, Components = "decode", Error = "fixture decode failure", DurationSec = 1 } };
+            ImportReport Write() => ImportCommand.ExecuteEntries(store, update, null, "mirror", true, "import", "1", "mirror-writer-test", failures, null, retirePaths: new[] { b });
+            var report = Write();
+            assert(report.Locations == 2 && report.Retired == 1 && report.ErrorsRows == 1 && report.Generation == generation + 1,
+                $"{label}: implicit-root mirror update, retirement, and failure commit together at one new generation");
+            using (var os = OpenStore.Open(store, false, VersionInfo.Display, now))
+            {
+                var own = os.Dal.ReadEntries(writerRoot).ToDictionary(x => x.DisplayPath, x => x.Entry, PathComparer.Instance);
+                assert(own.Count == 2 && own.ContainsKey(a) && own.ContainsKey(c) && own.Values.All(e => e.LastModified == updatedTime && e.Features.SmfmBpm == 130),
+                    $"{label}: only the writer's copies update and its retired path disappears, including beneath the foreign nested root");
+                var other = os.Dal.ReadEntries(new[] { foreignRoot, foreignNested }).ToList();
+                assert(other.Count == 3 && other.Any(e => e.DisplayPath == b) && other.All(e => e.Entry.LastModified == originalTime && e.Entry.Features.SmfmBpm == 90),
+                    $"{label}: the foreign machine's base and nested mirror copies remain present with their original facts");
+                assert(os.Dal.FindLocation(writerRoot, "nested/failed.flac", out _) != null
+                    && os.Dal.FindLocation(foreignRoot, "nested/failed.flac", out _) == null && os.Dal.FindLocation(foreignNested, "failed.flac", out _) == null,
+                    $"{label}: a failure-only location is recorded under the writer, never either foreign mirror");
+            }
+            var catalog = d.P("mbxmoods.json");
+            var publicationError = StoreScan.Publish(store, catalog, out var publication);
+            assert(publicationError == null && publication.Entries == 3 && publication.Generation == report.Generation,
+                $"{label}: publication succeeds with three primary entries at the committed generation ({publicationError?.Message})");
+            var loaded = Load(store, catalog, out var published);
+            assert(!loaded.Refused && loaded.Case == "equal-generation" && published.Count == 3 && published.Keys.All(p => p.StartsWith(@"D:\music\", StringComparison.OrdinalIgnoreCase))
+                && published.Values.All(e => e.LastModified == originalTime && e.Features.SmfmBpm == 100 && e.Features.Bpm == 120),
+                $"{label}: the authoritative library still contains all primary copies and their unchanged facts; mirrors do not enter publication");
+            var repeated = Write();
+            assert(repeated.Generation == report.Generation && repeated.Retired == 0 && repeated.ErrorsRows == 0 && repeated.VisibleChanges == 0,
+                $"{label}: repeating the mirror update does not advance generation, retire again, or duplicate the failure");
+        }
+
+        // R1b/D3 decides refusal versus in-place promotion. Either policy must treat equivalent Windows paths alike;
+        // use the exact-spelling outcome as the control, without choosing that policy in this regression.
+        static void TestEquivalentMirrorRoleCollision(Action<bool, string> assert)
+        {
+            bool? controlAccepted = null;
+            foreach (var shape in new[]
+            {
+                (Name: "exact", Held: @"X:\mirror", Requested: @"X:\mirror"),
+                (Name: "incoming-case", Held: @"X:\mirror", Requested: @"x:\MIRROR"),
+                (Name: "incoming-slashes", Held: @"X:\mirror", Requested: "X:/mirror"),
+                (Name: "incoming-trailing", Held: @"X:\mirror", Requested: @"X:\mirror\"),
+                (Name: "stored-case", Held: @"x:\MIRROR", Requested: @"X:\mirror"),
+                (Name: "stored-slashes", Held: "X:/mirror", Requested: @"X:\mirror"),
+                (Name: "stored-trailing", Held: @"X:\mirror\", Requested: @"X:\mirror"),
+            })
+            {
+                using var d = new Dir();
+                using var quiet = StoreLog.Quiet();
+                string now = DateTime.UtcNow.ToString("o");
+                using var os = OpenStore.Open(d.P("truedat.db"), true, VersionInfo.Display, now);
+                long held = os.Dal.EnsureRoot(os.Machine.Id, shape.Held, "mirror", now);
+                long? returned = null;
+                bool accepted = true;
+                try { returned = os.Dal.EnsureRoot(os.Machine.Id, shape.Requested, "primary", now); }
+                catch (StoreException) { accepted = false; }
+                if (!controlAccepted.HasValue) controlAccepted = accepted;
+                var roots = os.Dal.ListRoots();
+                int equivalent = roots.Count(r => string.Equals(r.Path.Replace('/', '\\').TrimEnd('\\'), @"X:\mirror", StringComparison.OrdinalIgnoreCase));
+                string expectedRole = controlAccepted.Value ? "primary" : "mirror";
+                assert(accepted == controlAccepted.Value && roots.Count == 1 && equivalent == 1
+                    && roots[0].Id == held && roots[0].Role == expectedRole && (!accepted || returned == held),
+                    $"StoreScan.MirrorRoleSpelling {shape.Name}: equivalent paths match the exact-path {(controlAccepted.Value ? "promotion" : "refusal")} and preserve one root"
+                    + $" (accepted {accepted}; roots {roots.Count}; equivalent {equivalent}; roles {string.Join(",", roots.Select(r => r.Role))})");
             }
         }
 
