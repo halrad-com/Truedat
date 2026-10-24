@@ -26,6 +26,10 @@ namespace Truedat.Store
             catch (Exception ex) { assert(false, $"StoreStop.FinalOwnedResult: threw {ex.GetType().Name}: {ex.Message}"); }
             try { TestStopAfterFinalStillWritesResult(assert); }
             catch (Exception ex) { assert(false, $"StoreStop.AfterFinalResult: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestEndFinalJoinWindow(assert); }
+            catch (Exception ex) { assert(false, $"StoreStop.EndFinalJoinWindow: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestLateFinalException(assert); }
+            catch (Exception ex) { assert(false, $"StoreStop.LateFinalException: threw {ex.GetType().Name}: {ex.Message}"); }
             foreach (bool afterFinal in new[] { false, true })
             {
                 try { TestSecondStopWaitsForResultSeal(assert, afterFinal); }
@@ -248,6 +252,102 @@ namespace Truedat.Store
                         secondReturned.Dispose(); firstReturned.Dispose();
                     }
                 }
+            }
+        }
+
+        // Join after EndFinal's first gate hold, then inspect disk on the terminating caller before Main can repair the record.
+        static void TestEndFinalJoinWindow(Action<bool, string> assert)
+        {
+            using (var f = new Fixture())
+            {
+                var previousWindow = ScanStop.BetweenFinalLocksForTest;
+                var previousSeal = StoreResult.BeforeStoppedSealForTest;
+                var returned = new ManualResetEventSlim(false);
+                Thread? stop = null; StoreResultFile? atReturn = null; Exception? stopError = null;
+                int emergencySaves = 0, seals = 0; bool joinedWindow = false;
+                ScanStop.Arm(_ => { emergencySaves++; return "unexpected emergency save"; }, handleCtrlC: false);
+                try
+                {
+                    if (!ScanStop.BeginFinal()) throw new InvalidOperationException("Could not acquire final persistence.");
+                    ScanSink.RecordCacheHit(A, Entry("Join-window committed title", 'a'));
+                    if (!f.Checkpoint(final: true).IsDurable || f.PublishError != null)
+                        throw new InvalidOperationException("Fixture final publication failed.");
+                    StoreResult.BeforeStoppedSealForTest = () => Interlocked.Increment(ref seals);
+                    ScanStop.BetweenFinalLocksForTest = () =>
+                    {
+                        stop = new Thread(() =>
+                        {
+                            try
+                            {
+                                ScanStop.Fire(130);
+                                if (StoreResult.TryRead(StoreResult.PathFor(f.Store), out var record)) atReturn = record;
+                            }
+                            catch (Exception ex) { stopError = ex; }
+                            finally { returned.Set(); }
+                        }) { IsBackground = true };
+                        stop.Start();
+                        joinedWindow = ReachedWaitOrReturned(stop, returned) && !returned.IsSet;
+                    };
+                    ScanStop.EndFinal();
+                    bool completed = stop != null && stop.Join(GuardMs);
+                    assert(joinedWindow && completed && stopError == null && atReturn != null
+                           && atReturn.ExitCode == 130 && atReturn.Outcome == StoreResult.OutcomeInterrupted
+                           && atReturn.Reason != StoreResult.ProvisionalReason,
+                        $"StoreStop.EndFinalJoinWindow: a stop joining between the locks reads a sealed record before returning (joined {joinedWindow}, returned {completed}, exit {atReturn?.ExitCode}, outcome {atReturn?.Outcome}, error {stopError?.Message})");
+                    assert(completed && emergencySaves == 0 && f.Checkpoints == 1 && seals == 1
+                           && atReturn != null && atReturn.Export.Performed && atReturn.Store.Generation == f.Generation()
+                           && atReturn.Export.Generation == f.LastPublication?.Generation
+                           && atReturn.Export.Catalog?.Sha256 == Publication.Sha256Hex(f.Catalog)
+                           && StoreTransfer.ReadEntries(f.Store)[A].Features!.Title == "Join-window committed title",
+                        $"StoreStop.EndFinalJoinWindow: one seal carries the committed title, generation, and publication hash without a second writer (seals {seals}, checkpoints {f.Checkpoints}, emergency saves {emergencySaves})");
+                }
+                finally
+                {
+                    ScanStop.BetweenFinalLocksForTest = previousWindow;
+                    StoreResult.BeforeStoppedSealForTest = previousSeal;
+                    ScanStop.EndFinal();
+                    if (stop == null || stop.Join(GuardMs)) returned.Dispose();
+                }
+            }
+        }
+
+        // Publication can succeed before final metadata work throws; a first late stop must retain both facts before Main catches it.
+        static void TestLateFinalException(Action<bool, string> assert)
+        {
+            using (var f = new Fixture())
+            {
+                const string cause = "stop-boundary final publication metadata failure";
+                var previousSeal = StoreResult.BeforeStoppedSealForTest;
+                int emergencySaves = 0, seals = 0;
+                ScanStop.Arm(_ => { emergencySaves++; return "unexpected emergency save"; }, handleCtrlC: false);
+                try
+                {
+                    if (!ScanStop.BeginFinal()) throw new InvalidOperationException("Could not acquire final persistence.");
+                    ScanSink.RecordCacheHit(A, Entry("Published before final exception", 'a'));
+                    if (!f.Checkpoint(final: true).IsDurable || f.PublishError != null)
+                        throw new InvalidOperationException("Fixture final publication failed.");
+                    StoreResult.BeforeStoppedSealForTest = () => Interlocked.Increment(ref seals);
+                    ScanStop.EndFinal(new IOException(cause)); // no stop has joined and Main has not recorded the exception
+                    string? answer = ScanStop.Fire(130);
+                    bool hasResult = StoreResult.TryRead(StoreResult.PathFor(f.Store), out var record);
+                    assert(hasResult && record.Outcome == StoreResult.OutcomeFailed && record.ExitCode == 130
+                           && record.Reason != null && record.Reason.Contains(cause) && !record.Reason.Contains("saved it")
+                           && answer != null && answer.Contains("failed") && answer.Contains(cause),
+                        $"StoreStop.LateFinalException: the first late stop records failed with the original cause before Main catches it ({record.Outcome}; exit {record.ExitCode}; {record.Reason})");
+                    assert(hasResult && record.Export.Performed && record.Store.Generation == f.Generation()
+                           && record.Export.Generation == f.LastPublication?.Generation
+                           && record.Export.Catalog?.Sha256 == Publication.Sha256Hex(f.Catalog)
+                           && StoreTransfer.ReadEntries(f.Store)[A].Features!.Title == "Published before final exception",
+                        "StoreStop.LateFinalException: the failure preserves the committed title, generation, and successful publication hash");
+                    string sealedHash = Publication.Sha256Hex(StoreResult.PathFor(f.Store));
+                    ScanStop.Fire(null);
+                    StoreResult.NoteScanOutcome(StoreResult.OutcomeFailed, "Main catch: " + cause);
+                    string? mainResult = StoreResult.FinishScan(unchecked((int)0xE0434352));
+                    assert(mainResult == null && sealedHash == Publication.Sha256Hex(StoreResult.PathFor(f.Store))
+                           && seals == 1 && emergencySaves == 0 && f.Checkpoints == 1,
+                        "StoreStop.LateFinalException: repeated stop and Main cleanup preserve the sealed record without another seal or data writer");
+                }
+                finally { StoreResult.BeforeStoppedSealForTest = previousSeal; }
             }
         }
 
