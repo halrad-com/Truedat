@@ -214,11 +214,31 @@ namespace Truedat.Store
             if (storePath == null || rec == null || fullStore == null) return null;
             RefreshScanFacts(rec, fullStore, r, edgesOn);
             if (rec.Export.Companion == null && companionPath != null && File.Exists(companionPath)) rec.Export.Companion = Describe(companionPath);
-            var path = _scanStoreFailure != null
-                ? Write(fullStore, rec, exitCode, OutcomeFailed, _scanStoreFailure + "; " + reason)
-                : Write(fullStore, rec, exitCode, OutcomeInterrupted, reason);
+            var path = SealStopped(rec, fullStore, exitCode, reason);
             ResetScanForTest();
             return path;
+        }
+
+        /// <summary>A stop that JOINED the scan's final writes (ScanStop.EndFinal): the pending record already carries the final flush's
+        /// facts (WriteScan) and the last publication (NoteScanExport); it is sealed as the stop's — interrupted (or failed, when the
+        /// scan noted a failure), the exit code the stop knows — and cleared, so Main's finally (which an Environment.Exit skips
+        /// anyway) rewrites nothing. Null when no scan record is pending.</summary>
+        internal static string? FinishStoppedAfterFinal(int? exitCode, string reason)
+        {
+            var rec = _scan; var fullStore = _scanStore;
+            if (rec == null || fullStore == null) return null;
+            var path = SealStopped(rec, fullStore, exitCode, reason);
+            ResetScanForTest();
+            return path;
+        }
+
+        /// <summary>The stop's outcome precedence: a store write failure, then a failure the scan noted (a persistently failed or failed
+        /// stop checkpoint — the pending work is NOT on disk, and "interrupted" would read as saved), else interrupted.</summary>
+        static string? SealStopped(StoreResultFile rec, string fullStore, int? exitCode, string reason)
+        {
+            if (_scanStoreFailure != null) return Write(fullStore, rec, exitCode, OutcomeFailed, _scanStoreFailure + "; " + reason);
+            if (_scanOutcome == OutcomeFailed) return Write(fullStore, rec, exitCode, OutcomeFailed, string.IsNullOrEmpty(_scanReason) || _scanReason == reason ? reason : _scanReason + "; " + reason);
+            return Write(fullStore, rec, exitCode, OutcomeInterrupted, reason);
         }
 
         /// <summary>The record's facts from the store and the scan-wide tally — shared by the flush's provisional write and the stop's

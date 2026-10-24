@@ -282,6 +282,9 @@ namespace Truedat
         // Transient, never written (keeper 067): which copy facts the catalog entry actually carried, as a TrackEntryMapper copy-column
         // bitmask — set only when a catalog is read for the store (LoadExistingMoodsForStore). Null = every column observed (a scan).
         public ulong? CopyObserved;
+        // Likewise for the CONTENT columns (TrackEntryMapper.ObservedContentMask, ContentIdx order): set beside CopyObserved when a catalog
+        // is read for the store, so a merge can tell an omitted field from a supplied zero or empty string. Null = not recorded.
+        public ulong[]? ContentObserved;
     }
 
     class AudioDetails
@@ -11251,10 +11254,12 @@ namespace Truedat
                     if (!mergeSource.TryGetValue(kv.Key, out src) && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out src);
                     if (src != null && !SameContentIdentity(src, kv.Value, kv.Key)) src = null;
                 }
+                var contentObserved = kv.Value.ContentObserved;   // the merged file's own content mask (merge only); the mapper returns fresh entries
                 var entry = src != null || own != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, src, own) : kv.Value;
-                // A merge's winning entry is another library's catalog entry: a content measurement it does NOT carry is unobserved, and
-                // the exact-arrival write below would otherwise clear it (labs 2026-10-24 defect 1). Plain verbs keep NULL = clear.
-                if (merge) entry = global::Truedat.Store.TrackEntryMapper.WithContentWhereNullFrom(entry, src, own);
+                // A merge's winning entry is another library's catalog entry: a content measurement it does NOT carry — absent, null, or a
+                // default the parser invented for a missing key — is unobserved, and the exact-arrival write below would otherwise clear it
+                // (labs 2026-10-24 defect 1; codex: bpm 0 / key "" for an omitted field). Plain verbs keep NULL = clear.
+                if (merge) entry = global::Truedat.Store.TrackEntryMapper.WithContentWhereUnobservedFrom(entry, contentObserved, src, own);
                 // R3: the catalog bytes cannot show a policy-cut difference; the supplied fields are compared on their own.
                 if (!publicChanged && b0 != null && global::Truedat.Store.TrackEntryMapper.ExcludedContentEqual(b0, entry)) continue;
                 // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
@@ -24889,7 +24894,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     FingerprintV1 = ParseFingerprintV1FromJson(track),
                 };
                 if (recordCopyObserved)
+                {
                     allTracks[filePath].CopyObserved = Truedat.Store.TrackEntryMapper.ObservedCopyMask(track, allTracks[filePath].FingerprintV1 != null);
+                    allTracks[filePath].ContentObserved = Truedat.Store.TrackEntryMapper.ObservedContentMask(track);
+                }
                 added++;
             }
             return added;

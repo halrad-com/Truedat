@@ -24,6 +24,8 @@ namespace Truedat.Store
             catch (Exception ex) { assert(false, $"StoreStop.PersistentFailure: threw {ex.GetType().Name}: {ex.Message}"); }
             try { TestFinalOwnedStopReturnsAfterResult(assert); }
             catch (Exception ex) { assert(false, $"StoreStop.FinalOwnedResult: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestStopAfterFinalStillWritesResult(assert); }
+            catch (Exception ex) { assert(false, $"StoreStop.AfterFinalResult: threw {ex.GetType().Name}: {ex.Message}"); }
         }
 
         static TrackEntry Entry(string title, char sha) => new TrackEntry
@@ -158,6 +160,30 @@ namespace Truedat.Store
                 assert(hasResult && record.ExitCode == 130 && record.Outcome == StoreResult.OutcomeFailed
                        && record.Reason != null && record.Reason.Contains("fail-run-outcome"),
                     $"StoreStop.PersistentFailure: stopped result preserves failed outcome and actual checkpoint cause ({record.Outcome}; {record.Reason})");
+            }
+        }
+
+        // A stop can arrive after EndFinal but before Main.FinishScan seals the provisional result.
+        static void TestStopAfterFinalStillWritesResult(Action<bool, string> assert)
+        {
+            using (var f = new Fixture())
+            {
+                int emergencySaves = 0;
+                var periodic = new PeriodicSave(Stopwatch.StartNew(), 3600, _ => { });
+                ScanStop.Arm(code => { emergencySaves++; return ScanStop.SaveNow(periodic, () => f.Checkpoint(), code, f.Seal); }, handleCtrlC: false);
+                assert(ScanStop.BeginFinal(), "StoreStop.AfterFinalResult: normal final persistence owns the session");
+                ScanSink.RecordCacheHit(A, Entry("Completed final cached title", 'a'));
+                var final = f.Checkpoint(final: true);
+                ScanStop.EndFinal(); // no stop was waiting when final persistence completed
+                ScanStop.Fire(130); // Main.FinishScan has not run yet
+                bool hasResult = StoreResult.TryRead(StoreResult.PathFor(f.Store), out var record);
+                assert(final.IsDurable && f.PublishError == null && emergencySaves == 0 && f.Checkpoints == 1,
+                    "StoreStop.AfterFinalResult: stopping after final publication does not start a second data writer");
+                assert(hasResult && record.ExitCode == 130 && record.Outcome == StoreResult.OutcomeInterrupted
+                       && record.Reason != StoreResult.ProvisionalReason && record.Export.Performed
+                       && record.Store.Generation == f.Generation() && record.Export.Generation == f.LastPublication?.Generation
+                       && record.Export.Catalog?.Sha256 == Publication.Sha256Hex(f.Catalog),
+                    $"StoreStop.AfterFinalResult: before Main cleanup, disk has the stop exit and final publication facts (exit {record.ExitCode}, outcome {record.Outcome}, published {record.Export.Performed})");
             }
         }
 

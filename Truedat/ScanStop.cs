@@ -39,6 +39,7 @@ namespace Truedat
         static State _state = State.Settled;
         static ManualResetEventSlim? _done;   // set once the session settles, whoever settled it
         static string? _result;
+        static bool _stopJoinedFinal; static int? _joinedExit;   // a stop that arrived during FinalOwned, and the exit code it knows
 
         /// <summary>Arm for one scan. <paramref name="saveNow"/> takes the exit code the caller knows (130 from the scan's own Ctrl+C
         /// handler; null for a native close, which the OS ends) and returns what happened, for the console. <paramref name="handleCtrlC"/>
@@ -48,7 +49,7 @@ namespace Truedat
         {
             lock (_gate)
             {
-                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null;
+                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null;
                 _done?.Dispose(); _done = new ManualResetEventSlim(false);
                 if (_routine != null) return;
                 _routine = OnCtrl;
@@ -76,15 +77,22 @@ namespace Truedat
             return s == State.FinalOwned;   // Settled: nothing to redo
         }
 
-        /// <summary>The final writes are done: the session settles and a stop arriving now (or later) gets that answer.</summary>
+        /// <summary>The final writes are done: the session settles and a stop arriving now (or later) gets that answer. A stop that JOINED the
+        /// final writes is about to end the process without Main's finally, so the scan's record is sealed here first — the final
+        /// flush's facts and publication, interrupted, the exit code the stop knows — before that caller is released (codex R7
+        /// acceptance: "before a terminating caller returns, disk has its exit and actual publication facts").</summary>
         internal static void EndFinal()
         {
-            ManualResetEventSlim? done;
+            ManualResetEventSlim? done; bool sealForStop; int? exit;
             lock (_gate)
             {
+                sealForStop = _state == State.FinalOwned && _stopJoinedFinal; exit = _joinedExit;
                 if (_state == State.FinalOwned) { _state = State.Settled; _result ??= FinalSavedIt; }
                 done = _done; _save = null;
             }
+            if (sealForStop)
+                try { global::Truedat.Store.StoreResult.FinishStoppedAfterFinal(exit, FinalSavedIt + "; the process was stopped during them"); }
+                catch (Exception ex) { Console.Error.WriteLine($"  note: the scan record was not sealed for the stop ({ex.Message})"); }
             done?.Set();
         }
 
@@ -100,6 +108,7 @@ namespace Truedat
                 if (_done == null) return null;   // never armed
                 s = _state; done = _done;
                 if (s == State.Active) { _state = State.StopOwned; save = _save; }
+                else if (s == State.FinalOwned) { _stopJoinedFinal = true; _joinedExit ??= exitCode; }   // the strongest known exit stays
             }
             if (s == State.Active)
             {
@@ -123,13 +132,24 @@ namespace Truedat
         {
             var outcome = p.SaveNow(checkpoint, force: true);
             string report;
-            if (outcome == null) report = "not saved: checkpoints stopped on an earlier failure (see above)";   // force: null only on a persistent failure
+            if (outcome == null)
+            {
+                // force: null only on a persistent failure. The record says FAILED with the checkpoint's own cause (codex StoreStop
+                // acceptance): the pending work is not on disk, and "interrupted" would read as saved.
+                var pf = p.PersistentFailure;
+                report = "not saved: checkpoints stopped on an earlier failure" + (pf != null ? $" (stage {pf.Stage}: {CheckpointCause.Describe(pf.Error)})" : " (see above)");
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, report);
+            }
             else if (outcome.IsDurable)
             {
                 int n = p.LastAttemptPending;
                 report = n > 0 ? $"saved {n} completed analyses" : "saved: completed cache updates (no new analyses since the last save)";
             }
-            else report = $"save failed at stage {outcome.Stage}: {CheckpointCause.Describe(outcome.Error)}";
+            else
+            {
+                report = $"save failed at stage {outcome.Stage}: {CheckpointCause.Describe(outcome.Error)}";
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, report);
+            }
             try { seal?.Invoke(exitCode, report); }
             catch (Exception ex) { report += $" (the scan record was not written: {ex.Message})"; }
             return report;

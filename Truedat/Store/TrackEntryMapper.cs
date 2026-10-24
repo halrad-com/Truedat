@@ -606,17 +606,43 @@ namespace Truedat.Store
             return any ? FromValues(row, arriving.LastModified) : arriving;
         }
 
-        /// <summary>Every CONTENT column the arriving entry does not carry (NULL) taken from <paramref name="first"/>, else
-        /// <paramref name="second"/> — for a MERGE's winning entry under the same content identity (labs 2026-10-24 defect 1: the verb's
-        /// exact-arrival rule made a catalog that lacked mfcc clear the stored blob). Present values are untouched. The caller has already
-        /// bound both supplies to the winner's identity; this never looks across it.</summary>
-        internal static TrackEntry WithContentWhereNullFrom(TrackEntry arriving, TrackEntry? first, TrackEntry? second)
+        /// <summary>Every CONTENT column the arriving entry does not carry taken from <paramref name="first"/>, else <paramref name="second"/>
+        /// — for a MERGE's winning entry under the same content identity (labs 2026-10-24 defect 1: the verb's exact-arrival rule made a
+        /// catalog that lacked mfcc clear the stored blob). "Does not carry" is the entry's <see cref="ObservedContentMask"/> when the
+        /// catalog reader recorded one — so a field the parser turned into a default (bpm 0, key "") counts as absent — else a NULL
+        /// value. Present values are untouched, zero and empty included when observed. The caller has already bound both supplies to the
+        /// winner's identity; this never looks across it.</summary>
+        internal static TrackEntry WithContentWhereUnobservedFrom(TrackEntry arriving, ulong[]? observed, TrackEntry? first, TrackEntry? second)
         {
             if (first == null && second == null) return arriving;
             var row = ToRow(arriving); var f = first != null ? ToRow(first) : null; var s = second != null ? ToRow(second) : null; bool any = false;
-            foreach (int i in ContentIdx) if (row[i] == null) { var v = f?[i] ?? s?[i]; if (v != null) { row[i] = v; any = true; } }
+            for (int k = 0; k < ContentIdx.Length; k++)
+            {
+                int i = ContentIdx[k];
+                bool carried = observed != null ? ContentIsObserved(observed, k) : row[i] != null;
+                if (carried) continue;
+                var v = f?[i] ?? s?[i];
+                if (v != null) { row[i] = v; any = true; }
+                else if (observed != null && row[i] != null) { row[i] = null; any = true; }   // a parser default with nothing to supply is not a value
+            }
             return any ? FromValues(row, arriving.LastModified) : arriving;
         }
+
+        /// <summary>The catalog key path of content column k: a name with underscores is a nested object (<c>keyVotes_krumhansl_key</c> is
+        /// <c>keyVotes.krumhansl.key</c>; <c>bitUsage_method</c> is <c>bitUsage.method</c>), anything else a top-level key.</summary>
+        static readonly string[][] ContentJsonPath = Array.ConvertAll(ContentIdx, i => Cols[i].Name.Contains("_") ? Cols[i].Name.Split('_') : new[] { Cols[i].Name });
+
+        /// <summary>Bit k set when the catalog entry CARRIES content column k (ContentIdx order): the key path exists and is not JSON null.
+        /// Recorded by the catalog reader beside <see cref="ObservedCopyMask"/> so a merge can tell an omitted field from a supplied
+        /// zero or empty string after parsing has turned both into the same default (the plan's null rule: "preserve presence before
+        /// parsing turns missing fields into defaults; actually supplied zero/false values remain values").</summary>
+        internal static ulong[] ObservedContentMask(System.Text.Json.JsonElement track)
+        {
+            var mask = new ulong[(ContentIdx.Length + 63) / 64];
+            for (int k = 0; k < ContentIdx.Length; k++) if (Has(track, ContentJsonPath[k])) mask[k >> 6] |= 1UL << (k & 63);
+            return mask;
+        }
+        internal static bool ContentIsObserved(ulong[] mask, int k) => (k >> 6) < mask.Length && (mask[k >> 6] & (1UL << (k & 63))) != 0;
 
         /// <summary>True when every policy-cut CONTENT column is exactly equal between the two entries — the comparison the catalog bytes
         /// cannot make (codex rescan 2026-10-23 R3).</summary>
