@@ -391,6 +391,13 @@ namespace Truedat.Store
                         $"CREATE TEMP TABLE tc2 AS SELECT * FROM track_copy WHERE location_id = {t2};" +
                         $"UPDATE tc2 SET location_id = {t2 + 1000};" +
                         "INSERT INTO track_copy SELECT * FROM tc2; DROP TABLE tc2;" +
+                        // t2's path under the alias too, but holding OTHER content (t1's entity), newer, with no file facts of its own
+                        $"UPDATE track_copy SET fileMd5 = '11111111111111111111111111111111' WHERE location_id = {t2};" +
+                        "INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state) " +
+                        $"SELECT {t2 + 3000}, (SELECT entity_id FROM track_location WHERE id = {t1}), (SELECT max(id) FROM library_root), rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc, state FROM track_location WHERE id = {t2};" +
+                        $"CREATE TEMP TABLE tc4 AS SELECT * FROM track_copy WHERE location_id = {t1};" +
+                        $"UPDATE tc4 SET location_id = {t2 + 3000}, updated_utc = '2099-01-01T00:00:00.0000000Z', fileMd5 = NULL;" +
+                        "INSERT INTO track_copy SELECT * FROM tc4; DROP TABLE tc4;" +
                         // history hanging off the alias's duplicate location
                         $"INSERT INTO run(producer_key, producer_version, location_id, started_utc, outcome) VALUES ('verify', '1', {t1 + 1000}, '2026-10-23T00:00:02Z', 'ok');" +
                         $"INSERT INTO check_result(location_id, kind, result, checked_utc) VALUES ({t1 + 1000}, 'verify', 'OK', '2026-10-23T00:00:03Z');" +
@@ -423,6 +430,8 @@ namespace Truedat.Store
                     $"{label}: t1 is one location under the survivor (the newer copy's, {dup}), t2 and the alias-only path sit beside it");
                 assert(db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};") == "A|130|2099-01-01T00:00:00.0000000Z",
                     $"{label}: the kept copy takes the artist it lacked from the dropped copy and keeps its own bpm and stamp ({db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};")})");
+                assert(db.ExecScalar($"SELECT id || '|' || IFNULL((SELECT fileMd5 FROM track_copy WHERE location_id = id), 'NULL') FROM track_location WHERE root_id = {survivor} AND canonical_path = 't2.flac';") == $"{t2 + 3000}|NULL",
+                    $"{label}: t2's path keeps the newer record, and other content never borrows the old file's MD5 ({db.ExecScalar($"SELECT id || '|' || IFNULL((SELECT fileMd5 FROM track_copy WHERE location_id = id), 'NULL') FROM track_location WHERE root_id = {survivor} AND canonical_path = 't2.flac';")})");
                 assert(db.ExecScalar($"SELECT location_id FROM run WHERE producer_key = 'verify';") == dup.ToString()
                        && db.ExecScalar("SELECT location_id FROM check_result;") == dup.ToString(),
                     $"{label}: the dropped location's run and check history moved onto the survivor");

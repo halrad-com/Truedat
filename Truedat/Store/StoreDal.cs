@@ -295,7 +295,10 @@ namespace Truedat.Store
                 {
                     keep = NewerCopy(locId, dup.Value);
                     long drop = keep == locId ? dup.Value : locId;
-                    MergeCopyInto(keep, drop);
+                    // Copy facts merge only between two records of the SAME content: the two locations name one entity. Two entities at
+                    // one path are two files that held it in turn, and the newer stands alone — its missing MD5, fingerprint or SMFM
+                    // is unknown, not the old file's (the rule: never borrow across hashes).
+                    if (SameEntity(keep, drop)) MergeCopyInto(keep, drop);
                     Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
                     Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
                     Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
@@ -313,6 +316,10 @@ namespace Truedat.Store
             Exec("DELETE FROM library_root WHERE id = ?;", innerId);
             return fold;
         }
+
+        bool SameEntity(long a, long b)
+            => Row("SELECT entity_id FROM track_location WHERE id = ?;", s => s.GetString(0), null, a)
+               == Row("SELECT entity_id FROM track_location WHERE id = ?;", s => s.GetString(0), null, b);
 
         /// <summary>Every copy fact the kept location's copy lacks is taken from the dropped location's copy; a value the kept copy holds is
         /// never replaced and never cleared. <c>location_id</c>, <c>run_id</c> and <c>updated_utc</c> stay the kept copy's — it is the newer
