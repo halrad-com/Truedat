@@ -23,6 +23,7 @@ namespace Truedat.Store
             Block(assert, "ledger mirror location", () => TestLedgerMirrorLocation(assert));
             Block(assert, "edge arrays drop", () => TestArraysDrop(assert));
             Block(assert, "verdict re-derive", () => TestVerdictRederive(assert));
+            Block(assert, "merge content presence", () => StoreMergeSelfTest.Run(assert));
         }
 
         static void Block(Action<bool, string> assert, string name, Action body)

@@ -19,6 +19,7 @@ namespace Truedat.Store
             try { TestCacheHitAndRetire(assert); }
             catch (Exception ex) { assert(false, $"StoreScan.CacheHitRetire: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ScanSink.Reset(); }
+            StoreStopSelfTest.Run(assert);
         }
 
         sealed class Dir : IDisposable
