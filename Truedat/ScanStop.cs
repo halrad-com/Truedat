@@ -12,6 +12,13 @@ namespace Truedat
     /// so a checkpoint already running is waited for and nothing is written twice. Windows gives a close handler about five seconds; with a
     /// store the authority commits first and the files republish from it on the next scan, so the catalog write finishing is not what the
     /// bound rests on.
+    ///
+    /// One SESSION per scan (codex rescan 2026-10-23 R4/R5): persistence at the end has exactly one owner — the first stop signal, or the
+    /// scan's own final writes — and every other party waits for that owner and takes its answer. A `fired` latch used to let a second
+    /// terminating signal return at once while the first was still saving (Ctrl+C then passed to termination; close/shutdown returned
+    /// "handled" and the system ended the process under the save), and the loop's end disarmed the hook and started the final writes
+    /// while a close handler could still be saving — two writers on the same temp paths. States: Active → StopOwned → Settled, or
+    /// Active → FinalOwned → Settled. The save itself runs outside the gate; the gate holds only the state.
     /// </summary>
     internal static class ScanStop
     {
@@ -21,58 +28,118 @@ namespace Truedat
         static extern bool SetConsoleCtrlHandler(HandlerRoutine handler, bool add);
 
         const int CtrlC = 0, CtrlBreak = 1, CtrlClose = 2, CtrlLogoff = 5, CtrlShutdown = 6;
+        const string FinalSavedIt = "the scan's final writes saved it";
+
+        enum State { Active, StopOwned, FinalOwned, Settled }
 
         static readonly object _gate = new object();
         static HandlerRoutine? _routine;   // kept alive: the delegate the OS calls back must not be collected
-        static Func<string?>? _save;
+        static Func<int?, string?>? _save;
         static bool _ctrlC;
-        static int _fired;
+        static State _state = State.Settled;
+        static ManualResetEventSlim? _done;   // set once the session settles, whoever settled it
+        static string? _result;
 
-        /// <summary>Arm for one scan. <paramref name="saveNow"/> returns what happened, for the console. <paramref name="handleCtrlC"/>
+        /// <summary>Arm for one scan. <paramref name="saveNow"/> takes the exit code the caller knows (130 from the scan's own Ctrl+C
+        /// handler; null for a native close, which the OS ends) and returns what happened, for the console. <paramref name="handleCtrlC"/>
         /// is for a mode with no Ctrl+C handler of its own (the per-file modes): save, then let the runtime end the process as it did.
         /// The library scan keeps its pause prompt and calls <see cref="Fire"/> itself where it used to abort without saving.</summary>
-        internal static void Arm(Func<string?> saveNow, bool handleCtrlC)
+        internal static void Arm(Func<int?, string?> saveNow, bool handleCtrlC)
         {
             lock (_gate)
             {
-                _save = saveNow; _ctrlC = handleCtrlC; _fired = 0;
+                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null;
+                _done?.Dispose(); _done = new ManualResetEventSlim(false);
                 if (_routine != null) return;
                 _routine = OnCtrl;
-                try { SetConsoleCtrlHandler(_routine, true); }
+                try
+                {
+                    // The registration's Boolean is a failure mode too, not only a throw (plan v1 Task 3).
+                    if (!SetConsoleCtrlHandler(_routine, true))
+                        Console.Error.WriteLine($"  note: the console close / shutdown hook could not be registered (error {Marshal.GetLastWin32Error()}); the periodic save still bounds a loss.");
+                }
                 catch (Exception ex) { Console.Error.WriteLine($"  note: the console close / shutdown hook is unavailable ({ex.Message}); the periodic save still bounds a loss."); }
             }
         }
 
-        /// <summary>The scan's loop is over and its final writes take it from here.</summary>
-        internal static void Disarm() { lock (_gate) _save = null; }
-
-        /// <summary>Run the armed save once; later calls do nothing. Returns the save's report, or null when nothing was armed or it already ran.</summary>
-        internal static string? Fire()
+        /// <summary>The scan's loop is over: the final writes ask to own persistence. True = they do, run them and call <see cref="EndFinal"/>.
+        /// False = a stop already owns it (waited for until it settled): the stop saved, the final writes stand down and write nothing.</summary>
+        internal static bool BeginFinal()
         {
-            Func<string?>? save;
-            lock (_gate) save = _save;
-            if (save == null || Interlocked.Exchange(ref _fired, 1) != 0) return null;
-            try { return save(); }
-            catch (Exception ex) { return $"save failed: {ex.Message}"; }
+            ManualResetEventSlim? done; State s;
+            lock (_gate)
+            {
+                s = _state; done = _done;
+                if (s == State.Active) { _state = State.FinalOwned; return true; }
+            }
+            if (s == State.StopOwned) { done?.Wait(); return false; }
+            return s == State.FinalOwned;   // Settled: nothing to redo
         }
 
-        /// <summary>What a stop saves: the completed analyses the periodic checkpoint has not written yet, through the same checkpoint.</summary>
-        internal static string? SaveNow(PeriodicSave p, Func<CheckpointOutcome> checkpoint)
+        /// <summary>The final writes are done: the session settles and a stop arriving now (or later) gets that answer.</summary>
+        internal static void EndFinal()
         {
-            int pending = p.SinceDurable;
-            var outcome = p.SaveNow(checkpoint);
-            if (outcome == null)
-                return pending == 0 ? "nothing completed since the last save" : "not saved: checkpoints stopped on an earlier failure (see above)";
-            return outcome.IsDurable
-                ? $"saved {pending} completed analyses"
-                : $"save failed at stage {outcome.Stage}: {CheckpointCause.Describe(outcome.Error)}";
+            ManualResetEventSlim? done;
+            lock (_gate)
+            {
+                if (_state == State.FinalOwned) { _state = State.Settled; _result ??= FinalSavedIt; }
+                done = _done; _save = null;
+            }
+            done?.Set();
+        }
+
+        /// <summary>A stop signal. The first one in an Active session runs the armed save and settles the session; every later caller
+        /// — a second Ctrl+C, a close during the save, a close during the final writes — WAITS for the owner and returns its answer.
+        /// Returns null only when nothing was ever armed. <paramref name="exitCode"/> is what the caller knows (130 from the scan's
+        /// own handler; null when the OS or the runtime decides).</summary>
+        internal static string? Fire(int? exitCode)
+        {
+            Func<int?, string?>? save = null; ManualResetEventSlim? done; State s;
+            lock (_gate)
+            {
+                if (_done == null) return null;   // never armed
+                s = _state; done = _done;
+                if (s == State.Active) { _state = State.StopOwned; save = _save; }
+            }
+            if (s == State.Active)
+            {
+                string? r;
+                try { r = save?.Invoke(exitCode) ?? "nothing to save"; }
+                catch (Exception ex) { r = $"save failed: {ex.Message}"; }
+                lock (_gate) { _result = r; _state = State.Settled; }
+                done!.Set();
+                return r;
+            }
+            if (s == State.StopOwned || s == State.FinalOwned) done!.Wait();
+            lock (_gate) return _result ?? FinalSavedIt;
+        }
+
+        /// <summary>What a stop saves: ONE forced checkpoint — the completed analyses the periodic checkpoint has not written yet AND the
+        /// cache-only updates no counter sees (codex rescan R6: "nothing completed since the last save" skipped a tag-refresh pass's
+        /// changes). A checkpoint already running is waited for; a persistently failed stage is not retried. Then the scan's record is
+        /// sealed with what happened (<paramref name="seal"/>, codex R7) before the process ends. The report is what THIS save did,
+        /// read after the lock — never a count sampled before the wait (labs 2026-10-24 finding 3).</summary>
+        internal static string? SaveNow(PeriodicSave p, Func<CheckpointOutcome> checkpoint, int? exitCode, Action<int?, string>? seal)
+        {
+            var outcome = p.SaveNow(checkpoint, force: true);
+            string report;
+            if (outcome == null) report = "not saved: checkpoints stopped on an earlier failure (see above)";   // force: null only on a persistent failure
+            else if (outcome.IsDurable)
+            {
+                int n = p.LastAttemptPending;
+                report = n > 0 ? $"saved {n} completed analyses" : "saved: completed cache updates (no new analyses since the last save)";
+            }
+            else report = $"save failed at stage {outcome.Stage}: {CheckpointCause.Describe(outcome.Error)}";
+            try { seal?.Invoke(exitCode, report); }
+            catch (Exception ex) { report += $" (the scan record was not written: {ex.Message})"; }
+            return report;
         }
 
         static bool OnCtrl(int type)
         {
             bool close = type == CtrlClose || type == CtrlLogoff || type == CtrlShutdown;
             if (!close && !_ctrlC) return false;   // Ctrl+C / Break: the scan's own handler runs next
-            var what = Fire();
+            var what = Fire(null);   // the system or the runtime ends the process after this: the exit code is not ours
             if (what != null) Console.Error.WriteLine($"  {Name(type)}: {what}");
             return close;   // close / logoff / shutdown: handled (the system ends the process when this returns); Ctrl+C: pass along
         }

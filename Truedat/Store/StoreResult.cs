@@ -191,6 +191,40 @@ namespace Truedat.Store
             BeginScan(storePath, startedUtc ?? DateTime.UtcNow.ToString("o"));
             var rec = _scan!; var fullStore = _scanStore!;
             if (startedUtc != null) rec.StartedUtc = startedUtc;
+            RefreshScanFacts(rec, fullStore, r, edgesOn);
+            rec.Export = new StoreResultExport { Performed = false, Companion = companionPath != null ? Describe(companionPath) : null };
+            // Exit code stays NULL here either way: the process has not finished; FinishScan writes the real one.
+            var path = _scanStoreFailure == null
+                ? Write(fullStore, rec, null, OutcomeInterrupted, ProvisionalReason)
+                : Write(fullStore, rec, null, OutcomeFailed, _scanStoreFailure);
+            r.ResultPath = path;
+            return path;
+        }
+
+        /// <summary>codex rescan 2026-10-23 R7: a STOP's own final write of the scan record. The explicit stop paths save and then end the
+        /// process past Main's finally (Environment.Exit, or the OS after a close handler), so the record on disk stayed PROVISIONAL —
+        /// export.performed false, exit code null, stale store facts — while the store and the files were saved. The stop seals it:
+        /// the committed store facts and the scan-wide tally refreshed, the LAST publication kept exactly as <see cref="NoteScanExport"/>
+        /// left it (never reset), outcome interrupted (a store write failure still outranks it), the exit code the stop knows — 130 from
+        /// the scan's own handler, null for a native close — and the stop's own sentence. Sealed: the pending record is cleared, so a
+        /// later <see cref="FinishScan"/> or <see cref="WriteScan"/> cannot rewrite it completed/0. Null when no scan record is pending.</summary>
+        internal static string? FinishStoppedScan(string? storePath, ScanSinkReport r, bool edgesOn, string? companionPath, int? exitCode, string reason)
+        {
+            var rec = _scan; var fullStore = _scanStore;
+            if (storePath == null || rec == null || fullStore == null) return null;
+            RefreshScanFacts(rec, fullStore, r, edgesOn);
+            if (rec.Export.Companion == null && companionPath != null && File.Exists(companionPath)) rec.Export.Companion = Describe(companionPath);
+            var path = _scanStoreFailure != null
+                ? Write(fullStore, rec, exitCode, OutcomeFailed, _scanStoreFailure + "; " + reason)
+                : Write(fullStore, rec, exitCode, OutcomeInterrupted, reason);
+            ResetScanForTest();
+            return path;
+        }
+
+        /// <summary>The record's facts from the store and the scan-wide tally — shared by the flush's provisional write and the stop's
+        /// sealing write. Touches nothing about the export block.</summary>
+        static void RefreshScanFacts(StoreResultFile rec, string fullStore, ScanSinkReport r, bool edgesOn)
+        {
             rec.Store = new StoreResultStore { Path = fullStore, TruedatVersion = VersionInfo.Display };
             try
             {
@@ -205,7 +239,6 @@ namespace Truedat.Store
                 }
             }
             catch (Exception ex) { StoreLog.Warn($"store-result: store not readable for the record ({ex.Message})"); }
-            rec.Export = new StoreResultExport { Performed = false, Companion = companionPath != null ? Describe(companionPath) : null };
             // Keeper 099: the scan's RESOLVED array flag (the persistence gate it set before any write) and the rows the sticky rule kept
             // arrays on while that flag was off — the tally over every flush. Edges on/off stays the companion's presence + detail.edgesOn.
             rec.Capture = new StoreResultCapture
@@ -226,12 +259,6 @@ namespace Truedat.Store
             if (r.Accounted != r.Entries) StoreLog.Warn($"store accounting: the outcome buckets sum to {r.Accounted} of {r.Entries} entries ({r.Buckets})");
             if (!r.Ok) _scanStoreFailure = "store write failed: " + (r.Error ?? "unknown");
             else if (r.SpillsLost > 0) _scanStoreFailure = $"store write lost {r.SpillsLost} edge fold(s): the spilled fold could not be read back when writing (recorded as failed edges runs; --refresh re-analyses them)";
-            // Exit code stays NULL here either way: the process has not finished; FinishScan writes the real one.
-            var path = _scanStoreFailure == null
-                ? Write(fullStore, rec, null, OutcomeInterrupted, ProvisionalReason)
-                : Write(fullStore, rec, null, OutcomeFailed, _scanStoreFailure);
-            r.ResultPath = path;
-            return path;
         }
 
         /// <summary>Beside the store: <c>&lt;store directory&gt;/store-result.json</c>.</summary>

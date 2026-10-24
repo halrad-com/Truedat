@@ -29,6 +29,12 @@ namespace Truedat
                 TestInPlaceChangeIsCaught(assert);
                 TestSaveNowOnStop(assert);
                 TestStopHookFiresOnce(assert);
+                TestForcedSaveWithNothingPending(assert);
+                TestStopJoinsRunningStop(assert);
+                TestFinalWaitsForRunningStop(assert);
+                TestStopDuringFinalWaits(assert);
+                TestNothingRestartsAfterSettled(assert);
+                TestStopMessageNeverInventsAFailure(assert);
             }
             catch (Exception ex) { assert(false, $"PeriodicSave: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -99,13 +105,121 @@ namespace Truedat
         static void TestStopHookFiresOnce(Action<bool, string> assert)
         {
             int n = 0;
-            ScanStop.Arm(() => { n++; return "saved"; }, handleCtrlC: false);
-            var first = ScanStop.Fire(); var second = ScanStop.Fire();
-            assert(first == "saved" && second == null && n == 1, $"the stop hook saves once however many stop signals arrive (ran {n})");
-            ScanStop.Disarm();
-            ScanStop.Arm(() => { n++; return "saved"; }, handleCtrlC: false);
-            ScanStop.Disarm();
-            assert(ScanStop.Fire() == null && n == 1, "after the scan's loop disarms it, a stop signal saves nothing (the final writes own the rest)");
+            ScanStop.Arm(_ => { n++; return "saved"; }, handleCtrlC: false);
+            var first = ScanStop.Fire(130); var second = ScanStop.Fire(null);
+            assert(first == "saved" && second == "saved" && n == 1, $"the stop hook saves once however many stop signals arrive; every caller gets the one result (ran {n}, second '{second}')");
+            ScanStop.EndFinal();
+            ScanStop.Arm(_ => { n++; return "saved"; }, handleCtrlC: false);
+            assert(ScanStop.BeginFinal(), "the scan's loop is over: the final writes take ownership");
+            ScanStop.EndFinal();
+            assert(ScanStop.Fire(null) != null && n == 1, "after the final writes settled, a stop signal saves nothing more (the final writes owned the rest) and still gets an answer");
+        }
+
+        // codex rescan 2026-10-23 R6: the stop decided "nothing to save" from the fresh-analysis counter, so a cache-only pass (tag
+        // refreshes, moved files) with zero analyses lost its pending changes at a stop. A stop FORCES one checkpoint; a persistent
+        // failure still blocks it (no retry loop).
+        static void TestForcedSaveWithNothingPending(Action<bool, string> assert)
+        {
+            var p = new PeriodicSave(Stopwatch.StartNew(), 3600, _ => { });
+            int n = 0;
+            var o = p.SaveNow(() => { n++; return CheckpointOutcome.Durable; }, force: true);
+            assert(n == 1 && o != null && o.IsDurable && p.Saves == 1, $"R6: a forced stop checkpoint runs with no analysis pending — the cache-only updates are what it saves (ran {n})");
+            var p2 = new PeriodicSave(Stopwatch.StartNew(), 0, _ => { }, retryDelaySecs: 0);
+            p2.AfterAnalysis(() => CheckpointOutcome.Failed("catalog", new IOException("disk full", unchecked((int)0x80070070))));
+            int k = 0;
+            assert(p2.SaveNow(() => { k++; return CheckpointOutcome.Durable; }, force: true) == null && k == 0, $"R6: force never retries a persistently failed stage (ran {k})");
+        }
+
+        // codex rescan 2026-10-23 R4: a second terminating signal returned at once while the first was still saving — Ctrl+C passed
+        // on to termination, close/shutdown returned "handled" — so the process could end under the save. Every stop caller waits
+        // for the one save and gets its result.
+        static void TestStopJoinsRunningStop(Action<bool, string> assert)
+        {
+            int n = 0;
+            using (var inSave = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                ScanStop.Arm(_ => { inSave.Set(); release.Wait(5000); n++; return "saved 7"; }, handleCtrlC: false);
+                var first = Task.Run(() => ScanStop.Fire(130));
+                inSave.Wait(5000);
+                var second = Task.Run(() => ScanStop.Fire(null));
+                bool secondWaited = !second.Wait(150);
+                release.Set();
+                first.Wait(5000); second.Wait(5000);
+                assert(secondWaited && first.Result == "saved 7" && second.Result == "saved 7" && n == 1,
+                    $"R4: a second stop during the first's save WAITS for it and returns its result; one save (waited {secondWaited}, second '{second.Result}', saves {n})");
+                ScanStop.EndFinal();
+            }
+        }
+
+        // codex rescan 2026-10-23 R5: the loop's end disarmed the hook and started the final writes while a stop callback could still
+        // be saving — two writers on the same temp paths. The final writes WAIT for a running stop and then skip (the stop saved).
+        static void TestFinalWaitsForRunningStop(Action<bool, string> assert)
+        {
+            int n = 0;
+            using (var inSave = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                ScanStop.Arm(_ => { inSave.Set(); release.Wait(5000); n++; return "saved"; }, handleCtrlC: false);
+                var stop = Task.Run(() => ScanStop.Fire(null));
+                inSave.Wait(5000);
+                var final = Task.Run(() => ScanStop.BeginFinal());
+                bool finalWaited = !final.Wait(150);
+                release.Set();
+                stop.Wait(5000); final.Wait(5000);
+                assert(finalWaited && final.Result == false && n == 1,
+                    $"R5: the final writes arriving during a stop's save wait for it and do NOT run (the stop owned persistence) (waited {finalWaited}, final owned {final.Result}, saves {n})");
+                ScanStop.EndFinal();
+            }
+        }
+
+        // R5 the other way: a stop (console closed) during the final writes waits for them — the window stays open until they settle —
+        // and starts no checkpoint of its own.
+        static void TestStopDuringFinalWaits(Action<bool, string> assert)
+        {
+            int n = 0;
+            ScanStop.Arm(_ => { n++; return "saved"; }, handleCtrlC: false);
+            assert(ScanStop.BeginFinal(), "fixture: the final writes own persistence");
+            var stop = Task.Run(() => ScanStop.Fire(null));
+            bool stopWaited = !stop.Wait(150);
+            ScanStop.EndFinal();
+            stop.Wait(5000);
+            assert(stopWaited && stop.Result != null && n == 0,
+                $"R5: a stop during the final writes waits for them and runs no checkpoint of its own (waited {stopWaited}, answer '{stop.Result}', saves {n})");
+        }
+
+        static void TestNothingRestartsAfterSettled(Action<bool, string> assert)
+        {
+            int n = 0;
+            ScanStop.Arm(_ => { n++; return "saved 3"; }, handleCtrlC: false);
+            ScanStop.Fire(130);
+            var again = ScanStop.Fire(null);
+            bool finalOwned = ScanStop.BeginFinal();
+            assert(again == "saved 3" && !finalOwned && n == 1,
+                $"after a stop settled nothing restarts persistence: a repeated stop gets the settled answer, the final writes stand down (again '{again}', final owned {finalOwned}, saves {n})");
+            ScanStop.EndFinal();
+        }
+
+        // labs code review 2026-10-24 finding 3: the stop sampled the pending count BEFORE taking the save lock, so a stop that waited
+        // behind a running checkpoint read 0 afterwards and printed "not saved: checkpoints stopped on an earlier failure" — no such
+        // failure, and the work WAS saved. The message comes from what the stop's own save did.
+        static void TestStopMessageNeverInventsAFailure(Action<bool, string> assert)
+        {
+            var p = new PeriodicSave(Stopwatch.StartNew(), 0, _ => { });
+            int m = 0;
+            using (var inSave = new ManualResetEventSlim(false))
+            using (var release = new ManualResetEventSlim(false))
+            {
+                var saver = Task.Run(() => p.AfterAnalysis(() => { inSave.Set(); release.Wait(5000); m++; return CheckpointOutcome.Durable; }));
+                inSave.Wait(5000);
+                var stop = Task.Run(() => ScanStop.SaveNow(p, () => { m++; return CheckpointOutcome.Durable; }, 130, null));
+                bool waited = !stop.Wait(150);
+                release.Set();
+                saver.Wait(5000); stop.Wait(5000);
+                var what = stop.Result ?? "(null)";
+                assert(waited && !what.Contains("not saved") && what.StartsWith("saved") && p.PersistentFailure == null,
+                    $"labs 3: a stop that waited behind a checkpoint reports what IT saved, never a failure that did not happen ('{what}')");
+            }
         }
 
         static void TestSkipWhileSaving(Action<bool, string> assert)

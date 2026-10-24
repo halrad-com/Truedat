@@ -157,15 +157,22 @@ namespace Truedat
         /// does not apply; a checkpoint already running is waited for, not skipped (its analyses are then saved, and nothing is written
         /// twice); nothing completed since the last durable save means nothing to write; a stage that failed persistently is not tried
         /// again. Returns the outcome, or null when nothing was attempted.</summary>
-        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save)
+        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save, bool force = false)
         {
             if (_persistent != null) return null;
             lock (_lock)
             {
-                if (_persistent != null || Volatile.Read(ref _sinceDurable) == 0) return null;
+                // codex rescan R6: the analysis counter cannot see cache-only work (tag refreshes, moved files), so a stop FORCES the
+                // checkpoint; the period's own "nothing new" rule is for the periodic path. A persistent failure still blocks it.
+                if (_persistent != null || (!force && Volatile.Read(ref _sinceDurable) == 0)) return null;
                 return Attempt(save);
             }
         }
+
+        /// <summary>The completed analyses the LAST attempt was asked to save (read under the lock, so a stop's report is what its save
+        /// covered — not a count sampled before it waited for a running checkpoint).</summary>
+        internal int LastAttemptPending => Volatile.Read(ref _lastAttemptPending);
+        int _lastAttemptPending;
 
         /// <summary>Call after an analysis completes. Attempts a checkpoint when a period has passed since the last durable one and no
         /// other worker is saving; returns true when this call made a DURABLE checkpoint. Never throws: an exception from
@@ -191,6 +198,7 @@ namespace Truedat
             {
                 Interlocked.Increment(ref _attempts);
                 int pending = Volatile.Read(ref _sinceDurable), pendingCatalog = Volatile.Read(ref _sinceCatalogHalf);
+                Volatile.Write(ref _lastAttemptPending, pending);
                 CheckpointOutcome outcome;
                 try { outcome = save() ?? CheckpointOutcome.Failed("checkpoint", null, "the save returned no outcome"); }
                 catch (Exception ex) { outcome = CheckpointOutcome.Failed("checkpoint", ex); }

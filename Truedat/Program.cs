@@ -4877,7 +4877,7 @@ namespace Truedat
                     return CheckpointOutcome.Durable;
                 };
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
-                    ScanStop.Arm(() => ScanStop.SaveNow(flPeriodicSave, flCheckpoint), handleCtrlC: true);
+                    ScanStop.Arm(code => ScanStop.SaveNow(flPeriodicSave, flCheckpoint, code, SealStoppedScan), handleCtrlC: true);
 
                 // Two-lane triage (see MoodsMode for the rationale): the per-file body below
                 // is IDENTICAL to the single loop it replaces. Split dispatch only, so cheap
@@ -5300,12 +5300,15 @@ namespace Truedat
                     flOptions, processFile);
 
                 flSw.Stop();
-                ScanStop.Disarm();   // the final writes below own the rest
+                // codex rescan R5: the final writes OWN persistence from here, or stand down when a stop already saved (BeginFinal waits for a
+                // stop in progress; it used to disarm the hook and start writing while a close handler could still be saving).
+                bool flFinalOwned = ScanStop.BeginFinal();
+                if (!flFinalOwned) Console.Error.WriteLine("  stop: the completed work was saved by the stop; the final writes stand down");
 
                 // Save moods file if --moods specified
                 var flCheckpointFailure = flPeriodicSave.PersistentFailure;
                 var flFinal = new FinalWrites();
-                if (!string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
+                if (flFinalOwned && !string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
                 {
                     // Keeper 132: a persistently failed stage is not attempted again here; the other half still writes.
                     flFinal = _storePath != null
@@ -5316,7 +5319,7 @@ namespace Truedat
                             Console.Error.WriteLine($"Saved {flMoodsTracks.Count} entries to: {analyzeFileMoods}");
                         }, () => FlushStoreSink(flMoodsTracks.Keys));   // S2 C3
                 }
-                else if (string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
+                else if (flFinalOwned && string.IsNullOrEmpty(analyzeFileMoods) && flProcessed > 0)
                 {
                     if (_storePath != null) global::Truedat.Store.ScanSink.DropUntied();   // S2: analysed-and-discarded leaves no artifact stash behind
                     // Without --moods this mode analyzes and DISCARDS. That is legitimate for a
@@ -5333,6 +5336,7 @@ namespace Truedat
                     Console.Error.WriteLine($"WARNING: no --moods given — {flProcessed} file(s) were analyzed but NO CATALOG was written.");
                     Console.Error.WriteLine("         Add --moods <path-to-mbxmoods.json> to record the results in a catalog.");
                 }
+                ScanStop.EndFinal();
                 KeepAwakeRelease();   // scan phase (incl. save) is over; nothing left to hold awake for
 
                 int flCachedTotal = flCachedByMtime + flCachedByHeadPath + flCachedByShaPath + flCachedByShaCross;
@@ -5944,7 +5948,7 @@ namespace Truedat
                 if (Interlocked.Exchange(ref cancelRequested, 1) != 0)
                 {
                     Console.WriteLine("Force exit - saving what has completed...");
-                    var what = ScanStop.Fire();
+                    var what = ScanStop.Fire(null);   // the runtime ends the process after this handler: the exit code is not ours
                     if (what != null) Console.WriteLine($"  {what}");
                     return;
                 }
@@ -5983,7 +5987,7 @@ namespace Truedat
                             {
                                 Console.WriteLine();
                                 Console.WriteLine("Stopping now - saving what has completed; the in-flight tracks are not.");
-                                var what = ScanStop.Fire();
+                                var what = ScanStop.Fire(130);
                                 if (what != null) Console.WriteLine($"  {what}");
                                 Environment.Exit(130);
                             }
@@ -6006,7 +6010,7 @@ namespace Truedat
                         if (k.Key == ConsoleKey.C && ctrl)
                         {
                             Console.WriteLine("Stopping now - saving what has completed...");
-                            var what = ScanStop.Fire();
+                            var what = ScanStop.Fire(130);
                             if (what != null) Console.WriteLine($"  {what}");
                             Environment.Exit(130);   // 2nd Ctrl+C -> stop now; the drained analyses are saved first (operator 2026-10-23)
                         }
@@ -6032,7 +6036,7 @@ namespace Truedat
                 }
             };
             // Console closed / logoff / shutdown, and the stop paths above: save the completed analyses now (operator 2026-10-23).
-            ScanStop.Arm(() => ScanStop.SaveNow(periodicSave, checkpoint), handleCtrlC: false);
+            ScanStop.Arm(code => ScanStop.SaveNow(periodicSave, checkpoint, code, SealStoppedScan), handleCtrlC: false);
 
             WarnLowDiskSpace(outputDir);
             Console.WriteLine($"Started:     {startTime:yyyy-MM-dd HH:mm:ss}");
@@ -6734,7 +6738,9 @@ namespace Truedat
             }
             catch (OperationCanceledException) { }
             budgetTimer?.Dispose();   // also keeps the timer reachable until here (a local-only Timer can be collected before it fires)
-            ScanStop.Disarm();   // the final writes below own the rest
+            // codex rescan R5: the final writes OWN persistence from here, or stand down when a stop already saved (BeginFinal waits for a
+            // stop in progress; it used to disarm the hook and start writing while a close handler could still be saving).
+            bool finalOwned = ScanStop.BeginFinal();
 
             sw.Stop();   // the SCAN clock, and the divisor for every rate below — it stops with the analysis
             var wasCancelled = Volatile.Read(ref cancelRequested) != 0;
@@ -6743,10 +6749,13 @@ namespace Truedat
             var checkpointFailure = periodicSave.PersistentFailure;
             // Keeper 132: a persistently failed operation is not tried again at the end — only the half that did NOT fail is written.
             // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
-            var finalWrites = _storePath != null
+            var finalWrites = !finalOwned ? new FinalWrites()   // the stop saved; nothing here writes again (both halves NotAttempted)
+                : _storePath != null
                 ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys, compactAfter: true)
                 : RunFinalWrites(checkpointFailure, true, () => SaveResults(moodsPath, allTracks), () => FlushStoreSink(allTracks.Keys));
             finalSaveSw.Stop();   // the WHOLE final-write phase: catalog, store flush, sidecar, companion
+            ScanStop.EndFinal();
+            if (!finalOwned) Console.WriteLine("  stop: the completed work was saved by the stop; the final writes stand down");
             // Stamped after the writes, not at sw.Stop(). It used to be taken before them, so a run that
             // spent four seconds writing the catalog, the store and the companion printed "Elapsed 1.8s"
             // and a Finished time from before those files existed (operator, 2026-10-18).
@@ -11434,6 +11443,12 @@ namespace Truedat
             PublishFromStore(catalogPath, checkpoint: true);
             return null;
         }
+
+        /// <summary>codex rescan R7: the stop's own final write of the scan record — the committed store facts, the LAST publication, the
+        /// exit code the stop knows — before the process ends past Main's finally. The scan's statics are read here, so ScanStop stays
+        /// a plain session.</summary>
+        static void SealStoppedScan(int? exitCode, string reason)
+            => global::Truedat.Store.StoreResult.FinishStoppedScan(_storePath, global::Truedat.Store.ScanSink.Total, _stageOpts.Edges, _edgesCompanionPath, exitCode, reason);
 
         /// <summary><see cref="global::Truedat.Store.StoreScan.ScanPublishes"/> for interpolated messages (a <c>global::</c> name
         /// cannot sit inside an interpolation hole).</summary>

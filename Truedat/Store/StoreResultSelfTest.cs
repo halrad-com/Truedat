@@ -26,6 +26,10 @@ namespace Truedat.Store
             try { TestScanRecord(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Scan: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (codex rescan R7: a stopped scan seals its record — exit code, committed generation, the last publication — before the process ends)");
+            try { TestFinishStoppedScan(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.Stopped: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (store-v3 T11: a multi-flush scan — the record carries the tally; a failed checkpoint is re-queued, a failed final flush fails the record)");
             try { TestMultiFlushTally(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.MultiFlush: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -267,6 +271,44 @@ namespace Truedat.Store
         }
 
         static ScanSinkReport OkReport(string store) => new ScanSinkReport { Ok = true, Entries = 3, Failures = 1, Edges = 2, EdgesFailed = 0, Remeasured = 1, EntitiesCreated = 2, ElapsedMs = 42, StorePath = store };
+
+        // codex rescan 2026-10-23 R7: the explicit stop paths saved and then Environment.Exit(130)'d past Main's finally, so the record on
+        // disk stayed PROVISIONAL — export.performed false, exit code null, stale store facts — while the store and the files were saved.
+        // The stop seals the record itself: refreshed store facts, the LAST publication (never reset), outcome interrupted, the exit
+        // code it knows (130 from the scan's own handler; null for a native close, which the OS ends), and nothing can rewrite it after.
+        static void TestFinishStoppedScan(Action<bool, string> assert)
+        {
+            const string started = "2026-10-23T00:00:00.0000000Z";
+            StoreResult.ResetScanForTest();
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db");
+                ImportCommand.ExecuteEntries(store, Fixture(@"D:\music\s.flac", 100), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                long gen; using (var os = OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) gen = os.Dal.Generation();
+                StoreResult.BeginScan(store, started);
+                File.WriteAllText(d.P("mbxmoods.json"), "{}"); File.WriteAllText(d.P("mbxmoods.mbxs"), "x");
+                StoreResult.NoteScanExport(new ExportReport { Published = true, Generation = gen, OutPath = d.P("mbxmoods.json"), SidecarPath = d.P("mbxmoods.mbxs"), Entries = 1 }, null);
+
+                var path = StoreResult.FinishStoppedScan(store, OkReport(store), edgesOn: false, companionPath: null, exitCode: 130, reason: "saved 3 completed analyses");
+                var r = new StoreResultFile();
+                bool ok = path != null && StoreResult.TryRead(path!, out r);
+                assert(ok && r.Outcome == "interrupted" && r.ExitCode == 130 && r.Reason == "saved 3 completed analyses" && r.FinishedUtc != null,
+                    $"R7: a stopped scan's record is sealed interrupted with the exit code the stop knows and the stop's own sentence ({r.Outcome}/{r.ExitCode}/{r.Reason}/{r.FinishedUtc})");
+                assert(ok && r.Export.Performed && r.Export.Generation == gen && r.Export.Catalog != null && r.Store.Generation == gen && r.Detail != null && r.Detail["entries"] == 3,
+                    $"R7: the record carries the LAST publication (not reset) and the committed store facts ({r.Export.Performed}/{r.Export.Generation}/{r.Store.Generation}/{(r.Detail == null ? "no detail" : r.Detail["entries"].ToString())})");
+                var finAfter = StoreResult.FinishScan(0);
+                var after = new StoreResultFile(); bool afterOk = path != null && StoreResult.TryRead(path!, out after);
+                assert(finAfter == null && afterOk && after.Outcome == "interrupted" && after.ExitCode == 130,
+                    $"R7: a later boundary finish is a no-op — the stopped record is never rewritten completed/0 ({finAfter}/{after.Outcome}/{after.ExitCode})");
+
+                // a native close: the OS ends the process, the exit code is not ours to know
+                StoreResult.BeginScan(store, started);
+                var path2 = StoreResult.FinishStoppedScan(store, OkReport(store), edgesOn: false, companionPath: null, exitCode: null, reason: "console closed: saved");
+                var n2 = new StoreResultFile(); bool n2Ok = path2 != null && StoreResult.TryRead(path2!, out n2);
+                assert(n2Ok && n2.Outcome == "interrupted" && n2.ExitCode == null && File.ReadAllText(path2!).Contains("\"exitCode\": null"),
+                    $"R7: a native close seals interrupted with exitCode null — never an invented 130 ({n2.Outcome}/{n2.ExitCode})");
+            }
+        }
 
         static void TestScanRecord(Action<bool, string> assert)
         {
