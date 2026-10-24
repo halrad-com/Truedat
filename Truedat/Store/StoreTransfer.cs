@@ -166,10 +166,27 @@ namespace Truedat.Store
             // different content, and a consumer holding 2 would never look again — the one thing the generation
             // exists to prevent. The floor is read now; a writer advancing the live store under a restore is the
             // single-writer rule broken, and the swap below re-checks it anyway.
-            long floor = Math.Max(File.Exists(store) ? ReadGenerationOf(store) : 0, filesGeneration);
+            long floor = filesGeneration;
+            if (File.Exists(store))
+            {
+                // labs 2026-10-24 finding 2: --restore is run precisely when the live store is torn, corrupt or held open, and this read
+                // sat outside every guard — a raw SqliteException instead of the one sentence everything below produces. An unreadable
+                // live store has no generation to floor on; the snapshot of it taken below is what decides whether the restore proceeds.
+                try { floor = Math.Max(ReadGenerationOf(store), filesGeneration); }
+                catch (Exception) { }
+            }
+            // labs 2026-10-24 finding 5: a torn zip, a missing entry or a full volume is the ARCHIVE failing to be read, and said so;
+            // folded into the open's catch it read "the store in the archive cannot be opened by this build" and sent the operator to
+            // schema versions.
+            try { ExtractStoreTo(archivePath, staged); }
+            catch (StoreException) { DeleteStaged(staged); throw; }
+            catch (Exception ex)
+            {
+                DeleteStaged(staged);
+                throw new StoreException($"the archive could not be read ({ex.Message}): {archivePath}; nothing was replaced.");
+            }
             try
             {
-                ExtractStoreTo(archivePath, staged);
                 candidate = Validate(staged);   // the archive's store as it was written: its schema, its generation
                 // codex 2026-10-23 F2: everything this build does when it opens a store — the schema migration, the root fold, the
                 // flatness conversion, the verdict derivation — runs on the STAGED copy, so a candidate the validator accepts but this

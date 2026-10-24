@@ -25,6 +25,7 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C3b: machine identity + entity resolution)");
             Block(assert, "MachineIdentity", () => TestMachineIdentity(assert));
             Block(assert, "EntityResolver", () => TestEntityResolver(assert));
+            Block(assert, "RestoreRefusals", () => TestRestoreRefusals(assert));
             Console.WriteLine("Store self-test (C4: TrackEntry mapper + feature rows)");
             Block(assert, "TrackEntryMapper", () => TestMapper(assert));
             Block(assert, "FeatureRows", () => TestFeatureRows(assert));
@@ -1969,8 +1970,66 @@ namespace Truedat.Store
                     $"a primary root is a path of the library: registering it again from another machine (any case, trailing slash) reuses the row ({dal.Count("library_root")} roots)");
                 long rM = dal.EnsureRoot(w3, @"X:\Library", "mirror", now);
                 assert(rM != r3 && dal.Count("library_root") == 4, "a mirror root is one machine's view and stays per machine");
+                // labs code review 2026-10-24 finding 1: the dedupe's SQL was written in a non-verbatim C# literal, where '\' is an escaped
+                // quote, so SQLite received replace(path, '/', '') and rtrim(.., '') — the stored side was never normalised and only a
+                // stored path with no forward slash and no trailing separator (the fixture's D:\Music) ever matched. The stored shapes:
+                db.Exec($"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{m1.Id}', 'E:/Live/', 'primary', '{now}');");
+                long slashed = dal.ScalarLong("SELECT id FROM library_root WHERE path = 'E:/Live/';");
+                assert(dal.EnsureRoot(w3, @"e:\live", "primary", now) == slashed && dal.Count("library_root") == 5,
+                    $"a primary root STORED with forward slashes and a trailing separator (E:/Live/) is the same root as e:\\live ({dal.Count("library_root")} roots, expected 5)");
+                db.Exec($"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{m1.Id}', 'F:\\Tail\\', 'primary', '{now}');");
+                long tailed = dal.ScalarLong("SELECT id FROM library_root WHERE path = 'F:\\Tail\\';");
+                assert(dal.EnsureRoot(w3, @"F:\Tail", "primary", now) == tailed && dal.Count("library_root") == 6,
+                    $"a primary root STORED with a trailing backslash (F:\\Tail\\) is the same root as F:\\Tail ({dal.Count("library_root")} roots, expected 6)");
+                db.Exec($"INSERT INTO library_root(machine_id, path, role, created_utc) VALUES ('{m1.Id}', 'G:\\Müsik', 'primary', '{now}');");
+                long accented = dal.ScalarLong("SELECT id FROM library_root WHERE path = 'G:\\Müsik';");
+                assert(dal.EnsureRoot(w3, @"g:\MÜSIK", "primary", now) == accented && dal.Count("library_root") == 7,
+                    $"a primary root's case-fold is not ASCII-only (G:\\Müsik vs g:\\MÜSIK) ({dal.Count("library_root")} roots, expected 7)");
             }
             finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // ---------------------------------------------------------------- restore refusals (labs code review 2026-10-24, findings 2 + 5)
+        // --restore is run when the live store is the problem. Every refusal here is one plain sentence ending "nothing was replaced"
+        // that names the thing that failed — never a raw SqliteException (the generation floor was read outside the guard), and never
+        // "the store in the archive cannot be opened by this build" for an archive that could not be READ (a truncated zip, a missing
+        // entry), which sends the operator to schema versions when the problem is the file.
+        static void TestRestoreRefusals(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-restore-refusals-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var oldSink = StoreLog.Sink; var oldThr = StoreLog.Threshold;
+            StoreLog.Sink = _ => { }; StoreLog.Threshold = StoreLogLevel.Error;
+            try
+            {
+                var now = DateTime.UtcNow.ToString("o");
+                // a real store to snapshot: the archive is a raw store copy (what --restore of an undo backup gets)
+                var source = Path.Combine(dir, "source.db");
+                var e = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120 }, LastModified = DateTime.UtcNow, AudioStreamSha256 = new string('a', 64) };
+                ImportCommand.ExecuteEntries(source, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = e }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                var archive = Path.Combine(dir, "snapshot.db");
+                StoreTransfer.VacuumInto(source, archive);
+
+                // finding 2: the live store is unreadable (what a restore is FOR) -> a sentence, not a stack trace
+                var live = Path.Combine(dir, "truedat.db");
+                File.WriteAllBytes(live, new byte[4096]);   // 4 KB of zeros: exists, is not a database
+                Exception? caught = null;
+                try { StoreTransfer.RestoreStore(archive, live, 5); } catch (Exception ex) { caught = ex; }
+                assert(caught is StoreException && caught.Message.Contains("nothing was replaced"),
+                    $"restore over an unreadable live store refuses with one sentence ending 'nothing was replaced', never a raw {caught?.GetType().Name} ({caught?.Message})");
+                assert(File.ReadAllBytes(live).All(b => b == 0) && !File.Exists(live + ".restore.tmp"), "…and the unreadable live store and the staging path are left exactly as they were");
+
+                // finding 5: the archive cannot be read -> the sentence names the ARCHIVE, not this build's ability to open a store
+                var torn = Path.Combine(dir, "torn.zip");
+                File.WriteAllBytes(torn, new byte[] { 0x50, 0x4B, 0x03, 0x04, 1, 2, 3, 4, 5, 6, 7, 8 });   // a zip signature and nothing behind it
+                var dest = Path.Combine(dir, "dest", "truedat.db");
+                caught = null;
+                try { StoreTransfer.RestoreStore(torn, dest, 5); } catch (Exception ex) { caught = ex; }
+                assert(caught is StoreException && caught.Message.Contains("nothing was replaced") && !caught.Message.Contains("cannot be opened by this build") && caught.Message.Contains("archive"),
+                    $"a torn archive refuses naming the archive, not 'the store in the archive cannot be opened by this build' ({caught?.GetType().Name}: {caught?.Message})");
+                assert(!File.Exists(dest) && !File.Exists(dest + ".restore.tmp"), "…and nothing was written at the destination");
+            }
+            finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- entity resolution

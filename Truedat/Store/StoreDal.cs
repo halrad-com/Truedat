@@ -110,8 +110,16 @@ namespace Truedat.Store
                     throw new StoreException($"Root {path} is already registered on this machine as a {held} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {held}.");
             }
             if (!existing.HasValue && role == "primary")
-                existing = Row("SELECT id FROM library_root WHERE role = 'primary' AND lower(rtrim(replace(path, '/', '\'), '\')) = ? ORDER BY id LIMIT 1;",
-                               s => (long?)s.GetInt64(0), null, path.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant());
+            {
+                // A primary root is a path of the LIBRARY, whichever machine registered it (codex 2026-10-23 F1): the same path in any
+                // spelling — separators, trailing separator, case — is the same root, oldest row first. Compared here, not in SQL
+                // (labs 2026-10-24 finding 1: the SQL form was written in a non-verbatim literal, where '\' is an escaped quote, so SQLite
+                // normalised nothing and only a stored path already in canonical shape ever matched; and SQLite's lower() is ASCII-only).
+                static string Norm(string p) => p.Replace('/', '\\').TrimEnd('\\');
+                var want = Norm(path);
+                foreach (var r in LibraryRoots())
+                    if (string.Equals(Norm(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; break; }
+            }
             if (existing.HasValue) return existing.Value;
             Exec("INSERT INTO library_root(machine_id, path, role, created_utc) VALUES (?, ?, ?, ?);", machineId, path, role, nowUtc);
             StoreLog.Info($"root registered: {path} ({role})");
