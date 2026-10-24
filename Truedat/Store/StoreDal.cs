@@ -116,19 +116,19 @@ namespace Truedat.Store
         /// <summary>
         /// The library's roots. A library is one catalog and one store, and its entries live wherever the operator put the
         /// files — any number of folders on any number of drives; MusicBee and the hub serve them all. A root is only how the
-        /// store records a path; it never decides what is published. So the library is every PRIMARY root of this machine
-        /// (mirror roots are another machine's view of the same audio). A machine with none — a metadata mirror reading a store
-        /// copied from the scanning box — reads every primary root. Picking ONE root here is what published 154 of MTest's
-        /// 3,439 tracks and then refused, and what would publish nothing at all for a library spread over two drives.
+        /// store records a path; it never decides what is published. So the library is every PRIMARY root, whichever machine
+        /// registered it (mirror roots are another machine's view of the same audio). Picking ONE root here is what published 154
+        /// of MTest's 3,439 tracks and then refused; picking "this machine's roots" is what cut a store copied to another box to
+        /// the one root that box registered (2026-10-23). The same path under two machines collapses where the entries are read
+        /// into a dictionary keyed by path.
         /// </summary>
-        internal List<(long Id, string Path, string Role)> LibraryRoots(string machineId)
+        internal List<(long Id, string Path, string Role)> LibraryRoots()
         {
-            var all = new List<(long Id, string Machine, string Path, string Role)>();
-            var st = Stmt("SELECT id, machine_id, path, role FROM library_root WHERE role = 'primary' ORDER BY id;");
-            try { while (st.Step()) all.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "", st.GetString(3) ?? "")); }
+            var list = new List<(long, string, string)>();
+            var st = Stmt("SELECT id, path, role FROM library_root WHERE role = 'primary' ORDER BY id;");
+            try { while (st.Step()) list.Add((st.GetInt64(0), st.GetString(1) ?? "", st.GetString(2) ?? "")); }
             finally { st.Reset(); }
-            var mine = all.Where(r => r.Machine == machineId).ToList();
-            return (mine.Count > 0 ? mine : all).Select(r => (r.Id, r.Path, r.Role)).ToList();
+            return list;
         }
 
         /// <summary>Every present entry under any of <paramref name="rootIds"/> (the library: <see cref="LibraryRoots"/>).</summary>

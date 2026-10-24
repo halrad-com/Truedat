@@ -11171,11 +11171,11 @@ namespace Truedat
                     // the remap moves that whole root: one transaction, the root row and every display path under it.
                     string oldRoot = remapOld.Replace('/', '\\').TrimEnd('\\'), newRoot = remapNew.Replace('/', '\\').TrimEnd('\\');
                     using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-                    var hit = os.Dal.LibraryRoots(os.Machine.LibraryMachineId(os.Dal)).Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
-                    if (hit.Count == 1)
+                    var hit = os.Dal.LibraryRoots().Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (hit.Count > 0)
                     {
                         using var tx = os.Db.BeginTransaction();
-                        moved = os.Dal.MoveRoot(hit[0].Id, hit[0].Path, newRoot);
+                        foreach (var h in hit) moved += os.Dal.MoveRoot(h.Id, h.Path, newRoot);
                         if (moved > 0) os.Dal.AdvanceGeneration();
                         tx.Complete();
                         // The move accounts for exactly the renamed paths; whatever the verb changed on the library's OTHER roots
@@ -15694,7 +15694,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     using (global::Truedat.Store.StoreLog.Quiet())
                     using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
                     {
-                        foreach (var (_, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) { histBack = back.Features.BpmHistogram; smfmBack = back.Features.SmfmScores; }
+                        foreach (var (_, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots().Select(x => x.Id))) { histBack = back.Features.BpmHistogram; smfmBack = back.Features.SmfmScores; }
                         trackIdNulls = os.Db.ExecScalar("SELECT count(*) FROM track_copy WHERE trackId IS NULL;");
                     }
                     Assert(exit == 0 && smfmBack == null && histBack != null && histBack.Length == 250 && histBack[60] == 0.75 && histBack[120] == 0.25,
@@ -15723,7 +15723,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var histByPath = new Dictionary<string, double[]?>(PathComparer.Instance);
                     using (global::Truedat.Store.StoreLog.Quiet())
                     using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
-                        foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots(os.Machine.Id).Select(x => x.Id))) histByPath[p] = back.Features.BpmHistogram;
+                        foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots().Select(x => x.Id))) histByPath[p] = back.Features.BpmHistogram;
                     histByPath.TryGetValue(@"D:\music\sub\t.flac", out var histMoved);
                     Assert(exit2 == 0 && histByPath.ContainsKey(@"D:\music\sub\t.flac") && histMoved != null && histMoved.Length == 250 && histMoved[60] == 0.75 && histMoved[120] == 0.25,
                         $"store-backed verb: an entry arriving under a renamed path keeps the policy-cut bpmHistogram (exit {exit2}, paths {string.Join("|", histByPath.Keys)}, histogram {(histMoved == null ? "ERASED" : histMoved.Length + " bins")})");

@@ -1413,7 +1413,7 @@ namespace Truedat.Store
                 WriteCatalog(cat, twoDrives);
                 ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat });
                 using (var os = OpenStore.Open(store, false, "selftest", Now()))
-                    assert(os.Dal.ListRoots().Count == 2 && os.Dal.LibraryRoots(os.Machine.Id).Count == 2, "a root on another drive is not folded: two library roots");
+                    assert(os.Dal.ListRoots().Count == 2 && os.Dal.LibraryRoots().Count == 2, "a root on another drive is not folded: two library roots");
                 var both = Path.Combine(outDir, "both", "mbxmoods.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(both)!);
                 var rb = ExportCommand.Execute(new ExportOptions { StorePath = store, OutPath = both });
@@ -1868,14 +1868,14 @@ namespace Truedat.Store
                 // Codex review 2026-10-20 #6: after --machine-adopt the adopting host's roots live under ITS machine row, but default
                 // export and the scan selected roots by the creating machine's id, so the host's own library was left out (and a scan
                 // whose catalog named it refused "root-unresolved").
+                // 2026-10-23: a production box adopted a store copied from the scanning box, then scanned a file outside D:\Music.
+                // That registered a root owned by the adopting host, and "this machine's roots only" then dropped the creating
+                // machine's D:\Music: the published catalog fell to 1 track and the next scan re-analysed the whole library.
+                // The library is every primary root, whoever registered it; mirror roots stay out.
                 long rB = dal.EnsureRoot(w3, @"E:\Music", "primary", now);
-                var libB = dal.LibraryRoots(m3.LibraryMachineId(dal));
-                assert(libB.Count == 1 && libB[0].Id == rB, $"#6 on the adopting host the library is that host's primary roots, E:\\Music, not the creating machine's ({string.Join(", ", libB.Select(x => x.Path))})");
-                var libA = dal.LibraryRoots(m1.LibraryMachineId(dal));
-                assert(libA.Count == 1 && libA[0].Id == r1, $"on the creating host the library is still its own roots ({string.Join(", ", libA.Select(x => x.Path))})");
-                var mirror = MachineIdentity.EnsureMinted(dal, "MIRRORBOX", now);
-                assert(dal.LibraryRoots(mirror.LibraryMachineId(dal)).Count == 1 && dal.LibraryRoots(mirror.LibraryMachineId(dal))[0].Id == r1,
-                    "a host that never adopted (a metadata mirror) still reads the creating machine's library");
+                var lib = dal.LibraryRoots();
+                assert(lib.Count == 2 && lib.Any(x => x.Id == r1) && lib.Any(x => x.Id == rB) && !lib.Any(x => x.Id == r3),
+                    $"the library is every primary root, the creating machine's and the adopting host's, never a mirror root ({string.Join(", ", lib.Select(x => x.Path))})");
             }
             finally { StoreLog.Sink = oldSink; StoreLog.Threshold = oldThr; db.Dispose(); try { Directory.Delete(dir, true); } catch { } }
         }
