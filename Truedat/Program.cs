@@ -5335,6 +5335,8 @@ namespace Truedat
                 // Save moods file if --moods specified
                 var flCheckpointFailure = flPeriodicSave.PersistentFailure;
                 var flFinal = new FinalWrites();
+                try
+                {
                 if (flFinalOwned && !string.IsNullOrEmpty(analyzeFileMoods) && flMoodsTracks.Count > 0)
                 {
                     // Keeper 132: a persistently failed stage is not attempted again here; the other half still writes.
@@ -5363,6 +5365,9 @@ namespace Truedat
                     Console.Error.WriteLine($"WARNING: no --moods given — {flProcessed} file(s) were analyzed but NO CATALOG was written.");
                     Console.Error.WriteLine("         Add --moods <path-to-mbxmoods.json> to record the results in a catalog.");
                 }
+                }
+                catch (Exception ex) { ScanStop.EndFinal(ex); throw; }   // a stop waiting on these writes is released with the failure (codex Cli.Exception)
+                NoteFinalOutcomeForStop(flCheckpointFailure, flFinal);
                 ScanStop.EndFinal();
                 KeepAwakeRelease();   // scan phase (incl. save) is over; nothing left to hold awake for
 
@@ -6774,11 +6779,17 @@ namespace Truedat
             var checkpointFailure = periodicSave.PersistentFailure;
             // Keeper 132: a persistently failed operation is not tried again at the end — only the half that did NOT fail is written.
             // S2 C3: the store is a second sink, written after the catalog, never instead of it (until T18's final order).
-            var finalWrites = !finalOwned ? new FinalWrites()   // the stop saved; nothing here writes again (both halves NotAttempted)
-                : _storePath != null
-                ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys, compactAfter: true)
-                : RunFinalWrites(checkpointFailure, true, () => SaveResults(moodsPath, allTracks), () => FlushStoreSink(allTracks.Keys));
+            FinalWrites finalWrites;
+            try
+            {
+                finalWrites = !finalOwned ? new FinalWrites()   // the stop saved; nothing here writes again (both halves NotAttempted)
+                    : _storePath != null
+                    ? RunAuthoritativeFinal(checkpointFailure, moodsPath, allTracks.Keys, compactAfter: true)
+                    : RunFinalWrites(checkpointFailure, true, () => SaveResults(moodsPath, allTracks), () => FlushStoreSink(allTracks.Keys));
+            }
+            catch (Exception ex) { ScanStop.EndFinal(ex); throw; }   // a stop waiting on these writes is released with the failure, never left hanging (codex Cli.Exception)
             finalSaveSw.Stop();   // the WHOLE final-write phase: catalog, store flush, sidecar, companion
+            NoteFinalOutcomeForStop(checkpointFailure, finalWrites);
             ScanStop.EndFinal();
             if (!finalOwned) Console.WriteLine("  stop: the completed work was saved by the stop; the final writes stand down");
             // Stamped after the writes, not at sw.Stop(). It used to be taken before them, so a run that
@@ -11496,6 +11507,19 @@ namespace Truedat
             if (storeFailure != null) return storeFailure;
             PublishFromStore(catalogPath, checkpoint: true);
             return null;
+        }
+
+        /// <summary>Before the final writes release a stop that joined them (ScanStop.EndFinal seals the record first): what the end
+        /// already knows is noted so the seal says FAILED with the real cause — a persistent checkpoint failure (the failed stage was
+        /// skipped, its work is not on disk) or a failed final write — instead of "interrupted; the final writes saved it" (codex
+        /// Cli.Persistent). The normal path re-notes the same facts in full a few lines later; a later note replaces this one.</summary>
+        static void NoteFinalOutcomeForStop(CheckpointOutcome? checkpointFailure, FinalWrites w)
+        {
+            if (checkpointFailure != null)
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed,
+                    $"checkpoint failed persistently at stage {checkpointFailure.Stage}: {CheckpointCause.Describe(checkpointFailure.Error)}; the failed stage was not attempted again at the end");
+            else if (FinalWriteFailure(w) is string failure)
+                global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, failure);
         }
 
         /// <summary>codex rescan R7: the stop's own final write of the scan record — the committed store facts, the LAST publication, the

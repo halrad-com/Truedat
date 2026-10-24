@@ -18,7 +18,9 @@ namespace Truedat
     /// terminating signal return at once while the first was still saving (Ctrl+C then passed to termination; close/shutdown returned
     /// "handled" and the system ended the process under the save), and the loop's end disarmed the hook and started the final writes
     /// while a close handler could still be saving — two writers on the same temp paths. States: Active → StopOwned → Settled, or
-    /// Active → FinalOwned → Settled. The save itself runs outside the gate; the gate holds only the state.
+    /// Active → FinalOwned → Settled. The save itself runs outside the gate; the gate holds only the state. A stop that joins or follows
+    /// the final writes gets the scan's record SEALED before it is released (the process ends past Main's finally after it), and a second
+    /// caller arriving while that seal is being written waits for it too (codex ConcurrentSeal acceptance).
     /// </summary>
     internal static class ScanStop
     {
@@ -41,6 +43,8 @@ namespace Truedat
         static string? _result;
         static bool _stopJoinedFinal; static int? _joinedExit;   // a stop that arrived during FinalOwned, and the exit code it knows
         static bool _finalSettled, _sealed;                      // the final writes settled the session; the record was sealed for a stop
+        static string _finalResult = FinalSavedIt;               // what the final writes did, for every stop that joins or follows them
+        static ManualResetEventSlim? _sealEvent;                 // set when a seal started AFTER the final writes has been written
 
         /// <summary>Arm for one scan. <paramref name="saveNow"/> takes the exit code the caller knows (130 from the scan's own Ctrl+C
         /// handler; null for a native close, which the OS ends) and returns what happened, for the console. <paramref name="handleCtrlC"/>
@@ -50,7 +54,9 @@ namespace Truedat
         {
             lock (_gate)
             {
-                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null; _finalSettled = false; _sealed = false;
+                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null;
+                _finalSettled = false; _sealed = false; _finalResult = FinalSavedIt;
+                _sealEvent?.Dispose(); _sealEvent = null;
                 _done?.Dispose(); _done = new ManualResetEventSlim(false);
                 if (_routine != null) return;
                 _routine = OnCtrl;
@@ -65,44 +71,59 @@ namespace Truedat
         }
 
         /// <summary>The scan's loop is over: the final writes ask to own persistence. True = they do, run them and call <see cref="EndFinal"/>.
-        /// False = a stop already owns it (waited for until it settled): the stop saved, the final writes stand down and write nothing.</summary>
+        /// False = a stop already owns it (waited for until it settled): the stop saved, the final writes stand down and write nothing.
+        /// A scan that never armed a session (a per-file run with no catalog to save) owns its own end: true.</summary>
         internal static bool BeginFinal()
         {
             ManualResetEventSlim? done; State s;
             lock (_gate)
             {
+                if (_done == null) return true;   // never armed (codex Cli.Unarmed): no session, the caller owns its writes
                 s = _state; done = _done;
                 if (s == State.Active) { _state = State.FinalOwned; return true; }
             }
             if (s == State.StopOwned) { done?.Wait(); return false; }
-            // FinalOwned again: true, because each scan mode calls BeginFinal exactly once (library :6759, per-file :5323), so a second call
-            // in one session cannot come from a second writer — only from the same caller re-asking. Settled: nothing to redo (labs 026).
+            // FinalOwned again: true, because each scan mode calls BeginFinal exactly once (library and per-file), so a second call in one
+            // session cannot come from a second writer — only from the same caller re-asking. Settled: nothing to redo (labs 026).
             return s == State.FinalOwned;
         }
 
-        /// <summary>The final writes are done: the session settles and a stop arriving now (or later) gets that answer. A stop that JOINED the
-        /// final writes is about to end the process without Main's finally, so the scan's record is sealed here first — the final
-        /// flush's facts and publication, interrupted, the exit code the stop knows — before that caller is released (codex R7
-        /// acceptance: "before a terminating caller returns, disk has its exit and actual publication facts").</summary>
-        internal static void EndFinal()
+        /// <summary>The final writes are done — or threw (<paramref name="error"/>): the session settles and a stop arriving now (or later)
+        /// gets that answer. A stop that JOINED the final writes is about to end the process without Main's finally, so the scan's record
+        /// is sealed here first — the final flush's facts and publication, interrupted (failed when the writes failed or the scan noted a
+        /// failure), the exit code the stop knows — and only then is that caller released (codex R7 acceptance). The seal happens while
+        /// the session is still FinalOwned, so a stop arriving mid-seal waits for it as well.</summary>
+        internal static void EndFinal(Exception? error = null)
         {
             ManualResetEventSlim? done; bool sealForStop; int? exit;
             lock (_gate)
             {
-                sealForStop = _state == State.FinalOwned && _stopJoinedFinal && !_sealed; exit = _joinedExit;
+                if (_done == null) return;   // never armed
+                if (_state != State.FinalOwned) { _save = null; return; }   // a stop owned it, or already ended
+                sealForStop = _stopJoinedFinal && !_sealed; exit = _joinedExit;
                 if (sealForStop) _sealed = true;
-                if (_state == State.FinalOwned) { _state = State.Settled; _finalSettled = true; _result ??= FinalSavedIt; }
-                done = _done; _save = null;
+                _finalResult = error == null ? FinalSavedIt : $"the scan's final writes failed ({error.Message}); the periodic saves hold what they wrote";
             }
-            if (sealForStop) SealAfterFinal(exit, "during");
+            if (sealForStop) SealAfterFinal(exit, error, "during");
+            lock (_gate) { _state = State.Settled; _finalSettled = true; _result ??= _finalResult; done = _done; _save = null; }
             done?.Set();
         }
 
         /// <summary>The scan's record sealed for a stop that joined (or followed) the final writes — before that caller is released, since
-        /// the process ends without Main's finally after it. Never throws.</summary>
-        static void SealAfterFinal(int? exitCode, string when)
+        /// the process ends without Main's finally after it. A failed final write seals FAILED with its cause. Never throws.</summary>
+        static void SealAfterFinal(int? exitCode, Exception? error, string when)
         {
-            try { global::Truedat.Store.StoreResult.FinishStoppedAfterFinal(exitCode, FinalSavedIt + $"; the process was stopped {when} them"); }
+            try
+            {
+                string reason;
+                if (error != null)
+                {
+                    reason = $"the scan's final writes failed ({error.Message}); the process was stopped {when} them";
+                    global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, reason);
+                }
+                else reason = FinalSavedIt + $"; the process was stopped {when} them";
+                global::Truedat.Store.StoreResult.FinishStoppedAfterFinal(exitCode, reason);
+            }
             catch (Exception ex) { Console.Error.WriteLine($"  note: the scan record was not sealed for the stop ({ex.Message})"); }
         }
 
@@ -112,18 +133,21 @@ namespace Truedat
         /// own handler; null when the OS or the runtime decides).</summary>
         internal static string? Fire(int? exitCode)
         {
-            Func<int?, string?>? save = null; ManualResetEventSlim? done; State s; bool sealNow = false;
+            Func<int?, string?>? save = null; ManualResetEventSlim? done; State s; bool sealNow = false; ManualResetEventSlim? sealWait = null;
             lock (_gate)
             {
                 if (_done == null) return null;   // never armed
                 s = _state; done = _done;
                 if (s == State.Active) { _state = State.StopOwned; save = _save; }
                 else if (s == State.FinalOwned) { _stopJoinedFinal = true; _joinedExit ??= exitCode; }   // the strongest known exit stays
-                else if (s == State.Settled && _finalSettled && !_sealed) { _sealed = true; sealNow = true; }   // a stop AFTER the final writes, before Main's finally
+                else if (s == State.Settled && _finalSettled)
+                {
+                    // A stop AFTER the final writes, before Main's finally: the first one seals the record; a second one arriving while
+                    // that seal is being written waits for it (codex ConcurrentSeal.AfterFinal) — never returns ahead of the disk.
+                    if (!_sealed) { _sealed = true; _sealEvent = new ManualResetEventSlim(false); sealNow = true; }
+                    else sealWait = _sealEvent;
+                }
             }
-            // The final writes settled the session and this is the first stop since: the process ends past Main's finally after this
-            // returns, so the record is sealed here with the final flush's facts and the exit code the stop knows.
-            if (sealNow) SealAfterFinal(exitCode, "after");
             if (s == State.Active)
             {
                 string? r;
@@ -133,8 +157,16 @@ namespace Truedat
                 done!.Set();
                 return r;
             }
+            if (sealNow)
+            {
+                // The process ends past Main's finally after this returns, so the record is sealed here with the final flush's facts and the
+                // exit code the stop knows.
+                SealAfterFinal(exitCode, null, "after");
+                _sealEvent?.Set();
+            }
+            else if (sealWait != null) sealWait.Wait();
             if (s == State.StopOwned || s == State.FinalOwned) done!.Wait();
-            lock (_gate) return _result ?? FinalSavedIt;
+            lock (_gate) return _result ?? _finalResult;
         }
 
         /// <summary>What a stop saves: ONE forced checkpoint — the completed analyses the periodic checkpoint has not written yet AND the

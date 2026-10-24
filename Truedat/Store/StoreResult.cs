@@ -229,6 +229,9 @@ namespace Truedat.Store
         {
             var rec = _scan; var fullStore = _scanStore;
             if (rec == null || fullStore == null) return null;
+            // The final store flush may have been SKIPPED (a persistent checkpoint failure) so no flush refreshed the record: the committed
+            // generation and the scan-wide tally are read now, the export block kept as the last publication left it (codex Cli.Persistent).
+            RefreshScanFacts(rec, fullStore, ScanSink.Total, Program._stageOpts.Edges);
             var path = SealStopped(rec, fullStore, exitCode, reason);
             ResetScanForTest();
             return path;
