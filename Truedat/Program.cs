@@ -11267,6 +11267,14 @@ namespace Truedat
             return global::Truedat.Store.FacetKinds.ForShaSource(a.AudioStreamSha256Source, isFlac) == global::Truedat.Store.FacetKinds.ForShaSource(b.AudioStreamSha256Source, isFlac);
         }
 
+        /// <summary>Whether two entries at one path are PROVABLY different content: both carry a hash and the hash or its kind disagrees.
+        /// An entry without a hash is unknown content, not different content, and the plan's null rule governs the unknown case — a supply
+        /// is dropped only on proof, never on absence. Gating on <see cref="SameContentIdentity"/> instead made every hashless entry fail
+        /// its own identity test, so a merge cleared the store-only fields of each one, the entries it never touched included.</summary>
+        internal static bool ContentDiffersProvably(TrackEntry a, TrackEntry b, string path)
+            => !string.IsNullOrEmpty(a.AudioStreamSha256) && !string.IsNullOrEmpty(b.AudioStreamSha256)
+               && !SameContentIdentity(a, b, path);
+
         internal static int RunStoreBackedVerb(string hubVerb, string flag, string catalogPath, Func<int> runVerb, string? remapOld = null, string? remapNew = null)
         {
             var store = _storePath!;
@@ -11323,12 +11331,12 @@ namespace Truedat
                 bool publicChanged = b0 == null || !EntryBytes(kv.Key, b0).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value));
                 TrackEntry? own = b0;
                 if (own == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out own);
-                if (merge && own != null && !SameContentIdentity(own, kv.Value, kv.Key)) own = null;
+                if (merge && own != null && ContentDiffersProvably(own, kv.Value, kv.Key)) own = null;
                 TrackEntry? src = null;
                 if (mergeSource != null)
                 {
                     if (!mergeSource.TryGetValue(kv.Key, out src) && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out src);
-                    if (src != null && !SameContentIdentity(src, kv.Value, kv.Key)) src = null;
+                    if (src != null && ContentDiffersProvably(src, kv.Value, kv.Key)) src = null;
                 }
                 var contentObserved = kv.Value.ContentObserved;   // the merged file's own content mask (merge only); the mapper returns fresh entries
                 var entry = src != null || own != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, src, own) : kv.Value;
