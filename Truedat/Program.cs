@@ -9520,10 +9520,17 @@ namespace Truedat
             }
         }
 
+        /// <summary>codex 2026-10-23 F3: the entries of every --merge-moods source that is a STORE, as read from it. The merge renders them
+        /// through the catalog writer, which cuts bpmHistogram, so the merged catalog arrives at the store write without the field, and
+        /// a track new to this store has no stored row to restore it from. The store-backed write reads these instead. Set by
+        /// RunMergeMoods, read and cleared by RunStoreBackedVerb; single-threaded verbs only.</summary>
+        static Dictionary<string, TrackEntry>? _mergeStoreSourceEntries;
+
         static int RunMergeMoods(List<string> sources, string outputPath)
         {
             Console.WriteLine("=== Merge Moods ===");
             Console.WriteLine();
+            _mergeStoreSourceEntries = null;
 
             // Merge reads N catalogs and writes one, so its cost sits on the load side — and
             // with shard files on a share, on how fast those arrive. Each source is timed by
@@ -9561,6 +9568,7 @@ namespace Truedat
                         Console.WriteLine($"  Cannot read store: {source} ({ex.Message})");
                         return 1;
                     }
+                    foreach (var kv in storeEntries) (_mergeStoreSourceEntries ??= new Dictionary<string, TrackEntry>(PathComparer.Instance))[kv.Key] = kv.Value;
                     tracks = new JsonObject();
                     foreach (var kv in storeEntries)
                     {
@@ -11168,10 +11176,17 @@ namespace Truedat
             // key; the content hash survives a rename, so the stored row is found by it (EV3 pre-tag review, H1).
             var beforeBySha = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
             foreach (var kv in before) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
+            // codex 2026-10-23 F3: a --merge-moods source that is a STORE carries the fields the catalog writer cuts; a track new to this
+            // store has no `before` row, so the source store's own entry supplies them — by path, then by content hash.
+            var mergeSource = _mergeStoreSourceEntries; _mergeStoreSourceEntries = null;
+            var mergeBySha = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
+            if (mergeSource != null) foreach (var kv in mergeSource) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
             foreach (var kv in after)
                 if (!before.TryGetValue(kv.Key, out var b) || !EntryBytes(kv.Key, b).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
                 {
                     if (b == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
+                    if (b == null && mergeSource != null && !mergeSource.TryGetValue(kv.Key, out b) && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256))
+                        mergeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
                     // the published file lacks policy-cut fields; the verb never saw them, so the store's values stand
                     var entry = b != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, b) : kv.Value;
                     // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
@@ -15745,6 +15760,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     histByPath.TryGetValue(@"D:\music\sub\t.flac", out var histMoved);
                     Assert(exit2 == 0 && histByPath.ContainsKey(@"D:\music\sub\t.flac") && histMoved != null && histMoved.Length == 250 && histMoved[60] == 0.75 && histMoved[120] == 0.25,
                         $"store-backed verb: an entry arriving under a renamed path keeps the policy-cut bpmHistogram (exit {exit2}, paths {string.Join("|", histByPath.Keys)}, histogram {(histMoved == null ? "ERASED" : histMoved.Length + " bins")})");
+
+                    // codex 2026-10-23 F3: a --merge-moods source that is a STORE renders through the catalog writer, which cuts bpmHistogram;
+                    // the merged track was new to the destination store, so nothing restored the field and the merge silently dropped it.
+                    var src = Path.Combine(dir, "source.db");
+                    var hist2 = new double[250]; hist2[10] = 1.0;
+                    var e2 = new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "B", Title = "u", Bpm = 99, Mfcc = new[] { 0.5, 0.25 }, BpmHistogram = hist2 },
+                        LastModified = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('k', 64),
+                    };
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                        global::Truedat.Store.ImportCommand.ExecuteEntries(src, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\u.flac"] = e2 }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                    int exit3;
+                    saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                    try { using (global::Truedat.Store.StoreLog.Quiet()) exit3 = RunStoreBackedVerb("merge-moods", "--merge-moods", cat, () => RunMergeMoods(new List<string> { cat, src }, cat)); }
+                    finally { Console.SetOut(saveOut); }
+                    double[]? histU = null;
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                    using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots().Select(x => x.Id))) if (string.Equals(p, @"D:\music\u.flac", StringComparison.OrdinalIgnoreCase)) histU = back.Features.BpmHistogram;
+                    Assert(exit3 == 0 && histU != null && histU.Length == 250 && histU[10] == 1.0,
+                        $"store-backed --merge-moods from a STORE source keeps the source's policy-cut bpmHistogram for a track new to this store (exit {exit3}, histogram {(histU == null ? "ERASED" : histU.Length + " bins")})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }
