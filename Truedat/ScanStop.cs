@@ -40,6 +40,7 @@ namespace Truedat
         static ManualResetEventSlim? _done;   // set once the session settles, whoever settled it
         static string? _result;
         static bool _stopJoinedFinal; static int? _joinedExit;   // a stop that arrived during FinalOwned, and the exit code it knows
+        static bool _finalSettled, _sealed;                      // the final writes settled the session; the record was sealed for a stop
 
         /// <summary>Arm for one scan. <paramref name="saveNow"/> takes the exit code the caller knows (130 from the scan's own Ctrl+C
         /// handler; null for a native close, which the OS ends) and returns what happened, for the console. <paramref name="handleCtrlC"/>
@@ -49,7 +50,7 @@ namespace Truedat
         {
             lock (_gate)
             {
-                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null;
+                _save = saveNow; _ctrlC = handleCtrlC; _state = State.Active; _result = null; _stopJoinedFinal = false; _joinedExit = null; _finalSettled = false; _sealed = false;
                 _done?.Dispose(); _done = new ManualResetEventSlim(false);
                 if (_routine != null) return;
                 _routine = OnCtrl;
@@ -86,14 +87,21 @@ namespace Truedat
             ManualResetEventSlim? done; bool sealForStop; int? exit;
             lock (_gate)
             {
-                sealForStop = _state == State.FinalOwned && _stopJoinedFinal; exit = _joinedExit;
-                if (_state == State.FinalOwned) { _state = State.Settled; _result ??= FinalSavedIt; }
+                sealForStop = _state == State.FinalOwned && _stopJoinedFinal && !_sealed; exit = _joinedExit;
+                if (sealForStop) _sealed = true;
+                if (_state == State.FinalOwned) { _state = State.Settled; _finalSettled = true; _result ??= FinalSavedIt; }
                 done = _done; _save = null;
             }
-            if (sealForStop)
-                try { global::Truedat.Store.StoreResult.FinishStoppedAfterFinal(exit, FinalSavedIt + "; the process was stopped during them"); }
-                catch (Exception ex) { Console.Error.WriteLine($"  note: the scan record was not sealed for the stop ({ex.Message})"); }
+            if (sealForStop) SealAfterFinal(exit, "during");
             done?.Set();
+        }
+
+        /// <summary>The scan's record sealed for a stop that joined (or followed) the final writes — before that caller is released, since
+        /// the process ends without Main's finally after it. Never throws.</summary>
+        static void SealAfterFinal(int? exitCode, string when)
+        {
+            try { global::Truedat.Store.StoreResult.FinishStoppedAfterFinal(exitCode, FinalSavedIt + $"; the process was stopped {when} them"); }
+            catch (Exception ex) { Console.Error.WriteLine($"  note: the scan record was not sealed for the stop ({ex.Message})"); }
         }
 
         /// <summary>A stop signal. The first one in an Active session runs the armed save and settles the session; every later caller
@@ -102,14 +110,18 @@ namespace Truedat
         /// own handler; null when the OS or the runtime decides).</summary>
         internal static string? Fire(int? exitCode)
         {
-            Func<int?, string?>? save = null; ManualResetEventSlim? done; State s;
+            Func<int?, string?>? save = null; ManualResetEventSlim? done; State s; bool sealNow = false;
             lock (_gate)
             {
                 if (_done == null) return null;   // never armed
                 s = _state; done = _done;
                 if (s == State.Active) { _state = State.StopOwned; save = _save; }
                 else if (s == State.FinalOwned) { _stopJoinedFinal = true; _joinedExit ??= exitCode; }   // the strongest known exit stays
+                else if (s == State.Settled && _finalSettled && !_sealed) { _sealed = true; sealNow = true; }   // a stop AFTER the final writes, before Main's finally
             }
+            // The final writes settled the session and this is the first stop since: the process ends past Main's finally after this
+            // returns, so the record is sealed here with the final flush's facts and the exit code the stop knows.
+            if (sealNow) SealAfterFinal(exitCode, "after");
             if (s == State.Active)
             {
                 string? r;
