@@ -35,6 +35,7 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
+            Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
             Block(assert, "FlatnessDefinition", () => TestFlatnessDefinition(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
             Block(assert, "StoreDictionary", () => TestStoreDictionary(assert));
