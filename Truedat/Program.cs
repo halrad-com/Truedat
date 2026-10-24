@@ -6808,6 +6808,8 @@ namespace Truedat
                 Console.WriteLine($"  Head-quick: {cachedByHeadPath}  (of {cachedCount} cached: tags-only via audioHead64kMd5)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
+                if (Volatile.Read(ref _movedKeptUnreachable) > 0)   // F3: an offline volume is not a deletion; those old paths stay until it answers
+                    Console.WriteLine($"              {_movedKeptUnreachable} old path(s) kept, not retired: their volume did not answer ({_movedUnreachableRoot})");
             if (shaBackfilled > 0)
                 Console.WriteLine($"  SHA backfill: {shaBackfilled}  (legacy cache hits gained audioStreamSha256)");
             if (flacRekeyed > 0)
@@ -7488,13 +7490,35 @@ namespace Truedat
         /// run-to-run on an otherwise-unchanged library). Guarding the removal on
         /// File.Exists lets legitimate duplicates coexist as two stable entries. Surface
         /// them with --duplicates.</summary>
-        static void RemoveIfMoved(ConcurrentDictionary<string, TrackEntry> dict, string oldKey)
+        internal enum MovedOutcome { Retired, KeptDuplicate, KeptUnreachable }
+        /// <summary>Old copies NOT retired this scan because their volume did not answer (F3) — the summary names them, and the last root.</summary>
+        static int _movedKeptUnreachable; static string? _movedUnreachableRoot;
+
+        /// <summary>codex perf review 2026-10-23 F3: File.Exists == false is also what an OFFLINE share answers, so a reachable duplicate
+        /// of a track whose old copy sits on an unmounted volume retired that old location although its file was never deleted. The
+        /// old path's ROOT is probed FRESH at every retirement decision (the --fixup rule — a volume that drops mid-scan is caught at the
+        /// next decision, not only at start); unreachable = keep the entry and count it; only a reachable root with the file absent is a
+        /// move. The probes are parameters so the rule is pinned without an offline share.</summary>
+        internal static MovedOutcome RemoveIfMoved(ConcurrentDictionary<string, TrackEntry> dict, string oldKey, Func<string, bool>? rootReachable = null, Func<string, bool>? fileExists = null)
         {
+            var root = ReachabilityRoot(oldKey);
+            bool reachable;
+            try { reachable = rootReachable != null ? rootReachable(root) : ProbeRootReachable(root, out _); }
+            catch { reachable = false; }
+            if (!reachable)
+            {
+                Interlocked.Increment(ref _movedKeptUnreachable); _movedUnreachableRoot = root;
+                return MovedOutcome.KeptUnreachable;
+            }
             bool stillThere;
-            try { stillThere = File.Exists(oldKey); }
-            catch { stillThere = false; }   // unreadable path → treat as gone (old behavior)
-            if (!stillThere && dict.TryRemove(oldKey, out _) && _storePath != null)
-                global::Truedat.Store.ScanSink.RecordRetire(oldKey);   // T18: the store retires the old location in the same flush
+            try { stillThere = (fileExists ?? File.Exists)(oldKey); }
+            catch { stillThere = false; }   // unreadable path on a reachable root → gone (old behavior)
+            if (!stillThere && dict.TryRemove(oldKey, out _))
+            {
+                if (_storePath != null) global::Truedat.Store.ScanSink.RecordRetire(oldKey);   // T18: the store retires the old location in the same flush
+                return MovedOutcome.Retired;
+            }
+            return MovedOutcome.KeptDuplicate;
         }
 
         static void RunDuplicates(string outputDir)
@@ -22210,6 +22234,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "F4: a non-zero exit, a timed-out child, or no output is never a measurement however many samples arrived");
                     Assert(DecodeCovers(0, false, 1000, 0, 30, 0) && !DecodeCovers(0, false, 0, 0, 30, 0),
                         "F4: with the rate unknown the floor is 'exited 0 with output' (stated, not invented)");
+                }
+                // codex perf review 2026-10-23 F3: a cross-SHA reuse retired the old copy's catalog entry on File.Exists == false — which an
+                // OFFLINE share also answers. A reachable duplicate of a track whose old copy sits on an unmounted volume retired that
+                // old location although its file was never deleted. Retirement needs a FRESH successful root probe at the decision (the
+                // --fixup rule, re-probed per gone-decision so a volume that drops mid-scan is caught), then the file absent.
+                {
+                    var savedStoreF3 = _storePath; _storePath = null;
+                    try
+                    {
+                        ConcurrentDictionary<string, TrackEntry> D() => new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance) { [@"Z:\gone\old.flac"] = new TrackEntry { Features = new TrackFeatures { Title = "old" } } };
+                        var d1 = D(); var o1 = RemoveIfMoved(d1, @"Z:\gone\old.flac", rootReachable: _ => false, fileExists: _ => false);
+                        Assert(o1 == MovedOutcome.KeptUnreachable && d1.Count == 1, $"F3: old copy on an UNREACHABLE root is kept, never retired ({o1}, entries {d1.Count})");
+                        var d2 = D(); var o2 = RemoveIfMoved(d2, @"Z:\gone\old.flac", rootReachable: _ => true, fileExists: _ => false);
+                        Assert(o2 == MovedOutcome.Retired && d2.Count == 0, $"F3: reachable root, file gone -> the legitimate move retires ({o2}, entries {d2.Count})");
+                        var d3 = D(); var o3 = RemoveIfMoved(d3, @"Z:\gone\old.flac", rootReachable: _ => true, fileExists: _ => true);
+                        Assert(o3 == MovedOutcome.KeptDuplicate && d3.Count == 1, $"F3: reachable root, file present -> a duplicate, kept ({o3})");
+                        int probes = 0; var d4 = D();
+                        bool Flaky(string _) => ++probes == 1;   // the volume answered at the first decision and dropped before the second
+                        var k1 = @"Z:\gone\old.flac"; d4[@"Z:\gone\old2.flac"] = new TrackEntry { Features = new TrackFeatures { Title = "old2" } };
+                        var o4a = RemoveIfMoved(d4, k1, rootReachable: Flaky, fileExists: _ => false);
+                        var o4b = RemoveIfMoved(d4, @"Z:\gone\old2.flac", rootReachable: Flaky, fileExists: _ => false);
+                        Assert(o4a == MovedOutcome.Retired && o4b == MovedOutcome.KeptUnreachable && d4.Count == 1 && probes == 2,
+                            $"F3: the root is probed at EVERY retirement decision — a drop between two decisions keeps the second ({o4a}/{o4b}, probes {probes})");
+                    }
+                    finally { _storePath = savedStoreF3; }
                 }
                 // codex perf review 2026-10-23 F6: the cache walk memoised its body-hash tuple even when the SHA read had FAILED (a sharing
                 // violation during the walk), and the worker took a present tuple as "hashing done" and skipped its resilient hasher — so
