@@ -841,6 +841,9 @@ namespace Truedat
             Console.WriteLine("                      the old small-buffer .1 extractor — see essentia-build/OUTPUT-BUILDS.md)");
             Console.WriteLine($"  --enableshortfiles  Scan very short files too. By default files under {ShortFileMaxSecs}s are skipped");
             Console.WriteLine("                      (silent spacers / sub-second junk), ledgered to mbxmoods-skipped.csv.");
+            Console.WriteLine("  --refresh-authenticity");
+            Console.WriteLine("                      Re-analyze cached tracks whose stored bitUsage was measured by an older method");
+            Console.WriteLine("                      (the tag differs from this build's). Opt-in; --refresh alone never does this.");
             Console.WriteLine("  --refresh-smfm      Re-read Sony 12-TONE (SMFM) on cache hits. Default: hits reuse the stored");
             Console.WriteLine("                      SMFM (no per-file read). Use after upgrading the reader / bulk-tagging.");
             Console.WriteLine("  --long-track-mins N Duration that flags a track for review in --preview (default 30).");
@@ -965,7 +968,7 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "no-dir-batch", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
-            "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "pause", "allow-sleep",
+            "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
@@ -2279,10 +2282,25 @@ namespace Truedat
             if (notice != null) Console.WriteLine(notice);
         }
 
-        /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges.</summary>
+        /// <summary>The bitUsage method this build measures with. Bumped from "ffmpeg-s32le-30s-mid-native" by F5 (2026-10-24): a full-scale
+        /// negative clip no longer zeroes the trailing-zero count, so a clipped master's stored LowestNonZeroBit from the old method is not
+        /// this method's answer. The HF tags did not move — F4 changed only when a decode counts as a measurement, not the measurement.</summary>
+        internal const string BitUsageMethodCurrent = "ffmpeg-s32le-30s-mid-native-v2";
+
+        /// <summary>codex x6 plan review 5 / plan Part A row R: the opt-in remeasurement route. Nothing compared the stored authenticity
+        /// method tags to this build's, so a corrected measurement reached only new or changed tracks — "a --refresh recomputes them" was
+        /// false. Stale = a STORED bitUsage whose method is not this build's; an entry with no bitUsage was not applicable and is not
+        /// stale. Read only under <c>--refresh-authenticity</c> — never by --refresh, never automatically (the plan's single refresh decision).</summary>
+        internal static bool AuthenticityStale(TrackFeatures? f)
+            => f?.BitUsage != null && !string.Equals(f.BitUsage.Method, BitUsageMethodCurrent, StringComparison.Ordinal);
+        internal static bool _refreshAuthenticity;
+
+        /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges, plus (under --refresh-authenticity)
+        /// a stored authenticity measurement from an older method.</summary>
         static bool HasCurrentEntry(TrackEntry? e)
             => HasCurrentFeatures(e?.Features)
-               && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!));
+               && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!))
+               && !(_refreshAuthenticity && AuthenticityStale(e?.Features));
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
         /// net48 can reach files beyond MAX_PATH (260). Used as a per-track fallback
@@ -2864,6 +2882,7 @@ namespace Truedat
                 else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "enableshortfiles") _enableShortFiles = true;
                 else if (canonical == "refresh-smfm") _refreshSmfm = true;
+                else if (canonical == "refresh-authenticity") _refreshAuthenticity = true;   // plan row R: opt-in remeasure of an older bitUsage method
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
                 {
@@ -15548,7 +15567,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // with resample interpolation noise (saw lowestNonZeroBit=0 and
                     // effectiveBits>24 on verified hi-res sources — impossible for true
                     // 24-bit content). Native sample rate restores measurement integrity.
-                    Method = "ffmpeg-s32le-30s-mid-native",
+                    Method = BitUsageMethodCurrent,
                 };
             }
             catch
@@ -22231,6 +22250,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "F4: a non-zero exit, a timed-out child, or no output is never a measurement however many samples arrived");
                     Assert(DecodeCovers(0, false, 1000, 0, 30, 0) && !DecodeCovers(0, false, 0, 0, 30, 0),
                         "F4: with the rate unknown the floor is 'exited 0 with output' (stated, not invented)");
+                }
+                // Plan Part A row R (codex x6 plan review 5): F4/F5 change what bitUsage stores, but nothing compared the stored method tags
+                // to this build's, so the corrected values reached only new or changed tracks and "--refresh recomputes them" was false.
+                // An explicit opt-in — never --refresh itself, never automatic — treats an entry whose stored bitUsage carries an older
+                // method as stale; an entry with no bitUsage (not applicable) is not stale.
+                {
+                    Assert(KnownFlags.Contains("refresh-authenticity"), "R: --refresh-authenticity is a flag");
+                    var old = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, BitUsage = new BitUsageSummary { Method = "ffmpeg-s32le-30s-mid-native", LowestNonZeroBit = 0 } };
+                    var cur = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, BitUsage = new BitUsageSummary { Method = BitUsageMethodCurrent, LowestNonZeroBit = 8 } };
+                    var none = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12 };
+                    Assert(AuthenticityStale(old) && !AuthenticityStale(cur) && !AuthenticityStale(none) && !AuthenticityStale(null),
+                        $"R: stale = a stored bitUsage with an older method; current, absent and null are not ({AuthenticityStale(old)}/{AuthenticityStale(cur)}/{AuthenticityStale(none)})");
+                    Assert(BitUsageMethodCurrent != "ffmpeg-s32le-30s-mid-native", "R: F5 moved the bitUsage method tag — the old one is not this build's");
+                    bool savedRA = _refreshAuthenticity;
+                    try
+                    {
+                        _refreshAuthenticity = false;
+                        Assert(HasCurrentEntry(new TrackEntry { Features = old }), "R: without the flag an older method is still a cache hit (no automatic rescan)");
+                        _refreshAuthenticity = true;
+                        Assert(!HasCurrentEntry(new TrackEntry { Features = old }) && HasCurrentEntry(new TrackEntry { Features = cur }) && HasCurrentEntry(new TrackEntry { Features = none }),
+                            "R: under the flag only the older-method entry is re-analysed");
+                    }
+                    finally { _refreshAuthenticity = savedRA; }
                 }
                 // codex perf review 2026-10-23 F9: the under-decode RETRY preferred the XML duration while the health GATE (acb6604) uses the
                 // smaller positive claim — XML 240 s / fingerprint 180 s / decoded 180 s transcoded and ran the extractor again although the
