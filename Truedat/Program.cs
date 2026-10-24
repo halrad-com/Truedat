@@ -4209,12 +4209,10 @@ namespace Truedat
                 (string? md5, string? sha, string? leg, string src)? afBodyHashes = null;
                 (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                 {
-                    if (afBodyHashes == null)
-                    {
-                        var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, _fileMd5Enabled, out _, out var leg);
-                        afBodyHashes = (m, s, leg, srcTag);
-                    }
-                    return afBodyHashes.Value;
+                    if (afBodyHashes != null) return afBodyHashes.Value;
+                    var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), afFileSize, _fileMd5Enabled, out _, out var leg);
+                    if (BodyHashesUsable(s)) afBodyHashes = (m, s, leg, srcTag);   // F6: a failed read is not memoised; the worker's resilient hasher gets its turn
+                    return (m, s, leg, srcTag);
                 }
                 try
                 {
@@ -5003,12 +5001,10 @@ namespace Truedat
                         (string? md5, string? sha, string? leg, string src)? flBodyHashes = null;
                         (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                         {
-                            if (flBodyHashes == null)
-                            {
-                                var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, _fileMd5Enabled, out _, out var leg);
-                                flBodyHashes = (m, s, leg, srcTag);
-                            }
-                            return flBodyHashes.Value;
+                            if (flBodyHashes != null) return flBodyHashes.Value;
+                            var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, _fileMd5Enabled, out _, out var leg);
+                            if (BodyHashesUsable(s)) flBodyHashes = (m, s, leg, srcTag);   // F6
+                            return (m, s, leg, srcTag);
                         }
 
                         // Cache hierarchy — same tiers as MoodsMode. Plugin-driven
@@ -6135,14 +6131,12 @@ namespace Truedat
                     (string? md5, string? sha, string? leg, string src)? msBodyHashes = null;
                     (string? md5, string? sha, string? leg, string src) EnsureBodyHashes()
                     {
-                        if (msBodyHashes == null)
-                        {
-                            if (msSourceSize == 0)
-                                try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
-                            var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, _fileMd5Enabled, out _, out var leg);
-                            msBodyHashes = (m, s, leg, srcTag);
-                        }
-                        return msBodyHashes.Value;
+                        if (msBodyHashes != null) return msBodyHashes.Value;
+                        if (msSourceSize == 0)
+                            try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
+                        var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, _fileMd5Enabled, out _, out var leg);
+                        if (BodyHashesUsable(s)) msBodyHashes = (m, s, leg, srcTag);   // F6: a failed read is not memoised; the worker's resilient hasher gets its turn
+                        return (m, s, leg, srcTag);
                     }
                     try
                     {
@@ -15334,6 +15328,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// Returns null on ffmpeg absence / decode failure / silent file — never throws.
         /// Designed to run concurrently with Essentia (single ffmpeg child process,
         /// ~5.5 MB total decoded payload, typically completes in 1–3s warm).</summary>
+        /// <summary>May a cache walk's body-hash result be memoised and handed to the worker as "hashing done"? Only when the audio SHA
+        /// succeeded (codex perf review 2026-10-23 F6): a failed read — a sharing violation during the walk — was memoised as a null
+        /// identity and the worker then skipped its resilient hasher, so a transient lock cost two extractor runs and the track. An
+        /// intentionally absent optional MD5 beside a good SHA is still a result.</summary>
+        internal static bool BodyHashesUsable(string? audioSha) => !string.IsNullOrEmpty(audioSha);
+
         /// <summary>The whole life of a companion decoder child (bitUsage, HF), start to exit — one absolute deadline, not one wait per phase
         /// (codex perf review 2026-10-23 F1: the drains blocked on Read until EOF and only then waited 60 s, so a child that stayed alive
         /// with stdout open never returned, and the worker awaits these tasks). 30 s of audio decodes in seconds; two minutes is generous.</summary>
@@ -22211,6 +22211,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(DecodeCovers(0, false, 1000, 0, 30, 0) && !DecodeCovers(0, false, 0, 0, 30, 0),
                         "F4: with the rate unknown the floor is 'exited 0 with output' (stated, not invented)");
                 }
+                // codex perf review 2026-10-23 F6: the cache walk memoised its body-hash tuple even when the SHA read had FAILED (a sharing
+                // violation during the walk), and the worker took a present tuple as "hashing done" and skipped its resilient hasher — so
+                // a transient lock became a null identity through two extractor runs and a failed track. Only a successful SHA is a
+                // result; an intentionally absent optional MD5 beside a good SHA still is (codex x6 plan review, 8).
+                Assert(BodyHashesUsable("abc") && !BodyHashesUsable(null) && !BodyHashesUsable(""),
+                    "F6: a body-hash result is memoised only when the audio SHA succeeded; MD5 presence is irrelevant");
                 // codex perf review 2026-10-23 F1: the drains blocked on Read until EOF and only then waited 60 s; a child that stayed alive
                 // with stdout open never returned, and the worker awaits these tasks. ONE absolute deadline over the child's whole life.
                 {
