@@ -1840,11 +1840,18 @@ namespace Truedat.Store
                 var warns = lines.FindAll(l => l.Contains(" WARN "));
                 assert(warns.Count == 0, "matching host logs no warning (INFO lines are fine)");
 
+                int before = lines.Count;
                 var m3 = MachineIdentity.EnsureMinted(dal, "MAX1", now);
                 assert(!m3.HostMatches && m3.Id == m1.Id, "a copied store opened on another host keeps the id but HostMatches is false");
-                warns = lines.FindAll(l => l.Contains(" WARN "));
-                assert(warns.Count == 1 && warns[0].Contains("ATOM") && warns[0].Contains("MAX1"),
-                    $"hostname mismatch warns once, naming both hosts ({(warns.Count > 0 ? warns[0] : "<none>")})");
+                // Every run that opens a copied store used to print a WARN telling the operator to pass --machine-adopt, though a
+                // scan adopts on its own and the commands that do need it refuse with the same advice. Diagnostic only now.
+                assert(lines.Count == before, $"a host mismatch prints nothing at the default level ({string.Join(" | ", lines.Skip(before))})");
+                StoreLog.SetVerbose(true);
+                MachineIdentity.EnsureMinted(dal, "MAX1", now);
+                StoreLog.SetVerbose(false);
+                var diag = lines.Skip(before).Where(l => l.Contains(" DEBUG ")).ToList();
+                assert(diag.Count == 1 && diag[0].Contains("ATOM") && diag[0].Contains("MAX1"),
+                    $"under --audit the mismatch is one diagnostic line naming both hosts ({(diag.Count > 0 ? diag[0] : "<none>")})");
                 bool refused = false;
                 try { m3.ForWrites(dal, adopt: false, now); } catch (StoreException) { refused = true; }
                 assert(refused, "writes as this machine are refused on a host mismatch without --machine-adopt");

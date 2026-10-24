@@ -30,8 +30,9 @@ namespace Truedat.Store
             }
             var created = dal.MetaGet("created_by_host") ?? "?";
             var mi = new MachineIdentity(id, created, currentHost);
+            // Diagnostic, not a warning: a scan adopts on its own, and the writes that do need --machine-adopt refuse with that advice.
             if (!mi.HostMatches)
-                StoreLog.Warn($"this store was created on host {created} and is open on {currentHost}; reads are fine, writes that record locations as this machine need --machine-adopt");
+                StoreLog.Debug($"this store was created on host {created} and is open on {currentHost}; reads are fine, writes that record locations as this machine need --machine-adopt");
             return mi;
         }
 
