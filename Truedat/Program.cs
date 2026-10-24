@@ -9559,7 +9559,8 @@ namespace Truedat
                 // rendered with the same writer, so a store source and a catalog source merge byte-identically; a
                 // shard store's own root is read along with every other, which is exactly the shard's share.
                 JsonObject tracks;
-                if (global::Truedat.Store.StoreTransfer.LooksLikeStore(source))
+                bool sourceIsStore = global::Truedat.Store.StoreTransfer.LooksLikeStore(source);
+                if (sourceIsStore)
                 {
                     Dictionary<string, TrackEntry> storeEntries;
                     try { storeEntries = global::Truedat.Store.StoreTransfer.ReadEntries(source); }
@@ -9604,6 +9605,10 @@ namespace Truedat
                     if (mergedTracks.ContainsKey(kvp.Key))
                         duplicatesOverwritten++;
                     mergedTracks[kvp.Key] = kvp.Value?.DeepClone();
+                    // codex rescan 2026-10-23 R2: the store entry kept for a path belongs to the LAST source that won it. A catalog
+                    // winning the path afterwards leaves no store entry behind, so an earlier store's policy-cut fields can never be
+                    // attached to the catalog's content.
+                    if (!sourceIsStore) _mergeStoreSourceEntries?.Remove(kvp.Key);
                     count++;
                 }
                 totalLoaded += count;
@@ -11142,6 +11147,15 @@ namespace Truedat
         /// hold; (6) the record (the hub's verb spelling, the committed generation, what was published). A remap whose old prefix IS the
         /// store's root moves the root row instead (locations, copies and history keep their ids).
         /// </summary>
+        /// <summary>The same content: a non-empty equal audioStreamSha256 AND the same hash kind (a FLAC's untagged TagLib-region hash and a
+        /// flac-frames hash can share text without being one measurement). A missing hash is never a match.</summary>
+        internal static bool SameContentIdentity(TrackEntry a, TrackEntry b, string path)
+        {
+            if (string.IsNullOrEmpty(a.AudioStreamSha256) || !string.Equals(a.AudioStreamSha256, b.AudioStreamSha256, StringComparison.OrdinalIgnoreCase)) return false;
+            bool isFlac = path.EndsWith(".flac", StringComparison.OrdinalIgnoreCase);
+            return global::Truedat.Store.FacetKinds.ForShaSource(a.AudioStreamSha256Source, isFlac) == global::Truedat.Store.FacetKinds.ForShaSource(b.AudioStreamSha256Source, isFlac);
+        }
+
         internal static int RunStoreBackedVerb(string hubVerb, string flag, string catalogPath, Func<int> runVerb, string? remapOld = null, string? remapNew = null)
         {
             var store = _storePath!;
@@ -11181,18 +11195,32 @@ namespace Truedat
             var mergeSource = _mergeStoreSourceEntries; _mergeStoreSourceEntries = null;
             var mergeBySha = new Dictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
             if (mergeSource != null) foreach (var kv in mergeSource) if (!string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha[kv.Value.AudioStreamSha256!] = kv.Value;
+            // codex rescan 2026-10-23 R2/R3. The published file lacks the policy-cut fields, so the verb's result never carries them and
+            // something must supply them. A plain verb cannot change a track's content, so the destination's own row stands (by key, or
+            // by sha after a rename). A MERGE can put DIFFERENT content at a path, so there the supply is bound to the winner's content
+            // identity (sha + hash kind): the merge source's entry first (its non-null values), the destination's row behind it, and
+            // neither across identities — a path match alone attached an earlier store's histogram to a later catalog's content.
+            bool merge = hubVerb == "merge-moods";
             foreach (var kv in after)
-                if (!before.TryGetValue(kv.Key, out var b) || !EntryBytes(kv.Key, b).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value)))
+            {
+                before.TryGetValue(kv.Key, out var b0);
+                bool publicChanged = b0 == null || !EntryBytes(kv.Key, b0).AsSpan().SequenceEqual(EntryBytes(kv.Key, kv.Value));
+                TrackEntry? own = b0;
+                if (own == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out own);
+                if (merge && own != null && !SameContentIdentity(own, kv.Value, kv.Key)) own = null;
+                TrackEntry? src = null;
+                if (mergeSource != null)
                 {
-                    if (b == null && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) beforeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
-                    if (b == null && mergeSource != null && !mergeSource.TryGetValue(kv.Key, out b) && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256))
-                        mergeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out b);
-                    // the published file lacks policy-cut fields; the verb never saw them, so the store's values stand
-                    var entry = b != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, b) : kv.Value;
-                    // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
-                    // saw are not — marked observed, a trackId arriving as the type's 0 replaced a stored NULL (execution review D5).
-                    entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.VerbCopyObserved; changed[kv.Key] = entry;
+                    if (!mergeSource.TryGetValue(kv.Key, out src) && !string.IsNullOrEmpty(kv.Value.AudioStreamSha256)) mergeBySha.TryGetValue(kv.Value.AudioStreamSha256!, out src);
+                    if (src != null && !SameContentIdentity(src, kv.Value, kv.Key)) src = null;
                 }
+                var entry = src != null || own != null ? global::Truedat.Store.TrackEntryMapper.WithPolicyCutFrom(kv.Value, src, own) : kv.Value;
+                // R3: the catalog bytes cannot show a policy-cut difference; the supplied fields are compared on their own.
+                if (!publicChanged && b0 != null && global::Truedat.Store.TrackEntryMapper.ExcludedContentEqual(b0, entry)) continue;
+                // Every copy column the published file carries is observed (the verb's result is exact); the policy-cut ones it never
+                // saw are not — marked observed, a trackId arriving as the type's 0 replaced a stored NULL (execution review D5).
+                entry.CopyObserved = global::Truedat.Store.TrackEntryMapper.VerbCopyObserved; changed[kv.Key] = entry;
+            }
 
             string? storeError = null; int moved = 0;
             long generationBefore = load.Generation;
@@ -15853,6 +15881,98 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     LoadExistingMoods(cat, published);
                     Assert(exit2 == 0 && State("primary") == "retired" && State("mirror") == "present" && published.Count == 0,
                         $"R1 ({order}): --prune-entry retires the PRIMARY location, the mirror's stays, and the published catalog no longer holds the track (exit {exit2}, primary {State("primary")}, mirror {State("mirror")}, published {published.Count})");
+                }
+                finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
+            }
+
+            // codex rescan 2026-10-23 R2/R3: --merge-moods from a STORE source. R2: the source store's entries were kept by PATH and
+            // restored into whatever won the path — a later catalog with DIFFERENT content at that path got the earlier store's
+            // bpmHistogram attached to its sha. R3: the change detector compared catalog bytes, which cannot see the policy-cut
+            // fields, so a source whose public fields equal the destination's never filled a missing histogram. The policy-cut
+            // fields follow the WINNER of the path, by content identity (sha + kind), and a difference in them is a change.
+            {
+                var dir = Path.Combine(Path.GetTempPath(), "truedat-merge-winner-selftest-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var savedStore = _storePath;
+                try
+                {
+                    var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, MoodsFileName);
+                    string shaA = new string('a', 64), shaB = new string('b', 64);
+                    double[] H(int bin) { var h = new double[250]; h[bin] = 1.0; return h; }
+                    TrackEntry Mk(string sha, double[]? hist, string title = "t", string? shaSource = null) => new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "A", Title = title, Bpm = 120, Mfcc = new[] { 1.5, -2.25 }, BpmHistogram = hist },
+                        LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = sha, AudioStreamSha256Source = shaSource,
+                    };
+                    string StoreWith(string name, TrackEntry e)
+                    {
+                        var p = Path.Combine(dir, name);
+                        using (global::Truedat.Store.StoreLog.Quiet())
+                            global::Truedat.Store.ImportCommand.ExecuteEntries(p, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\p.flac"] = e }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                        return p;
+                    }
+                    string CatalogWith(string name, TrackEntry e)
+                    {
+                        var d = Path.Combine(dir, name); Directory.CreateDirectory(d);
+                        var p = Path.Combine(d, MoodsFileName);
+                        SaveResults(p, new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\p.flac"] = e });
+                        return p;
+                    }
+                    // the destination: one unrelated track, so the store exists and publishes
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                        global::Truedat.Store.ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\x.flac"] = Mk(new string('x', 64), H(1), "x") }, @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                    _storePath = store;
+                    int Merge(params string[] sources)
+                    {
+                        var saveOut = Console.Out; Console.SetOut(TextWriter.Null);
+                        try { using (global::Truedat.Store.StoreLog.Quiet()) return RunStoreBackedVerb("merge-moods", "--merge-moods", cat, () => RunMergeMoods(new List<string> { cat }.Concat(sources).ToList(), cat)); }
+                        finally { Console.SetOut(saveOut); }
+                    }
+                    (string? Sha, double[]? Hist, long Gen) P()
+                    {
+                        using (global::Truedat.Store.StoreLog.Quiet())
+                        using (var os = global::Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        {
+                            foreach (var (p, back) in os.Dal.ReadEntries(os.Dal.LibraryRoots().Select(x => x.Id)))
+                                if (string.Equals(p, @"D:\music\p.flac", StringComparison.OrdinalIgnoreCase)) return (back.AudioStreamSha256, back.Features.BpmHistogram, os.Dal.Generation());
+                            return (null, null, os.Dal.Generation());
+                        }
+                    }
+                    string Bins(double[]? h) => h == null ? "null" : string.Join(",", h.Select((v, i) => (v, i)).Where(t => t.v != 0).Select(t => t.i));
+
+                    var srcA = StoreWith("srcA.db", Mk(shaA, H(10)));
+                    var catB = CatalogWith("b", Mk(shaB, null, "Later catalog winner"));
+                    // store A, then catalog B: B wins the path with different content; A's histogram is not B's measurement
+                    int exit = Merge(srcA, catB); var r = P();
+                    Assert(exit == 0 && r.Sha == shaB && r.Hist == null,
+                        $"R2 (store A, then catalog B): the winner's content carries no histogram — the losing store's is not attached to it (exit {exit}, sha {r.Sha?.Substring(0, 4)}, bins {Bins(r.Hist)})");
+                    // catalog B, then store A: A wins, with its own histogram
+                    exit = Merge(catB, srcA); r = P();
+                    Assert(exit == 0 && r.Sha == shaA && Bins(r.Hist) == "10",
+                        $"R2 (catalog B, then store A): the winning store's histogram rides with its content (exit {exit}, sha {r.Sha?.Substring(0, 4)}, bins {Bins(r.Hist)})");
+                    // two stores at the same path: the later one wins, histogram and all
+                    var srcB = StoreWith("srcB.db", Mk(shaB, H(20)));
+                    exit = Merge(srcA, srcB); r = P();
+                    Assert(exit == 0 && r.Sha == shaB && Bins(r.Hist) == "20",
+                        $"R2 (store A, then store B): the later store wins the path with its own histogram (exit {exit}, sha {r.Sha?.Substring(0, 4)}, bins {Bins(r.Hist)})");
+                    // equal hash TEXT, different hash KIND (flac-frames vs the untagged TagLib-region hash of a .flac) is not the same content
+                    var srcK = StoreWith("srcK.db", Mk(shaA, H(30), shaSource: "flac-frames"));
+                    var catK = CatalogWith("k", Mk(shaA, null));
+                    exit = Merge(srcK, catK); r = P();
+                    Assert(exit == 0 && r.Sha == shaA && r.Hist == null,
+                        $"R2 (same hash text, different kind): no histogram crosses identities (exit {exit}, bins {Bins(r.Hist)})");
+
+                    // R3: the destination now holds p.flac (sha A, no histogram). A source store with the SAME public fields and a
+                    // histogram fills it — catalog bytes are equal, the policy-cut field is not.
+                    var srcR = StoreWith("srcR.db", Mk(shaA, H(40)));
+                    long genBefore = P().Gen;
+                    exit = Merge(srcR); r = P();
+                    Assert(exit == 0 && r.Sha == shaA && Bins(r.Hist) == "40" && r.Gen > genBefore,
+                        $"R3: a source store with equal public fields fills the missing histogram (exit {exit}, bins {Bins(r.Hist)}, generation {genBefore} -> {r.Gen})");
+                    long genFilled = r.Gen;
+                    exit = Merge(srcR); r = P();
+                    Assert(exit == 0 && Bins(r.Hist) == "40" && r.Gen == genFilled,
+                        $"R3: repeating the identical merge writes nothing and advances no generation (exit {exit}, bins {Bins(r.Hist)}, generation {genFilled} -> {r.Gen})");
                 }
                 finally { _storePath = savedStore; Environment.ExitCode = 0; try { Directory.Delete(dir, true); } catch { } }
             }

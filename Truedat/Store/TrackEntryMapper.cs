@@ -593,11 +593,25 @@ namespace Truedat.Store
         /// <summary>The entry with every field the catalog's field policy keeps out of the published file taken from <paramref name="stored"/>.
         /// A store-backed verb reads its result back from that file, so a policy-cut field (bpmHistogram) is absent there by policy, not
         /// cleared by the verb — written back as an exact arrival it would erase what the store holds.</summary>
-        internal static TrackEntry WithPolicyCutFrom(TrackEntry arriving, TrackEntry stored)
+        internal static TrackEntry WithPolicyCutFrom(TrackEntry arriving, TrackEntry stored) => WithPolicyCutFrom(arriving, stored, null);
+
+        /// <summary>The policy-cut columns from <paramref name="first"/> where it has a value, else from <paramref name="second"/> (codex rescan
+        /// 2026-10-23 R2: a merge source's NULL is unobserved, never a clear of the destination's value under the same content).</summary>
+        internal static TrackEntry WithPolicyCutFrom(TrackEntry arriving, TrackEntry? first, TrackEntry? second)
         {
-            var row = ToRow(arriving); var s = ToRow(stored); bool any = false;
-            for (int i = 0; i < Cols.Length; i++) if (FieldPolicy.IsExcluded(Cols[i].Name)) { row[i] = s[i]; any = true; }
+            var row = ToRow(arriving); var f = first != null ? ToRow(first) : null; var s = second != null ? ToRow(second) : null; bool any = false;
+            for (int i = 0; i < Cols.Length; i++) if (FieldPolicy.IsExcluded(Cols[i].Name)) { row[i] = f?[i] ?? s?[i]; any = true; }
             return any ? FromValues(row, arriving.LastModified) : arriving;
+        }
+
+        /// <summary>True when every policy-cut CONTENT column is exactly equal between the two entries — the comparison the catalog bytes
+        /// cannot make (codex rescan 2026-10-23 R3).</summary>
+        internal static bool ExcludedContentEqual(TrackEntry a, TrackEntry b)
+        {
+            var ra = ToRow(a); var rb = ToRow(b);
+            for (int k = 0; k < ContentIdx.Length; k++)
+                if (FieldPolicy.IsExcluded(ContentColumnName(k)) && !ContentEqualExact(k, ContentValue(ra, k), ContentValue(rb, k))) return false;
+            return true;
         }
 
         internal static TrackEntry FromValues(object?[] values, DateTime lastModified)
