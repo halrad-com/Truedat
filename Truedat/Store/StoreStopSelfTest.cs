@@ -26,6 +26,12 @@ namespace Truedat.Store
             catch (Exception ex) { assert(false, $"StoreStop.FinalOwnedResult: threw {ex.GetType().Name}: {ex.Message}"); }
             try { TestStopAfterFinalStillWritesResult(assert); }
             catch (Exception ex) { assert(false, $"StoreStop.AfterFinalResult: threw {ex.GetType().Name}: {ex.Message}"); }
+            foreach (bool afterFinal in new[] { false, true })
+            {
+                try { TestSecondStopWaitsForResultSeal(assert, afterFinal); }
+                catch (Exception ex) { assert(false, $"StoreStop.ConcurrentSeal({afterFinal}): threw {ex.GetType().Name}: {ex.Message}"); }
+            }
+
         }
 
         static TrackEntry Entry(string title, char sha) => new TrackEntry
@@ -162,6 +168,93 @@ namespace Truedat.Store
                     $"StoreStop.PersistentFailure: stopped result preserves failed outcome and actual checkpoint cause ({record.Outcome}; {record.Reason})");
             }
         }
+
+        // Setting Settled/sealed before the result write finishes must not release another terminating caller.
+        static void TestSecondStopWaitsForResultSeal(Action<bool, string> assert, bool afterFinal)
+        {
+            using (var f = new Fixture())
+            {
+                string label = "StoreStop.ConcurrentSeal." + (afterFinal ? "AfterFinal" : "DuringFinal");
+                var enteredSeal = new ManualResetEventSlim(false);
+                var releaseSeal = new ManualResetEventSlim(false);
+                var secondReturned = new ManualResetEventSlim(false);
+                var firstReturned = new ManualResetEventSlim(false);
+                var previousBarrier = StoreResult.BeforeStoppedSealForTest;
+                Exception? ownerError = null, secondError = null, firstError = null;
+                int emergencySaves = 0, sealCalls = 0;
+                Thread? first = null, owner = null, second = null;
+                ScanStop.Arm(_ => { Interlocked.Increment(ref emergencySaves); return "unexpected emergency save"; }, handleCtrlC: false);
+                try
+                {
+                    if (!ScanStop.BeginFinal()) throw new InvalidOperationException("Could not acquire final persistence.");
+                    ScanSink.RecordCacheHit(A, Entry("Sealed final title", 'a'));
+                    if (!f.Checkpoint(final: true).IsDurable) throw new InvalidOperationException("Fixture final checkpoint failed.");
+                    if (afterFinal) ScanStop.EndFinal();
+                    else
+                    {
+                        first = new Thread(() =>
+                        {
+                            try { ScanStop.Fire(130); }
+                            catch (Exception ex) { firstError = ex; }
+                            finally { firstReturned.Set(); }
+                        }) { IsBackground = true };
+                        first.Start();
+                        if (!ReachedWaitOrReturned(first, firstReturned) || firstReturned.IsSet)
+                            throw new InvalidOperationException("First stop did not join final persistence.");
+                    }
+                    StoreResult.BeforeStoppedSealForTest = () =>
+                    {
+                        Interlocked.Increment(ref sealCalls);
+                        enteredSeal.Set();
+                        if (!releaseSeal.Wait(GuardMs * 3)) throw new TimeoutException("Test sealing barrier was not released.");
+                    };
+                    owner = new Thread(() =>
+                    {
+                        try { if (afterFinal) ScanStop.Fire(130); else ScanStop.EndFinal(); }
+                        catch (Exception ex) { ownerError = ex; }
+                    }) { IsBackground = true };
+                    owner.Start();
+                    if (!enteredSeal.Wait(GuardMs)) throw new InvalidOperationException("Real result sealing did not reach the barrier.");
+                    second = new Thread(() =>
+                    {
+                        try { ScanStop.Fire(130); }
+                        catch (Exception ex) { secondError = ex; }
+                        finally { secondReturned.Set(); }
+                    }) { IsBackground = true };
+                    second.Start();
+                    bool observed = ReachedWaitOrReturned(second, secondReturned);
+                    assert(observed && !secondReturned.IsSet,
+                        label + ": second terminating caller waits while the result write is held");
+                    releaseSeal.Set();
+                    bool joined = owner.Join(GuardMs) && second.Join(GuardMs) && (first == null || first.Join(GuardMs));
+                    bool hasResult = StoreResult.TryRead(StoreResult.PathFor(f.Store), out var record);
+                    assert(joined && ownerError == null && secondError == null && firstError == null && sealCalls == 1
+                           && emergencySaves == 0 && f.Checkpoints == 1 && hasResult && record.ExitCode == 130
+                           && record.Outcome == StoreResult.OutcomeInterrupted && record.Reason != StoreResult.ProvisionalReason && record.Export.Performed
+                           && record.Store.Generation == f.Generation() && record.Export.Generation == record.Store.Generation
+                           && record.Export.Catalog?.Sha256 == Publication.Sha256Hex(f.Catalog),
+                        label + ": releasing the seal completes every caller with one result and no second data writer");
+                }
+                finally
+                {
+                    releaseSeal.Set();
+                    bool joined = (owner == null || owner.Join(GuardMs)) & (second == null || second.Join(GuardMs));
+                    ScanStop.EndFinal();
+                    joined &= first == null || first.Join(GuardMs);
+                    StoreResult.BeforeStoppedSealForTest = previousBarrier;
+                    if (joined)
+                    {
+                        enteredSeal.Dispose(); releaseSeal.Dispose();
+                        secondReturned.Dispose(); firstReturned.Dispose();
+                    }
+                }
+            }
+        }
+
+        // Each worker has no wait before its production call: its wait state or return identifies the tested boundary.
+        static bool ReachedWaitOrReturned(Thread worker, ManualResetEventSlim returned)
+            => SpinWait.SpinUntil(() => returned.IsSet
+                || (worker.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, GuardMs);
 
         // A stop can arrive after EndFinal but before Main.FinishScan seals the provisional result.
         static void TestStopAfterFinalStillWritesResult(Action<bool, string> assert)

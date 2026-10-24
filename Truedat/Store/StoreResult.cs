@@ -112,6 +112,8 @@ namespace Truedat.Store
         static string? _scanStore;
         static string? _scanStoreFailure;
         static string? _scanOutcome, _scanReason;
+        // Dormant outside self-tests: hold the real stopped-result write at its completion boundary.
+        internal static Action? BeforeStoppedSealForTest;
         internal const string ProvisionalReason = "the scan has not reported its outcome yet";
 
         /// <summary>A scan with a store in force has begun: the previous verb's record is stale from here, so a
@@ -236,6 +238,7 @@ namespace Truedat.Store
         /// stop checkpoint — the pending work is NOT on disk, and "interrupted" would read as saved), else interrupted.</summary>
         static string? SealStopped(StoreResultFile rec, string fullStore, int? exitCode, string reason)
         {
+            BeforeStoppedSealForTest?.Invoke();
             if (_scanStoreFailure != null) return Write(fullStore, rec, exitCode, OutcomeFailed, _scanStoreFailure + "; " + reason);
             if (_scanOutcome == OutcomeFailed) return Write(fullStore, rec, exitCode, OutcomeFailed, string.IsNullOrEmpty(_scanReason) || _scanReason == reason ? reason : _scanReason + "; " + reason);
             return Write(fullStore, rec, exitCode, OutcomeInterrupted, reason);
