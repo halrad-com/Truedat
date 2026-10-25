@@ -11038,16 +11038,21 @@ namespace Truedat
         /// <summary>
         /// Find a tool exe by checking: app base directory, output/library directory, working directory.
         /// </summary>
-        // Known Essentia extractor builds by MD5, newest first. .5 is current; older builds
+        // Known Essentia extractor builds by MD5, newest first. .6 is current; older builds
         // run but lack fixes/speed. Capabilities tracked: optimized (-O2), accurate bpm
         // (first-peak key-collision fixed), 13-hour file support (large-buffer chords),
         // binary frames (.5: --frames-bin + framesInclude, the edges path's input; main
-        // output additive only — metadata.version.extractor_build is the one new key).
-        internal const string LatestExtractorMd5 = "6f47bdfcaadfd4f510c5e1621c07945d";
-        internal const string LatestExtractorSummary = "output-x64.5: .4 plus binary frames (--frames-bin, framesInclude) and a build id in the output";
+        // output additive only — metadata.version.extractor_build is the one new key),
+        // decoder correctness (.6, 7319de5: FFmpeg send/receive loop, drain once, output
+        // capacity from the received frame — .5 segfaulted on a legal 65535-block stereo
+        // FLAC; every other codec decodes byte-identically to .5, so .6 invalidates nothing
+        // .5 analysed and --retry-errors picks up the files .5 crashed on).
+        internal const string LatestExtractorMd5 = "2fe852f564c894691e144697c6a0d200";
+        internal const string LatestExtractorSummary = "output-x64.6: .5 plus the decoder fix (large-block FLAC no longer crashes the extractor)";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges (current)",
+            ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix (current)",
+            ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges; crashes on 65535-block stereo FLAC (.6 fixes)",
             ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support; no binary frames (--edges needs .5)",
             ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3 — optimized, 13-hour file support; INACCURATE bpm (first-peak key-collision bug)",
             ["f52e166e9063b23cdda538cdf8530ed4"] = "output-x64.2 — 13-hour file support; NOT optimized (~3x slower), inaccurate bpm",
@@ -11486,14 +11491,14 @@ namespace Truedat
             if (!hasCatalogTarget)
                 return "Error: --edges in --analyze-file / --file-list needs --moods <mbxmoods.json>: the store is written after the catalog entry, and without a catalog target nothing is recorded (measured: the run completes and writes no edge row).";
             var build = global::Truedat.Store.ScanSink.ExtractorBuild;
-            var required = global::Truedat.Edges.EdgeProducer.RequiredBuild;
-            if (_edgesFromConfig && !string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
+            var required = global::Truedat.Edges.EdgeProducer.SupportedBuildsText;
+            if (_edgesFromConfig && !global::Truedat.Edges.EdgeProducer.SupportsFrames(build))
             {
                 Console.WriteLine($"  edges: on, but the extractor is {build}, not {required}; edges skipped this run (update the extractor from truedat-deps)");
                 _stageOpts.Edges = false;
                 return null;
             }
-            if (!string.Equals(build, required, StringComparison.OrdinalIgnoreCase))
+            if (!global::Truedat.Edges.EdgeProducer.SupportsFrames(build))
                 return $"Error: --edges needs extractor build {required} (binary frames via --frames-bin); the resolved extractor is {build} ({essentiaExe}). Update essentia_streaming_extractor_music.exe from truedat-deps.";
             var ffmpeg = _ffmpegPath.Value;
             Console.WriteLine($"  Edges:      enabled ({_edgeSettings.ProducerVersion}; {_edgeSettings.EdgeSeconds} s per edge, series at {_edgeSettings.PoolHz}/s, frames in {_stageOpts.StageDir})");

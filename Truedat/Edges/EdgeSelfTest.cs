@@ -48,15 +48,23 @@ namespace Truedat.Edges
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
         }
 
-        /// <summary>The committed output-x64.5 exe must resolve to its build name, not an MD5 stub: the store's run rows and
-        /// the extractor report both go through this table, and the edges path requires the .5 build by name.</summary>
+        /// <summary>Every committed extractor exe must resolve to its build name, not an MD5 stub: the store's run rows and the
+        /// extractor report both go through this table. The edges path needs the binary frames writer, which .5 introduced and .6
+        /// (decoder fix, 2026-10-25) carries unchanged — a SET of supported builds keyed on that capability, not one exact string
+        /// (plan B6 [c1]: registering .6 alone would have skipped default edges and refused --edges).</summary>
         static void TestExtractorBuild(Action<bool, string> assert)
         {
-            var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "output-x64.5", "essentia_streaming_extractor_music.exe"));
-            if (exe == null) { Console.WriteLine("  SKIP  essentia-build/output-x64.5 exe not found from the test binary"); return; }
-            var id = Program.ExtractorBuildId(exe);
-            assert(id == "output-x64.5", $"the .5 exe resolves to output-x64.5 (got {id})");
-            assert(string.Equals(Program.LatestExtractorMd5, "6f47bdfcaadfd4f510c5e1621c07945d", StringComparison.OrdinalIgnoreCase), $"the latest known extractor is .5 (got {Program.LatestExtractorMd5})");
+            foreach (var build in new[] { "output-x64.5", "output-x64.6" })
+            {
+                var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", build, "essentia_streaming_extractor_music.exe"));
+                if (exe == null) { Console.WriteLine($"  SKIP  essentia-build/{build} exe not found from the test binary"); continue; }
+                var id = Program.ExtractorBuildId(exe);
+                assert(id == build, $"the committed {build} exe resolves to its build name (got {id})");
+            }
+            assert(string.Equals(Program.LatestExtractorMd5, "2fe852f564c894691e144697c6a0d200", StringComparison.OrdinalIgnoreCase),
+                $"the latest known extractor is .6, the decoder-only build 7319de5 (got {Program.LatestExtractorMd5})");
+            assert(!EdgeProducer.SupportsFrames("output-x64.4") && EdgeProducer.SupportsFrames("output-x64.5") && EdgeProducer.SupportsFrames("output-x64.6") && !EdgeProducer.SupportsFrames(null),
+                $"binary frames: .4 no, .5 yes, .6 yes, unknown no ({EdgeProducer.SupportedBuildsText})");
         }
 
         // ---------------------------------------------------------------- the store rows
