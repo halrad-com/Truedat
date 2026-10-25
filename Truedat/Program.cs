@@ -11045,8 +11045,13 @@ namespace Truedat
         // output additive only — metadata.version.extractor_build is the one new key),
         // decoder correctness (.6, 7319de5: FFmpeg send/receive loop, drain once, output
         // capacity from the received frame — .5 segfaulted on a legal 65535-block stereo
-        // FLAC; every other codec decodes byte-identically to .5, so .6 invalidates nothing
-        // .5 analysed and --retry-errors picks up the files .5 crashed on).
+        // FLAC). FLAC, PCM WAV/AIFF, MP3, AAC, WMA v2, Vorbis, ALAC and WavPack decode
+        // byte-identically to .5, so nothing .5 analysed in those codecs changes and
+        // --retry-errors picks up the files .5 crashed on. APE is different: FFmpeg packs
+        // ~295k samples per packet and apedec yields 4,608 per call, so .5's receive-once
+        // loop dropped most of each APE file — any .5 APE analysis is truncated and .6
+        // changes it (WMA Lossless: same decoder family, untested). The refresh set after
+        // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
         internal const string LatestExtractorMd5 = "2fe852f564c894691e144697c6a0d200";
         internal const string LatestExtractorSummary = "output-x64.6: .5 plus the decoder fix (large-block FLAC no longer crashes the extractor)";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
