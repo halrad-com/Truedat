@@ -390,3 +390,70 @@ Not verified: the APE, WMA Lossless and WMA Pro rows have no `.5` extractor outp
 against (the `.5` analysis of them is wrong by construction); any decoder not in the corpus;
 multichannel; non-ASCII paths; whole-scan wall time — this binary was not raced against `.5`
 on a library, and the per-cut numbers are elapsed on a shared machine.
+
+`.6` is frozen at drop 2 (`64b55cec`) as the fallback build. The drop 3 items (buffer reuse,
+the StereoMuxer status, the ESPB write) were folded into `.7`.
+
+## output-x64.7 — decode once, one HPCP pass for chords and tuning (2026-10-25)
+
+Same output as `.6` drop 2 in every call shape (the 2-arg call, the full profile, the scan
+profile, the edges frames file) apart from the build id (`metadata.version.extractor_build`
+and the ESPB header tag). Three changes, each built, gated against `.6` and measured alone:
+
+1. **Output pools filled in place** (`5485e89`). `MusicExtractor::compute` wrote a local
+   results and statistics pool and copied both into its outputs; it now fills the outputs
+   directly. The StereoMuxer status guard (`43db55f`) is the other code item folded in from
+   drop 3; the ESPB write makes no pool copy (its cost is the file write), so it is unchanged.
+2. **`HPCPFused`** (`3645acc`, `src/algorithms/spectral/hpcpfused.{h,cpp}`). The chords (36
+   bins) and tuning (120 bins) HPCPs are configured identically except size; one pass over the
+   peaks computes both — the hypothesised fundamental and `log2(f / ref)` once per peak and
+   harmonic position, every bin by HPCP's own expressions in HPCP's order. Bit-identical to the
+   two HPCPs it replaces on every frame of the real rows (`spike-x6/hpcp-bench.txt`). The key
+   HPCP is untouched.
+3. **Shared decode** (`6f669a9`, `src/essentia/utils/audioloader_spool.h`). The first pass's
+   `AudioLoader` (the one hashing the packets) also records what it pushes — one record per
+   `process()` call, the interleaved float bytes it converted, plus the metadata tokens it
+   pushes at reset — and the loaders of the replay-gain pass and both descriptor networks replay
+   those records instead of opening the file, through the same copy routine. The spool is held
+   in memory only, never on disk, under a per-track cap: profile key `x7.spoolMaxBytes`
+   (default 256 MiB, ~12.7 min of 44.1 kHz stereo); a track estimated above it, or one that
+   crosses it, is decoded by every pass as before. `x7.sharedDecode: 0` switches it off. A
+   build that predates `.7` ignores both keys.
+
+Incremental build (`run-x6-build.sh`, one-shot scheduled task, `-j6`). `essentia_streaming_
+extractor_music.exe`: MD5 **`6af75d493dfb3b4949ec1fd433b4c58c`**.
+
+**Verification** (`spike-x6/`, against the `.6` drop 2 outputs on the strict gate tools —
+coverage, freshness and finite/non-finite checks — 45 decodable rows, 37 exactly repeating):
+
+- Every exactly-repeating row identical in the main output and byte-identical in the frames
+  file, with the spool on (`field-table-sraw-c3raw.txt`, `field-table-sscan-c3scan.txt`,
+  `gate-edges-sscanedges-c3scanedges.txt`) and with it forced off by a 1-byte cap
+  (`field-table-sscanedges-c3zscanedges.txt`, `gate-edges-sscanedges-c3zscanedges.txt`); the
+  APE row, whose packets carry 64 frames, is among them. Noisy rows within their per-key and
+  family bands; two family flags on one AAC file in change 1 were shown to be the extractor's
+  own run-to-run spread by repeating the row on both builds (`noise-r_m4a_2-drop2*.txt`).
+- The spool, natively under ASan and UBSan: 19/19 (`spool-test.txt`); the first run found that
+  a cap below one block could never record, fixed before the build. Decoder fixtures 8/8.
+- Memory (`c3-mem-cap256m.txt`, `c3-mem-cap100m.txt`, same binary, spool on vs off): peak
+  working set rises by the spool — 352,800 B per audio-second for stereo, half for mono —
+  within +4.5 MiB, and not at all for a track over the cap. The extractor's own peak is
+  106.6 MiB + 0.414 MiB per audio-second (`mem-fit.txt`); `ram-tiers.txt` projects the total
+  for 4 / 8 / 20 workers on 8 / 16 / 32 GB with the cap truedat passes.
+- Disk: the spool code has no file API, and the bytes the process writes (`written_mib`,
+  GetProcessIoCounters) differ with and without the spool only by its log lines on stdout.
+
+**Measurement** (production-shaped corpus — rows above 44.1 kHz converted first, as a truedat
+scan does; scan + edges profile; two passes each): the HPCP rows fall by ~2.8 % of the
+extractor's time (`profile-c1pa-vs-c2pb.txt`); the shared decode, same binary on vs off,
+−8.5 % (`profile-c3na-vs-c3pb.txt`, `decode-share-c3.txt`) — the three replaying loaders from
+~2.5 s each to ~0.2 s, recording +0.4 s on the first pass. By codec: WMA Lossless and APE
+−25 to −28 %, 44.1 kHz FLAC / MP3 / AAC 0–9 %, hi-res after truedat's conversion about 0.
+Against `.6` drop 2 the corpus runs ~16 % faster (`profile-p0a-vs-c3pb.txt`); about 11 points
+are attributable to the two changes, the rest is between-pass spread on a shared machine.
+
+Not verified: the AudioLoader record / replay code under a sanitizer (the spool itself is;
+the loader code is shown by the identical outputs); the mid-stream abandon on a real file
+(no duration-less decodable stream in the corpus — unit-tested); more than two channels
+(the loader refuses them before any spool; truedat downmixes first); a physical 8 GB machine;
+a library scan.
