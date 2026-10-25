@@ -35,7 +35,7 @@ namespace Truedat.Store
             Seed(dir.Store, root, mirrorFirst ? "mirror" : "primary", (path, 'a'));
             long primary, first, alias, keep, drop, foreignRoot, foreignLoc, generation;
             (long Run, long Check) kh, dh, fh;
-            string contentBefore, historyBefore, foreignBefore, copyStamp;
+            string contentBefore, historyBefore, foreignBefore, copyStamp, copyBefore;
             using (var os = OpenStore.Open(dir.Store, false, VersionInfo.Display, Now()))
             {
                 var db = os.Db;
@@ -64,6 +64,7 @@ namespace Truedat.Store
                 historyBefore = HistoryPayload(db);
                 foreignBefore = ForeignState(db, foreignRoot, foreignLoc, fh);
                 copyStamp = db.ExecScalar($"SELECT quote(run_id) || '|' || updated_utc FROM track_copy WHERE location_id = {keep};")!;
+                copyBefore = Rows(db, "track_copy", $"location_id = {keep}");
                 generation = os.Dal.Generation();
                 assert(Id(db, "SELECT count(DISTINCT entity_id) FROM track_location;") == 1
                     && Id(db, "SELECT count(*) FROM track_location;") == 3
@@ -77,12 +78,12 @@ namespace Truedat.Store
             {
                 var db = os.Db;
                 long actual = Id(db, $"SELECT id FROM track_location WHERE root_id = {primary} AND canonical_path = 'song.flac';");
-                assert((actual == keep || actual == drop) && Id(db, "SELECT count(*) FROM library_root;") == 2
+                assert(actual == keep && Id(db, "SELECT count(*) FROM library_root;") == 2
                     && Id(db, $"SELECT count(*) FROM library_root WHERE id = {primary} AND role = 'primary';") == 1
                     && Id(db, $"SELECT count(*) FROM track_location WHERE root_id = {primary};") == 1,
                     label + ": one existing location remains under the existing primary root");
-                assert(db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || hex(smfmScores) FROM track_copy WHERE location_id = {actual};")
-                    == "donor artist|123000000|" + Scores, label + ": NULL text, integer, and blob fields retain the older supplied values");
+                assert(Rows(db, "track_copy", $"location_id = {actual}") == copyBefore,
+                    label + ": the entire retained copy is unchanged, including NULL text, integer, and blob fields");
                 assert(db.ExecScalar($"SELECT quote(title) || '|' || trackId || '|' || album || '|' || (genre IS NULL) FROM track_copy WHERE location_id = {actual};")
                     == "''|0|kept album|1", label + ": supplied empty and zero survive; both-NULL stays NULL");
                 assert(db.ExecScalar($"SELECT quote(run_id) || '|' || updated_utc FROM track_copy WHERE location_id = {actual};") == copyStamp,
@@ -158,7 +159,7 @@ namespace Truedat.Store
             using var dir = new Fixture();
             using var quiet = StoreLog.Quiet();
             Seed(dir.Store, root, "primary", (target, 'a'), (root + @"\source.flac", 'b'));
-            string before, contentBefore, historyBefore;
+            string contentBefore, historyBefore;
             long primary, newerObservation;
             using (var os = OpenStore.Open(dir.Store, false, VersionInfo.Display, Now()))
             {
@@ -184,20 +185,9 @@ namespace Truedat.Store
                     && Id(db, $"SELECT count(*) FROM track_copy WHERE location_id = {newer} AND fileMd5 IS NULL AND fingerprint_v1_fileSize IS NULL AND smfmScores IS NULL;") == 1,
                     label + ": fixture has overlapping paths with different known hashes and missing newer file facts");
                 contentBefore = Snapshot(db, "file_entity", "identity_facet", "track_content");
-                historyBefore = HistoryPayload(db); before = Snapshot(db);
+                historyBefore = HistoryPayload(db);
             }
-            OpenStore repaired;
-            try { repaired = OpenStore.Open(dir.Store, false, VersionInfo.Display, Now()); }
-            catch (StoreException ex)
-            {
-                using var raw = SqliteDb.Open(dir.Store, false);
-                bool explainsIdentity = new[] { "content", "identity", "hash", "conflict", "ambiguous" }
-                    .Any(word => ex.Message.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0);
-                assert(explainsIdentity && Snapshot(raw) == before,
-                    label + ": an identity refusal explains the conflict and leaves the entire logical store unchanged (" + ex.Message + ")");
-                return;
-            }
-            using (repaired)
+            using (var repaired = OpenStore.Open(dir.Store, false, VersionInfo.Display, Now()))
             {
                 var db = repaired.Db;
                 long borrowed = Id(db, "SELECT count(*) FROM track_copy p JOIN track_location l ON l.id = p.location_id " +

@@ -274,9 +274,8 @@ namespace Truedat.Store
 
         /// <summary>Fold root <paramref name="innerId"/> into <paramref name="outerId"/>: its locations move under the survivor (root-relative
         /// paths recomputed with the same <see cref="CanonicalPath.Split"/> the insert uses); a path recorded under BOTH keeps the location
-        /// whose copy is newer and merges the other's copy into it field by field — a value the newer copy lacks is taken from the older,
-        /// never cleared (the merge's null rule, 2026-10-24) — while the dropped location's run and check history move onto the survivor
-        /// and its verdict and location row go. Then the inner root row is deleted.</summary>
+        /// whose copy is newer, leaving every copy field unchanged. The dropped location's run and check history move onto the survivor,
+        /// and its copy, verdict and location rows go. Then the inner root row is deleted.</summary>
         RootFold FoldRootInto(long innerId, string innerPath, long outerId, string outerPath, string reason, string? outerRole = null)
         {
             var fold = new RootFold { InnerId = innerId, Inner = innerPath, OuterId = outerId, Outer = outerPath, Reason = reason, OuterRole = outerRole };
@@ -295,10 +294,6 @@ namespace Truedat.Store
                 {
                     keep = NewerCopy(locId, dup.Value);
                     long drop = keep == locId ? dup.Value : locId;
-                    // Copy facts merge only between two records of the SAME content: the two locations name one entity. Two entities at
-                    // one path are two files that held it in turn, and the newer stands alone — its missing MD5, fingerprint or SMFM
-                    // is unknown, not the old file's (the rule: never borrow across hashes).
-                    if (SameEntity(keep, drop)) MergeCopyInto(keep, drop);
                     Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
                     Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
                     Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
@@ -315,32 +310,6 @@ namespace Truedat.Store
             }
             Exec("DELETE FROM library_root WHERE id = ?;", innerId);
             return fold;
-        }
-
-        bool SameEntity(long a, long b)
-            => Row("SELECT entity_id FROM track_location WHERE id = ?;", s => s.GetString(0), null, a)
-               == Row("SELECT entity_id FROM track_location WHERE id = ?;", s => s.GetString(0), null, b);
-
-        /// <summary>Every copy fact the kept location's copy lacks is taken from the dropped location's copy; a value the kept copy holds is
-        /// never replaced and never cleared. <c>location_id</c>, <c>run_id</c> and <c>updated_utc</c> stay the kept copy's — it is the newer
-        /// observation, that is why it was kept. A dropped location with no copy row supplies nothing.</summary>
-        void MergeCopyInto(long keep, long drop)
-        {
-            if (ScalarLong("SELECT count(*) FROM track_copy WHERE location_id = ?;", drop) == 0) return;
-            if (ScalarLong("SELECT count(*) FROM track_copy WHERE location_id = ?;", keep) == 0)
-            {
-                Exec("UPDATE track_copy SET location_id = ? WHERE location_id = ?;", keep, drop);
-                return;
-            }
-            var cols = new List<string>();
-            using (var ti = Db.Prepare("PRAGMA table_info(track_copy);"))
-                while (ti.Step())
-                {
-                    var name = ti.GetString(1)!;
-                    if (name != "location_id" && name != "run_id" && name != "updated_utc") cols.Add(name);
-                }
-            var sets = string.Join(", ", cols.Select(c => $"\"{c}\" = COALESCE(\"{c}\", (SELECT \"{c}\" FROM track_copy WHERE location_id = {drop}))"));
-            Exec($"UPDATE track_copy SET {sets} WHERE location_id = ?;", keep);
         }
 
         /// <summary>Whether <paramref name="innerPath"/>'s root is redundant beside <paramref name="outerPath"/>'s: inside it, or the same

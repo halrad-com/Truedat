@@ -352,7 +352,7 @@ namespace Truedat.Store
         /// <summary>The repair half of the spelling fix (8884c86 prevents; this heals): a store an earlier build left with one path as two
         /// roots on one machine — a mirror and a primary in two spellings, child rows under both — opens as one root. The PRIMARY row
         /// survives whichever is older (nothing published may vanish), the mirror's locations move under it, a path recorded under both
-        /// keeps the newer copy and takes the older copy's facts where it had none, run and check history move, another machine's mirror
+        /// keeps the newer copy unchanged, run and check history move, another machine's mirror
         /// at the same path is untouched, the generation advances once, and a second open is a read.</summary>
         static void TestLegacyRootAliasRepair(Action<bool, string> assert, bool mirrorFirst)
         {
@@ -428,8 +428,8 @@ namespace Truedat.Store
                        && db.ExecScalar($"SELECT id FROM track_location WHERE root_id = {survivor} AND canonical_path = 't1.flac';") == dup.ToString()
                        && db.ExecScalar($"SELECT root_id FROM track_location WHERE id = {bOnly};") == survivor.ToString(),
                     $"{label}: t1 is one location under the survivor (the newer copy's, {dup}), t2 and the alias-only path sit beside it");
-                assert(db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};") == "A|130|2099-01-01T00:00:00.0000000Z",
-                    $"{label}: the kept copy takes the artist it lacked from the dropped copy and keeps its own bpm and stamp ({db.ExecScalar($"SELECT artist || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};")})");
+                assert(db.ExecScalar($"SELECT quote(artist) || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};") == "NULL|130|2099-01-01T00:00:00.0000000Z",
+                    $"{label}: the kept copy retains its NULL artist, supplied bpm, and observation stamp ({db.ExecScalar($"SELECT quote(artist) || '|' || smfmBpm || '|' || updated_utc FROM track_copy WHERE location_id = {dup};")})");
                 assert(db.ExecScalar($"SELECT id || '|' || IFNULL((SELECT fileMd5 FROM track_copy WHERE location_id = id), 'NULL') FROM track_location WHERE root_id = {survivor} AND canonical_path = 't2.flac';") == $"{t2 + 3000}|NULL",
                     $"{label}: t2's path keeps the newer record, and other content never borrows the old file's MD5 ({db.ExecScalar($"SELECT id || '|' || IFNULL((SELECT fileMd5 FROM track_copy WHERE location_id = id), 'NULL') FROM track_location WHERE root_id = {survivor} AND canonical_path = 't2.flac';")})");
                 assert(db.ExecScalar($"SELECT location_id FROM run WHERE producer_key = 'verify';") == dup.ToString()
