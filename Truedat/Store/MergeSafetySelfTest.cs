@@ -122,32 +122,38 @@ namespace Truedat.Store
                 "MergeSafety legacy alias: merge also preserves the existing legacy-alias contract");
         }
 
+        // A scan's entry is the file's observation: a NULL it carries is a value, not an absence. The scan nulls a whole-file MD5
+        // that a tag-only edit made stale, and the catalog it writes carries none — the store holds what the scan writes, so a
+        // republish cannot bring the stale MD5 back (operator 2026-10-24: the regression d79cec7 shipped).
         static void FreshScanNull(Action<bool, string> assert)
         {
-            using var f = new Fixture();
-            f.Seed((PathA, Entry(ShaA, "flac-frames", Old, true)));
-            var measured = new TrackEntry
+            using (var f = new Fixture())
             {
-                LastModified = DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind),
-                AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
-                Features = new TrackFeatures { Title = "Freshly measured", Bpm = 130 },
-                // A normal scan does not carry a catalog observation mask; optional unavailable values remain NULL.
-            };
+                f.Seed((PathA, Entry(ShaA, "flac-frames", Old, true)));
+                int exit = f.StripSmfm();
+                assert(exit == 0 && f.Cell("(p.smfmBpm IS NULL) || '|' || (p.smfmScores IS NULL) || '|' || p.fileMd5", PathA) == "1|1|" + Md5,
+                    "MergeSafety fresh scan: an explicit strip still clears SMFM and retains unrelated MD5");
+            }
             foreach (ulong? mask in new ulong?[] { null, TrackEntryMapper.PerFileScanCopyObserved })
             {
+                using var f = new Fixture();
+                f.Seed((PathA, Entry(ShaA, "flac-frames", Old, true)));
                 string mode = mask.HasValue ? "per-file mask" : "raw entry";
-                measured.CopyObserved = mask; measured.Features.Title = "Freshly measured " + mode;
+                var measured = new TrackEntry
+                {
+                    LastModified = DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                    AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
+                    Features = new TrackFeatures { Title = "Freshly measured " + mode, Bpm = 130 },
+                    CopyObserved = mask,
+                };
                 ImportCommand.ExecuteEntries(f.Store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [PathA] = measured },
                     Root, "primary", true, "essentia", "merge-safety", "synthetic fresh scan", null, null);
                 assert(f.Cell("p.title || '|' || c.bpm", PathA) == measured.Features.Title + "|1300",
                     "MergeSafety fresh scan (" + mode + "): the ordinary scan writer stores supplied title and BPM");
-                assert(f.Cell("p.fileMd5 || '|' || p.smfmBpm || '|' || (p.smfmScores IS NOT NULL) || '|' || p.fingerprint_v1_audioHead64kMd5", PathA)
-                    == Md5 + "|95000000|1|" + Md5,
-                    "MergeSafety fresh scan (" + mode + "): unavailable optional MD5, SMFM, and fingerprint never erase known same-content values");
+                string? facts = f.Cell("coalesce(p.fileMd5, '<null>') || '|' || coalesce(p.smfmBpm, '<null>') || '|' || (p.smfmScores IS NULL) || '|' || coalesce(p.fingerprint_v1_audioHead64kMd5, '<null>')", PathA);
+                assert(facts == "<null>|<null>|1|<null>",
+                    "MergeSafety fresh scan (" + mode + "): the scan's NULL clears the stored MD5, SMFM and fingerprint — the store holds what the scan writes (got " + facts + ")");
             }
-            int exit = f.StripSmfm();
-            assert(exit == 0 && f.Cell("(p.smfmBpm IS NULL) || '|' || (p.smfmScores IS NULL) || '|' || p.fileMd5", PathA) == "1|1|" + Md5,
-                "MergeSafety fresh scan: an explicit strip still clears SMFM and retains unrelated MD5");
         }
 
         static Dictionary<string, object?> Entry(string? sha, string? kind, string modified, bool full)

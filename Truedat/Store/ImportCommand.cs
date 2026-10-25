@@ -825,9 +825,10 @@ namespace Truedat.Store
             // fabricated head hash were going over the scan's).
             ulong? observedCopy = entry.CopyObserved;
             if (legacyAlias) observedCopy = (entry.CopyObserved ?? TrackEntryMapper.AllCopyObserved) & TrackEntryMapper.CopyMaskWhereNull(existingCopy);
-            // The catalog reader excludes absent/NULL keys from its mask, but marks a supplied empty string (for example MD5)
-            // even when parsing maps it to NULL. Honor that supplied value; a raw scan's unavailable NULL still preserves the store.
-            bool clearNull = ExactArrival || (catalogImport && entry.CopyObserved.HasValue);
+            // A scan's entry IS the file's observation: a NULL it carries is a value (a whole-file MD5 the scan nulled after a tag-only edit
+            // must not come back from the store on republish — operator 2026-10-24). The catalog reader marks a supplied empty string even
+            // though parsing maps it to NULL, so a masked import clears too; only a maskless catalog import keeps the store on NULL.
+            bool clearNull = !catalogImport || ExactArrival || entry.CopyObserved.HasValue;
             var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff, clearNull: clearNull);
             if (copyRow != null)
             {
