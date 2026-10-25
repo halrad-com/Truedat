@@ -11517,6 +11517,10 @@ namespace Truedat
                     {
                         var now = DateTime.UtcNow.ToString("o");
                         using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, now);
+                        // A remap can delete stored copy rows (a destination path the store already holds, retired or not) that the
+                        // catalog zip never held, so the store is copied beside itself first (B5 recheck B1, 2026-10-25).
+                        string remapBackup = global::Truedat.Store.SchemaMigrator.BackupBeside(os.Db, "remap");
+                        global::Truedat.Store.StoreLog.Info($"store backed up before the remap: {remapBackup}");
                         using var tx = os.Db.BeginTransaction();
                         var machine = os.Machine.ForWrites(os.Dal, _storeMachineAdopt, now);
                         moved = os.Dal.RemapLocations(remapSources, before.Keys, remapOld!, remapNew!, machine, now);
@@ -15543,7 +15547,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     {
                         try
                         {
-                            Console.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {features!.AnalyzedLengthSec:F0}s of {refDurSec:F0}s)  [{Path.GetFileName(src.SourcePath)}]");
+                            Console.Error.WriteLine($"  Transcoding via ffmpeg (essentia under-decoded {features!.AnalyzedLengthSec:F0}s of {refDurSec:F0}s)  [{Path.GetFileName(src.SourcePath)}]");
                             var retry = AnalyzeWithEssentiaCore(essentiaExe, wavPath, new FileInfo(wavPath).Length, ct);
                             if (retry.Features?.AnalyzedLengthSec is double got
                                 && got > features!.AnalyzedLengthSec)
@@ -25698,7 +25702,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     try
                     {
-                        Console.WriteLine($"  Downmixing to stereo (multi-channel detected)  [{shown}]");
+                        Console.Error.WriteLine($"  Downmixing to stereo (multi-channel detected)  [{shown}]");
                         var stereoSize = new FileInfo(stereoPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, stereoPath, stereoSize, ct);
                         if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(stereoPath, audioPath);   // S2: the stash follows the source the scan records
@@ -25733,7 +25737,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     try
                     {
-                        Console.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)  [{shown}]");
+                        Console.Error.WriteLine($"  Transcoding via ffmpeg (essentia could not read the source)  [{shown}]");
                         var wavSize = new FileInfo(wavPath).Length;
                         result = AnalyzeWithEssentiaCore(essentiaExe, wavPath, wavSize, ct);
                         if (result.Features != null) global::Truedat.Store.ScanSink.Rekey(wavPath, audioPath);   // S2: the stash follows the source the scan records

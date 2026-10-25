@@ -236,6 +236,12 @@ namespace Truedat.Store
                     && os.Dal.ScalarLong("SELECT count(*) FROM run WHERE location_id = ?;", retiredId) == 0,
                     "the retired destination history is reparented to the explicit winner");
             }
+            // B5 recheck B1: the remap deleted the retired destination's copy row and the only backup was the catalog zip, which never held
+            // it. The store is backed up before a remap writes, so that copy can be recovered.
+            var backups = System.IO.Directory.GetFiles(f.Directory, "truedat.db.bak.remap.*");
+            long kept = -1;
+            if (backups.Length == 1) using (var db = SqliteDb.Open(backups[0], false)) kept = long.Parse(db.ExecScalar($"SELECT count(*) FROM track_copy WHERE location_id = {retiredId};") ?? "-1");
+            f.Check(backups.Length == 1 && kept == 1, $"the store is backed up before the remap and the backup holds the retired copy ({backups.Length} backup(s), retired copy rows {kept})");
             var catalog = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             Program.LoadExistingMoodsForStore(f.Catalog, catalog);
             f.Check(catalog.Count == 2 && catalog.TryGetValue(destination, out var moved) && moved.Features.Title == "Explicit source"

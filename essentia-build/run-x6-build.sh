@@ -25,11 +25,15 @@ if [ -z "$1" ]; then
 fi
 DEST="$1"
 EXE="$DEST/essentia_streaming_extractor_music.exe"
-# git missing or failing counts as committed: the unsafe direction is the one to refuse
-if [ -e "$EXE" ] && { ! command -v git >/dev/null || git ls-files --error-unmatch "$EXE" >/dev/null 2>&1; }; then
-  echo "run-x6-build.sh: $EXE is committed (or git is unavailable to say otherwise) - refusing to overwrite it; build to a new dir" | tee "$LOG"
-  echo "EXIT=4" >> "$LOG"
-  exit 4
+# Only a definite "not tracked" (ls-files --error-unmatch exit 1) lets an existing exe be overwritten. Tracked (0), git missing, or
+# any git error (128: unreadable repo, safe-directory refusal) refuses: the unsafe direction is the one to refuse (B5 recheck B3).
+if [ -e "$EXE" ]; then
+  if command -v git >/dev/null; then git ls-files --error-unmatch "$EXE" >/dev/null 2>&1; tracked=$?; else tracked=127; fi
+  if [ "$tracked" -ne 1 ]; then
+    echo "run-x6-build.sh: $EXE is committed, or git could not say (exit $tracked) - refusing to overwrite it; build to a new dir" | tee "$LOG"
+    echo "EXIT=4" >> "$LOG"
+    exit 4
+  fi
 fi
 echo "START $(date) dest=$DEST" > "$LOG"
 export PKG_CONFIG_PATH="$(pwd)/3rdparty/lib/pkgconfig"
