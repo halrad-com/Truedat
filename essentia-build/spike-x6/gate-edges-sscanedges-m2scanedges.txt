@@ -48,5 +48,5 @@ r_wmalossless              band      32      1044     0.992       0
 r_wmapro                   band      32       200     0.207       0  
 r_ape                      band      32         0         0       0  
 
-45 row(s), 0 failure(s)
+45 row(s) compared, 0 failure(s)
 PASS

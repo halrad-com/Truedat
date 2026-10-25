@@ -66,6 +66,11 @@ echo "START $(date) spec=$spec exe=$exe profile=${profile:-(2-arg)} bin=${bin:-0
 md5sum "$exe" >> "$status" 2>&1
 for label in "$@"; do
   mkdir -p "out/$label"
+  # a reused label starts empty, so a row that fails this time cannot leave the
+  # previous run's output behind for a gate to compare; the stamp lets the
+  # gates reject anything older (overwatch review V1, 2026-10-25)
+  rm -f "out/$label"/*.json "out/$label"/*.json_frames "out/$label"/*.bin "out/$label"/*.log
+  date > "out/$label/started"
   printf 'id\trc\tms\n' > "out/$label/runs.tsv"
   prof=""
   if [ -n "$profiling" ]; then prof="out/$label/profile.tsv"; : > "$prof"; fi

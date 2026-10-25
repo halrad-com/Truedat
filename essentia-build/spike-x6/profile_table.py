@@ -42,9 +42,15 @@ def read_runs(label):
                 head = line[len("# x6profile "):]
                 audio, _, rest = head.rpartition(" wall=")
                 fields = dict(kv.split("=", 1) for kv in ("wall=" + rest).split(" ") if "=" in kv)
-                peak = fields.get("peakws_mib")
-                cur = (audio, float(fields["wall"]), float(fields["cpu"]), OrderedDict(),
-                       float(peak) if peak is not None else None)
+                # x6profile writes -1 when the memory query is unavailable: that is
+                # "not measured", never a negative peak (overwatch review V3)
+                try:
+                    peak = float(fields.get("peakws_mib"))
+                except (TypeError, ValueError):
+                    peak = None
+                if peak is not None and not peak > 0:
+                    peak = None
+                cur = (audio, float(fields["wall"]), float(fields["cpu"]), OrderedDict(), peak)
                 runs.append(cur)
             elif cur is not None and line and not line.startswith("phase\t"):
                 phase, name, inst, calls, secs = line.split("\t")
@@ -130,9 +136,10 @@ def write_label(label, only=None):
              "pooled total of phase totals %.3f s elapsed; wall %.3f s; process CPU %.3f s" % (
                  grand, sum(r[1] for r in runs), sum(r[2] for r in runs))]
     if peaks:
-        top = max(runs, key=lambda r: r[4] if r[4] is not None else -1)
-        lines.append("peak working set (MiB): max %.1f (%s), sum over runs %.1f" % (
-            top[4], row_id(ids, top[0]), sum(peaks)))
+        top = max((r for r in runs if r[4] is not None), key=lambda r: r[4])
+        lines.append("peak working set (MiB): max %.1f (%s), sum over the %d measured run(s) %.1f%s" % (
+            top[4], row_id(ids, top[0]), len(peaks), sum(peaks),
+            "" if len(peaks) == len(runs) else "; %d run(s) not measured" % (len(runs) - len(peaks))))
     # the peak working set column only once a profile carries it (drop 3), so the
     # earlier tables keep their layout
     if peaks:

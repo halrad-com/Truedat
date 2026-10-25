@@ -26,12 +26,12 @@ aac_44k_st                 aac/44100/2ch                         646       0    
 aac_48k_mo                 aac/48000/1ch                         649       0    yes      0      0    3648  
 aac_96k_st                 aac/96000/2ch                         654       0    yes      0      0    3648  
 aac_44k_st_short           aac/44100/2ch                         642       0    yes      0      0    3585  
-aac_44k_st_adts            aac/44100/2ch      (missing: sfull,sscan)
+aac_44k_st_adts            aac/44100/2ch      (missing: sfull,sscan - not decoded by either run)
 wma_44k_st                 wmav2/44100/2ch                       649       0    yes      0      0    3648  
 wma_48k_st                 wmav2/48000/2ch                       649       0    yes      0      0    3648  
 vorbis_44k_st              vorbis/44100/2ch                      651       0    yes      0      0    3648  
 vorbis_48k_mo              vorbis/48000/1ch                      649       0    yes      0      0    3648  
-opus_48k_st                opus/48000/2ch     (missing: sfull,sscan)
+opus_48k_st                opus/48000/2ch     (missing: sfull,sscan - not decoded by either run)
 alac16_44k_st              alac/44100/2ch                        651       0    yes      0      0    3648  
 alac24_96k_st              alac/96000/2ch                        648       0    yes      0      0    3648  
 alac24_192k_st             alac/192000/2ch                       650       0    yes      0      0    3648  
@@ -46,10 +46,10 @@ r_wma                      wmav2/44100/2ch                      1193       0   b
 r_flac_hd                  flac/48000/2ch                        940       0   band      0      0    3648  
 r_flac_live                flac/44100/2ch                       1154       0    yes      0      0    3648  
 r_wav                      pcm_s16le/44100/1ch                    971       0    yes      0      0    3648  
-r_opus                     opus/48000/2ch     (missing: sfull,sscan)
+r_opus                     opus/48000/2ch     (missing: sfull,sscan - not decoded by either run)
 r_wmalossless              wmalossless/44100/2ch                   1391       0   band      0      0    3648  
 r_wmapro                   wmapro/96000/2ch                     1344       0   band      0      0    3648  
 r_ape                      ape/44100/2ch                         767       0    yes      0      0    3648  
 
-totals: allowlisted missing 0, strict/exact-row diffs 1, family-beyond 0, non-numeric 0
+totals: allowlisted missing 0, strict/exact-row diffs 1, family-beyond 0, non-numeric 0; rows compared 45, coverage failures 0
 FAIL

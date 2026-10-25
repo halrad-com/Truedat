@@ -77,7 +77,11 @@ def bin_path(label, row_id):
 
 
 def compare(a, b):
-    """-> (shape problems, {descriptor: (moved, max_rel)})"""
+    """-> (problems, {descriptor: (moved, max_rel)}). A problem is a shape
+    difference or a finite/non-finite transition: relative arithmetic on a NaN
+    or an infinity yields NaN, so such a change used to count as moved with a
+    relative error of zero and pass any band (overwatch review V2, 2026-10-25).
+    Two NaNs, or the same infinity, are equal."""
     problems = []
     diffs = {}
     for name in sorted(set(a) | set(b)):
@@ -89,20 +93,47 @@ def compare(a, b):
         if (ta, fa, na, da) != (tb, fb, nb, db):
             problems.append("%s shape a=%s b=%s" % (name, (ta, fa, na, da), (tb, fb, nb, db)))
             continue
-        moved, max_rel = 0, 0.0
+        moved, max_rel, nonfinite = 0, 0.0, 0
         if ta.startswith("f32"):
             for x, y in zip(va, vb):
                 if x == y or (math.isnan(x) and math.isnan(y)):
                     continue
                 moved += 1
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    nonfinite += 1
+                    continue
                 r = abs(x - y) / max(1e-12, abs(x), abs(y))
                 if r > max_rel:
                     max_rel = r
         elif va != vb:
             moved = sum(1 for x, y in zip(va, vb) if x != y)
             max_rel = 1.0
+        if nonfinite:
+            problems.append("%s: %d finite/non-finite value(s)" % (name, nonfinite))
         diffs[name] = (moved, max_rel)
     return problems, diffs
+
+
+def run_codes(label):
+    """{row id: exit code} from out/<label>/runs.tsv (run-repeat.sh); {} if absent."""
+    codes = {}
+    path = os.path.join(HERE, "out", label, "runs.tsv")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                p = line.rstrip("\n").split("\t")
+                if len(p) >= 2 and p[1].lstrip("-").isdigit():
+                    codes[p[0]] = int(p[1])
+    return codes
+
+
+def stale(label, row_id):
+    """True when out/<label>/started (run-repeat.sh's start stamp, written after it
+    clears the label's old outputs) is newer than this row's frames file."""
+    stamp = os.path.join(HERE, "out", label, "started")
+    path = bin_path(label, row_id)
+    return os.path.exists(stamp) and os.path.exists(path) and os.path.getmtime(path) < os.path.getmtime(stamp)
 
 
 def rows_with_both(la, lb):
@@ -163,8 +194,28 @@ def gate(full, cand):
            "shape (descriptors, dtype, flags, count, dims) must match; exact rows byte-identical;"
            " other rows within 2x the descriptor's same-binary band (espb-band.tsv)",
            "", "%-26s %-6s %5s %9s %9s %7s  %s" % ("id", "exact", "descs", "moved", "max_rel", "beyond", "note")]
-    fails = 0
+    fails = compared = 0
+    codes = run_codes(cand)
+    # coverage first (overwatch review V1): every row the FULL run wrote a frames
+    # file for must have a fresh one from the candidate, with exit 0
+    for i in manifest_ids():
+        have_a, have_b = os.path.exists(bin_path(full, i)), os.path.exists(bin_path(cand, i))
+        why = ""
+        if have_a and not have_b:
+            why = "candidate frames file MISSING"
+        elif have_b and not have_a:
+            why = "baseline frames file missing - cannot judge the candidate"
+        elif have_a and codes.get(i, 0) != 0:
+            why = "candidate exit %d" % codes[i]
+        elif have_a and stale(cand, i):
+            why = "candidate frames file STALE (older than the label's start stamp)"
+        if why:
+            fails += 1
+            out.append("%-26s COVERAGE FAIL: %s" % (i, why))
     for i in rows_with_both(full, cand):
+        if codes.get(i, 0) != 0 or stale(cand, i):
+            continue   # already failed on coverage
+        compared += 1
         pa, pb = bin_path(full, i), bin_path(cand, i)
         exact = i in exact_rows
         with open(pa, "rb") as fa, open(pb, "rb") as fb:
@@ -184,12 +235,13 @@ def gate(full, cand):
             note = "exact row, 0 values moved, but bytes differ (header?)"
         out.append("%-26s %-6s %5d %9d %9.3g %7d  %s%s" % (
             i, "yes" if exact else "band", len(a), moved, max_rel, len(beyond), "" if ok else "FAIL ", note))
-    out += ["", "%d row(s), %d failure(s)" % (len(out) - 4, fails), "PASS" if fails == 0 else "FAIL"]
+    out += ["", "%d row(s) compared, %d failure(s)" % (compared, fails),
+            "PASS" if fails == 0 and compared > 0 else ("FAIL: no row compared" if not compared else "FAIL")]
     text = "\n".join(out) + "\n"
     with open(os.path.join(HERE, "gate-edges-%s-%s.txt" % (full, cand)), "w", encoding="utf-8") as f:
         f.write(text)
     sys.stdout.write(text)
-    return 1 if fails else 0
+    return 1 if fails or not compared else 0
 
 
 def main(argv):

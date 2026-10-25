@@ -81,20 +81,76 @@ def family(key):
     return last if last in STATS else "value"
 
 
+NONFINITE = "nonfinite"   # num_delta's verdict for a finite/non-finite transition
+
+
+def num_delta(va, vb):
+    """Relative difference of two numbers: 0.0 when equal (two NaNs, or the
+    same infinity, count as equal), NONFINITE when one is finite and the other
+    is not, or both are non-finite and differ - relative arithmetic on those
+    yields NaN and would hide the change (overwatch review V2, 2026-10-25)."""
+    fa, fb = math.isfinite(va), math.isfinite(vb)
+    if fa and fb:
+        return abs(va - vb) / max(1e-12, abs(va), abs(vb))
+    if not fa and not fb and ((math.isnan(va) and math.isnan(vb)) or va == vb):
+        return 0.0
+    return NONFINITE
+
+
 def rel_diffs(a, b):
     setp = sorted(k for k in set(a) ^ set(b) if k not in ALLOWED)
     nonnum, rels = [], {}
     for k in set(a) & set(b):
         va, vb = a[k], b[k]
         if is_num(va) and is_num(vb):
-            if isinstance(va, float) and isinstance(vb, float) and math.isnan(va) and math.isnan(vb):
-                continue
-            r = abs(va - vb) / max(1e-12, abs(va), abs(vb))
-            if r > 0:
+            r = num_delta(va, vb)
+            if r == NONFINITE:
+                nonnum.append(k + " (finite/non-finite)")
+            elif r > 0:
                 rels[k] = r
         elif va != vb and k not in ALLOWED:
             nonnum.append(k)
     return setp, sorted(nonnum), rels
+
+
+def run_codes(label):
+    """{row id: exit code} from out/<label>/runs.tsv (run-repeat.sh); {} if absent."""
+    codes = {}
+    path = os.path.join(HERE, "out", label, "runs.tsv")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                p = line.rstrip("\n").split("\t")
+                if len(p) >= 2 and p[1].lstrip("-").isdigit():
+                    codes[p[0]] = int(p[1])
+    return codes
+
+
+def stale(label, row_id, ext=".json"):
+    """True when the label has a start stamp (run-repeat.sh writes out/<label>/started
+    after clearing the label's old outputs) and this artifact predates it."""
+    stamp = os.path.join(HERE, "out", label, "started")
+    path = os.path.join(HERE, "out", label, row_id + ext)
+    return os.path.exists(stamp) and os.path.exists(path) and os.path.getmtime(path) < os.path.getmtime(stamp)
+
+
+def coverage(base, cand, row_id, a, b):
+    """The gate's coverage rule (overwatch review V1): a row the BASELINE produced
+    must be produced, fresh and with exit 0, by the candidate. Returns a failure
+    reason, or "" (compare it), or None (neither run produced it: not compared,
+    not a failure - the known refusals, e.g. raw ADTS and Opus)."""
+    if a is None and b is None:
+        return None
+    if a is None:
+        return "baseline output missing - cannot judge the candidate"
+    if b is None:
+        return "candidate output MISSING"
+    if run_codes(cand).get(row_id, 0) != 0:
+        return "candidate exit %d" % run_codes(cand)[row_id]
+    if stale(cand, row_id):
+        return "candidate output STALE (older than the label's start stamp)"
+    return ""
 
 
 def manifest_rows():
@@ -206,14 +262,19 @@ def cross(base, cand, parity_label):
            "pcm = %s" % ("parity-%s.txt verdict for the baseline loader" % parity_label if parity_label else "(not given)"),
            "",
            "%-26s %-18s %-24s %6s %7s %7s %5s  %s" % ("id", "codec", "pcm", "moved", "strict", "family", "set", "top family-beyond keys")]
-    tot_strict = tot_family = tot_set = 0
+    tot_strict = tot_family = tot_set = tot_cover = compared = 0
     for row in manifest_rows():
         a, b = load(base, row["id"]), load(cand, row["id"])
-        if a is None or b is None:
-            out.append("%-26s %-18s %-24s (missing: %s)" % (
-                row["id"], codec_of(row["id"]), parity.get(row["id"], ""),
-                ",".join(l for l, v in ((base, a), (cand, b)) if v is None)))
+        why = coverage(base, cand, row["id"], a, b)
+        if why is None:
+            out.append("%-26s %-18s %-24s (missing: %s,%s - not decoded by either run)" % (
+                row["id"], codec_of(row["id"]), parity.get(row["id"], ""), base, cand))
             continue
+        if why:
+            tot_cover += 1
+            out.append("%-26s %-18s %-24s COVERAGE FAIL: %s" % (row["id"], codec_of(row["id"]), parity.get(row["id"], ""), why))
+            continue
+        compared += 1
         setp, nonnum, rels = rel_diffs(a, b)
         strict = [k for k, r in rels.items() if r > 2 * key_band.get(k, 0.0)]
         fam = sorted(((r, k) for k, r in rels.items() if r > 2 * fam_band.get(family(k), 0.0)), reverse=True)
@@ -225,12 +286,17 @@ def cross(base, cand, parity_label):
             len(setp) + len(nonnum), "; ".join("%s %.2g" % (k, r) for r, k in fam[:4])))
         for k in (setp + nonnum)[:5]:
             out.append("    SET/NON-NUMERIC: %s" % k)
-    out += ["", "totals: strict-beyond %d, family-beyond %d, set/non-numeric %d" % (tot_strict, tot_family, tot_set)]
+    out += ["", "totals: strict-beyond %d, family-beyond %d, set/non-numeric %d; rows compared %d, coverage failures %d" % (
+        tot_strict, tot_family, tot_set, compared, tot_cover)]
+    # a table, not a gate: strict / family movement is reported for judgement,
+    # but missing or stale coverage, or nothing compared at all, is a failure
+    if tot_cover or not compared:
+        out.append("COVERAGE FAIL" if tot_cover else "FAIL: no row compared")
     text = "\n".join(out) + "\n"
     with open(os.path.join(HERE, "field-table-%s-%s.txt" % (base, cand)), "w", encoding="utf-8") as f:
         f.write(text)
     sys.stdout.write(text)
-    return 0
+    return 1 if tot_cover or not compared else 0
 
 
 def read_allowlist():
@@ -261,13 +327,18 @@ def scan_gate(full, scan, parity_label):
            "",
            "%-26s %-18s %-14s %7s %7s %6s %6s %6s %7s  %s" % (
                "id", "codec", "pcm", "allowed", "missing", "exact", "strict", "family", "cut", "note")]
-    tot_missing = tot_strict = tot_family = tot_nonnum = 0
+    tot_missing = tot_strict = tot_family = tot_nonnum = tot_cover = compared = 0
     for row in manifest_rows():
         a, b = load(full, row["id"]), load(scan, row["id"])
-        if a is None or b is None:
-            out.append("%-26s %-18s (missing: %s)" % (row["id"], codec_of(row["id"]),
-                       ",".join(l for l, v in ((full, a), (scan, b)) if v is None)))
+        why = coverage(full, scan, row["id"], a, b)
+        if why is None:
+            out.append("%-26s %-18s (missing: %s,%s - not decoded by either run)" % (row["id"], codec_of(row["id"]), full, scan))
             continue
+        if why:
+            tot_cover += 1
+            out.append("%-26s %-18s COVERAGE FAIL: %s" % (row["id"], codec_of(row["id"]), why))
+            continue
+        compared += 1
         allowed_keys = [k for k in a if strip_index(k) in allowed]
         missing = [k for k in allowed_keys if k not in b]
         cut = [k for k in a if k not in b and strip_index(k) not in allowed]
@@ -278,9 +349,10 @@ def scan_gate(full, scan, parity_label):
                 continue
             va, vb = a[k], b[k]
             if is_num(va) and is_num(vb):
-                if isinstance(va, float) and isinstance(vb, float) and math.isnan(va) and math.isnan(vb):
+                r = num_delta(va, vb)
+                if r == NONFINITE:
+                    nonnum.append(k + " (finite/non-finite)")
                     continue
-                r = abs(va - vb) / max(1e-12, abs(va), abs(vb))
                 if r == 0:
                     continue
                 if exact_row:
@@ -311,9 +383,10 @@ def scan_gate(full, scan, parity_label):
         out.append("%-26s %-18s %-14s %7d %7d %6s %6d %6d %7d  %s" % (
             row["id"], codec_of(row["id"]), parity.get(row["id"], "")[:14], len(allowed_keys), len(missing),
             "yes" if exact_row else "band", len(strict), len(fam), len(cut), note))
-    out += ["", "totals: allowlisted missing %d, strict/exact-row diffs %d, family-beyond %d, non-numeric %d"
-            % (tot_missing, tot_strict, tot_family, tot_nonnum),
-            "PASS" if tot_missing == 0 and tot_strict == 0 and tot_family == 0 and tot_nonnum == 0 else "FAIL"]
+    ok = tot_missing == 0 and tot_strict == 0 and tot_family == 0 and tot_nonnum == 0 and tot_cover == 0 and compared > 0
+    out += ["", "totals: allowlisted missing %d, strict/exact-row diffs %d, family-beyond %d, non-numeric %d;"
+            " rows compared %d, coverage failures %d" % (tot_missing, tot_strict, tot_family, tot_nonnum, compared, tot_cover),
+            "PASS" if ok else "FAIL"]
     text = "\n".join(out) + "\n"
     with open(os.path.join(HERE, "gate-scan-%s-%s.txt" % (full, scan)), "w", encoding="utf-8") as f:
         f.write(text)
