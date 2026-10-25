@@ -37,6 +37,11 @@ AlgorithmStatus StereoMuxer::process() {
   EXEC_DEBUG("data acquired");
 
   if (status != OK) {
+    // Let downstream consumers drain a full output before retrying, including
+    // at EOF. Output backpressure does not mean the input is a partial frame
+    // (same guard as StereoDemuxer; found by the 2026-10-24 review).
+    if (status == NO_OUTPUT) return NO_OUTPUT;
+
     // if shouldStop is true, that means there is no more audio, so we need
     // to take what's left to fill in half-frames, instead of waiting for more
     // data to come in (which would have done by returning from this function)

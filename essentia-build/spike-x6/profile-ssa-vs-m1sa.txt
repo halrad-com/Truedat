@@ -1,0 +1,126 @@
+x6 ELAPSED profile, pooled seconds side by side: ssa  m1sa
+delta = last minus first; negative is time removed (elapsed; see each label's process CPU in its own table)
+
+phase                algorithm                                         ssa         m1sa        delta
+1 metadata           [phase total]                                   0.020        0.022       +0.002
+2 audio_metadata     [phase total]                                  20.623       21.958       +1.335
+2 audio_metadata     AudioLoader                                     3.300        3.530       +0.230
+2 audio_metadata     BinaryOperatorStream                            0.066        0.073       +0.006
+2 audio_metadata     FrameCutter                                     3.114        3.344       +0.230
+2 audio_metadata     IIR                                             1.012        1.090       +0.078
+2 audio_metadata     LoudnessEBUR128                                 0.004        0.004       +0.000
+2 audio_metadata     Mean                                            1.966        2.135       +0.168
+2 audio_metadata     PoolStorage                                     0.054        0.061       +0.008
+2 audio_metadata     Resample                                        9.829       10.292       +0.463
+2 audio_metadata     StereoDemuxer                                   0.178        0.202       +0.024
+2 audio_metadata     StereoMuxer                                     0.073        0.092       +0.018
+2 audio_metadata     StereoTrimmer                                   0.059        0.076       +0.017
+2 audio_metadata     UnaryOperatorStream                             0.093        0.109       +0.017
+3 replay_gain        [phase total]                                  11.204       11.546       +0.342
+3 replay_gain        AudioLoader                                     3.145        3.227       +0.082
+3 replay_gain        DevNull<Real>[0]]                               0.005        0.005       +0.000
+3 replay_gain        DevNull<int>[0]]                                0.004        0.004       +0.000
+3 replay_gain        DevNull<std::string>[0]]                        0.004        0.005       +0.000
+3 replay_gain        DevNull<std::string>[1]]                        0.003        0.003       +0.000
+3 replay_gain        EqualLoudness                                   1.741        1.899       +0.157
+3 replay_gain        FrameCutter                                     0.083        0.086       +0.004
+3 replay_gain        InstantPower                                    0.067        0.069       +0.002
+3 replay_gain        MonoMixer                                       0.057        0.060       +0.003
+3 replay_gain        PoolStorage                                     0.012        0.013       +0.001
+3 replay_gain        ReplayGain                                      0.004        0.004       +0.001
+3 replay_gain        Resample                                        5.320        5.378       +0.058
+3 replay_gain        Scale                                           0.128        0.132       +0.004
+3 replay_gain        Trimmer                                         0.025        0.027       +0.003
+4 network1           [phase total]                                  57.741       65.620       +7.879
+4 network1           AudioLoader                                     3.338        3.848       +0.510
+4 network1           BarkBands                                       0.084        0.100       +0.016
+4 network1           BpmHistogramDescriptors                         0.005        0.006       +0.001
+4 network1           CartesianToPolar                                8.165        9.115       +0.950
+4 network1           CentralMoments                                  0.318        0.369       +0.051
+4 network1           Centroid                                        0.072        0.085       +0.012
+4 network1           Crest                                           0.073        0.093       +0.020
+4 network1           Danceability                                    0.751        0.796       +0.045
+4 network1           Decrease                                        0.159        0.183       +0.024
+4 network1           DevNull<Real>[1]]                               0.006        0.009       +0.003
+4 network1           DevNull<Real>[2]]                               0.005        0.006       +0.002
+4 network1           DevNull<Real>[3]]                               0.005        0.006       +0.002
+4 network1           DevNull<Real>[4]]                               0.007        0.010       +0.003
+4 network1           DevNull<int>[1]]                                0.008        0.012       +0.004
+4 network1           DevNull<std::string>[2]]                        0.009        0.014       +0.005
+4 network1           DevNull<std::string>[3]]                        0.004        0.007       +0.003
+4 network1           DevNull<std::vector<Real>>[0]]                  0.004        0.005       +0.002
+4 network1           DevNull<std::vector<Real>>[1]]                  0.004        0.006       +0.002
+4 network1           DevNull<std::vector<Real>>[2]]                  0.006        0.008       +0.002
+4 network1           Dissonance                                      2.332        2.661       +0.329
+4 network1           DistributionShape                               0.147        0.180       +0.033
+4 network1           DynamicComplexity                               0.424        0.450       +0.026
+4 network1           Energy                                          0.070        0.081       +0.011
+4 network1           EnergyBand                                      0.113        0.139       +0.026
+4 network1           Entropy                                         3.125        3.555       +0.430
+4 network1           EqualLoudness                                   1.820        2.127       +0.308
+4 network1           FFT[size=1024]                                  0.312        0.377       +0.065
+4 network1           FFT[size=2048]                                  0.341        0.411       +0.070
+4 network1           FlatnessDB                                      0.385        0.455       +0.070
+4 network1           Flux                                            0.079        0.094       +0.015
+4 network1           FrameCutter                                     1.017        1.223       +0.206
+4 network1           GFCC                                            2.269        2.585       +0.316
+4 network1           HFC                                             0.086        0.099       +0.013
+4 network1           Loudness                                        0.112        0.133       +0.020
+4 network1           MFCC                                            0.297        0.357       +0.060
+4 network1           MonoMixer                                       0.076        0.101       +0.024
+4 network1           OnsetDetection[method=complex]                 12.555       13.964       +1.408
+4 network1           OnsetDetection[method=hfc]                      0.111        0.134       +0.023
+4 network1           OnsetRate                                       0.046        0.022       -0.024
+4 network1           PitchSalience                                   1.654        1.944       +0.290
+4 network1           PoolStorage                                     1.484        1.836       +0.352
+4 network1           RMS                                             0.073        0.083       +0.010
+4 network1           Resample                                        5.013        5.378       +0.365
+4 network1           RhythmExtractor2013[method=degara]              0.004        0.007       +0.003
+4 network1           RollOff                                         0.083        0.098       +0.015
+4 network1           Scale                                           0.162        0.187       +0.024
+4 network1           SilenceRate                                     0.123        0.143       +0.020
+4 network1           SpectralComplexity                              0.537        0.633       +0.096
+4 network1           SpectralContrast                                1.369        1.560       +0.191
+4 network1           SpectralPeaks                                   0.374        0.457       +0.083
+4 network1           Spectrum[size=2048]                             1.306        1.548       +0.242
+4 network1           StrongPeak                                      0.550        0.612       +0.062
+4 network1           TempoTapDegara                                  0.276        0.298       +0.023
+4 network1           Trimmer                                         0.045        0.060       +0.015
+4 network1           TuningFrequency                                 0.314        0.357       +0.043
+4 network1           UnaryOperator                                   0.103        0.130       +0.027
+4 network1           Windowing[size=1024]                            0.391        0.490       +0.099
+4 network1           Windowing[size=2048]                            0.089        0.113       +0.024
+4 network1           ZeroCrossingRate                                0.331        0.372       +0.041
+4 network1           [step] computeAverageLoudness                   0.001        0.001       +0.000
+5 network2           [phase total]                                  20.853       23.565       +2.712
+5 network2           AudioLoader                                     3.110        3.715       +0.605
+5 network2           ChordsDescriptors                               0.011        0.012       +0.001
+5 network2           ChordsDetection                                 0.277        0.297       +0.020
+5 network2           Crest                                           0.018        0.024       +0.006
+5 network2           DevNull<Real>[5]]                               0.005        0.007       +0.002
+5 network2           DevNull<int>[2]]                                0.005        0.007       +0.002
+5 network2           DevNull<std::string>[4]]                        0.004        0.007       +0.002
+5 network2           DevNull<std::string>[5]]                        0.003        0.003       +0.000
+5 network2           Entropy                                         0.070        0.080       +0.010
+5 network2           FrameCutter                                     0.156        0.189       +0.032
+5 network2           HPCP[size=120]                                  5.687        6.339       +0.651
+5 network2           HPCP[size=36]                                   3.658        4.119       +0.460
+5 network2           Key[profileType=edma]                           0.004        0.005       +0.001
+5 network2           Key[profileType=krumhansl]                      0.003        0.004       +0.001
+5 network2           Key[profileType=temperley]                      0.003        0.004       +0.001
+5 network2           MonoMixer                                       0.060        0.080       +0.019
+5 network2           PoolStorage                                     0.201        0.251       +0.051
+5 network2           Resample                                        4.937        5.387       +0.450
+5 network2           Scale                                           0.157        0.176       +0.019
+5 network2           SingleBeatLoudness                              0.226        0.272       +0.046
+5 network2           Slicer                                          0.021        0.027       +0.006
+5 network2           SpectralPeaks                                   0.279        0.319       +0.040
+5 network2           Spectrum[size=2048]                             0.432        0.496       +0.064
+5 network2           Trimmer                                         0.028        0.044       +0.016
+5 network2           Windowing[size=1024]                            0.099        0.120       +0.021
+5 network2           [step] computeTuningSystemFeatures              0.017        0.021       +0.004
+6 aggregation        [phase total]                                   0.104        0.120       +0.016
+7 output             [phase total]                                   0.854        0.783       -0.071
+7 output             [step] main                                     0.854        0.783       -0.071
+
+ALL                  grand total                                   111.398      123.614      +12.215

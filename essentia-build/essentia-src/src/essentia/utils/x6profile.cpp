@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>   // PROCESS_MEMORY_COUNTERS only; the function is fetched from kernel32 at run time
 #else
 #include <sys/resource.h>
 #include <time.h>
@@ -67,6 +68,27 @@ double processCpuSeconds() {
   struct rusage r;
   if (getrusage(RUSAGE_SELF, &r) != 0) return -1;
   return r.ru_utime.tv_sec + r.ru_stime.tv_sec + 1e-6 * (r.ru_utime.tv_usec + r.ru_stime.tv_usec);
+#endif
+}
+
+// Peak working set of the process in MiB (-1 if unavailable); *current gets the
+// working set now. On Windows via K32GetProcessMemoryInfo looked up in kernel32
+// so the build needs no psapi import library.
+double peakWorkingSetMiB(double* current) {
+#ifdef _WIN32
+  typedef BOOL (WINAPI *GetPmiFn)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+  static GetPmiFn fn = (GetPmiFn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "K32GetProcessMemoryInfo");
+  if (!fn) return -1;
+  PROCESS_MEMORY_COUNTERS pmc;
+  pmc.cb = sizeof(pmc);
+  if (!fn(GetCurrentProcess(), &pmc, sizeof(pmc))) return -1;
+  if (current) *current = (double)pmc.WorkingSetSize / 1048576.0;
+  return (double)pmc.PeakWorkingSetSize / 1048576.0;
+#else
+  struct rusage r;
+  if (getrusage(RUSAGE_SELF, &r) != 0) return -1;
+  if (current) *current = -1;
+  return r.ru_maxrss / 1024.0;   // KiB on Linux
 #endif
 }
 
@@ -155,7 +177,10 @@ void report(const string& label) {
     fprintf(stderr, "x6profile: cannot append to %s\n", outputPath());
     return;
   }
-  fprintf(f, "# x6profile %s wall=%.6f cpu=%.6f\n", label.c_str(), now() - startTime(), processCpuSeconds());
+  double ws = -1;
+  double peak = peakWorkingSetMiB(&ws);
+  fprintf(f, "# x6profile %s wall=%.6f cpu=%.6f peakws_mib=%.3f ws_mib=%.3f\n", label.c_str(),
+          now() - startTime(), processCpuSeconds(), peak, ws);
   fprintf(f, "phase\talgorithm\tinstances\tcalls\tseconds\n");
   for (map<pair<string, string>, Entry>::const_iterator it = table().begin(); it != table().end(); ++it) {
     fprintf(f, "%s\t%s\t%u\t%ld\t%.6f\n", it->first.first.c_str(), it->first.second.c_str(),

@@ -28,7 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def read_runs(label):
-    """-> list of (audio, wall, cpu, {(phase, name): (instances, calls, seconds)})"""
+    """-> list of (audio, wall, cpu, {(phase, name): (instances, calls, seconds)}, peakws)
+
+    peakws is the run's peak working set in MiB (drop 3 header field
+    peakws_mib=), or None for a profile written before the field existed."""
     runs = []
     path = os.path.join(HERE, "out", label, "profile.tsv")
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -38,8 +41,10 @@ def read_runs(label):
             if line.startswith("# x6profile "):
                 head = line[len("# x6profile "):]
                 audio, _, rest = head.rpartition(" wall=")
-                wall, _, cpu = rest.partition(" cpu=")
-                cur = (audio, float(wall), float(cpu), OrderedDict())
+                fields = dict(kv.split("=", 1) for kv in ("wall=" + rest).split(" ") if "=" in kv)
+                peak = fields.get("peakws_mib")
+                cur = (audio, float(fields["wall"]), float(fields["cpu"]), OrderedDict(),
+                       float(peak) if peak is not None else None)
                 runs.append(cur)
             elif cur is not None and line and not line.startswith("phase\t"):
                 phase, name, inst, calls, secs = line.split("\t")
@@ -80,7 +85,7 @@ def row_id(ids, audio):
 def pooled(runs):
     """-> OrderedDict phase -> {'total': s, 'algos': {name: (inst, calls, s)}}"""
     out = OrderedDict()
-    for _, _, _, table in runs:
+    for _, _, _, table, _ in runs:
         for (phase, name), (inst, calls, secs) in table.items():
             p = out.setdefault(phase, {"total": 0.0, "algos": OrderedDict()})
             if name == "[step] total":
@@ -115,27 +120,40 @@ def write_label(label, only=None):
     pool = pooled(runs)
     grand = sum(p["total"] for p in pool.values())
     phases = sorted(pool)
+    peaks = [r[4] for r in runs if r[4] is not None]
     lines = ["x6 ELAPSED profile: label %s, %d run(s)%s (phase/algorithm values are elapsed; 'process CPU' is the CPU measurement)" % (
                  label, len(runs), " - rows common to the compared labels only" if only is not None else ""),
              "pooled total of phase totals %.3f s elapsed; wall %.3f s; process CPU %.3f s" % (
-                 grand, sum(r[1] for r in runs), sum(r[2] for r in runs)),
-             "", "per file (seconds): wall, process CPU (GetProcessTimes), then each phase's elapsed total",
-             "%-26s %8s %8s " % ("id", "wall", "cpu") + " ".join("%12s" % p[:12] for p in phases)]
-    for audio, wall, cpu, table in runs:
+                 grand, sum(r[1] for r in runs), sum(r[2] for r in runs))]
+    if peaks:
+        top = max(runs, key=lambda r: r[4] if r[4] is not None else -1)
+        lines.append("peak working set (MiB): max %.1f (%s), sum over runs %.1f" % (
+            top[4], row_id(ids, top[0]), sum(peaks)))
+    # the peak working set column only once a profile carries it (drop 3), so the
+    # earlier tables keep their layout
+    if peaks:
+        lines += ["", "per file (seconds): wall, process CPU (GetProcessTimes), peak working set MiB, then each phase's elapsed total",
+                  "%-26s %8s %8s %8s " % ("id", "wall", "cpu", "peakMiB") + " ".join("%12s" % p[:12] for p in phases)]
+    else:
+        lines += ["", "per file (seconds): wall, process CPU (GetProcessTimes), then each phase's elapsed total",
+                  "%-26s %8s %8s " % ("id", "wall", "cpu") + " ".join("%12s" % p[:12] for p in phases)]
+    for audio, wall, cpu, table, peak in runs:
         per = OrderedDict((p, 0.0) for p in phases)
         for (phase, name), (_, _, secs) in table.items():
             if name == "[step] total":
                 per[phase] += secs
-        lines.append("%-26s %8.3f %8.3f " % (row_id(ids, audio)[:26], wall, cpu)
-                     + " ".join("%12.3f" % per[p] for p in phases))
+        head = "%-26s %8.3f %8.3f " % (row_id(ids, audio)[:26], wall, cpu)
+        if peaks:
+            head += "%8s " % ("%.1f" % peak if peak is not None else "-")
+        lines.append(head + " ".join("%12.3f" % per[p] for p in phases))
     lines += ["", "pooled over all runs"] + phase_lines(pool, grand)
     text = "\n".join(lines) + "\n"
     with open(os.path.join(HERE, "profile-%s.txt" % label), "w", encoding="utf-8") as f:
         f.write(text)
-    return pool, grand, text
+    return pool, grand, text, (max(peaks) if peaks else None)
 
 
-def write_compare(labels, pools, grands):
+def write_compare(labels, pools, grands, peaks):
     lines = ["x6 ELAPSED profile, pooled seconds side by side: " + "  ".join(labels),
              "delta = last minus first; negative is time removed (elapsed; see each label's process CPU in its own table)", ""]
     names = OrderedDict()
@@ -157,6 +175,8 @@ def write_compare(labels, pools, grands):
                 vals.append(p["algos"].get(name, (0, 0, 0.0))[2])
         lines.append("%-20s %-40s " % (phase, name) + " ".join("%12.3f" % v for v in vals) + " %+12.3f" % (vals[-1] - vals[0]))
     lines += ["", "%-20s %-40s " % ("ALL", "grand total") + " ".join("%12.3f" % g for g in grands) + " %+12.3f" % (grands[-1] - grands[0])]
+    if all(p is not None for p in peaks):
+        lines.append("%-20s %-40s " % ("ALL", "peak working set MiB, max over runs") + " ".join("%12.1f" % p for p in peaks) + " %+12.1f" % (peaks[-1] - peaks[0]))
     text = "\n".join(lines) + "\n"
     with open(os.path.join(HERE, "profile-%s-vs-%s.txt" % (labels[0], labels[-1])), "w", encoding="utf-8") as f:
         f.write(text)
@@ -167,18 +187,19 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
-    pools, grands = [], []
+    pools, grands, peaks = [], [], []
     only = None
     if len(argv) > 1:   # compare like with like: only the rows every label ran
         sets = [set(r[0] for r in read_runs(label)) for label in argv]
         only = set.intersection(*sets)
     for label in argv:
-        pool, grand, text = write_label(label, only)
+        pool, grand, text, peak = write_label(label, only)
         pools.append(pool)
         grands.append(grand)
+        peaks.append(peak)
         sys.stdout.write(text)
     if len(argv) > 1:
-        sys.stdout.write(write_compare(argv, pools, grands))
+        sys.stdout.write(write_compare(argv, pools, grands, peaks))
     return 0
 
 

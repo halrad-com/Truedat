@@ -1,0 +1,188 @@
+x6 ELAPSED profile: label m1sea, 45 run(s) - rows common to the compared labels only (phase/algorithm values are elapsed; 'process CPU' is the CPU measurement)
+pooled total of phase totals 121.141 s elapsed; wall 121.600 s; process CPU 117.641 s
+peak working set (MiB): max 337.1 (r_m4a), sum over runs 5938.6
+
+per file (seconds): wall, process CPU (GetProcessTimes), peak working set MiB, then each phase's elapsed total
+id                             wall      cpu  peakMiB   1 metadata 2 audio_meta 3 replay_gai   4 network1   5 network2 6 aggregatio     7 output
+flac16_44k_st                 0.247    0.203    106.9        0.000        0.020        0.015        0.124        0.039        0.002        0.038
+flac16_44k_mo                 0.231    0.219    106.8        0.000        0.019        0.013        0.124        0.037        0.002        0.029
+flac16_48k_st                 0.356    0.328    107.0        0.000        0.066        0.036        0.150        0.061        0.002        0.031
+flac24_96k_st                 0.474    0.438    106.9        0.000        0.112        0.059        0.175        0.089        0.002        0.029
+flac24_192k_st                0.721    0.656    106.9        0.000        0.189        0.106        0.234        0.135        0.002        0.046
+flac16_192k_mo                0.679    0.641    107.1        0.000        0.182        0.103        0.233        0.124        0.002        0.029
+flac16_44k_st_bigblock        0.247    0.234    108.7        0.000        0.021        0.019        0.126        0.039        0.002        0.029
+flac24_96k_st_bigblock        0.448    0.438    109.2        0.000        0.106        0.066        0.166        0.074        0.002        0.027
+flac16_192k_st_bigblock       0.699    0.656    111.4        0.000        0.202        0.108        0.213        0.130        0.002        0.038
+flac16_44k_mo_bigblock        0.236    0.219    107.6        0.000        0.019        0.014        0.128        0.036        0.002        0.029
+flac16_44k_st_short           0.148    0.125    101.5        0.000        0.011        0.011        0.076        0.016        0.003        0.024
+wav_s16_44k_st                0.237    0.203    107.2        0.000        0.023        0.017        0.118        0.036        0.002        0.033
+wav_s24_96k_st                0.433    0.406    108.6        0.000        0.099        0.053        0.156        0.076        0.002        0.041
+wav_f32_48k_st                0.332    0.312    107.7        0.000        0.064        0.034        0.137        0.056        0.002        0.033
+wav_f32_192k_st               0.652    0.609    111.2        0.000        0.177        0.097        0.207        0.128        0.002        0.033
+wav_s16_192k_mo               0.652    0.625    107.9        0.000        0.179        0.103        0.206        0.116        0.002        0.033
+aiff_s16_44k_st               0.225    0.203    106.9        0.000        0.018        0.012        0.122        0.034        0.002        0.030
+mp3_44k_st                    0.241    0.219    107.2        0.000        0.018        0.013        0.122        0.037        0.002        0.042
+mp3_48k_mo                    0.354    0.250    107.1        0.000        0.066        0.036        0.143        0.058        0.002        0.041
+mp3_44k_st_short              0.133    0.109    101.8        0.000        0.008        0.008        0.054        0.017        0.002        0.035
+aac_44k_st                    0.271    0.250    107.8        0.001        0.021        0.015        0.136        0.052        0.002        0.035
+aac_48k_mo                    0.350    0.297    107.9        0.000        0.066        0.036        0.150        0.057        0.002        0.033
+aac_96k_st                    0.453    0.438    108.1        0.000        0.104        0.059        0.163        0.076        0.002        0.039
+aac_44k_st_short              0.125    0.094    102.6        0.000        0.010        0.008        0.054        0.015        0.002        0.030
+wma_44k_st                    0.237    0.219    107.4        0.000        0.018        0.013        0.116        0.035        0.002        0.030
+wma_48k_st                    0.357    0.312    107.6        0.000        0.062        0.040        0.147        0.060        0.002        0.039
+vorbis_44k_st                 0.236    0.234    107.2        0.000        0.022        0.014        0.123        0.035        0.002        0.032
+vorbis_48k_mo                 0.354    0.328    107.5        0.000        0.066        0.036        0.148        0.063        0.002        0.032
+alac16_44k_st                 0.253    0.234    107.0        0.000        0.025        0.017        0.128        0.042        0.002        0.032
+alac24_96k_st                 0.486    0.469    107.0        0.000        0.112        0.068        0.175        0.092        0.002        0.030
+alac24_192k_st                0.749    0.719    107.1        0.000        0.211        0.121        0.227        0.145        0.003        0.035
+wv_s16_44k_st                 0.245    0.234    107.0        0.000        0.025        0.016        0.124        0.041        0.002        0.028
+wv_s32_96k_st                 0.514    0.453    107.1        0.000        0.123        0.071        0.188        0.097        0.003        0.023
+mp3_44k_st_trunc              0.235    0.203    107.3        0.000        0.020        0.015        0.124        0.035        0.002        0.032
+flac16_44k_st_trunc           0.247    0.188    106.9        0.000        0.020        0.015        0.124        0.037        0.002        0.041
+r_mp3                         9.852    9.641    233.4        0.001        1.178        0.553        6.040        2.020        0.006        0.035
+r_m4a                        15.976   15.656    337.1        0.003        1.909        0.759       10.448        2.794        0.008        0.031
+r_m4a_2                       5.313    5.078    188.9        0.001        0.613        0.264        3.456        0.935        0.003        0.029
+r_wma                         9.084    8.938    241.2        0.001        1.147        0.480        5.698        1.697        0.006        0.037
+r_flac_hd                    12.037   11.828    185.2        0.001        3.211        1.911        4.738        2.120        0.003        0.040
+r_flac_live                   8.471    8.281    227.6        0.001        1.021        0.497        5.372        1.529        0.005        0.031
+r_wav                         5.322    5.203    181.5        0.000        0.536        0.175        3.586        0.960        0.008        0.030
+r_wmalossless                13.672   13.156    232.2        0.002        2.217        1.678        6.858        2.863        0.005        0.033
+r_wmapro                     26.578   25.734    226.0        0.001        7.388        4.218        9.490        5.425        0.005        0.032
+r_ape                         2.437    2.359    134.7        0.000        0.383        0.260        1.279        0.469        0.002        0.033
+
+pooled over all runs
+
+1 metadata                0.024 s    0.0% of total   (algorithms 0.000 s, remainder 0.024 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+
+2 audio_metadata         22.109 s   18.3% of total   (algorithms 21.155 s, remainder 0.955 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+  Resample                                    2    211682     10.259   46.4%    8.5%
+  AudioLoader                                 1     70808      3.589   16.2%    3.0%
+  FrameCutter                                 3    294684      3.430   15.5%    2.8%
+  Mean                                        3    294819      2.138    9.7%    1.8%
+  IIR                                         2    201824      1.090    4.9%    0.9%
+  StereoDemuxer                               2    206753      0.211    1.0%    0.2%
+  UnaryOperatorStream                         4    343532      0.115    0.5%    0.1%
+  StereoMuxer                                 1    100912      0.098    0.4%    0.1%
+  StereoTrimmer                               1    100912      0.084    0.4%    0.1%
+  BinaryOperatorStream                        1    100912      0.074    0.3%    0.1%
+  PoolStorage                                11    831423      0.061    0.3%    0.1%
+  LoudnessEBUR128                             1     70808      0.004    0.0%    0.0%
+
+3 replay_gain            12.263 s   10.1% of total   (algorithms 11.585 s, remainder 0.678 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+  Resample                                    1    105841      5.713   46.6%    4.7%
+  AudioLoader                                 1     70808      3.432   28.0%    2.8%
+  EqualLoudness                               1    100912      1.998   16.3%    1.6%
+  Scale                                       1    100912      0.142    1.2%    0.1%
+  FrameCutter                                 1    126674      0.092    0.7%    0.1%
+  InstantPower                                1    126719      0.074    0.6%    0.1%
+  MonoMixer                                   1    105841      0.066    0.5%    0.1%
+  Trimmer                                     1    100912      0.032    0.3%    0.0%
+  PoolStorage                                 2    197578      0.014    0.1%    0.0%
+  DevNull<Real>[0]]                           1     70853      0.006    0.0%    0.0%
+  DevNull<std::string>[0]]                    1     70853      0.005    0.0%    0.0%
+  DevNull<int>[0]]                            1     70853      0.005    0.0%    0.0%
+  ReplayGain                                  1     70814      0.004    0.0%    0.0%
+  DevNull<std::string>[1]]                    1     70853      0.003    0.0%    0.0%
+
+4 network1               62.104 s   51.3% of total   (algorithms 56.998 s, remainder 5.106 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+  OnsetDetection[method=complex]              2    504998     13.397   21.6%   11.1%
+  CartesianToPolar                            2    504998      8.717   14.0%    7.2%
+  Resample                                    1    105841      5.374    8.7%    4.4%
+  AudioLoader                                 1     70808      3.577    5.8%    3.0%
+  Entropy                                     1    192638      3.372    5.4%    2.8%
+  Dissonance                                  1    192638      2.509    4.0%    2.1%
+  GFCC                                        1    192809      2.426    3.9%    2.0%
+  EqualLoudness                               1    102168      1.993    3.2%    1.6%
+  PitchSalience                               1    192809      1.783    2.9%    1.5%
+  PoolStorage                                62  10253540      1.629    2.6%    1.3%
+  SpectralContrast                            1    192638      1.463    2.4%    1.2%
+  Spectrum[size=2048]                         3    516505      1.417    2.3%    1.2%
+  FrameCutter                                 6   1096065      1.157    1.9%    1.0%
+  Danceability                                1     70814      0.794    1.3%    0.7%
+  SpectralComplexity                          1    192809      0.591    1.0%    0.5%
+  StrongPeak                                  1    192809      0.583    0.9%    0.5%
+  Windowing[size=1024]                        4    829126      0.447    0.7%    0.4%
+  DynamicComplexity                           1     72064      0.439    0.7%    0.4%
+  FlatnessDB                                  3    578427      0.421    0.7%    0.3%
+  SpectralPeaks                               2    323696      0.416    0.7%    0.3%
+  FFT[size=2048]                              1    192377      0.381    0.6%    0.3%
+  ZeroCrossingRate                            1    192809      0.350    0.6%    0.3%
+  FFT[size=1024]                              1    312621      0.346    0.6%    0.3%
+  CentralMoments                              4    771065      0.342    0.6%    0.3%
+  TuningFrequency                             1    131058      0.338    0.5%    0.3%
+  MFCC                                        1    192809      0.314    0.5%    0.3%
+  TempoTapDegara                              1     72064      0.290    0.5%    0.2%
+  Scale                                       1    100912      0.172    0.3%    0.1%
+  Decrease                                    1    192809      0.170    0.3%    0.1%
+  DistributionShape                           4    771065      0.159    0.3%    0.1%
+  SilenceRate                                 1    192809      0.134    0.2%    0.1%
+  EnergyBand                                  4    771236      0.124    0.2%    0.1%
+  Loudness                                    1     74832      0.122    0.2%    0.1%
+  OnsetDetection[method=hfc]                  1    312621      0.122    0.2%    0.1%
+  UnaryOperator                               2    385447      0.115    0.2%    0.1%
+  Windowing[size=2048]                        1    192377      0.103    0.2%    0.1%
+  BarkBands                                   1    192809      0.092    0.1%    0.1%
+  RollOff                                     1    192809      0.092    0.1%    0.1%
+  HFC                                         1    192809      0.091    0.1%    0.1%
+  MonoMixer                                   1    105841      0.090    0.1%    0.1%
+  Flux                                        1    192809      0.086    0.1%    0.1%
+  Crest                                       3    578427      0.080    0.1%    0.1%
+  RMS                                         1    192809      0.078    0.1%    0.1%
+  Centroid                                    1    192638      0.078    0.1%    0.1%
+  Energy                                      1    192809      0.075    0.1%    0.1%
+  Trimmer                                     1    100912      0.055    0.1%    0.0%
+  OnsetRate                                   1     71893      0.019    0.0%    0.0%
+  DevNull<std::string>[2]]                    1     70853      0.011    0.0%    0.0%
+  DevNull<int>[1]]                            1     70853      0.009    0.0%    0.0%
+  DevNull<Real>[4]]                           1    131058      0.008    0.0%    0.0%
+  DevNull<Real>[1]]                           1     70853      0.008    0.0%    0.0%
+  DevNull<std::vector<Real>>[2]]              1     70859      0.006    0.0%    0.0%
+  BpmHistogramDescriptors                     1     72109      0.005    0.0%    0.0%
+  DevNull<Real>[3]]                           1     72109      0.005    0.0%    0.0%
+  RhythmExtractor2013[method=degara]          1     72064      0.005    0.0%    0.0%
+  DevNull<std::vector<Real>>[1]]              1     71938      0.005    0.0%    0.0%
+  DevNull<Real>[2]]                           1     72109      0.005    0.0%    0.0%
+  DevNull<std::vector<Real>>[0]]              1     72109      0.004    0.0%    0.0%
+  DevNull<std::string>[3]]                    1     70853      0.004    0.0%    0.0%
+  [step] computeAverageLoudness               0        45      0.001    0.0%    0.0%
+
+5 network2               23.031 s   19.0% of total   (algorithms 21.487 s, remainder 1.545 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+  HPCP[size=120]                              1    131058      6.226   27.0%    5.1%
+  Resample                                    1    105841      5.401   23.4%    4.5%
+  HPCP[size=36]                               2    262116      4.025   17.5%    3.3%
+  AudioLoader                                 1     70808      3.500   15.2%    2.9%
+  Spectrum[size=2048]                         1    131058      0.479    2.1%    0.4%
+  SpectralPeaks                               1    131058      0.310    1.3%    0.3%
+  ChordsDetection                             1     70814      0.297    1.3%    0.2%
+  SingleBeatLoudness                          1     76714      0.255    1.1%    0.2%
+  PoolStorage                                25   2264777      0.236    1.0%    0.2%
+  FrameCutter                                 1    131013      0.183    0.8%    0.2%
+  Scale                                       1    100912      0.171    0.7%    0.1%
+  Windowing[size=1024]                        1    131058      0.113    0.5%    0.1%
+  MonoMixer                                   1    105841      0.078    0.3%    0.1%
+  Entropy                                     1    131058      0.077    0.3%    0.1%
+  Trimmer                                     1    100912      0.040    0.2%    0.0%
+  Slicer                                      1     99552      0.025    0.1%    0.0%
+  Crest                                       1    131058      0.023    0.1%    0.0%
+  [step] computeTuningSystemFeatures          0        45      0.018    0.1%    0.0%
+  ChordsDescriptors                           1     70814      0.011    0.0%    0.0%
+  DevNull<Real>[5]]                           1     70853      0.007    0.0%    0.0%
+  DevNull<int>[2]]                            1     70853      0.006    0.0%    0.0%
+  DevNull<std::string>[4]]                    1     70853      0.006    0.0%    0.0%
+  Key[profileType=edma]                       1     70814      0.005    0.0%    0.0%
+  Key[profileType=krumhansl]                  1     70814      0.004    0.0%    0.0%
+  DevNull<std::string>[5]]                    1     70853      0.004    0.0%    0.0%
+  Key[profileType=temperley]                  1     70814      0.004    0.0%    0.0%
+
+6 aggregation             0.118 s    0.1% of total   (algorithms 0.000 s, remainder 0.118 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+
+7 output                  1.492 s    1.2% of total   (algorithms 0.000 s, remainder 1.492 s)
+  algorithm                                inst     calls  elapsed s  %phase  %total
+  [step] main                                 0        45      0.786   52.7%    0.6%
+  [step] frames                               0        45      0.705   47.3%    0.6%
