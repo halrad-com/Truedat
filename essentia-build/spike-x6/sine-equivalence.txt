@@ -1,0 +1,11 @@
+Build A (send/receive loop moved into essentia/utils/audioloader_decode.h at
+LEGACY semantics, AudioLoader wired through it, conversion unchanged) vs the
+shipped output-x64.5, 2-arg call on spike-x5/sine60.wav (60 s 44.1 kHz stereo
+sine; deterministic: .4 vs .5 had 0 numeric differences on it).
+
+input   spike-x5/sine60.wav                       md5 8497626afc10b2d8d7d04a5847aa614c
+.5      output-x64.5 (6f47bdfcaadfd4f510c5e1621c07945d)   -> md5 b5cfde9cc7b867aada63d2e1fb6f607a
+build A spike-x6/out/build-a (dfa05827ec0f564f82d645a8eba6e430) -> md5 b5cfde9cc7b867aada63d2e1fb6f607a
+
+cmp: byte-identical. The refactor is behaviour-preserving on this input, so the
+RED rows recorded with build A's tools are the .5 loader's behaviour.

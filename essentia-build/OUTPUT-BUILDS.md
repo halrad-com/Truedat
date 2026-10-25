@@ -197,3 +197,67 @@ A sine is not music — the real measurement is the 20-track slice on max (archi
 difference in any output is the `metadata.version.extractor_build` key, plus the run-to-run noise
 that `.4` already has. Truedat pairing unchanged (`--max-duration 48000`); the truedat side —
 `ReportExtractorBuild`'s MD5 table, `truedat-deps`, the C# ESPB reader — is separate work.
+
+## output-x64.6 — decoder correctness, decoder-only (2026-10-25)
+
+`AudioLoader`'s libavcodec loop and frame conversion, moved into
+`src/essentia/utils/audioloader_decode.h` (outside `algorithms/`, whose headers the build
+turns into algorithm registrations) so the loader, a scripted-decoder fixture and a native
+ASan harness run the same code:
+
+- **Send/receive loop.** `.5` sent each packet once and received one frame: a packet refused
+  with `EAGAIN` was dropped, and a multi-frame packet's later frames were left behind. `.6`
+  receives the pending frames and resends the same packet, and receives until the decoder
+  wants input.
+- **Drain.** `.5` re-sent the drain packet every iteration, so the second send's `AVERROR_EOF`
+  ended the drain after one delayed frame. `.6` sends it once and receives until EOF.
+- **Conversion capacity.** `.5` converted into a fixed 384,000-byte buffer, told `swr_convert`
+  the frame's sample count as capacity and clamped only after the write: a 65,535-sample stereo
+  frame (524,280 B) overflowed the heap and the process died (exit 139). `.6` sizes the buffer
+  from the received frame and `swr_get_out_samples`, grows it on demand and reuses it.
+- Also: non-audio packets (cover art) are unreffed instead of overwritten, each converted
+  frame is unreffed, the frame is freed with `av_frame_free`, and frames are pushed downstream
+  in chunks of at most 65,536 (a frame is pushed whole now; one request above the source's
+  262,144-token phantom size throws).
+
+`metadata.version.extractor_build` = `"output-x64.6"`. The `.5` writer, `--frames-bin`,
+`framesInclude` and every call shape are untouched.
+
+Incremental build on `.5`'s object cache (`run-x6-build.sh`, one-shot scheduled task, `-j6`):
+5 sources recompiled, **8m33s** (21:03:13 → 21:11:46 PDT 2026-10-24).
+`essentia_streaming_extractor_music.exe`: MD5 **`2fe852f564c894691e144697c6a0d200`**.
+
+**Verification** (evidence and method: `spike-x6/README.md`; 45-row corpus — every codec the
+extractor's FFmpeg decodes, 44.1–192 kHz, mono/stereo, incomplete final frames, short and
+truncated files, 65,535-block FLAC — synthetic rows regenerating byte-identically, plus eight
+real files):
+
+- **PCM parity against FFmpeg 7.1.1** built from the extractor's own FFmpeg source, flags and
+  toolchain (`spike-x6/references.txt`): `.6` sample count and f32 PCM byte-identical on
+  **45 of 45** rows (`parity-x6.txt`). The `.5` loader (an intermediate build whose extractor is
+  byte-identical to `.5` on `sine60.wav`) is byte-identical on every row except the three stereo
+  65,535-block FLACs, where it crashes (`parity-build-a.txt`). So with this FFmpeg the loop
+  defects lost no samples on any codec here — its decoders return one frame per packet and no
+  delayed frames — and the capacity defect is the only one real files reach.
+- **Decoder-state fixtures** (`essentia_test_audioloader_decodeloop`, the loader's own loop
+  against a scripted decoder: multi-frame packets, `EAGAIN` backpressure, delayed frames at
+  drain, drain-once, mid-stream error, an `EAGAIN`-forever decoder): `.5` loop 5 of 8 fail,
+  `.6` 8 of 8 pass (`fixtures-*.txt`).
+- **ASan** (FFmpeg 7.1.1 built natively with `--toolchain=gcc-asan --disable-asm`, so
+  libswresample is instrumented): `.6` over the corpus, 0 ASan/LeakSanitizer reports; `.5`'s
+  conversion on the big-block rows, heap-buffer-overflow in `libswresample/audioconvert.c` via
+  `swr_convert` on the three stereo rows and nothing on the mono control (`asan-*report.txt`).
+- **End-to-end, `.5` vs `.6`**, 2-arg call, judged against a `.5` × 3 same-binary band
+  (`repeat-band.*`): on every row `.5` analyses, 0 values beyond 2× the statistic family's
+  band; synthetic rows move 0 keys at all. Per-key (2× the key's own three-run band) flags 56
+  values on four real files, and an out-of-sample `.6` vs `.6` pair flags 50 on the same four —
+  the run-to-run noise `.3` documented, not the change (`field-table-*.txt`).
+- **Call shapes** (`additive-check.txt`): 2-arg and 4-arg main JSON differ from `.5` only in
+  `extractor_build`; 3-arg JSON frames byte-identical; the ESPB file differs in one byte, the
+  header tag.
+
+Against the shipped `dist/truedat/ffmpeg.exe` (FFmpeg 8.x) AAC in MP4 decodes 288–867 frames
+shorter (8.x trims the end padding) and AAC/WMA differ in the last bits; both loaders are
+bit-exact against 7.1.1 there, so these are FFmpeg-version effects (`references.txt`).
+Not verified: an Opus decoder (none in this FFmpeg build), multichannel input, real files with
+large FLAC blocks (none found), non-ASCII paths.

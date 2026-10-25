@@ -23,10 +23,9 @@
 #include "streamingalgorithm.h"
 #include "network.h"
 #include "ffmpegapi.h"
+#include "audioloader_decode.h"
 #include "poolstorage.h"
 
-
-#define MAX_AUDIO_FRAME_SIZE 192000
 
 namespace essentia {
 namespace streaming {
@@ -42,13 +41,10 @@ class AudioLoader : public Algorithm {
 
   int _nChannels;
 
-  // MAX_AUDIO_FRAME_SIZE is in bytes, multiply it by 2 to get some margin, 
-  // because we might want to decode multiple frames in this buffer (all the 
-  // frames contained in a packet, which can be more than 1 as in flac), and 
-  // each time we decode a frame we need to have at least a full buffer of free space.
-  const int FFMPEG_BUFFER_SIZE = MAX_AUDIO_FRAME_SIZE * 2;
-
-  uint8_t* _buffer;   // byte-oriented buffer, clearer semantics
+  // interleaved float output of the frame being pushed, sized from that frame
+  // and grown on demand (audioloader_decode.h); output-x64.5 used a fixed
+  // 384,000-byte buffer here, which a 65535-sample stereo frame overflowed
+  audioloader_detail::ConvertBuffer _convert;
   int _dataSize;
 
   AVFormatContext* _demuxCtx;
@@ -77,11 +73,12 @@ class AudioLoader : public Algorithm {
                          int* outputSize, AVPacket* packet);
   int decodePacket();
   void flushPacket();
+  void emitDecodedFrame();
   void copyFFmpegOutput();
 
 
  public:
-  AudioLoader() : Algorithm(), _buffer(0),  _demuxCtx(0),
+  AudioLoader() : Algorithm(), _demuxCtx(0),
 	          _audioCtx(0), _audioCodec(0), _decodedFrame(0),
             _convertCtxAv(0), _configured(false) {
 
@@ -96,12 +93,6 @@ class AudioLoader : public Algorithm {
 
     // Note: av_register_all() was deprecated and removed in FFmpeg 4.0
     // Modern FFmpeg automatically registers formats and codecs
-
-    // use av_malloc, allocate bytes; interpret as float* when needed
-    _buffer = (uint8_t*)av_malloc(FFMPEG_BUFFER_SIZE);
-    if (!_buffer) {
-      throw EssentiaException("Error allocating FFmpeg buffer");
-    }
 
     _md5Encoded = av_md5_alloc();
     if (!_md5Encoded) {

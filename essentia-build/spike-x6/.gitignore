@@ -1,0 +1,17 @@
+# Verification scratch for the output-x64.6 build. Small text evidence (tables,
+# fixture logs, the corpus manifest) and the scripts are tracked; generated
+# audio, decoded PCM, extractor outputs and native build trees are not -
+# regenerate them with the scripts here (see README.md).
+corpus/
+pcm/
+# a machine's own file paths: never in this public repo
+real-files.tsv
+manifest.tsv
+out/
+asan/work/
+ref/*.exe
+*.f32
+*.log
+*.json
+*.json_frames
+*.bin

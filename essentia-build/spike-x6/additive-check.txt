@@ -1,0 +1,19 @@
+output-x64.6 additive check: every call shape produces exactly .5's files apart
+from the build id. Input spike-x5/sine60.wav (deterministic: .4 vs .5 had 0
+numeric diffs). .5 = 6f47bdfcaadfd4f510c5e1621c07945d, .6 = 2fe852f564c894691e144697c6a0d200.
+
+2-arg  (input output)
+  diff main JSON: one line - metadata.version.extractor_build "output-x64.5" -> "output-x64.6"
+
+3-arg  (input output spike-x5/frames-all.yaml; outputFrames -> <output>_frames)
+  cmp <output>_frames: byte-identical
+
+4-arg  (input output spike-x5/frames-curated.yaml --frames-bin <bin>)
+  diff main JSON: the same one line (extractor_build)
+  cmp -l ESPB: one byte, offset 40: 0x35 '5' -> 0x36 '6' (the header tag, which
+  carries the build id by design - FRAMES-BINARY-FORMAT.md)
+
+The BinaryPoolOutput writer, --frames-bin, framesInclude and the extractor_build
+key are untouched by the drop 1 change (git diff of the drop 1 commit touches
+only the loader, its new header, the build id, the examples wscript and the two
+verification tools).

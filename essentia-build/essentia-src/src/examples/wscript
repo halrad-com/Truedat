@@ -89,6 +89,15 @@ example_sources_with_tensorflow = [
     ('streaming_vggish_predict', )
 ]
 
+# truedat x6: decoder-parity and decoder-state tools, built whenever the music
+# extractor is. EXAMPLE_LIST is fixed at configure time and these are not in
+# it, so listing them here lets an incremental build pick them up without a
+# reconfigure. Verification tools only; not shipped.
+example_sources_truedat = [
+    ('standard_audioloader_dump', ),
+    ('test_audioloader_decodeloop', ),
+]
+
 
 def configure(ctx):
     example_list_fileio = [p[0] for p in example_sources_fileio]
@@ -174,6 +183,10 @@ def build(ctx):
                     build_example(e[0])
                 elif len(e) == 2:
                     build_example(e[0], e[1])
+
+        if 'streaming_extractor_music' in ctx.env.EXAMPLE_LIST:
+            for e in example_sources_truedat:
+                build_example(e[0])
 
 
     if ctx.env.WITH_VAMP:

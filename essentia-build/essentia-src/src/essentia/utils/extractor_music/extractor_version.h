@@ -7,6 +7,6 @@
 // Identity of THIS compiled extractor binary, written to the main output as
 // metadata.version.extractor_build (truedat reads the build from the output
 // instead of an MD5 table). Bump with every output-x64.N build.
-#define MUSIC_EXTRACTOR_BUILD_ID "output-x64.5"
+#define MUSIC_EXTRACTOR_BUILD_ID "output-x64.6"
 
 #endif /* EXTRACTOR_VERSION_H_ */

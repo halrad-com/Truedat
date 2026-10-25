@@ -1,0 +1,46 @@
+x6 B1 parity references (pinned). Both run as
+  ffmpeg -i <in> -map 0:a:0 -c:a pcm_f32le -f f32le <out>
+with no -ar / -ac (format-only conversion, as the loader does). Delay/padding:
+applied inside libavcodec/libavformat on both sides; no manual trim, no offset.
+
+=== same  (THE GATE)  spike-x6/ref/ffmpeg-7.1.1-mingw.exe  md5 1830c31ce4a547fc71dbd4e9b6928ccb
+Built by ref/build-ffmpeg-ref.sh from ffmpeg-7.1.1.tar.gz
+  sha256 9a6e57a446b671012612aaeb9df5126794d5ac8f2015ca220934f99a6a4e0601
+with the extractor's toolchain (x86_64-w64-mingw32 gcc 13-win32) and flags.
+  ffmpeg version 7.1.1
+  libavutil 59.39.100  libavcodec 61.19.101  libavformat 61.7.100
+  libavfilter 10.4.100  libswresample 5.3.100
+  = the extractor's 3rdparty/include (libavcodec 61.19.101, libavformat 61.7.100)
+configure: $FFMPEG_AUDIO_FLAGS from build_config.sh (the extractor's FFmpeg),
+  --enable-cross-compile --cross-prefix=x86_64-w64-mingw32- --arch=x86_64
+  --target-os=mingw32 --disable-shared --enable-static, plus ONLY
+  --enable-ffmpeg --enable-avfilter
+  --enable-filter=abuffer,abuffersink,aresample,aformat,anull
+  --enable-muxer=pcm_f32le --enable-encoder=pcm_f32le
+(full line: ffmpeg-7.1.1-mingw.exe -version)
+
+=== shipped  (informational)  dist/truedat/ffmpeg.exe  md5 497c3bd8e153493af20e556e8525dcfc
+  ffmpeg version 2026-10-08-git-ec420ba161-full_build-www.gyan.dev
+  libavutil 61.13.100  libavcodec 63.18.100  libavformat 63.8.100
+  libswresample 7.3.101
+
+=== Known reference-VERSION effects (8.x vs 7.1.1) - NOT loader regressions
+Measured: the .5 loader (build A) and the .6 loader are each bit-exact against
+7.1.1 on every row below, and both show the same differences against 8.x.
+  - AAC in MP4 (m4a): 8.x outputs 288-867 FEWER sample frames than 7.1.1 - it
+    trims the encoder's end padding; 7.1.1 does not. The overlap is
+    bit-identical (aac_44k_st -655, aac_48k_mo -288, aac_96k_st -576,
+    aac_44k_st_short -867). Real m4a rows in this corpus have equal counts.
+  - AAC (incl. raw ADTS) and WMA (wmav2) float PCM: last-bit differences,
+    max |d| 1.9e-9 .. 1.2e-7, equal counts (decoder arithmetic changed
+    between libavcodec 61 and 63).
+  - Every other codec in the corpus (FLAC, PCM WAV/AIFF, MP3, Vorbis, ALAC,
+    WavPack): bit-identical between the two references.
+Source: parity-build-a.txt / parity-x6.txt (gate) vs parity-build-a-shipped.txt /
+parity-x6-shipped.txt.
+
+=== FFmpeg limit found while building the corpus (both versions; not a loader defect)
+FFmpeg's flac encoder writes 24-bit streams with block size 65535 that NO FFmpeg
+(7.1.1 or 8.x, ffmpeg or ffprobe) decodes a sample of, when the content barely
+compresses (seeded noise, or a tone at 0.4 x the rate; seen at 96k and 192k).
+The corpus' 24-bit big-block row is therefore generated from two low tones only.

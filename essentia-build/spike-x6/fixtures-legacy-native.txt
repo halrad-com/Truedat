@@ -1,0 +1,9 @@
+PASS one-frame-per-packet               frames 50/50, packet errors 0, drain sends 1, api calls 102
+FAIL three-frames-per-packet            frames 51/150, packet errors 0, drain sends 2, api calls 103
+FAIL send-backpressure-eagain           frames 25/50, packet errors 0, drain sends 1, api calls 102
+FAIL eagain-with-multiframe-packets     frames 34/100, packet errors 0, drain sends 2, api calls 103
+FAIL four-delayed-frames-at-drain       frames 47/50, packet errors 0, drain sends 2, api calls 103
+FAIL drain-sent-once                    drain sends 2
+PASS decode-error-mid-stream            frames 49/49, packet errors 1, drain sends 1, api calls 102
+PASS api-violation-does-not-spin        frames 0/0, packet errors 0, drain sends 1, api calls 8
+FAILED: 5 failure(s)
