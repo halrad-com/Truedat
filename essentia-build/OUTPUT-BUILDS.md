@@ -430,9 +430,14 @@ coverage, freshness and finite/non-finite checks — 45 decodable rows, 37 exact
   file, with the spool on (`field-table-sraw-c3raw.txt`, `field-table-sscan-c3scan.txt`,
   `gate-edges-sscanedges-c3scanedges.txt`) and with it forced off by a 1-byte cap
   (`field-table-sscanedges-c3zscanedges.txt`, `gate-edges-sscanedges-c3zscanedges.txt`); the
-  APE row, whose packets carry 64 frames, is among them. Noisy rows within their per-key and
-  family bands; two family flags on one AAC file in change 1 were shown to be the extractor's
-  own run-to-run spread by repeating the row on both builds (`noise-r_m4a_2-drop2*.txt`).
+  APE row, whose packets carry 64 frames, is among them. Noisy rows: every family band clean
+  (family-beyond 0 in each table). The per-key bands are NOT all clean: strict-beyond 12 in the
+  full output, 1 in the scan profile, and 1 with the forced over-cap path (the `totals` lines of the
+  three field tables). An independent review counted one more in the spool-on scan + edges main
+  output, which has no field table committed. None of these keys was repeated, so they are
+  unresolved as noise, not shown to be noise. Two family flags on one AAC file in change 1 were
+  shown to be the extractor's own run-to-run spread by repeating the row on both builds
+  (`noise-r_m4a_2-drop2*.txt`); those are different keys.
 - The spool, natively under ASan and UBSan: 19/19 (`spool-test.txt`); the first run found that
   a cap below one block could never record, fixed before the build. Decoder fixtures 8/8.
 - Memory (`c3-mem-cap256m.txt`, `c3-mem-cap100m.txt`, same binary, spool on vs off): peak
