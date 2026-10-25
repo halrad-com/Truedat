@@ -8,6 +8,25 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV3.3] — 2026-10-24
+
+### Fixed
+
+- A library spread across several drives, or one whose root got registered twice, publishes the whole catalog.
+  Stores that already have the problem fix themselves the next time they open, after making a backup.
+- A store copied to another machine publishes the whole library there too.
+- Changing a file's tags no longer brings back the old file hash on the next scan.
+- Merging catalogs from two machines keeps every value either side had.
+- Stopping a scan (Ctrl+C twice, closing the window, logging off, shutting down) saves what finished before it exits.
+- A drive that's offline during a scan is not treated as deleted files.
+- `--fixup --remap` and `--restore` refuse with a sentence instead of crashing, and `--restore` keeps a copy of what
+  it replaced.
+- Two authenticity measurement errors (clipped tracks, failed decodes) corrected.
+
+### Added
+
+- `--refresh-authenticity` re-measures tracks analysed with an older authenticity method.
+
 ## [0.5.5.3-EV2.2.3.2] — 2026-10-20
 
 ### Changed
