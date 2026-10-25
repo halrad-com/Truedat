@@ -440,8 +440,9 @@ namespace Truedat.Store
             r.Entries = loaded; r.Catalog = catalog;
             (r.CatalogSha256, r.CatalogBytes) = HashCatalog(catalog);
             StoreLog.Info($"catalog {catalog}: {loaded} entries, {r.CatalogBytes:N0} bytes, sha256 {r.CatalogSha256.Substring(0, 12)}…");
-            // Fail-safe: once the store holds this catalog, every publication replaces the file. Keep the imported bytes first.
-            var pinned = global::Truedat.CatalogArchive.PinImported(catalog, r.CatalogSha256);
+            // Fail-safe: once the store holds this catalog, every publication replaces the file. Keep the imported bytes first — and if
+            // they cannot be kept, import nothing (CatalogPinException; the store is not even opened).
+            var pinned = PinCatalog(catalog, r.CatalogSha256);
             if (pinned != null) StoreLog.Info($"catalog kept as it was imported: {pinned}");
 
             var now = DateTime.UtcNow.ToString("o");
@@ -1007,11 +1008,29 @@ namespace Truedat.Store
             return best;
         }
 
+        /// <summary>The import's fail-safe as one call: hash the catalog (single file or every part) and pin it beside itself. The
+        /// seeding scan calls this BEFORE it imports, so a pin that cannot be written refuses the scan while the catalog is still
+        /// untouched (codex 2026-10-25 N2: a failed pin used to fall through to a scan without a store, which then rewrote the
+        /// unprotected file). Null when there is no catalog file on disk; throws <see cref="CatalogPinException"/> on any failure.</summary>
+        internal static string? PinCatalog(string catalog)
+        {
+            if (global::Truedat.CatalogArchive.CatalogFiles(catalog).Count == 0) return null;
+            return PinCatalog(catalog, HashCatalog(catalog).Sha);
+        }
+
+        static string? PinCatalog(string catalog, string sha)
+        {
+            try { return global::Truedat.CatalogArchive.PinImported(catalog, sha); }
+            catch (Exception ex) when (!(ex is CatalogPinException))
+            {
+                var pin = $"{catalog}.imported.{sha.Substring(0, Math.Min(16, sha.Length))}.zip";
+                throw new CatalogPinException($"the catalog could not be kept as {pin} before import ({ex.Message.Trim()}); nothing was imported", ex);
+            }
+        }
+
         static (string Sha, long Bytes) HashCatalog(string catalog)
         {
-            var files = new List<string>();
-            if (File.Exists(catalog)) files.Add(catalog);
-            else for (int i = 1; File.Exists(catalog + "." + i); i++) files.Add(catalog + "." + i);
+            var files = global::Truedat.CatalogArchive.CatalogFiles(catalog);
             long bytes = 0;
             using var sha = SHA256.Create();
             foreach (var f in files)

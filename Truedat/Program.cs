@@ -4094,7 +4094,7 @@ namespace Truedat
             // --analyze-file: single file Essentia analysis (no iTunes XML needed)
             if (analyzeFileMode)
             {
-                EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog);   // no store yet: this scan makes one (needs a --moods target)
+                if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 // No path at all is a usage error and stays exit 1 — there is nothing to
                 // ledger and nothing the caller could have meant.
@@ -4720,7 +4720,7 @@ namespace Truedat
             //   --file-list -       read paths from stdin (one per line, # comments)
             if (fileListMode)
             {
-                EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog);   // no store yet: this scan makes one (needs a --moods target)
+                if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 List<string> filePaths;
 
@@ -5566,7 +5566,9 @@ namespace Truedat
             }
             // No store yet: the library scan makes one now that its catalog path is known, and then begins the run record
             // for it (BeginScan above ran with no store and recorded nothing). A --chunk shard never does.
-            if (libraryScan && EnsureDefaultStore(moodsPath, chunked: chunkTotal > 0, auditLog))
+            var seed = libraryScan ? EnsureDefaultStore(moodsPath, chunked: chunkTotal > 0, auditLog) : SeedResult.NoStore;
+            if (seed == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // the catalog could not be pinned: nothing scanned, nothing rewritten
+            if (seed == SeedResult.StoreInForce)
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             var logPath = Path.Combine(outputDir, "truedat.log");
             TeeWriter? tee = null;
@@ -23609,29 +23611,47 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// "a rescan is an opt in"). A store the scan cannot have — SQLite unavailable on this OS, a seed that fails —
         /// is a note and a scan without it, never a refused scan: a default must not break the command it rides on.
         /// Returns true when a store is now in force for this run.</summary>
-        static bool EnsureDefaultStore(string? catalogPath, bool chunked, bool audit)
+        /// <summary>What <see cref="EnsureDefaultStore"/> decided: no store for this scan; a store in force (created or seeded); or the
+        /// scan is REFUSED — the catalog it would seed from could not be pinned beside itself, so the scan must not rewrite it either.</summary>
+        internal enum SeedResult { NoStore, StoreInForce, Refused }
+
+        static SeedResult EnsureDefaultStore(string? catalogPath, bool chunked, bool audit)
         {
-            if (catalogPath == null) return false;
+            if (catalogPath == null) return SeedResult.NoStore;
             // The store asked for by a flag or the config file was resolved in the arg block; otherwise the default location.
             // Either way the question is the same — is there a store FILE yet — so a typed --store or config `store true`
             // on a library that has a catalog seeds too, instead of refusing until --store-import has been run by hand.
             string storePath;
             try { storePath = _storePath ?? global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _); }
-            catch (Exception ex) { Console.WriteLine($"  Store:      not created ({ex.Message}); this scan runs without it"); return false; }
+            catch (Exception ex) { Console.WriteLine($"  Store:      not created ({ex.Message}); this scan runs without it"); return SeedResult.NoStore; }
             if (!ShouldCreateDefaultStore(File.Exists(storePath), _noStoreTyped, ConfigSaysOff("store"), chunked, hasCatalogTarget: true))
-                return false;
+                return SeedResult.NoStore;
 
             var probe = global::Truedat.Store.SqliteProbe.Probe();
             if (!probe.Ok)
             {
                 Console.WriteLine($"  Store:      not created — {probe.Message} This scan runs without it.");
-                return false;
+                return SeedResult.NoStore;
             }
 
             bool catalogHasEntries = File.Exists(catalogPath) && new FileInfo(catalogPath).Length > 0;
             if (catalogHasEntries)
             {
                 Console.WriteLine($"  Store:      none yet — seeding {storePath} from the catalog (no audio read)");
+                // The fail-safe first, by itself: the catalog is pinned beside itself before the import opens anything. A pin that
+                // cannot be written REFUSES the scan — falling through to "a scan without a store" would rewrite the one copy
+                // that was not protected (codex 2026-10-25 N2). The import pins again and finds the pin already there.
+                try
+                {
+                    var pin = global::Truedat.Store.ImportCommand.PinCatalog(catalogPath!);
+                    if (pin != null) Console.WriteLine($"              catalog kept as it is: {pin}");
+                }
+                catch (global::Truedat.Store.CatalogPinException ex)
+                {
+                    Console.Error.WriteLine($"Error: {ex.Message}.");
+                    Console.Error.WriteLine("  Nothing was scanned and the catalog is untouched. Fix that and run again, or scan with --no-store (the catalog is then rewritten with no copy kept).");
+                    return SeedResult.Refused;
+                }
                 int rc;
                 try
                 {
@@ -23658,7 +23678,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Console.WriteLine(publishFailure != null
                         ? $"  Store:      seeded, but the catalog could not be published from it ({publishFailure}); this scan runs without a store"
                         : "  Store:      seeding did not complete; this scan runs without a store (truedat --store-import shows why)");
-                    return false;
+                    return SeedResult.NoStore;
                 }
                 Console.WriteLine("              tracks already in the catalog get edges with truedat --refresh (a re-analysis, so opt-in)");
             }
@@ -23671,7 +23691,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // --edges is already on and stays HARD (it refuses on an old extractor, as asked), so it is left exactly as it is.
             if (!_stageOpts.Edges && !_noEdgesTyped && !ConfigSaysOff("edges")) { _stageOpts.Edges = true; _edgesFromConfig = true; }
             Console.WriteLine($"              on by default{(_stageOpts.Edges ? ", with edges" : "")}; --no-store, or truedat --config store false, turns it off");
-            return true;
+            return SeedResult.StoreInForce;
         }
 
         /// <summary>Where a store in force puts its working files and its companion — one place for the arg block and the

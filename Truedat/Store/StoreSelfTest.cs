@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 
 namespace Truedat.Store
@@ -1447,6 +1448,64 @@ namespace Truedat.Store
                     $"import pins its source catalog: {pins.Length} pinned zip(s) after import, publish, re-import of the published file and a rotation (expected 2: the original and the published one), the first byte-identical to the original: {held != null && held.SequenceEqual(original)}");
                 using (StoreLog.Quiet()) ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
                 assert(Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip").Length == 2, "importing the same catalog again pins nothing new (the pin is named by content)");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+
+            // codex 2026-10-25 N1: a split catalog (mbxmoods.json.1 / .2) imported fine but pinned nothing — PinImported looked for the
+            // single file — and the first publication deleted both parts (one file OR parts, never both). Every part is pinned, whole.
+            dir = Path.Combine(Path.GetTempPath(), "truedat-pin-parts-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(cat + ".1", VerdictSelfTest.Fixture());
+                WriteCatalog(cat + ".2", FixtureEntries(@"D:\music"));
+                var part1 = File.ReadAllBytes(cat + ".1"); var part2 = File.ReadAllBytes(cat + ".2");
+                assert(CatalogArchive.CatalogFiles(cat).Count == 2 && CatalogArchive.CatalogFiles(cat)[1] == cat + ".2",
+                    "CatalogFiles names the numbered parts in order when the single file is absent");
+                using (StoreLog.Quiet())
+                {
+                    var rep = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                    assert(rep.Entries > 0, $"fixture: the split catalog imports ({rep.Entries} entries)");
+                    StoreScan.Publish(store, cat, out _);
+                }
+                var pins = Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip");
+                byte[]? got1 = null, got2 = null;
+                if (pins.Length == 1)
+                {
+                    using var zip = ZipFile.OpenRead(pins[0]);
+                    var e1 = zip.GetEntry("mbxmoods.json.1"); var e2 = zip.GetEntry("mbxmoods.json.2");
+                    if (e1 != null) using (var ms = new MemoryStream()) { using (var es = e1.Open()) es.CopyTo(ms); got1 = ms.ToArray(); }
+                    if (e2 != null) using (var ms = new MemoryStream()) { using (var es = e2.Open()) es.CopyTo(ms); got2 = ms.ToArray(); }
+                }
+                assert(pins.Length == 1 && got1 != null && got1.SequenceEqual(part1) && got2 != null && got2.SequenceEqual(part2),
+                    $"a split catalog is pinned whole before its first publication: {pins.Length} pin(s) (expected 1) holding both parts byte-identical ({got1 != null && got1.SequenceEqual(part1)}, {got2 != null && got2.SequenceEqual(part2)})");
+                assert(File.Exists(cat) && !File.Exists(cat + ".1") && !File.Exists(cat + ".2"),
+                    "fixture: publication replaced the parts with the single file (the invariant the pin exists for)");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+
+            // codex 2026-10-25 N2: a pin that cannot be written must stop the import before the store is touched — PinCatalog is also what
+            // the seeding scan calls first, so the same refusal keeps a scan from rewriting the one unprotected copy.
+            dir = Path.Combine(Path.GetTempPath(), "truedat-pin-fail-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(cat, VerdictSelfTest.Fixture());
+                var original = File.ReadAllBytes(cat);
+                string sha;
+                using (var fs = File.OpenRead(cat)) using (var h = System.Security.Cryptography.SHA256.Create()) sha = BitConverter.ToString(h.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+                Directory.CreateDirectory($"{cat}.imported.{sha.Substring(0, 16)}.zip");   // a directory where the pin must go: the archive write fails
+                string? thrown = null;
+                try { using (StoreLog.Quiet()) ImportCommand.PinCatalog(cat); } catch (CatalogPinException ex) { thrown = ex.Message; }
+                assert(thrown != null && thrown.Contains("could not be kept") && thrown.Contains("nothing was imported"),
+                    $"PinCatalog names the failure as a CatalogPinException ({thrown ?? "<no throw>"})");
+                thrown = null;
+                try { using (StoreLog.Quiet()) ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" }); }
+                catch (CatalogPinException ex) { thrown = ex.Message; }
+                assert(thrown != null && !File.Exists(store) && File.ReadAllBytes(cat).SequenceEqual(original),
+                    $"an import whose pin fails imports nothing: refused {thrown != null}, store created {File.Exists(store)}, catalog unchanged {File.ReadAllBytes(cat).SequenceEqual(original)}");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

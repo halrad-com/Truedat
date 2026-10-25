@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -77,31 +78,56 @@ namespace Truedat
         /// <paramref name="bakPath"/> (entry name mbxmoods.json), staged to a .tmp and
         /// atomically moved into place. Returns the backup path written.</summary>
         internal static string WriteZipBackup(string catalogPath, string bakPath)
+            => WriteZipBackup(new[] { (catalogPath, CatalogEntryName) }, bakPath);
+
+        /// <summary>The multi-file form: each (path, entry name) pair becomes one entry, staged and swapped the same way. A split
+        /// catalog (mbxmoods.json.1, .2, …) is pinned as one zip holding every part under its own file name.</summary>
+        internal static string WriteZipBackup(IReadOnlyList<(string Path, string EntryName)> files, string bakPath)
         {
             var tmp = bakPath + ".tmp";
             try { File.Delete(tmp); } catch { }
             using (var zfs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
             using (var zip = new ZipArchive(zfs, ZipArchiveMode.Create))
             {
-                var entry = zip.CreateEntry(CatalogEntryName, CompressionLevel.Optimal);
-                using var es = entry.Open();
-                using var src = new FileStream(catalogPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-                src.CopyTo(es);
+                foreach (var f in files)
+                {
+                    var entry = zip.CreateEntry(f.EntryName, CompressionLevel.Optimal);
+                    using var es = entry.Open();
+                    using var src = new FileStream(f.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                    src.CopyTo(es);
+                }
             }
             Program.AtomicReplace(tmp, bakPath);
             return bakPath;
+        }
+
+        /// <summary>The files a catalog path means on disk: the single file when it exists, otherwise the numbered parts
+        /// <c>&lt;catalog&gt;.1</c>, <c>.2</c>, … while they are contiguous (the reader's rule; the INVARIANT is one or the other,
+        /// never both). Empty when neither exists. One rule for the import's hash and its pin, so they cannot disagree.</summary>
+        internal static List<string> CatalogFiles(string catalogPath)
+        {
+            var files = new List<string>();
+            if (File.Exists(catalogPath)) files.Add(catalogPath);
+            else for (int i = 1; File.Exists(catalogPath + "." + i); i++) files.Add(catalogPath + "." + i);
+            return files;
         }
 
         /// <summary>The fail-safe for a catalog a store imports (operator 2026-10-25): once the store holds it, every scan publishes over
         /// mbxmoods.json from the store with no backup, and the editing verbs' zips rotate out after keep-backups. So the imported file is
         /// zipped beside itself first as <c>&lt;catalog&gt;.imported.&lt;sha256 prefix&gt;.zip</c>: named by content, so importing the same
         /// bytes again writes nothing new, and never matched by <see cref="RotateBackups"/> (its prefix is ".bak."). Restores with --restore
-        /// like any backup. Returns the pin's path (existing or new); null when there is no single catalog file to pin.</summary>
+        /// like any backup. A split catalog (numbered parts) is pinned whole — every part in the one zip, each under its own file
+        /// name — because publication deletes the parts (one file OR parts, never both); codex 2026-10-25 N1 reproduced the parts
+        /// being deleted with no copy kept. Returns the pin's path (existing or new); null when there is no catalog file to pin.</summary>
         internal static string? PinImported(string catalogPath, string sha256)
         {
-            if (!File.Exists(catalogPath) || string.IsNullOrEmpty(sha256)) return null;
+            if (string.IsNullOrEmpty(sha256)) return null;
+            var files = CatalogFiles(catalogPath);
+            if (files.Count == 0) return null;
             var pin = $"{catalogPath}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}.zip";
-            if (!File.Exists(pin)) WriteZipBackup(catalogPath, pin);
+            if (File.Exists(pin)) return pin;
+            if (files.Count == 1) WriteZipBackup(files[0], pin);
+            else WriteZipBackup(files.Select(f => (f, Path.GetFileName(f))).ToList(), pin);
             return pin;
         }
 

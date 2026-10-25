@@ -9,6 +9,14 @@ namespace Truedat.Store
         /// <summary>Process exit code for this refusal: 1 generic, StoreExitCodes.StoreUnavailable (4) when SQLite itself is missing or too old.</summary>
         public int ExitCode { get; }
         public StoreException(string message, int exitCode = 1) : base(message) { ExitCode = exitCode; }
+        public StoreException(string message, Exception inner) : base(message, inner) { ExitCode = 1; }
+    }
+
+    /// <summary>The catalog about to be imported could not be pinned beside itself (ImportCommand.PinCatalog). The import does not
+    /// proceed, and a scan that was about to seed a store from that catalog refuses rather than run without one.</summary>
+    internal sealed class CatalogPinException : StoreException
+    {
+        public CatalogPinException(string message, Exception inner) : base(message, inner) { }
     }
 
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>
