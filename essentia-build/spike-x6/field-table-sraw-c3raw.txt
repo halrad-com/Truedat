@@ -1,0 +1,56 @@
+x6 per-field table: sraw (baseline) vs c3raw (candidate)
+judged against repeat-band.tsv: STRICT = beyond 2x the key's own same-binary band (primary); FAMILY = beyond 2x its family's pooled band (secondary)
+FAMILY is uninformative for a family whose 2x band reaches the metric's ceiling (rel diff <= 2): min (2x band 3.76)
+pcm = (not given)
+
+id                         codec              pcm                       moved  strict  family   set  top family-beyond keys
+flac16_44k_st              flac/44100/2ch                                   0       0       0     0  
+flac16_44k_mo              flac/44100/1ch                                   0       0       0     0  
+flac16_48k_st              flac/48000/2ch                                   0       0       0     0  
+flac24_96k_st              flac/96000/2ch                                   0       0       0     0  
+flac24_192k_st             flac/192000/2ch                                  0       0       0     0  
+flac16_192k_mo             flac/192000/1ch                                  0       0       0     0  
+flac16_44k_st_bigblock     flac/44100/2ch                                   0       0       0     0  
+flac24_96k_st_bigblock     flac/96000/2ch                                   0       0       0     0  
+flac16_192k_st_bigblock    flac/192000/2ch                                  0       0       0     0  
+flac16_44k_mo_bigblock     flac/44100/1ch                                   0       0       0     0  
+flac16_44k_st_short        flac/44100/2ch                                   0       0       0     0  
+wav_s16_44k_st             pcm_s16le/44100/2ch                               0       0       0     0  
+wav_s24_96k_st             pcm_s24le/96000/2ch                               0       0       0     0  
+wav_f32_48k_st             pcm_f32le/48000/2ch                               0       0       0     0  
+wav_f32_192k_st            pcm_f32le/192000/2ch                               0       0       0     0  
+wav_s16_192k_mo            pcm_s16le/192000/1ch                               0       0       0     0  
+aiff_s16_44k_st            pcm_s16be/44100/2ch                               0       0       0     0  
+mp3_44k_st                 mp3/44100/2ch                                    0       0       0     0  
+mp3_48k_mo                 mp3/48000/1ch                                    0       0       0     0  
+mp3_44k_st_short           mp3/44100/2ch                                    0       0       0     0  
+aac_44k_st                 aac/44100/2ch                                    0       0       0     0  
+aac_48k_mo                 aac/48000/1ch                                    0       0       0     0  
+aac_96k_st                 aac/96000/2ch                                    0       0       0     0  
+aac_44k_st_short           aac/44100/2ch                                    0       0       0     0  
+aac_44k_st_adts            aac/44100/2ch                               (missing: sraw,c3raw - not decoded by either run)
+wma_44k_st                 wmav2/44100/2ch                                  0       0       0     0  
+wma_48k_st                 wmav2/48000/2ch                                  0       0       0     0  
+vorbis_44k_st              vorbis/44100/2ch                                 0       0       0     0  
+vorbis_48k_mo              vorbis/48000/1ch                                 0       0       0     0  
+opus_48k_st                opus/48000/2ch                              (missing: sraw,c3raw - not decoded by either run)
+alac16_44k_st              alac/44100/2ch                                   0       0       0     0  
+alac24_96k_st              alac/96000/2ch                                   0       0       0     0  
+alac24_192k_st             alac/192000/2ch                                  0       0       0     0  
+wv_s16_44k_st              wavpack/44100/2ch                                0       0       0     0  
+wv_s32_96k_st              wavpack/96000/2ch                                0       0       0     0  
+mp3_44k_st_trunc           mp3/44100/2ch                                    0       0       0     0  
+flac16_44k_st_trunc        flac/44100/2ch                                   0       0       0     0  
+r_mp3                      mp3/44100/2ch                                  695       1       0     0  
+r_m4a                      aac/44100/2ch                                  703       0       0     0  
+r_m4a_2                    aac/44100/2ch                                  797       6       0     0  
+r_wma                      wmav2/44100/2ch                                687       0       0     0  
+r_flac_hd                  flac/48000/2ch                                 516       1       0     0  
+r_flac_live                flac/44100/2ch                                   0       0       0     0  
+r_wav                      pcm_s16le/44100/1ch                               0       0       0     0  
+r_opus                     opus/48000/2ch                              (missing: sraw,c3raw - not decoded by either run)
+r_wmalossless              wmalossless/44100/2ch                             785       3       0     0  
+r_wmapro                   wmapro/96000/2ch                               764       1       0     0  
+r_ape                      ape/44100/2ch                                    0       0       0     0  
+
+totals: strict-beyond 12, family-beyond 0, set/non-numeric 0; rows compared 45, coverage failures 0

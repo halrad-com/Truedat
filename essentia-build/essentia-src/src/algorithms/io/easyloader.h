@@ -48,6 +48,8 @@ class EasyLoader : public AlgorithmComposite {
     declareParameter("replayGain", "the value of the replayGain that should be used to normalize the signal [dB]", "(-inf,inf)", -6.0);
     declareParameter("downmix", "the mixing type for stereo files", "{left,right,mix}", "mix");
     declareParameter("audioStream", "audio stream index to be loaded. Other streams are no taken into account (e.g. if stream 0 is video and 1 is audio use index 0 to access it.)", "[0,inf)", 0);
+    declareParameter("spoolKey", "truedat x7: passed to the AudioLoader (shared-decode spool key)", "", "");
+    declareParameter("spoolMode", "truedat x7: passed to the AudioLoader", "{none,record,replay}", "none");
 
   }
 

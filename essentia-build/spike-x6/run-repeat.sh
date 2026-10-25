@@ -24,6 +24,7 @@
 #           scanedges   scan-edges-profile.yaml --frames-bin out/<label>/<id>.bin
 #           full        3-arg call with profiles/full.yaml (= the 2-arg call)
 #           cut=<name>  3-arg call with profiles/cut-<name>.yaml (one cut alone)
+#           pfe=<name>  profiles/<name>.yaml + --frames-bin (e.g. x7-nospool-scanedges)
 #           prod        run over manifest-prod.tsv (make-prod-corpus.sh: the
 #                       hi-res rows converted to 44.1k as truedat does) instead
 #                       of manifest.tsv
@@ -57,6 +58,8 @@ case "$modes" in *.scan.*)      profile=scan-profile.yaml ;; esac
 case "$modes" in *.scanedges.*) profile=scan-edges-profile.yaml; bin=1 ;; esac
 case "$modes" in *.full.*)      profile=profiles/full.yaml ;; esac
 case "$modes" in *.cut=*)       cut="${modes#*.cut=}"; profile="profiles/cut-${cut%%.*}.yaml" ;; esac
+# pfe=<name>: profiles/<name>.yaml with --frames-bin (an edges-shape profile variant)
+case "$modes" in *.pfe=*)       pf="${modes#*.pfe=}"; profile="profiles/${pf%%.*}.yaml"; bin=1 ;; esac
 profiling=""
 case "$modes" in *.prof.*) profiling=1 ;; esac
 manifest=manifest.tsv

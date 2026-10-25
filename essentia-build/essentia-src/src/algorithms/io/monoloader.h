@@ -57,6 +57,8 @@ class MonoLoader : public AlgorithmComposite {
     declareParameter("downmix", "the mixing type for stereo files", "{left,right,mix}", "mix");
     declareParameter("audioStream", "audio stream index to be loaded. Other streams are no taken into account (e.g. if stream 0 is video and 1 is audio use index 0 to access it.)", "[0,inf)", 0);
     declareParameter("resampleQuality", "the resampling quality, 0 for best quality, 4 for fast linear approximation", "[0,4]", 1);
+    declareParameter("spoolKey", "truedat x7: passed to the AudioLoader (shared-decode spool key)", "", "");
+    declareParameter("spoolMode", "truedat x7: passed to the AudioLoader", "{none,record,replay}", "none");
   }
 
   void declareProcessOrder() {

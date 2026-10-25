@@ -92,6 +92,19 @@ double peakWorkingSetMiB(double* current) {
 #endif
 }
 
+// Bytes the process has written through the I/O manager so far (files, pipes,
+// devices), -1 if unavailable - the x7 check that the shared-decode spool adds
+// no writes: equal with and without it.
+double writtenMiB() {
+#ifdef _WIN32
+  IO_COUNTERS io;
+  if (!GetProcessIoCounters(GetCurrentProcess(), &io)) return -1;
+  return (double)io.WriteTransferCount / 1048576.0;
+#else
+  return -1;
+#endif
+}
+
 } // namespace
 
 bool enabled() {
@@ -179,8 +192,10 @@ void report(const string& label) {
   }
   double ws = -1;
   double peak = peakWorkingSetMiB(&ws);
-  fprintf(f, "# x6profile %s wall=%.6f cpu=%.6f peakws_mib=%.3f ws_mib=%.3f\n", label.c_str(),
-          now() - startTime(), processCpuSeconds(), peak, ws);
+  // written_mib: everything the process wrote before this report - the output
+  // JSON and frames file included, since report() runs after them
+  fprintf(f, "# x6profile %s wall=%.6f cpu=%.6f peakws_mib=%.3f ws_mib=%.3f written_mib=%.6f\n", label.c_str(),
+          now() - startTime(), processCpuSeconds(), peak, ws, writtenMiB());
   fprintf(f, "phase\talgorithm\tinstances\tcalls\tseconds\n");
   for (map<pair<string, string>, Entry>::const_iterator it = table().begin(); it != table().end(); ++it) {
     fprintf(f, "%s\t%s\t%u\t%ld\t%.6f\n", it->first.first.c_str(), it->first.second.c_str(),

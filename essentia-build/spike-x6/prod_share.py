@@ -110,6 +110,11 @@ def pooled(rows, sel):
 
 
 def main(labels):
+    stem = None   # --out <stem>: write decode-share-<stem>.txt instead of step0-decode.txt
+    if "--out" in labels:
+        i = labels.index("--out")
+        stem = labels[i + 1]
+        labels = labels[:i] + labels[i + 2:]
     if not labels:
         print(__doc__)
         return 2
@@ -164,7 +169,7 @@ def main(labels):
         out.append("  %-36s %8.3f s %5.2f%% | %8.3f s %5.2f%%" % ("tuning-system fields (120-bin + step)", a, 100 * a / grand, b, 100 * b / greal))
         out.append("")
     text = "\n".join(out) + "\n"
-    with open(os.path.join(HERE, "step0-decode.txt"), "w", encoding="utf-8") as f:
+    with open(os.path.join(HERE, "decode-share-%s.txt" % stem if stem else "step0-decode.txt"), "w", encoding="utf-8") as f:
         f.write(text)
     sys.stdout.write(text)
     return 0

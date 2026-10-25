@@ -61,7 +61,9 @@ void EasyLoader::configure() {
   _monoLoader->configure(INHERIT("filename"),
                          INHERIT("sampleRate"),
                          INHERIT("downmix"),
-                         INHERIT("audioStream"));
+                         INHERIT("audioStream"),
+                         INHERIT("spoolKey"),     // x7 shared decode
+                         INHERIT("spoolMode"));
 
   _params.add("originalSampleRate", _monoLoader->parameter("originalSampleRate"));
 

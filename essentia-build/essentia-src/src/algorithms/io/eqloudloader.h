@@ -53,6 +53,8 @@ class EqloudLoader : public AlgorithmComposite {
     declareParameter("endTime", "the end time of the slice to be extracted [s]", "[0,inf)", 1e6);
     declareParameter("replayGain", "the value of the replayGain [dB] that should be used to normalize the signal [dB]", "(-inf,inf)", -6.0);
     declareParameter("downmix", "the mixing type for stereo files", "{left,right,mix}", "mix");
+    declareParameter("spoolKey", "truedat x7: passed to the AudioLoader (shared-decode spool key)", "", "");
+    declareParameter("spoolMode", "truedat x7: passed to the AudioLoader", "{none,record,replay}", "none");
   }
 
   void declareProcessOrder() {

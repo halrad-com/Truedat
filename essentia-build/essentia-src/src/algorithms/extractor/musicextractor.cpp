@@ -21,7 +21,9 @@
 #include "extractor_music/tagwhitelist.h"
 #include "extractor_music/x6options.h"
 #include "x6profile.h"
+#include "audioloader_spool.h"
 #include "devnull.h"
+#include <sstream>
 
 using namespace std;
 
@@ -196,6 +198,24 @@ void MusicExtractor::compute() {
   results.clear();
   stats.clear();
 
+  // x7 shared decode: phase 2 records the decoded stream into an in-memory
+  // spool (audioloader_spool.h) and phases 3-5 replay it instead of decoding
+  // the file three more times. Off with x7.sharedDecode: 0; capped per track by
+  // x7.spoolMaxBytes (default 256 MiB) - a larger track is decoded by every pass
+  // as before. The guard frees the spool on every exit from here.
+  _spoolKey.clear();
+  _replayMode = "none";
+  if (x6on(options, "x7.sharedDecode")) {
+    double cap = options.contains<Real>("x7.spoolMaxBytes") ? options.value<Real>("x7.spoolMaxBytes") : 268435456.0;
+    if (cap >= 1) {
+      ostringstream key;
+      key << "x7spool:" << (const void*)this;
+      _spoolKey = key.str();
+      audioloader_spool::create(_spoolKey, (uint64_t)cap);
+    }
+  }
+  audioloader_spool::Guard spoolGuard(_spoolKey);
+
   streaming::AlgorithmFactory& factory = streaming::AlgorithmFactory::instance();
 
   results.set("metadata.version.essentia", essentia::version);
@@ -228,6 +248,17 @@ void MusicExtractor::compute() {
   x6profile::setPhase("2 audio_metadata");
   { x6profile::Scope total("total"); computeAudioMetadata(audioFilename, results); }
 
+  if (!_spoolKey.empty()) {
+    audioloader_spool::Spool* s = audioloader_spool::find(_spoolKey);
+    if (s && s->complete()) {
+      _replayMode = "replay";
+      E_INFO("MusicExtractor: shared decode: " << s->records() << " frames, " << s->payload() << " bytes held in RAM");
+    }
+    else {
+      E_INFO("MusicExtractor: shared decode off for this track (over the spool cap); every pass decodes it");
+    }
+  }
+
   E_INFO("MusicExtractor: Replay gain");
   x6profile::setPhase("3 replay_gain");
   { x6profile::Scope total("total"); computeReplayGain(audioFilename, results); }
@@ -254,7 +285,9 @@ void MusicExtractor::compute() {
                                     "startTime",  startTime,
                                     "endTime",    endTime,
                                     "replayGain", replayGain,
-                                    "downmix",    downmix);
+                                    "downmix",    downmix,
+                                    "spoolKey",   _spoolKey,     // x7: replay phase 2's decode
+                                    "spoolMode",  _replayMode);
   MusicLowlevelDescriptors *lowlevel = new MusicLowlevelDescriptors(options);
   MusicRhythmDescriptors *rhythm = new MusicRhythmDescriptors(options);
   MusicTonalDescriptors *tonal = new MusicTonalDescriptors(options);
@@ -281,7 +314,9 @@ void MusicExtractor::compute() {
                                        "startTime",  startTime,
                                        "endTime",    endTime,
                                        "replayGain", replayGain,
-                                       "downmix",    downmix);
+                                       "downmix",    downmix,
+                                       "spoolKey",   _spoolKey,     // x7: replay phase 2's decode
+                                       "spoolMode",  _replayMode);
 
   SourceBase& source_2 = loader_2->output("audio");
   rhythm->createNetworkBeatsLoudness(source_2, results);  // requires 'beat_positions'
@@ -289,6 +324,9 @@ void MusicExtractor::compute() {
 
   scheduler::Network network_2(loader_2);
   network_2.run();
+
+  // x7: the last replay is done - free the spool before aggregation and output
+  if (!_spoolKey.empty()) audioloader_spool::release(_spoolKey);
 
   // Descriptors that require values from other descriptors in the previous chain
   { x6profile::Scope step("computeTuningSystemFeatures"); tonal->computeTuningSystemFeatures(results); } // requires 'hpcp_highres'
@@ -480,9 +518,12 @@ void MusicExtractor::computeAudioMetadata(const string& audioFilename, Pool& res
   // x6 (drop 2): x6.md5 off = no MD5 over the encoded packets and no
   // md5_encoded key (x6options.h; absent = on)
   const bool md5 = x6on(options, "x6.md5");
+  // x7: this loader also records the decoded stream for passes 3-5 (no key = off)
   streaming::Algorithm* loader = factory.create("AudioLoader",
                                                 "filename",   audioFilename,
-                                                "computeMD5", md5);
+                                                "computeMD5", md5,
+                                                "spoolKey",   _spoolKey,
+                                                "spoolMode",  "record");
 
   if (md5) loader->output("md5")    >> PC(results, "metadata.audio_properties.md5_encoded");
   else     loader->output("md5")    >> NOWHERE;
@@ -564,7 +605,9 @@ void MusicExtractor::computeReplayGain(const string& audioFilename, Pool& result
                                       "sampleRate", analysisSampleRate,
                                       "startTime",  startTime,
                                       "endTime",    endTime,
-                                      "downmix",    downmix);
+                                      "downmix",    downmix,
+                                      "spoolKey",   _spoolKey,     // x7: replay phase 2's decode
+                                      "spoolMode",  _replayMode);
     streaming::Algorithm* rgain = factory.create("ReplayGain", "applyEqloud", false);
 
     audio->output("audio")      >> rgain->input("signal");

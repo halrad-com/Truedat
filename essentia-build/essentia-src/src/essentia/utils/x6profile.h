@@ -6,12 +6,14 @@
  * phase and the algorithm's name), the extractor times its standard-mode
  * steps, and report() appends one table per run to that file:
  *
- *   # x6profile <label> wall=<s> cpu=<s> peakws_mib=<MiB> ws_mib=<MiB>
+ *   # x6profile <label> wall=<s> cpu=<s> peakws_mib=<MiB> ws_mib=<MiB> written_mib=<MiB>
  *   phase<TAB>algorithm<TAB>instances<TAB>calls<TAB>seconds
  *
  * cpu is the process CPU (user + kernel) at report time; peakws_mib the peak
  * working set of the process, the memory figure for the drop 3 buffer / pool
- * changes; ws_mib the working set at report time (after the output is written).
+ * changes; ws_mib the working set at report time (after the output is written);
+ * written_mib the bytes the process wrote through the I/O manager by then
+ * (GetProcessIoCounters WriteTransferCount: files, pipes and the console).
  * The extractor is single-threaded, so the per-call wall time is its CPU time
  * while nothing else competes for the core. When off, the scheduler pays one
  * predictable branch per process() call. Never changes any output.

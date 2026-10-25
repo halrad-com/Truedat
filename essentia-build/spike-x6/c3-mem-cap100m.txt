@@ -1,0 +1,15 @@
+x7 C3 spool memory / writes: c3ca (spool) vs c3na (no spool), cap 104857600 bytes (100.0 MiB)
+
+id              ch    len s   peak on  peak off     delta  expected     resid  written on-off (bytes)
+r_ape            2     60.5     157.7     134.3     +23.4      20.3      +3.1  +84
+r_flac_hd        2    186.7     246.6     182.8     +63.9      62.8      +1.0  +89
+r_flac_live      2    290.3     225.3     224.9      +0.5       0.0      +0.5  +225
+r_m4a            2    547.6     337.4     336.2      +1.2       0.0      +1.2  +221
+r_m4a_2          2    191.7     254.7     187.8     +67.0      64.5      +2.5  +82
+r_mp3            2    305.2     232.5     233.4      -0.8       0.0      -0.8  +231
+r_wav            1    178.2     211.4     179.8     +31.6      30.0      +1.6  +85
+r_wma            2    324.7     238.6     239.0      -0.4       0.0      -0.4  +230
+r_wmalossless    2    302.4     230.7     230.3      +0.4       0.0      +0.4  +220
+r_wmapro         2    286.1     222.8     222.9      -0.1       0.0      -0.1  +221
+
+largest |written on - off|: 231 bytes (the spool's own log line on stdout is ~60-90 bytes)

@@ -24,6 +24,7 @@
 #include "network.h"
 #include "ffmpegapi.h"
 #include "audioloader_decode.h"
+#include "audioloader_spool.h"
 #include "poolstorage.h"
 
 
@@ -64,6 +65,15 @@ class AudioLoader : public Algorithm {
   int _selectedStream;
   bool _configured;
 
+  // x7 shared decode (audioloader_spool.h): "record" = also keep what this
+  // loader pushes in the keyed spool; "replay" = push a complete spool's
+  // records instead of decoding (and decode as before when there is none)
+  std::string _spoolKey;
+  std::string _spoolMode;
+  audioloader_spool::Spool* _recording;   // non-null while recording
+  audioloader_spool::Cursor _replay;      // active while replaying
+  void startRecording();
+
 
   void openAudioFile(const std::string& filename);
   void closeAudioFile();
@@ -79,7 +89,7 @@ class AudioLoader : public Algorithm {
  public:
   AudioLoader() : Algorithm(), _demuxCtx(0),
 	          _audioCtx(0), _audioCodec(0), _decodedFrame(0),
-            _convertCtxAv(0), _configured(false) {
+            _convertCtxAv(0), _configured(false), _recording(0) {
 
     declareOutput(_audio, 1, "audio", "the input audio signal");
     declareOutput(_sampleRate, 0, "sampleRate", "the sampling rate of the audio signal [Hz]");
@@ -108,6 +118,8 @@ class AudioLoader : public Algorithm {
     declareParameter("filename", "the name of the file from which to read", "", Parameter::STRING);
     declareParameter("computeMD5", "compute the MD5 checksum", "{true,false}", false);
     declareParameter("audioStream", "audio stream index to be loaded. Other streams are not taken into account (e.g. if stream 0 is video and 1 is audio use index 0 to access it.)", "[0,inf)", 0);
+    declareParameter("spoolKey", "truedat x7: the key of an in-memory shared-decode spool (empty = none)", "", "");
+    declareParameter("spoolMode", "truedat x7: record what this loader pushes into the spool, or replay a complete spool instead of decoding", "{none,record,replay}", "none");
   }
 
   void configure();

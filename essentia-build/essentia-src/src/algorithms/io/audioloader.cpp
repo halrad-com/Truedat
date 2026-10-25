@@ -44,6 +44,8 @@ void AudioLoader::configure() {
     av_log_set_level(AV_LOG_QUIET);   // choices: {AV_LOG_VERBOSE, AV_LOG_QUIET}
     _computeMD5 = parameter("computeMD5").toBool();
     _selectedStream = parameter("audioStream").toInt();
+    _spoolKey = parameter("spoolKey").toString();
+    _spoolMode = _spoolKey.empty() ? "none" : parameter("spoolMode").toString();
     reset();
 }
 
@@ -224,6 +226,29 @@ AlgorithmStatus AudioLoader::process() {
         throw EssentiaException("AudioLoader: Trying to call process() on an AudioLoader algo which hasn't been correctly configured.");
     }
 
+    // x7 replay: one recorded process() call per call - the same bytes through
+    // the same copy as the decoding loader pushed them, then the same ending
+    if (_replay.active()) {
+        uint32_t bytes;
+        if (_replay.next(bytes)) {
+            if (bytes > 0) {
+                if (!_convert.reserve((int)bytes)) {
+                    throw EssentiaException("AudioLoader: could not allocate the replay buffer");
+                }
+                _replay.read(_convert.data(), bytes);
+            }
+            _dataSize = (int)bytes;
+            copyFFmpegOutput();
+            _dataSize = 0;
+            return OK;
+        }
+        shouldStop(true);
+        _replay = audioloader_spool::Cursor();
+        string md5 = "";   // replaying loaders never hash (reset() decodes when computeMD5 is set)
+        _md5.push(md5);
+        return FINISHED;
+    }
+
     // One decoded frame per call (audioloader_decode.h explains why). The
     // decoder is fed, and the drain packet sent, as part of the same call, so
     // every call either pushes a frame or finishes the stream.
@@ -273,6 +298,10 @@ AlgorithmStatus AudioLoader::process() {
 
     shouldStop(true);
     closeAudioFile();
+    if (_recording) {   // x7: the whole stream is recorded; the other passes may replay it
+        _recording->finish();
+        _recording = 0;
+    }
     if (_computeMD5) {
         av_md5_final(_md5Encoded, _checksum);
         _md5.push(uint8_t_to_hex(_checksum, 16));
@@ -371,6 +400,17 @@ void AudioLoader::emitDecodedFrame() {
     int bytes = audioloader_detail::convertFrame(_convertCtxAv, _decodedFrame,
                                                  _audioCtx->sample_fmt, _nChannels, _convert);
     av_frame_unref(_decodedFrame);   // the samples now live in _convert
+
+    // x7 record: one record per call, whatever it pushes - nothing (0 bytes)
+    // when the conversion failed, so a replay keeps the same rhythm
+    if (_recording) {
+        uint32_t n = bytes > 0 ? (uint32_t)bytes : 0;
+        if (!_recording->append(n ? _convert.data() : 0, n)) {
+            E_INFO("AudioLoader: shared-decode spool over its cap mid-stream; abandoned, the other passes decode");
+            _recording = 0;
+        }
+    }
+
     if (bytes < 0) {
         char errstring[1204];
         av_strerror(bytes, errstring, sizeof(errstring));
@@ -430,10 +470,54 @@ void AudioLoader::reset() {
     string filename = parameter("filename").toString();
 
     closeAudioFile();
+    _recording = 0;
+    _replay = audioloader_spool::Cursor();
+
+    // x7 replay: a complete spool stands in for the file - the same metadata
+    // tokens, then (process) the same records. No spool, an incomplete one, or
+    // a loader that must hash the packets: decode the file as before.
+    if (_spoolMode == "replay" && !_computeMD5) {
+        audioloader_spool::Spool* s = audioloader_spool::find(_spoolKey);
+        if (s && s->complete()) {
+            _replay = audioloader_spool::Cursor(s);
+            pushChannelsSampleRateInfo((int)s->channels, (Real)(int)s->sampleRate);
+            pushCodecInfo(s->codec, s->bitRate);
+            return;
+        }
+        E_INFO("AudioLoader: no complete shared-decode spool; decoding the file");
+    }
+
     openAudioFile(filename);
 
     pushChannelsSampleRateInfo(_audioCtx->ch_layout.nb_channels, _audioCtx->sample_rate);
     pushCodecInfo(_audioCodec->name, _audioCtx->bit_rate);
+
+    if (_spoolMode == "record") startRecording();
+}
+
+
+// x7: starts recording into the keyed spool, unless the track's estimated size
+// (duration x rate x channels x 4 bytes, +5%) exceeds the spool's cap - a
+// track over the cap is decoded by every pass as before. An unknown duration
+// records, and the per-record cap check is the backstop.
+void AudioLoader::startRecording() {
+    audioloader_spool::Spool* s = audioloader_spool::find(_spoolKey);
+    if (!s) return;
+    int rate = _audioCtx->sample_rate;
+    int channels = _audioCtx->ch_layout.nb_channels;
+    if (_demuxCtx->duration != AV_NOPTS_VALUE && _demuxCtx->duration > 0) {
+        double seconds = _demuxCtx->duration / (double)AV_TIME_BASE;
+        double estimate = seconds * rate * channels * 4.0 * 1.05;
+        if (estimate > (double)s->cap) {
+            E_INFO("AudioLoader: track over the shared-decode spool cap (" << (uint64_t)estimate
+                   << " > " << s->cap << " bytes); every pass decodes it");
+            s->abandon();
+            return;
+        }
+    }
+    int bitRate = _audioCtx->bit_rate;   // the same conversion pushCodecInfo's argument makes
+    s->begin((uint32_t)channels, (uint32_t)rate, (int32_t)bitRate, _audioCodec->name);
+    _recording = s;
 }
 
 } // namespace streaming

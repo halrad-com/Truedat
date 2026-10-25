@@ -82,6 +82,12 @@ class MusicExtractor : public Algorithm {
   std::string downmix;
   standard::Algorithm* _svms;
 
+  // x7 shared decode (audioloader_spool.h): the key of this extractor's spool,
+  // empty when off; the mode the replaying passes (3, 4, 5) use - "replay" once
+  // phase 2 recorded a complete spool, else "none" (they decode as before)
+  std::string _spoolKey;
+  std::string _replayMode;
+
   void setExtractorOptions(const std::string& filename);
   void setExtractorDefaultOptions();
   void mergeValues(Pool &pool);

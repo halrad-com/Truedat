@@ -57,7 +57,9 @@ void EqloudLoader::configure() {
 
   _monoLoader->configure(INHERIT("filename"),
                          INHERIT("sampleRate"),
-                         INHERIT("downmix"));
+                         INHERIT("downmix"),
+                         INHERIT("spoolKey"),     // x7 shared decode
+                         INHERIT("spoolMode"));
 
   _trimmer->configure(INHERIT("sampleRate"),
                       INHERIT("startTime"),

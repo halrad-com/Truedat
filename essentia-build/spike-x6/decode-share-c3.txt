@@ -1,0 +1,153 @@
+x7 step 0 - shared-decode recoverable share on production-shaped input
+input: manifest-prod.tsv (rows above 44.1 kHz converted with truedat's own ffmpeg soxr command first, as a scan does)
+call: scan-edges profile + --frames-bin, ESSENTIA_PROFILE on; values are ELAPSED per process() call, 'cpu' is process CPU
+rule (see prod_share.py): gross = AudioLoader x3 + MonoMixer/Resample x2 + network2's Trimmer/Scale; net = gross - 3 spool reads
+
+== c3na: 45 rows; spool read priced at 0.00031 s per audio-second (loader on the converted f32 WAV rows) ==
+id                         codec        conv    len s     cpu s   total s   gross s     net s  gross%    net%
+flac16_44k_st              flac                  3.77     0.219     0.224     0.011     0.008   5.05%   3.50%
+flac16_44k_mo              flac                  3.77     0.203     0.209     0.008     0.004   3.68%   2.02%
+flac16_48k_st              flac          yes     3.77     0.188     0.208     0.002    -0.001   1.18%  -0.50%
+flac24_96k_st              flac          yes     3.77     0.203     0.212     0.002    -0.001   1.17%  -0.47%
+flac24_192k_st             flac          yes     3.77     0.188     0.204     0.002    -0.001   1.21%  -0.50%
+flac16_192k_mo             flac          yes     3.77     0.188     0.214     0.002    -0.001   0.93%  -0.69%
+flac16_44k_st_bigblock     flac                  3.77     0.203     0.210     0.010     0.006   4.61%   2.96%
+flac24_96k_st_bigblock     flac          yes     3.77     0.172     0.197     0.002    -0.001   1.18%  -0.58%
+flac16_192k_st_bigblock    flac          yes     3.77     0.203     0.207     0.002    -0.001   1.17%  -0.52%
+flac16_44k_mo_bigblock     flac                  3.77     0.188     0.207     0.006     0.002   2.72%   1.04%
+flac16_44k_st_short        flac                  0.05     0.094     0.108     0.000     0.000   0.39%   0.35%
+wav_s16_44k_st             pcm_s16le             3.77     0.203     0.224     0.002    -0.001   0.97%  -0.58%
+wav_s24_96k_st             pcm_s24le     yes     3.77     0.188     0.212     0.002    -0.001   1.17%  -0.47%
+wav_f32_48k_st             pcm_f32le     yes     3.77     0.188     0.214     0.002    -0.001   1.12%  -0.51%
+wav_f32_192k_st            pcm_f32le     yes     3.77     0.172     0.206     0.002    -0.001   1.11%  -0.58%
+wav_s16_192k_mo            pcm_s16le     yes     3.77     0.156     0.199     0.002    -0.001   1.05%  -0.69%
+aiff_s16_44k_st            pcm_s16be             3.77     0.219     0.209     0.003    -0.000   1.51%  -0.15%
+mp3_44k_st                 mp3                   3.77     0.203     0.216     0.009     0.005   4.02%   2.41%
+mp3_48k_mo                 mp3           yes     3.77     0.188     0.199     0.002    -0.001   1.00%  -0.75%
+mp3_44k_st_short           mp3                   0.05     0.094     0.111     0.000     0.000   0.41%   0.37%
+aac_44k_st                 aac                   3.78     0.219     0.214     0.006     0.003   2.92%   1.28%
+aac_48k_mo                 aac           yes     3.77     0.172     0.208     0.002    -0.002   0.93%  -0.74%
+aac_96k_st                 aac           yes     3.77     0.188     0.211     0.002    -0.001   1.12%  -0.53%
+aac_44k_st_short           aac                   0.07     0.125     0.110     0.001     0.001   0.63%   0.57%
+wma_44k_st                 wmav2                 3.76     0.203     0.228     0.008     0.005   3.54%   2.02%
+wma_48k_st                 wmav2         yes     3.75     0.219     0.234     0.003    -0.000   1.42%  -0.06%
+vorbis_44k_st              vorbis                3.77     0.188     0.231     0.008     0.005   3.50%   1.99%
+vorbis_48k_mo              vorbis        yes     3.77     0.203     0.211     0.002    -0.001   1.07%  -0.58%
+alac16_44k_st              alac                  3.77     0.234     0.245     0.022     0.019   9.17%   7.75%
+alac24_96k_st              alac          yes     3.77     0.188     0.218     0.003    -0.001   1.29%  -0.31%
+alac24_192k_st             alac          yes     3.77     0.203     0.213     0.003    -0.001   1.21%  -0.42%
+wv_s16_44k_st              wavpack               3.77     0.219     0.251     0.021     0.018   8.55%   7.17%
+wv_s32_96k_st              wavpack       yes     3.77     0.203     0.212     0.003    -0.001   1.26%  -0.38%
+mp3_44k_st_trunc           mp3                   3.76     0.219     0.222     0.009     0.006   4.07%   2.50%
+flac16_44k_st_trunc        flac                  3.74     0.188     0.226     0.012     0.009   5.41%   3.88%
+r_mp3                      mp3                 305.19     8.281     8.400     0.690     0.408   8.21%   4.86%
+r_m4a                      aac                 547.60    14.234    14.427     0.779     0.274   5.40%   1.90%
+r_m4a_2                    aac                 191.68     5.016     5.095     0.262     0.085   5.15%   1.67%
+r_wma                      wmav2               324.66     8.016     8.139     0.541     0.242   6.65%   2.97%
+r_flac_hd                  flac          yes   186.69     4.719     4.747     0.149    -0.023   3.14%  -0.49%
+r_flac_live                flac                290.35     7.656     7.784     0.791     0.523  10.16%   6.71%
+r_wav                      pcm_s16le           178.19     4.234     4.283     0.079    -0.086   1.84%  -2.00%
+r_wmalossless              wmalossless         302.44    12.078    12.223     3.759     3.480  30.75%  28.47%
+r_wmapro                   wmapro        yes   286.08     6.844     6.958     0.213    -0.051   3.06%  -0.73%
+r_ape                      ape                  60.48     2.266     2.302     0.591     0.536  25.70%  23.27%
+
+pooled (share of the pooled phase totals):
+  all rows                     n=45 total    81.583 s  cpu    79.969 s  gross    8.035 s =  9.85%  net    5.456 s =  6.69%
+  real rows                    n=10 total    74.358 s  cpu    73.344 s  gross    7.854 s = 10.56%  net    5.387 s =  7.24%
+  real rows, 44.1k as is       n= 8 total    62.654 s  cpu    61.781 s  gross    7.492 s = 11.96%  net    5.461 s =  8.72%
+  rows converted from hi-res   n=20 total    15.482 s  cpu    14.969 s  gross    0.405 s =  2.62%  net   -0.094 s = -0.61%
+  synthetic rows               n=35 total     7.224 s  cpu     6.625 s  gross    0.181 s =  2.50%  net    0.069 s =  0.96%
+
+per phase, pooled over all rows (elapsed s):
+  algorithm          2 audio_metadata    3 replay_gain       4 network1       5 network2
+  AudioLoader                   2.868            2.479            2.654            2.528
+  MonoMixer                     0.000            0.044            0.066            0.052
+  Resample                      0.071            0.023            0.046            0.031
+  Trimmer                       0.000            0.019            0.040            0.025
+  Scale                         0.000            0.124            0.157            0.155
+  EqualLoudness                 0.000            1.752            1.772            0.000
+  StereoDemuxer                 0.162            0.000            0.000            0.000
+  StereoMuxer                   0.067            0.000            0.000            0.000
+  StereoTrimmer                 0.054            0.000            0.000            0.000
+  [phase total]                10.433            5.174           51.019           13.419
+
+tonal (network2), elapsed s and share of the pooled total - all rows | real rows:
+  HPCP[size=36]                           0.602 s  0.74% |    0.575 s  0.77%
+  HPCP[size=120]                          0.000 s  0.00% |    0.000 s  0.00%
+  [step] computeTuningSystemFeatures      0.017 s  0.02% |    0.010 s  0.01%
+  tuning-system fields (120-bin + step)    0.017 s  0.02% |    0.010 s  0.01%
+
+== c3pa: 45 rows; spool read priced at 0.00023 s per audio-second (loader on the converted f32 WAV rows) ==
+id                         codec        conv    len s     cpu s   total s   gross s     net s  gross%    net%
+flac16_44k_st              flac                  3.77     0.188     0.204     0.001    -0.001   0.73%  -0.54%
+flac16_44k_mo              flac                  3.77     0.219     0.205     0.001    -0.001   0.65%  -0.61%
+flac16_48k_st              flac          yes     3.77     0.172     0.197     0.002    -0.001   0.78%  -0.54%
+flac24_96k_st              flac          yes     3.77     0.219     0.210     0.002    -0.001   0.75%  -0.49%
+flac24_192k_st             flac          yes     3.77     0.172     0.196     0.002    -0.001   0.80%  -0.53%
+flac16_192k_mo             flac          yes     3.77     0.172     0.196     0.001    -0.001   0.70%  -0.63%
+flac16_44k_st_bigblock     flac                  3.77     0.188     0.206     0.002    -0.001   0.90%  -0.35%
+flac24_96k_st_bigblock     flac          yes     3.77     0.172     0.201     0.002    -0.001   0.78%  -0.51%
+flac16_192k_st_bigblock    flac          yes     3.77     0.188     0.219     0.002    -0.001   0.73%  -0.46%
+flac16_44k_mo_bigblock     flac                  3.77     0.188     0.204     0.001    -0.001   0.61%  -0.66%
+flac16_44k_st_short        flac                  0.05     0.094     0.103     0.000     0.000   0.05%   0.02%
+wav_s16_44k_st             pcm_s16le             3.77     0.188     0.212     0.002    -0.001   0.92%  -0.30%
+wav_s24_96k_st             pcm_s24le     yes     3.77     0.188     0.213     0.002    -0.001   0.81%  -0.41%
+wav_f32_48k_st             pcm_f32le     yes     3.77     0.188     0.204     0.002    -0.001   0.79%  -0.48%
+wav_f32_192k_st            pcm_f32le     yes     3.77     0.203     0.226     0.002    -0.001   0.81%  -0.34%
+wav_s16_192k_mo            pcm_s16le     yes     3.77     0.203     0.207     0.002    -0.001   0.76%  -0.50%
+aiff_s16_44k_st            pcm_s16be             3.77     0.203     0.210     0.002    -0.001   0.78%  -0.46%
+mp3_44k_st                 mp3                   3.77     0.188     0.215     0.002    -0.001   0.74%  -0.47%
+mp3_48k_mo                 mp3           yes     3.77     0.172     0.202     0.001    -0.001   0.68%  -0.60%
+mp3_44k_st_short           mp3                   0.05     0.141     0.103     0.000     0.000   0.06%   0.02%
+aac_44k_st                 aac                   3.78     0.188     0.201     0.002    -0.001   0.75%  -0.55%
+aac_48k_mo                 aac           yes     3.77     0.188     0.209     0.001    -0.001   0.70%  -0.54%
+aac_96k_st                 aac           yes     3.77     0.188     0.210     0.002    -0.001   0.79%  -0.45%
+aac_44k_st_short           aac                   0.07     0.125     0.107     0.000     0.000   0.06%   0.01%
+wma_44k_st                 wmav2                 3.76     0.188     0.215     0.002    -0.001   0.80%  -0.40%
+wma_48k_st                 wmav2         yes     3.75     0.203     0.211     0.002    -0.001   0.82%  -0.40%
+vorbis_44k_st              vorbis                3.77     0.188     0.221     0.002    -0.001   0.74%  -0.43%
+vorbis_48k_mo              vorbis        yes     3.77     0.188     0.209     0.002    -0.001   0.73%  -0.52%
+alac16_44k_st              alac                  3.77     0.219     0.209     0.002    -0.001   0.85%  -0.39%
+alac24_96k_st              alac          yes     3.77     0.188     0.201     0.002    -0.001   0.82%  -0.47%
+alac24_192k_st             alac          yes     3.77     0.188     0.200     0.002    -0.001   0.85%  -0.45%
+wv_s16_44k_st              wavpack               3.77     0.188     0.223     0.002    -0.001   0.77%  -0.40%
+wv_s32_96k_st              wavpack       yes     3.77     0.188     0.209     0.002    -0.001   0.80%  -0.44%
+mp3_44k_st_trunc           mp3                   3.76     0.203     0.211     0.002    -0.001   0.80%  -0.43%
+flac16_44k_st_trunc        flac                  3.74     0.188     0.226     0.002    -0.001   0.68%  -0.46%
+r_mp3                      mp3                 305.19     7.844     7.965     0.102    -0.108   1.29%  -1.35%
+r_m4a                      aac                 547.60    13.953    14.138     0.190    -0.187   1.34%  -1.32%
+r_m4a_2                    aac                 191.68     4.984     5.085     0.065    -0.067   1.28%  -1.31%
+r_wma                      wmav2               324.66     7.969     8.030     0.113    -0.111   1.40%  -1.38%
+r_flac_hd                  flac          yes   186.69     4.438     4.491     0.059    -0.070   1.31%  -1.55%
+r_flac_live                flac                290.35     7.094     7.118     0.092    -0.108   1.29%  -1.52%
+r_wav                      pcm_s16le           178.19     4.250     4.258     0.048    -0.074   1.14%  -1.74%
+r_wmalossless              wmalossless         302.44     8.625     8.763     0.102    -0.106   1.17%  -1.21%
+r_wmapro                   wmapro        yes   286.08     7.031     7.030     0.096    -0.101   1.36%  -1.44%
+r_ape                      ape                  60.48     1.719     1.735     0.021    -0.021   1.19%  -1.21%
+
+pooled (share of the pooled phase totals):
+  all rows                     n=45 total    75.609 s  cpu    74.359 s  gross    0.940 s =  1.24%  net   -0.985 s = -1.30%
+  real rows                    n=10 total    68.614 s  cpu    67.906 s  gross    0.888 s =  1.29%  net   -0.954 s = -1.39%
+  real rows, 44.1k as is       n= 8 total    57.093 s  cpu    56.438 s  gross    0.733 s =  1.28%  net   -0.783 s = -1.37%
+  rows converted from hi-res   n=20 total    15.241 s  cpu    14.844 s  gross    0.183 s =  1.20%  net   -0.189 s = -1.24%
+  synthetic rows               n=35 total     6.995 s  cpu     6.453 s  gross    0.052 s =  0.74%  net   -0.032 s = -0.45%
+
+per phase, pooled over all rows (elapsed s):
+  algorithm          2 audio_metadata    3 replay_gain       4 network1       5 network2
+  AudioLoader                   3.231            0.180            0.206            0.188
+  MonoMixer                     0.000            0.042            0.067            0.049
+  Resample                      0.078            0.020            0.046            0.028
+  Trimmer                       0.000            0.018            0.043            0.022
+  Scale                         0.000            0.122            0.158            0.152
+  EqualLoudness                 0.000            1.745            1.809            0.000
+  StereoDemuxer                 0.171            0.000            0.000            0.000
+  StereoMuxer                   0.075            0.000            0.000            0.000
+  StereoTrimmer                 0.061            0.000            0.000            0.000
+  [phase total]                10.964            2.797           49.224           11.049
+
+tonal (network2), elapsed s and share of the pooled total - all rows | real rows:
+  HPCP[size=36]                           0.607 s  0.80% |    0.580 s  0.85%
+  HPCP[size=120]                          0.000 s  0.00% |    0.000 s  0.00%
+  [step] computeTuningSystemFeatures      0.017 s  0.02% |    0.011 s  0.02%
+  tuning-system fields (120-bin + step)    0.017 s  0.02% |    0.011 s  0.02%
+

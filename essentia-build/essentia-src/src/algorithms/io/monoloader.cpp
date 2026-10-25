@@ -60,7 +60,9 @@ void MonoLoader::configure() {
 
   _audioLoader->configure("filename", filename,
                           "computeMD5", false,
-                          INHERIT("audioStream"));
+                          INHERIT("audioStream"),
+                          INHERIT("spoolKey"),     // x7 shared decode
+                          INHERIT("spoolMode"));
 
   int inputSampleRate = (int)lastTokenProduced<Real>(_audioLoader->output("sampleRate"));
 

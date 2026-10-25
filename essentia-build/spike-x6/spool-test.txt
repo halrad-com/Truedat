@@ -1,0 +1,23 @@
+x7 spool tests, native, -fsanitize=address,undefined (g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0)
+build rc=0
+PASS typical: records accepted, spool complete
+PASS typical: record count and payload
+PASS typical: replay = recording, byte for byte, in order
+PASS typical: allocation within the cap
+PASS large records: accepted
+PASS large records: replay = recording across blocks
+PASS over cap: an append is refused
+PASS over cap: abandoned spool holds nothing
+PASS over cap: finish() after abandonment does not make it complete
+PASS small cap: fits and stays within it
+PASS small cap: replay = recording
+PASS small cap: a record above the cap abandons
+PASS three replays of one spool
+PASS re-record replaces the previous recording
+PASS registry: create / find
+PASS registry: create replaces
+PASS registry: unknown key is absent
+PASS guard: released at scope exit
+PASS release of an unknown key is a no-op
+0 failure(s)
+run rc=0

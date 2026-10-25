@@ -97,6 +97,7 @@ example_sources_truedat = [
     ('standard_audioloader_dump', ),
     ('test_audioloader_decodeloop', ),
     ('standard_x7_hpcp_bench', ),   # x7 step 0: HPCP sizing (measurement only)
+    ('test_audioloader_spool', ),   # x7: the in-memory shared-decode spool
 ]
 
 

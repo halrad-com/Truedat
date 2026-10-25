@@ -25,7 +25,7 @@ if [ $rc -eq 0 ]; then
   TOOLS="../spike-x6/out/tools-$(basename "$DEST")"
   mkdir -p "../$DEST" "$TOOLS"
   cp build/src/examples/essentia_streaming_extractor_music.exe "../$DEST/" >> "$LOG" 2>&1 || rc=3
-  for exe in essentia_standard_audioloader_dump essentia_test_audioloader_decodeloop essentia_standard_x7_hpcp_bench; do
+  for exe in essentia_standard_audioloader_dump essentia_test_audioloader_decodeloop essentia_standard_x7_hpcp_bench essentia_test_audioloader_spool; do
     cp "build/src/examples/$exe.exe" "$TOOLS/" >> "$LOG" 2>&1 || rc=3
   done
   echo "COPIED extractor to $DEST, tools to $TOOLS (rc $rc)" >> "$LOG"
