@@ -28,7 +28,7 @@ namespace Truedat.Edges
         /// <summary>The extractor builds that carry the binary frames writer (<c>--frames-bin</c> + <c>framesInclude</c>) the edges
         /// path reads — a capability set, not one exact string (plan B6 [c1]). Format compatibility lives here; measurement provenance
         /// (which edges an extractor change invalidates) is the edge producer version, never the build id.</summary>
-        internal static readonly string[] SupportedBuilds = { "output-x64.5", "output-x64.6" };
+        internal static readonly string[] SupportedBuilds = { "output-x64.5", "output-x64.6", "output-x64.7" };
         internal static string SupportedBuildsText => string.Join(" or ", SupportedBuilds);
         internal static bool SupportsFrames(string? build)
             => build != null && Array.Exists(SupportedBuilds, b => string.Equals(b, build, StringComparison.OrdinalIgnoreCase));
@@ -54,19 +54,22 @@ namespace Truedat.Edges
             "x6.melbands128: 0\nx6.bandsStorage: 0\nx6.md5: 1\n";
 
         /// <summary>What truedat hands the extractor as its one profile file: the frames block when edges are on, the scan keys when the
-        /// build honours them (<see cref="Program.ScanProfileCapable"/>), both when both — the extractor takes a single profile.</summary>
-        internal static string ProfileTextFor(bool edges, bool scan)
-            => (edges ? ProfileText() : "") + (scan ? ScanProfileKeys : "");
+        /// build honours them (<see cref="Program.ScanProfileCapable"/>), both when both — the extractor takes a single profile. Extractor .7
+        /// also gets its RAM spool cap (<paramref name="spoolMaxBytes"/>, <see cref="Program.SpoolCapBytes"/>): the per-track ceiling on the
+        /// in-memory decode it replays to its later passes; above it the track decodes per pass as before, same output.</summary>
+        internal static string ProfileTextFor(bool edges, bool scan, long? spoolMaxBytes = null)
+            => (edges ? ProfileText() : "") + (scan ? ScanProfileKeys : "")
+               + (spoolMaxBytes.HasValue ? "x7.spoolMaxBytes: " + spoolMaxBytes.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n" : "");
 
         /// <summary>Writes the profile beside the extractor's temp JSON (same directory, so the same ASCII guarantee) and
         /// returns its path with the frames path the extractor is told to write (null when edges are off: no frames file is asked for).
         /// Null profile when neither edges nor the scan profile apply — the caller makes the plain 2-arg call.</summary>
-        internal static (string? ProfilePath, string? FramesPath) PrepareFor(string tempJson, bool edges = true, bool scan = false)
+        internal static (string? ProfilePath, string? FramesPath) PrepareFor(string tempJson, bool edges = true, bool scan = false, long? spoolMaxBytes = null)
         {
-            if (!edges && !scan) return (null, null);
+            if (!edges && !scan && !spoolMaxBytes.HasValue) return (null, null);
             string stem = Path.Combine(Path.GetDirectoryName(tempJson) ?? ".", Path.GetFileNameWithoutExtension(tempJson));
             string profile = stem + ".profile.yaml", frames = stem + ".frames.bin";
-            File.WriteAllText(profile, ProfileTextFor(edges, scan), new UTF8Encoding(false));
+            File.WriteAllText(profile, ProfileTextFor(edges, scan, spoolMaxBytes), new UTF8Encoding(false));
             return (profile, edges ? frames : null);
         }
 

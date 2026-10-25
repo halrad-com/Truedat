@@ -5334,6 +5334,7 @@ namespace Truedat
                 if (flLikelyCached.Count + flLikelyWork.Count != filePaths.Count)
                     throw new InvalidOperationException("two-lane split dropped or duplicated files");
                 var flOptions = new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = CancellationToken.None };
+                _extractorWorkers = Math.Max(1, parallelism);   // .7 spool cap divides RAM by this
                 KeepAwakePump(workMode: true);   // initial assert before the scan phase starts
                 // Fast lane: default (chunked) partitioner -> % races up on cheap cache hits.
                 Parallel.ForEach(flLikelyCached, flOptions, processFile);
@@ -5884,6 +5885,7 @@ namespace Truedat
                 _etaNewAudioMsTotal = etaNewAudioMs;
                 _scanAudioMsTotal = allAudioMs;
                 _scanParallelism = parallelism;
+                _extractorWorkers = Math.Max(1, parallelism);   // .7 spool cap divides RAM by this
                 if (etaNew > 0)
                 {
                     var newMb = etaNewBytes / (1024.0 * 1024.0);
@@ -11052,12 +11054,13 @@ namespace Truedat
         // loop dropped most of each APE file — any .5 APE analysis is truncated and .6
         // changes it (WMA Lossless: same decoder family, untested). The refresh set after
         // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
-        internal const string LatestExtractorMd5 = "64b55cec008649c673fa13c9ab8dd4b6";
-        internal const string LatestExtractorSummary = "output-x64.6: .5 plus the decoder fix (large-block FLAC, APE, WMA Lossless/Pro decode in full) and the scan profile (computes only what truedat reads)";
+        internal const string LatestExtractorMd5 = "6af75d493dfb3b4949ec1fd433b4c58c";
+        internal const string LatestExtractorSummary = "output-x64.7: .6 plus one decode per file (kept in RAM for the later passes) and one HPCP pass for chords and tuning - same output, ~11% less extractor time";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
+            ["6af75d493dfb3b4949ec1fd433b4c58c"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track) and fused chords/tuning HPCP; same output (current, 9844483)",
             // Every accepted .6 drop keeps its MD5 here under the same name (option A): a deployed earlier drop must still resolve by name.
-            ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (current: drop 2, 296f87d)",
+            ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (drop 2, 296f87d; the .7 fallback)",
             ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — drop 1 (7319de5): decoder fix only; fails on APE (StereoDemuxer overflow) and refuses the scan profile — superseded by drop 2",
             ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges; crashes on 65535-block stereo FLAC (.6 fixes)",
             ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support; no binary frames (--edges needs .5)",
@@ -11073,12 +11076,71 @@ namespace Truedat
         static readonly HashSet<string> ScanProfileCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "64b55cec008649c673fa13c9ab8dd4b6",   // .6 drop 2 (296f87d)
+            "6af75d493dfb3b4949ec1fd433b4c58c",   // .7 (9844483)
         };
         static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _extractorMd5ByPath = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Whether the extractor at <paramref name="exePath"/> honours the scan profile — its MD5, hashed once per path per run.</summary>
         internal static bool ScanProfileCapable(string exePath)
             => ScanProfileCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
+
+        /// <summary>The extractor builds (by MD5) that keep the whole decoded track in RAM and replay it to their later passes instead of
+        /// decoding four times (.7, 6f669a9) — the ones truedat hands <c>x7.spoolMaxBytes</c>. Every earlier build ignores the key (executed
+        /// on .5 and .6, worker mails 048/049), so this set says which builds READ it, not which would break.</summary>
+        static readonly HashSet<string> SpoolCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "6af75d493dfb3b4949ec1fd433b4c58c",   // .7 (9844483)
+        };
+
+        internal static bool SpoolCapable(string exePath)
+            => SpoolCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
+
+        /// <summary>The per-track RAM spool cap that keeps ALL workers together inside 60 % of RAM on their worst spooled track. Per worker
+        /// that track costs 106.6 + 0.4141 L + 0.33646 L MiB — the extractor's measured fit plus the stereo f32 spool (essentia-build/spike-x6/
+        /// mem-fit.txt, drop 2, 10 real rows) — with L = cap / 0.33646 s (352,800 B/s), which solves to cap = (0.6 RAM / N - 106.6) / (1 + 0.4141 / 0.33646),
+        /// clamped to [0, 256 MiB]. Operator 2026-10-25: it has to work at 8 GB (8 GiB x8 = 227.6 MiB; x20 = 62.4 MiB, short tracks only).
+        /// Zero = no spool: the extractor decodes per pass exactly as before, same output.</summary>
+        internal static long SpoolCapBytes(long availableRamBytes, int workers)
+        {
+            // Base and slope are the measured fit; the spool rate is exact by construction: stereo f32 at 44.1 kHz = 352,800 B per second.
+            const double BaseMiB = 106.6, ExtractorMiBPerSec = 0.4141, SpoolMiBPerSec = 352800.0 / 1048576, Share = 0.6, CeilingMiB = 256;
+            if (availableRamBytes <= 0) return 0;
+            int n = Math.Max(1, workers);
+            double cap = (Share * (availableRamBytes / 1048576.0) / n - BaseMiB) / (1 + ExtractorMiBPerSec / SpoolMiBPerSec);
+            return (long)(Math.Max(0, Math.Min(CeilingMiB, cap)) * 1048576);
+        }
+
+        /// <summary>How many extractors this run starts at once — set by the scan modes beside their Parallel.ForEach; 1 until then.</summary>
+        internal static int _extractorWorkers = 1;
+
+        /// <summary>The run's spool cap, from the RAM AVAILABLE when the first track is analysed (not the installed total: a RAM drive or a
+        /// busy box shrinks it) and the run's worker count. Computed once and logged once.</summary>
+        static readonly Lazy<long> _runSpoolCap = new Lazy<long>(() =>
+        {
+            long avail = AvailablePhysicalBytes();
+            long cap = SpoolCapBytes(avail, _extractorWorkers);
+            Console.WriteLine($"  Spool:      {cap / 1048576.0:F0} MB per track in RAM (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
+            return cap;
+        });
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        sealed class MemoryStatusEx
+        {
+            public uint dwLength = (uint)Marshal.SizeOf(typeof(MemoryStatusEx));
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GlobalMemoryStatusEx([In, Out] MemoryStatusEx lpBuffer);
+
+        /// <summary>Physical memory available now, in bytes; 0 when the query fails (the spool cap then turns the spool off).</summary>
+        internal static long AvailablePhysicalBytes()
+        {
+            try { var m = new MemoryStatusEx(); return GlobalMemoryStatusEx(m) ? (long)m.ullAvailPhys : 0; }
+            catch { return 0; }
+        }
 
         /// <summary>The extractor's command line: input and output always; the profile as the third argument when there is one; the
         /// binary frames path only when edges asked for it. One place, so the three shapes cannot drift.</summary>
@@ -25678,7 +25740,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             bool scanProfile = ScanProfileCapable(essentiaExe);
             if (_stageOpts.Edges || scanProfile)
             {
-                try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson, edges: _stageOpts.Edges, scan: scanProfile); }
+                long? spoolCap = SpoolCapable(essentiaExe) ? _runSpoolCap.Value : (long?)null;   // .7: the RAM spool's per-track ceiling
+                try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson, edges: _stageOpts.Edges, scan: scanProfile, spoolMaxBytes: spoolCap); }
                 catch (Exception ex) { edgesPrepError = $"could not write the extractor profile beside the extractor output: {ex.Message}"; }
             }
             RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
