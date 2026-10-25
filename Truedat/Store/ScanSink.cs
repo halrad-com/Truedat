@@ -227,9 +227,13 @@ namespace Truedat.Store
 
         /// <summary>T18: the scan changed this catalog entry WITHOUT analysing it (a cache-hit tier rebuilt it: lastModified, fingerprint, tags,
         /// a re-key). Under a store-authoritative scan the store must hold it too, as copy facts — written under the import producer, so it is
-        /// never recorded as a measurement.</summary>
+        /// never recorded as a measurement. The rebuilt entry is the scan's whole statement of the file (tags from the XML, the rest
+        /// carried or decided — a tag-only edit sets FileMd5 null because the digest is stale), so every copy column is observed: a NULL it
+        /// carries lands, and a stale MD5 cannot come back from the store on publish. The per-file modes set their own mask first (no XML, so
+        /// no trackId); this fills in only when the caller declared none.</summary>
         internal static void RecordCacheHit(string path, TrackEntry entry)
         {
+            entry.CopyObserved ??= TrackEntryMapper.AllCopyObserved;
             lock (_tieLock)
             {
                 if (_entries.ContainsKey(path) && !_copyOnly.ContainsKey(path)) return;   // a fresh analysis of this path is already pending: it wins
