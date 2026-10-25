@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Name | Truedat (Music Mood Extractor & Fingerprinter) |
-| Version | 1.0.0 (assembly); release v0.5.5.3-EV2.1 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.3-EV2.1` |
+| Version | 1.0.0 (assembly); release v0.5.5.3-EV4 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.3-EV4` |
 | License | MIT |
 | Framework | .NET Framework 4.8 |
 | Output | `truedat.exe` (single file, ILRepack merged) |
@@ -68,7 +68,7 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 
 | File | Architecture | Build | Source |
 |------|-------------|-------|--------|
-| `essentia_streaming_extractor_music.exe` | x64 | `output-x64.5` | Built from `essentia-build/` — mood analysis. `.5` adds a binary frame-level output (`--frames-bin`, `framesInclude`) that `--edges` folds, and a build id in the output; the 2/3-argument invocations are unchanged from `.4` |
+| `essentia_streaming_extractor_music.exe` | x64 | `output-x64.7` | Built from `essentia-build/` — mood analysis. `.5` added the binary frame-level output (`--frames-bin`, `framesInclude`) that `--edges` folds, and a build id in the output. `.6` fixed the decoder (large-block FLAC crashed, and APE, WMA Lossless and WMA Pro were cut short) and added the scan profile, which computes only the statistics truedat reads. `.7` decodes each track once into RAM and replays it to the later passes (capped per track; truedat sets the cap from the RAM available and the worker count), computes the chords and tuning HPCP in one pass, and no longer holds the whole track for danceability and dynamic complexity; its output is identical to `.6` apart from the build id. The 2/3-argument invocations are unchanged |
 
 The running build is identified by MD5 and named in `truedat --version` / the scan's tool check
 (`KnownExtractors` in `Truedat/Program.cs`); `--edges` refuses an older one rather than silently
@@ -76,7 +76,7 @@ skipping the fold.
 
 | File | MD5 | SHA-256 |
 |------|-----|---------|
-| `essentia_streaming_extractor_music.exe` (`output-x64.5`) | `6f47bdfcaadfd4f510c5e1621c07945d` | `5114426816ef64f11cb3b8c53844dc324cf420272ba9d757e148bc7edf224a98` |
+| `essentia_streaming_extractor_music.exe` (`output-x64.7`) | `0fb6f804f8f53dad65c4c963e6447e47` | `f0a9741606f5ce47e6d10fc16d33fd65ce48df7c2221325f0bbb0747e02d5cf9` |
 
 Place it in the same folder as `truedat.exe`.
 
@@ -100,7 +100,7 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 Verified equal: the copies in `dist/truedat/` hash to the same values, so the shipped files are
 the recorded ones. (The extractor on that branch is **not** current — it is MD5
-`c6a436d0fe9a33a4c8eac120d9e6243f`, an older build than the `output-x64.5` shipped here.)
+`6f47bdfcaadfd4f510c5e1621c07945d`, `output-x64.5`, older than the `output-x64.7` shipped here.)
 
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
