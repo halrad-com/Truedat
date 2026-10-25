@@ -8,6 +8,16 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV4] — 2026-10-25
+
+### Changed
+
+- Extractor `.7` build: optimization performance improvements.
+
+### Added
+
+- A backup is created before a catalog is imported into the store.
+
 ## [0.5.5.3-EV3.3] — 2026-10-24
 
 ### Fixed
