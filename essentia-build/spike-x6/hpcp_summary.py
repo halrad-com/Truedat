@@ -45,6 +45,9 @@ def parse(path):
                 cur["contributions"] = int(kv["contributions"])
             elif head == "alloc":
                 cur["alloc_" + kv["size"]] = float(kv["seconds"])
+            elif head == "fused":   # x7: HPCPFused against chords + tuning
+                cur["fused"] = float(kv["seconds"])
+                cur["fused_diff"] = int(kv["frames_differing_36"]) + int(kv["frames_differing_120"])
     return rows
 
 
@@ -90,8 +93,15 @@ def main(argv):
             "  member LO/HI buffers save the per-call allocation: %.4f s (36) + %.4f s (120) = %.1f%% of the three HPCPs" % (
                 tot["alloc_36"], tot["alloc_120"], 100 * (tot["alloc_36"] + tot["alloc_120"]) / three if three else 0),
             "  frames %d; per frame: chords %.2f us, tuning %.2f us, walk %.2f us" % (
-                tot_frames, 1e6 * ch / tot_frames, 1e6 * tu / tot_frames, 1e6 * tot["walk"] / tot_frames),
-            "",
+                tot_frames, 1e6 * ch / tot_frames, 1e6 * tu / tot_frames, 1e6 * tot["walk"] / tot_frames)]
+    fused_rows = [r for r in rows.values() if "fused" in r]
+    if fused_rows:
+        fz = sum(r["fused"] for r in fused_rows) - sum(r["copy"] for r in fused_rows)
+        sep = sum(r["hpcp_chords"] + r["hpcp_tuning"] - 2 * r["copy"] for r in fused_rows)
+        diff = sum(r["fused_diff"] for r in fused_rows)
+        out.append("  HPCPFused (x7) on %d row(s): frames differing from HPCP chords/tuning: %d (%s); time %.4f s vs %.4f s separate = %.1f%% saved" % (
+            len(fused_rows), diff, "BIT-IDENTICAL" if diff == 0 else "MISMATCH", fz, sep, 100 * (sep - fz) / sep if sep else 0))
+    out += ["",
             "To put these on the extractor's scale, multiply each share by the HPCP rows of the same input's",
             "x6profile table (step0-decode.txt: HPCP[size=36] is key + chords together, HPCP[size=120] is tuning)."]
     sys.stdout.write("\n".join(out) + "\n")

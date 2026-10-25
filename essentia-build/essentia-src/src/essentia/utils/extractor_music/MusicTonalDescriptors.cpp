@@ -138,8 +138,13 @@ void MusicTonalDescriptors::createNetwork(SourceBase& source, Pool& pool) {
                                    "useThreeChords", true);
 
   // TODO review this parameters to improve our chords detection
-  Algorithm* hpcp_chord = factory.create("HPCP",
+  // x7: the chords HPCP (36 bins) and the tuning HPCP (120 bins, below) were
+  // two HPCP instances configured identically except size; HPCPFused computes
+  // both in one pass over the peaks, each output bit-identical to the HPCP it
+  // replaces ("hpcp" = chords, "hpcpHighRes" = tuning)
+  Algorithm* hpcp_chord = factory.create("HPCPFused",
                                          "size", 36,
+                                         "sizeHighRes", 120,
                                          "referenceFrequency", tuningFreq,
                                          "harmonics", 8,
                                          "bandPreset", true,
@@ -208,22 +213,8 @@ void MusicTonalDescriptors::createNetwork(SourceBase& source, Pool& pool) {
   hpcp_chord->output("hpcp") >> crest->input("array");
   crest->output("crest") >> PC(pool, nameSpace + "hpcp_crest");
 
-  // HPCP Tuning
-  Algorithm* hpcp_tuning = factory.create("HPCP",
-                                          "size", 120,
-                                          "referenceFrequency", tuningFreq,
-                                          "harmonics", 8,
-                                          "bandPreset", true,
-                                          "minFrequency", 20.0,
-                                          "maxFrequency", 3500.0,
-                                          "bandSplitFrequency", 500.0,
-                                          "weightType", "cosine",
-                                          "nonLinear", true,
-                                          "windowSize", 0.5);
-
-  peaks->output("frequencies")  >> hpcp_tuning->input("frequencies");
-  peaks->output("magnitudes")   >> hpcp_tuning->input("magnitudes");
-  hpcp_tuning->output("hpcp")   >> PC(pool, nameSpace + "hpcp_highres");
+  // HPCP Tuning: the 120-bin output of the fused chords HPCP above
+  hpcp_chord->output("hpcpHighRes") >> PC(pool, nameSpace + "hpcp_highres");
 }
 
 

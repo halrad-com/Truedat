@@ -37,6 +37,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <essentia/algorithmfactory.h>
@@ -158,6 +159,43 @@ int main(int argc, char* argv[]) {
         best = min(best, x6profile::now() - t0);
       }
       printf("copy seconds=%.6f check=%.6g\n", best, sink);
+    }
+
+    // ---- 1b. HPCPFused (x7) against the two HPCPs it replaces: bit for bit on
+    //          every frame, then its time against chords + tuning ----
+    {
+      Algorithm* ch = makeHpcp("chords");
+      Algorithm* tu = makeHpcp("tuning");
+      Algorithm* fu = AlgorithmFactory::create("HPCPFused", "size", 36, "sizeHighRes", 120,
+                                               "referenceFrequency", kRef, "harmonics", 8,
+                                               "bandPreset", true, "minFrequency", kMin, "maxFrequency", kMax,
+                                               "bandSplitFrequency", 500.0, "weightType", "cosine",
+                                               "nonLinear", true, "windowSize", 0.5);
+      vector<Real> fi, mi, oc, ot, fa, fb;
+      ch->input("frequencies").set(fi); ch->input("magnitudes").set(mi); ch->output("hpcp").set(oc);
+      tu->input("frequencies").set(fi); tu->input("magnitudes").set(mi); tu->output("hpcp").set(ot);
+      fu->input("frequencies").set(fi); fu->input("magnitudes").set(mi);
+      fu->output("hpcp").set(fa); fu->output("hpcpHighRes").set(fb);
+      size_t badA = 0, badB = 0;
+      for (size_t i = 0; i < freqs.size(); i++) {
+        fi = freqs[i]; mi = mags[i];
+        ch->compute(); tu->compute(); fu->compute();
+        if (fa.size() != oc.size() || (fa.size() && memcmp(&fa[0], &oc[0], fa.size() * sizeof(Real)))) badA++;
+        if (fb.size() != ot.size() || (fb.size() && memcmp(&fb[0], &ot[0], fb.size() * sizeof(Real)))) badB++;
+      }
+      double best = 1e30, check = 0;
+      for (int r = 0; r < repeats; r++) {
+        double t0 = x6profile::now();
+        for (size_t i = 0; i < freqs.size(); i++) {
+          fi = freqs[i]; mi = mags[i];
+          fu->compute();
+          check += fa.empty() ? 0 : fa[0];
+        }
+        best = min(best, x6profile::now() - t0);
+      }
+      delete ch; delete tu; delete fu;
+      printf("fused seconds=%.6f frames_differing_36=%u frames_differing_120=%u check=%.6g\n",
+             best, (unsigned)badA, (unsigned)badB, check);
     }
 
     // ---- 2. the shared walk alone (what a fused chords+tuning HPCP computes once) ----
