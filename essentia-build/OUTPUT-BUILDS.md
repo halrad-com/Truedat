@@ -394,11 +394,12 @@ on a library, and the per-cut numbers are elapsed on a shared machine.
 `.6` is frozen at drop 2 (`64b55cec`) as the fallback build. The drop 3 items (buffer reuse,
 the StereoMuxer status, the ESPB write) were folded into `.7`.
 
-## output-x64.7 — decode once, one HPCP pass for chords and tuning (2026-10-25)
+## output-x64.7 — decode once, one HPCP pass for chords and tuning, no full-PCM retention (2026-10-25)
 
 Same output as `.6` drop 2 in every call shape (the 2-arg call, the full profile, the scan
 profile, the edges frames file) apart from the build id (`metadata.version.extractor_build`
-and the ESPB header tag). Three changes, each built, gated against `.6` and measured alone:
+and the ESPB header tag). Four changes, each built, gated and measured alone; the first three
+against `.6`, the fourth (B5, added before `.7` was released, same build id) against the first three:
 
 1. **Output pools filled in place** (`5485e89`). `MusicExtractor::compute` wrote a local
    results and statistics pool and copied both into its outputs; it now fills the outputs
@@ -419,9 +420,15 @@ and the ESPB header tag). Three changes, each built, gated against `.6` and meas
    (default 256 MiB, ~12.7 min of 44.1 kHz stereo); a track estimated above it, or one that
    crosses it, is decoded by every pass as before. `x7.sharedDecode: 0` switches it off. A
    build that predates `.7` ignores both keys.
+4. **Streaming Danceability and DynamicComplexity** (`820c85e`, B5). Both stored every mono
+   44.1 kHz sample in a pool and ran the standard algorithm at the end — 352,800 B per
+   audio-second for the pair. They now stream: each keeps the frame being filled and its small
+   per-frame series, and does the arithmetic with the standard algorithm's own steps over the
+   same samples in the same order.
 
 Incremental build (`run-x6-build.sh`, one-shot scheduled task, `-j6`). `essentia_streaming_
-extractor_music.exe`: MD5 **`6af75d493dfb3b4949ec1fd433b4c58c`**.
+extractor_music.exe`: MD5 **`0fb6f804f8f53dad65c4c963e6447e47`** (`220d877`). It replaced
+the three-change build, `6af75d493dfb3b4949ec1fd433b4c58c` (`9844483`), which was never released.
 
 **Verification** (`spike-x6/`, against the `.6` drop 2 outputs on the strict gate tools —
 coverage, freshness and finite/non-finite checks — 45 decodable rows, 37 exactly repeating):
@@ -437,14 +444,28 @@ coverage, freshness and finite/non-finite checks — 45 decodable rows, 37 exact
   output, which has no field table committed. None of these keys was repeated, so they are
   unresolved as noise, not shown to be noise. Two family flags on one AAC file in change 1 were
   shown to be the extractor's own run-to-run spread by repeating the row on both builds
-  (`noise-r_m4a_2-drop2*.txt`); those are different keys.
+  (`noise-r_m4a_2-drop2*.txt`); those are different keys. A same-binary control taken for
+  change 4 puts the per-key counts in scale: the three-change build against a second run of
+  itself gives strict-beyond 133 on the full output (`field-table-c3raw-c3raw2.txt`) and 9 in
+  the scan + edges shape (`field-table-c3pa-c3pb.txt`).
+- Change 4 against the three-change build: `danceability`, `dynamic_complexity` and
+  `average_loudness` identical on every row in all six pass shapes (`b5-exact.txt`); exact rows
+  identical; frames gates pass with the spool on and forced off (`gate-edges-c3scanedges-
+  b5scanedges.txt`, `gate-edges-c3zscanedges-b5zscanedges.txt`); noisy-row movement at the
+  same-binary level — strict-beyond 127 against 133 on the full output, 7 against 9 and 8 in
+  the scan + edges shape, family 0. Natively, streaming against standard bit for bit at chunk
+  sizes from 1 sample to the whole track, synthetic signals and two real files: 232/232
+  (`b5-streaming-test.txt`).
 - The spool, natively under ASan and UBSan: 19/19 (`spool-test.txt`); the first run found that
   a cap below one block could never record, fixed before the build. Decoder fixtures 8/8.
 - Memory (`c3-mem-cap256m.txt`, `c3-mem-cap100m.txt`, same binary, spool on vs off): peak
   working set rises by the spool — 352,800 B per audio-second for stereo, half for mono —
-  within +4.5 MiB, and not at all for a track over the cap. The extractor's own peak is
-  106.6 MiB + 0.414 MiB per audio-second (`mem-fit.txt`); `ram-tiers.txt` projects the total
-  for 4 / 8 / 20 workers on 8 / 16 / 32 GB with the cap truedat passes.
+  within +4.5 MiB, and not at all for a track over the cap. The extractor's own peak was
+  106.6 MiB + 0.414 MiB per audio-second before change 4 (`mem-fit.txt`; `ram-tiers.txt`
+  projects that build for 4 / 8 / 20 workers on 8 / 16 / 32 GB). With change 4 it is
+  109.1 MiB + 0.066 MiB per audio-second, spool off, 10 real rows, residuals within 1.6 MiB
+  (`b5-mem.txt`; spool on: `b5-mem-spool.txt`); every row's saving equals the 352,800 B/s the
+  two pools held.
 - Disk: the spool code has no file API, and the bytes the process writes (`written_mib`,
   GetProcessIoCounters) differ with and without the spool only by its log lines on stdout.
 
@@ -456,6 +477,9 @@ extractor's time (`profile-c1pa-vs-c2pb.txt`); the shared decode, same binary on
 −25 to −28 %, 44.1 kHz FLAC / MP3 / AAC 0–9 %, hi-res after truedat's conversion about 0.
 Against `.6` drop 2 the corpus runs ~16 % faster (`profile-p0a-vs-c3pb.txt`); about 11 points
 are attributable to the two changes, the rest is between-pass spread on a shared machine.
+Change 4's own rows (Danceability, DynamicComplexity) cost +0.69 s over a 75.6 s corpus; its
+passes ran under other load (algorithms it does not touch were 12–17 % slower too), so no
+whole-run timing is claimed for it.
 
 Not verified: the AudioLoader record / replay code under a sanitizer (the spool itself is;
 the loader code is shown by the identical outputs); the mid-stream abandon on a real file
