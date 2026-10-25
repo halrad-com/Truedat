@@ -25875,6 +25875,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (spools && edgesProfile == null)
                 {
                     try { if (File.Exists(tempJson)) File.Delete(tempJson); } catch { }
+                    if (tempLink != null) { try { RetryDelete(tempLink); } catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); } }
                     return (null, edgesPrepError ?? "could not write the extractor profile that carries the RAM spool cap");
                 }
             }
