@@ -1,0 +1,63 @@
+x6 drop 2 - per-cut table, all on the drop 2 binary (spike-x6/out/build-s3,
+64b55cec008649c673fa13c9ab8dd4b6) with x6profile on, 45 decodable corpus rows,
+each pass alone on the machine (other huddle sessions were active on the box;
+see the noise line). Side-by-side tables: profile-sfa-vs-*.txt; per-label
+tables profile-<label>.txt. Elapsed per phase/algorithm; "process CPU" is
+GetProcessTimes summed over the runs.
+
+== same-binary noise on this binary and night ==
+  sfa (full profile, 2-arg)   elapsed 120.588 s   process CPU 118.656 s
+  sfb (same)                  elapsed 125.601 s   process CPU 123.594 s   (+4.2%)
+  wall over the 42 rows shared with the baseline: 80.0 s vs 87.9 s (+9.9%).
+  => a TOTAL that moves by less than ~5-10% is not a result; the per-phase and
+  per-algorithm rows a cut touches are, because they are localised and the
+  untouched rows show the noise.
+
+== each cut alone (vs sfa) ==
+                      total elapsed   process CPU   what actually moved (the rows the cut touches)
+  cut-stats           117.912 (-2.7)  116.359 (-1.9%)  aggregation 2.808 -> 0.176 s (-2.63 s); output (JSON) 1.035 -> 0.829 s (-0.21 s)
+  cut-melbands128     119.531 (-1.1)  117.531 (-0.9%)  MelBands 0.481 -> 0 s; its PoolStorage -0.05 s; aggregation 2.808 -> 1.991 s (-0.82 s: the 128-band vector's statistics)
+  cut-bands           115.457 (-5.1)  113.891 (-4.0%)  PoolStorage (network1) 1.792 -> 1.579 s (-0.21 s); aggregation 2.808 -> 1.968 s (-0.84 s: three band vectors' statistics); the remaining -4 s is in network1/2 rows the cut does not touch = noise
+  cut-md5             119.426 (-1.2)  117.875 (-0.7%)  nothing the cut touches moved beyond noise (AudioLoader phase 2: -0.03 s); the MD5 over the packets is not measurable here
+  scan profile        ssa 111.398 (-9.2) / ssb 110.286 (-10.3)   110.031 / 108.781   (-7.3% / -8.3% process CPU)
+  (stats + melbands128 + bands; md5 left ON after the first scan passes showed cutting it
+   changes the edges frames file's descriptor set for nothing measurable)
+                                                       aggregation 2.808 -> 0.104 / 0.117 s (-2.69 s); output 1.035 -> 0.854 / 0.792 s (-0.24 s);
+                                                       MelBands -0.48 s; PoolStorage (network1) 1.792 -> 1.484 / 1.463 s (-0.33 s)
+                                                       => attributable to the rows the cuts touch: -3.7 s = 3.1% of the run set;
+                                                          observed end to end: -7.6% / -8.5% elapsed, the two scan passes agreeing within 1%,
+                                                          while the two full passes differ by 4.2% - so between 3% (attributable) and ~8% (observed)
+  (an earlier pair of scan passes, taken while the box was noisier, showed -0.3% / +2.6%:
+   profile-sfa-vs-ssb.txt before the rescan; the rescan tables replace them)
+
+== the edges call shape (profile + --frames-bin), same binary, profiler on ==
+  sea  (full edges profile)        116.807 s elapsed   process CPU 114.875 s
+  ssea (scan + edges profile)      114.620 s           process CPU 112.391 s   (-1.9% / -2.2%)
+  moved: aggregation 2.621 -> 0.114 s (-2.51 s); output (main JSON) 0.975 -> 0.794 s; MelBands -0.47 s;
+  PoolStorage -0.24 s; the ESPB frames write unchanged (0.55 vs 0.59 s) - it writes the same
+  framesInclude set under both profiles. Attributable -3.4 s = 2.9%; observed -1.9%.
+
+== the scan profile's output ==
+  main JSON keys: 599 -> see cut-candidates (full) and gate-scan-*.txt; every allowlisted key present
+  and equal (gate); file size on the WMA Lossless row 211 lines vs ~600 under the full profile.
+
+== the architect's follow-ups, measured with the per-instance keying ==
+  OnsetDetection[method=complex] x2 (OnsetRate's + the Degara tracker's)   9.948 s   12.9% of total
+  CartesianToPolar x2 (the phase those two need)                           6.449 s    8.4%
+  OnsetDetection[method=hfc] x1                                            0.120 s    0.1%
+    => the hfc method is free; "complex" and the phase it needs are ~21% of the extractor,
+       and the Degara beat tracker needs its own complex detection regardless of OnsetRate.
+  HPCP[size=120] x1 (tuning)                                               4.504 s    5.8%
+  HPCP[size=36]  x2 (key + chords)                                         2.921 s    3.8%
+    => the 120-bin tuning HPCP alone costs more than key and chords together.
+  FFT-class: FFT[1024] 0.254 + FFT[2048] 0.277 + Spectrum[2048] 1.044 + 0.339 = 1.9 s = 2.5%.
+
+== the baseline, restated on this binary (profile-sfa.txt, 45 rows) ==
+  network1 56.7% | network2 17.7% | audio_metadata (EBU pass) 14.5% | replay_gain 6.9% |
+  aggregation 2.9% | output 1.2% | metadata 0.0%.
+  The build-p baseline (cpu-baseline.txt) carried ~10% of its own profiler's cost in every
+  phase (its per-call keying built two strings per process() call; s3's keying is one hash
+  lookup): un-instrumented wall over the same 42 rows was 91.6 s for build-p vs 80.0 s for
+  s3 and 84.3 s for the registered .6 with no profiler. The SHARES moved by less than one
+  point; the "scheduler remainder" of network1 fell from 6.6 s to 4.3 s (5.5%) - the rest of
+  that line was the profiler.

@@ -18,6 +18,7 @@
  */
 
 #include "MusicLowlevelDescriptors.h"
+#include "x6options.h"
 
 using namespace std;
 using namespace essentia;
@@ -66,10 +67,16 @@ void MusicLowlevelDescriptors::createNetworkNeqLoud(SourceBase& source, Pool& po
   fc->output("frame")             >> zcr->input("signal");
   zcr->output("zeroCrossingRate") >> PC(pool, nameSpace + "zerocrossingrate");
 
+  // x6 (drop 2): profile switches, absent = on (x6options.h). With
+  // x6.bandsStorage off the band vectors still feed their shape, flatness and
+  // crest descriptors below; only the per-frame pool storage (and so the
+  // aggregation of a 40-, 40- and 27-band vector per frame) is skipped.
+  const bool storeBands = x6on(options, "x6.bandsStorage");
+
   // MelBands and MFCC
   Algorithm* mfcc = factory.create("MFCC", "numberBands", 40);
   spec->output("spectrum")  >> mfcc->input("spectrum");
-  mfcc->output("bands")     >> PC(pool, nameSpace + "melbands");
+  if (storeBands) mfcc->output("bands") >> PC(pool, nameSpace + "melbands");
   mfcc->output("mfcc")      >> PC(pool, nameSpace + "mfcc");
   
   // Spectral MelBands Central Moments Statistics, Flatness and Crest
@@ -88,16 +95,18 @@ void MusicLowlevelDescriptors::createNetworkNeqLoud(SourceBase& source, Pool& po
   mels_fl->output("flatnessDB")  >> PC(pool, nameSpace + "melbands_flatness_db");
   mels_cr->output("crest")       >> PC(pool, nameSpace + "melbands_crest");
   
-  // MelBands 128 
-  Algorithm* melbands128 = factory.create("MelBands", "numberBands", 128);
-  spec->output("spectrum")     >> melbands128->input("spectrum");
-  melbands128->output("bands") >> PC(pool, nameSpace + "melbands128");
+  // MelBands 128 (x6.melbands128: nothing downstream consumes it)
+  if (x6on(options, "x6.melbands128")) {
+    Algorithm* melbands128 = factory.create("MelBands", "numberBands", 128);
+    spec->output("spectrum")     >> melbands128->input("spectrum");
+    melbands128->output("bands") >> PC(pool, nameSpace + "melbands128");
+  }
 
   // ERBBands and GFCC
   uint nERBBands = 40;
   Algorithm* gfcc = factory.create("GFCC", "numberBands", nERBBands);
   spec->output("spectrum")  >> gfcc->input("spectrum");
-  gfcc->output("bands")     >> PC(pool, nameSpace + "erbbands");
+  if (storeBands) gfcc->output("bands") >> PC(pool, nameSpace + "erbbands");
   gfcc->output("gfcc")      >> PC(pool, nameSpace + "gfcc");
 
   // Spectral ERBBands Central Moments Statistics, Flatness and Crest
@@ -120,7 +129,7 @@ void MusicLowlevelDescriptors::createNetworkNeqLoud(SourceBase& source, Pool& po
   int nBarkBands = 27;
   Algorithm* barkBands = factory.create("BarkBands", "numberBands", nBarkBands);
   spec->output("spectrum")    >> barkBands->input("spectrum");
-  barkBands->output("bands")  >> PC(pool, nameSpace + "barkbands");
+  if (storeBands) barkBands->output("bands") >> PC(pool, nameSpace + "barkbands");
 
   // Spectral BarkBands Central Moments Statistics, Flatness and Crest
   Algorithm* barks_cm = factory.create("CentralMoments", "range", nBarkBands-1);

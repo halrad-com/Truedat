@@ -1,0 +1,3 @@
+# ONE cut, measured alone: no per-frame melbands / erbbands / barkbands storage
+# (their shape, flatness and crest descriptors still run); full statistics.
+x6.bandsStorage: 0

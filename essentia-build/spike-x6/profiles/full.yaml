@@ -1,0 +1,10 @@
+# The FULL profile written out: every key at the extractor's default, so a
+# 3-arg call with this file must produce exactly the 2-arg call's output.
+lowlevel.stats: [mean, var, stdev, median, min, max, dmean, dmean2, dvar, dvar2]
+tonal.stats: [mean, var, stdev, median, min, max, dmean, dmean2, dvar, dvar2]
+rhythm.stats: [mean, var, stdev, median, min, max, dmean, dmean2, dvar, dvar2]
+lowlevel.mfccStats: [mean, cov, icov]
+lowlevel.gfccStats: [mean, cov, icov]
+x6.melbands128: 1
+x6.bandsStorage: 1
+x6.md5: 1

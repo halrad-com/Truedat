@@ -22,6 +22,7 @@
 #include "graphutils.h"
 #include "../streaming/streamingalgorithm.h"
 #include "../streaming/streamingalgorithmcomposite.h"
+#include "../utils/x6profile.h"
 using namespace std;
 using namespace essentia;
 using namespace essentia::streaming;
@@ -281,8 +282,13 @@ bool Network::runStep() {
   printNetworkBufferFillState();
 #endif
 
-  // first run the generator once
-  gen->process();
+  // first run the generator once (timed only under ESSENTIA_PROFILE, see x6profile.h)
+  if (x6profile::enabled()) {
+    double t0 = x6profile::now();
+    gen->process();
+    x6profile::addCall(gen, x6profile::now() - t0);
+  }
+  else gen->process();
 
   bool endOfStream = gen->shouldStop();
 
@@ -310,7 +316,12 @@ bool Network::runStep() {
       _toposortedNetwork[i]->shouldStop(endOfStream && runStack.empty());
       AlgorithmStatus status;
       do {
-        status = _toposortedNetwork[i]->process();
+        if (x6profile::enabled()) {
+          double t0 = x6profile::now();
+          status = _toposortedNetwork[i]->process();
+          x6profile::addCall(_toposortedNetwork[i], x6profile::now() - t0);
+        }
+        else status = _toposortedNetwork[i]->process();
 
 #if DEBUGGING_ENABLED
         if (status == OK || status == FINISHED) _toposortedNetwork[i]->nProcess++;

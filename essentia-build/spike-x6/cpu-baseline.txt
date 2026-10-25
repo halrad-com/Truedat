@@ -1,0 +1,117 @@
+x6 drop 2 - CPU baseline of the FULL extractor (decoder-only .6 + x6profile),
+measured BEFORE any cut.
+
+CORRECTION (after the drop 2 build): this build-p baseline is inflated by its
+own instrumentation - the first x6profile keyed every process() call by a
+(phase, name) string pair, two string copies and a map lookup per call, ~15M
+calls per corpus pass. Un-instrumented wall over the same 42 rows: build-p
+91.6 s, the drop 2 binary (one hash lookup per call) 80.0 s, the registered
+.6 with no profiler 84.3 s. Absolute seconds below are therefore ~10% high;
+the phase SHARES hold to within a point (cpu-table.txt restates them on the
+drop 2 binary: network1 56.7%, network2 17.7%, EBU pass 14.5%, replay gain
+6.9%, aggregation 2.9%, output 1.2%), and the "scheduler remainder" of
+network1 (6.6 s here) is 4.3 s there - the difference was the profiler. Source tables: profile-pa.txt, profile-pb.txt (two runs
+of the 2-arg call, same binary), profile-pa-vs-pb.txt, profile-pea.txt (edges
+call shape). Pooled over the 42 decodable corpus rows (8 real tracks dominate:
+~85 of the 88 s). Per-call time is wall of a single-threaded process() call with
+nothing else on the core = CPU; the instrumentation adds two clock reads per
+call (~15M calls => under 1 s, equal in every instrumented build, so cancels in
+before/after). Same-binary noise: pa 88.17 s vs pb 88.74 s, +0.6%; a cut smaller
+than ~1% of total is not distinguishable from noise with two samples.
+
+== where the 88.2 s go (pa) ==
+  phase                 seconds   share   dominated by
+  1 metadata              0.02    0.0%   TagLib
+  2 audio_metadata       12.66   14.4%   EBU R128 loudness pass: Resample 4.0, FrameCutter 2.9, Mean 1.7, AudioLoader 1.6, IIR 0.9
+  3 replay_gain           6.10    6.9%   Resample 2.2, AudioLoader 1.4, EqualLoudness 1.4
+  4 network1             50.00   56.7%   OnsetDetection 10.8 (12.2% of total), CartesianToPolar 7.0 (7.9%),
+                                         Entropy 2.7, Resample 2.2, Dissonance 2.0, GFCC 2.0, AudioLoader 1.8,
+                                         PoolStorage 1.5 (66 instances, 8.66M calls), PitchSalience 1.5,
+                                         EqualLoudness 1.5, SpectralContrast 1.2, Spectrum 1.2, FrameCutter 1.0;
+                                         scheduler remainder 6.6 (7.5% of total)
+  5 network2             15.47   17.5%   HPCP 8.2 (9.2% of total; key, chords and tuning instances), Resample 2.1, AudioLoader 1.6
+  6 aggregation           2.96    3.4%   PoolAggregator (standard mode; all of it in the phase remainder)
+  7 output                0.97    1.1%   JSON writing (main output)
+
+== the edges call shape (pea: edges-profile.yaml + --frames-bin) ==
+90.86 s vs 88.17 s for the 2-arg call: +2.7 s (+3.0%), of which the ESPB write
+is 0.69 s (output phase 0.97 -> 1.63 s) and the rest is network1 +1.3 s /
+network2 +0.8 s - frames storage and the run-to-run spread (same order as
+pa vs pb's +0.6 s). profile-pa-vs-pea.txt.
+
+== the architect's four follow-ups (mail 008) ==
+FFT share. FFT (2 instances, OnsetRate's and the Degara tracker's) 0.61 s +
+Spectrum (3 in network1, 1 in network2; Spectrum wraps an FFT) 1.16 + 0.38 s
+= 2.15 s = 2.4% of total. CartesianToPolar (7.0 s) is atan2/hypot per bin, not
+an FFT. So the FFTW AVX2/FMA and -march=x86-64-v3 toolchain levers address
+2.4% of the extractor's CPU: closed with a number, like the JSON item.
+
+HPCP sharing. Three instances take the same SpectralPeaks (60 peaks,
+20-3500 Hz) and the same tuning frequency, with DIFFERENT parameters:
+  hpcp_key    size 36,  bandPreset false, nonLinear false, windowSize 1.0, default harmonics
+  hpcp_chord  size 36,  bandPreset true (split 500 Hz), nonLinear true, windowSize 0.5, harmonics 8
+  hpcp_tuning size 120, otherwise = hpcp_chord
+No two are parameter-identical, and a 36-bin HPCP is not a re-binning of the
+120-bin one (cosine weighting over a 0.5-semitone window), so there is no
+byte-identical dedupe. Closed.
+
+Shared decode - what the four passes prepare (plan B4 sizing; no code here):
+  phase 2  AudioLoader -> StereoDemuxer -> Resample L,R to 44.1 kHz ->
+           StereoMuxer -> StereoTrimmer -> LoudnessEBUR128.
+           STEREO, 44.1 kHz, unscaled.            cost: AudioLoader 1.6 + Resample 4.0 (two) = 5.7 s
+  phase 3  EqloudLoader = MonoLoader (AudioLoader -> MonoMixer -> Resample) ->
+           Trimmer -> Scale (the loader's default gain) -> EqualLoudness -> ReplayGain.
+           MONO, 44.1 kHz, default scale, equal-loudness filtered.  cost 1.4 + 2.2 + 1.4 (EqualLoudness) = 5.1 s
+  phase 4  EasyLoader = MonoLoader -> Trimmer -> Scale(replayGain from phase 3).
+           MONO, 44.1 kHz, replay-gain scaled.    cost 1.8 + 2.2 = 4.0 s
+  phase 5  EasyLoader with the SAME parameters as phase 4.
+           IDENTICAL stream to phase 4's.         cost 1.6 + 2.1 = 3.7 s
+Only phases 4 and 5 consume the same prepared audio; the second pass exists
+because BeatsLoudness needs phase 4's beats_position and HPCP needs its
+tuning_frequency. A PCM spool of phase 4's stream (mono float32 at 44.1 kHz:
+176 KB per second, ~265 MB for a 25-minute track, RAM or stage dir) serves
+phase 5 byte-identically: ~3.7 s, 4.2% of total, exactly. Phase 3's stream
+differs only by a linear gain before a linear filter - derivable from phase
+4's up to float rounding (not byte-identical); phase 2 is stereo and separate.
+So: 19% in four passes; ~4% recoverable exactly, ~14% if rounding-level drift
+in the replay gain pass is accepted (a refresh-decision input).
+
+Onset methods (source: algorithms/rhythm/onsetrate.cpp, streaming composite).
+OnsetRate runs ONE front end - FrameCutter 1024/512 (hann) -> FFT ->
+CartesianToPolar (magnitude AND phase) - feeding TWO OnsetDetection instances
+on the same frames, method "hfc" (magnitude only) and method "complex"
+(magnitude + phase). The two detection functions are fused by the Onsets
+algorithm with weights (1, 1) into one onset-time list, and
+onset_rate = count / (frames x hop / sampleRate). So: dropping either method
+changes onset_rate (a producer change: a product decision, not an optimisation);
+dropping "complex" alone would also let the front end use Spectrum
+(magnitude only) instead of CartesianToPolar - the phase (atan2 per bin) is
+the expensive half of the 7.0 s. The Degara beat tracker has its own
+FFT -> CartesianToPolar -> OnsetDetection(complex) front end on the same
+audio (frame 1024 / hop 512 as well) - the third OnsetDetection instance.
+The measured split between the three instances: per-method rows in the drop 2
+report (x6profile keys by "method" / "size" from build-s2 on).
+
+== what this says about the planned cuts ==
+- The B2 cuts as planned act on aggregation (3.4%) and pool storage (1.7%) and
+  one unread branch (MelBands 128: 0.42 s, 0.5%, plus its storage/aggregation
+  share). Everything they can remove together is on the order of 5% of
+  extractor CPU. They are still worth having (they are free and they shrink
+  the output), but they are not where the time is.
+- The time is in features truedat READS:
+  * the onset front end - OnsetDetection x3 (OnsetRate's hfc+complex, the
+    Degara beat tracker's complex) + CartesianToPolar x2 + FFT 0.6 =
+    ~18.4 s, 21% of total - feeding rhythm.onset_rate, bpm, beats_position
+    and the bpm histogram, all read;
+  * HPCP x3: 8.2 s, 9% - key profiles, chords, tuning, all read;
+  * decode + resample, FOUR times (phases 2,3,4,5): AudioLoader 6.4 s +
+    Resample 10.5 s = 16.9 s, 19% of total. A shared decode (plan B4) would
+    keep one pass: ~12.7 s, ~14%, recoverable. The plan's line for a .7 design
+    was "if measured >= 20%": the four passes are 19%, the recoverable part 14%.
+  * EBU R128: ~5.5 s, 6%, read (loudness_ebu128.*).
+- B4's JSON double-check: the whole output phase is 1.1% of total, so the
+  double parse is at most a fraction of that. Not worth a change.
+- Instances: 66 PoolStorage sinks in network1 make 8.66M process() calls for
+  1.5 s - the per-call scheduler cost (the 6.6 s remainder) scales with the
+  number of algorithms in the graph, which is the drop 3 (fewer copies) and
+  "fewer nodes" territory, not a profile switch.

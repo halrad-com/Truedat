@@ -25,6 +25,7 @@
 #include <essentia/algorithm.h>
 #include <essentia/algorithmfactory.h> 
 #include <essentia/utils/extractor_music/extractor_version.h>
+#include <essentia/utils/x6profile.h>
 #include "music_extractor/extractor_utils.h"
 
 #include "credit_libav.h"
@@ -101,18 +102,24 @@ int essentia_main(string audioFilename, string outputFilename, string profileFil
     // Identity of this binary, additive to the main output only.
     results.set("metadata.version.extractor_build", MUSIC_EXTRACTOR_BUILD_ID);
 
-    outputToFile(results, outputFilename, options);
-    if (options.value<Real>("outputFrames")) {
-      if (framesBinFilename.empty()) {
-        outputToFile(resultsFrames, outputFilename+"_frames", options);
+    x6profile::setPhase("7 output");
+    {
+      x6profile::Scope total("total");
+      { x6profile::Scope step("main"); outputToFile(results, outputFilename, options); }
+      if (options.value<Real>("outputFrames")) {
+        x6profile::Scope step("frames");
+        if (framesBinFilename.empty()) {
+          outputToFile(resultsFrames, outputFilename+"_frames", options);
+        }
+        else {
+          outputToBinaryFile(resultsFrames, framesBinFilename, options, MUSIC_EXTRACTOR_BUILD_ID);
+        }
       }
-      else {
-        outputToBinaryFile(resultsFrames, framesBinFilename, options, MUSIC_EXTRACTOR_BUILD_ID);
+      else if (!framesBinFilename.empty()) {
+        cerr << "Warning: --frames-bin given but the profile does not set outputFrames; no frames file written" << endl;
       }
     }
-    else if (!framesBinFilename.empty()) {
-      cerr << "Warning: --frames-bin given but the profile does not set outputFrames; no frames file written" << endl;
-    }
+    x6profile::report(audioFilename);   // no-op unless ESSENTIA_PROFILE is set
     delete extractor;
     essentia::shutdown();
   }

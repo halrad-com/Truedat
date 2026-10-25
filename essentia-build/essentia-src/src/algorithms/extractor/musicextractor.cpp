@@ -19,6 +19,9 @@
 
 #include "musicextractor.h"
 #include "extractor_music/tagwhitelist.h"
+#include "extractor_music/x6options.h"
+#include "x6profile.h"
+#include "devnull.h"
 
 using namespace std;
 
@@ -206,8 +209,11 @@ void MusicExtractor::compute() {
   // TODO: we still compute some low-level descriptors with equal loudness filter...
   // TODO: remove for consistency? evaluate on classification tasks?
   
+  // x6profile phases (timed only under ESSENTIA_PROFILE): each phase's "total"
+  // step minus its algorithms' process() time is setup and pool overhead
   E_INFO("MusicExtractor: Read metadata");
-  readMetadata(audioFilename, results);
+  x6profile::setPhase("1 metadata");
+  { x6profile::Scope total("total"); readMetadata(audioFilename, results); }
 
   if (requireMbid
       && !results.contains<vector<string> >("metadata.tags.musicbrainz_trackid")
@@ -216,10 +222,12 @@ void MusicExtractor::compute() {
   }
   
   E_INFO("MusicExtractor: Compute md5 audio hash, codec, length, and EBU 128 loudness");
-  computeAudioMetadata(audioFilename, results);
-  
+  x6profile::setPhase("2 audio_metadata");
+  { x6profile::Scope total("total"); computeAudioMetadata(audioFilename, results); }
+
   E_INFO("MusicExtractor: Replay gain");
-  computeReplayGain(audioFilename, results);
+  x6profile::setPhase("3 replay_gain");
+  { x6profile::Scope total("total"); computeReplayGain(audioFilename, results); }
 
   #if HAVE_LIBCHROMAPRINT
     if (chromaprintCompute) {
@@ -234,7 +242,9 @@ void MusicExtractor::compute() {
 
   // normalize the audio with replay gain and compute as many lowlevel, rhythm,
   // and tonal descriptors as possible
-  
+
+  x6profile::setPhase("4 network1");
+  double x6t0 = x6profile::enabled() ? x6profile::now() : 0;
   streaming::Algorithm* loader = factory.create("EasyLoader",
                                     "filename",   audioFilename,
                                     "sampleRate", analysisSampleRate,
@@ -255,10 +265,13 @@ void MusicExtractor::compute() {
 
   scheduler::Network network(loader);
   network.run();
-  
-  // Descriptors that require values from other descriptors in the previous chain
-  lowlevel->computeAverageLoudness(results);  // requires 'loudness'
 
+  // Descriptors that require values from other descriptors in the previous chain
+  { x6profile::Scope step("computeAverageLoudness"); lowlevel->computeAverageLoudness(results); }  // requires 'loudness'
+  if (x6profile::enabled()) x6profile::addStep("total", x6profile::now() - x6t0);   // encloses the step above
+
+  x6profile::setPhase("5 network2");
+  x6t0 = x6profile::enabled() ? x6profile::now() : 0;
   streaming::Algorithm* loader_2 = factory.create("EasyLoader",
                                        "filename",   audioFilename,
                                        "sampleRate", analysisSampleRate,
@@ -275,7 +288,8 @@ void MusicExtractor::compute() {
   network_2.run();
 
   // Descriptors that require values from other descriptors in the previous chain
-  tonal->computeTuningSystemFeatures(results); // requires 'hpcp_highres'
+  { x6profile::Scope step("computeTuningSystemFeatures"); tonal->computeTuningSystemFeatures(results); } // requires 'hpcp_highres'
+  if (x6profile::enabled()) x6profile::addStep("total", x6profile::now() - x6t0);   // encloses the step above
 
   // TODO is this necessary? tuning_frequency should always have one value:
   Real tuningFreq = results.value<vector<Real> >(tonal->nameSpace + "tuning_frequency").back();
@@ -284,7 +298,8 @@ void MusicExtractor::compute() {
   
 
   E_INFO("MusicExtractor: Compute aggregation");
-  stats = computeAggregation(results);
+  x6profile::setPhase("6 aggregation");
+  { x6profile::Scope total("total"); stats = computeAggregation(results); }
 
   // pre-trained classifiers are only available in branches devoted for that
   // (eg: 2.0.1)
@@ -465,11 +480,15 @@ void MusicExtractor::readMetadata(const string& audioFilename, Pool& results) {
 
 void MusicExtractor::computeAudioMetadata(const string& audioFilename, Pool& results) {
   streaming::AlgorithmFactory& factory = streaming::AlgorithmFactory::instance();
+  // x6 (drop 2): x6.md5 off = no MD5 over the encoded packets and no
+  // md5_encoded key (x6options.h; absent = on)
+  const bool md5 = x6on(options, "x6.md5");
   streaming::Algorithm* loader = factory.create("AudioLoader",
                                                 "filename",   audioFilename,
-                                                "computeMD5", true);
+                                                "computeMD5", md5);
 
-  loader->output("md5")             >> PC(results, "metadata.audio_properties.md5_encoded");
+  if (md5) loader->output("md5")    >> PC(results, "metadata.audio_properties.md5_encoded");
+  else     loader->output("md5")    >> NOWHERE;
   loader->output("sampleRate")      >> PC(results, "metadata.audio_properties.sample_rate");
   loader->output("numberChannels")  >> PC(results, "metadata.audio_properties.number_channels");
   loader->output("bit_rate")        >> PC(results, "metadata.audio_properties.bit_rate");
@@ -607,6 +626,14 @@ void MusicExtractor::setExtractorOptions(const std::string& filename) {
   yaml->output("pool").set(opts);
   yaml->compute();
   delete yaml;
+
+  // x6 (drop 2): YamlInput ADDS a list's elements (the multi-value string pool)
+  // while the defaults above were SET as one vector (the single-vector pool),
+  // and Pool::merge refuses a type change - so a profile could never override
+  // a statistics list ("...already exists but contains a different data type").
+  // Drop the default first; Pool::value<vector<string>>() reads either pool.
+  const vector<string> names = opts.descriptorNames();
+  for (int i=0; i<(int)names.size(); ++i) options.remove(names[i]);
   options.merge(opts, "replace");
 }
 

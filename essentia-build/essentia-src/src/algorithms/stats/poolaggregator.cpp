@@ -93,59 +93,75 @@ void PoolAggregator::aggregateSingleRealPool(const Pool& input, Pool& output) {
 }
 
 void PoolAggregator::aggregateRealPool(const Pool& input, Pool& output) {
-  PoolOf(Real) realPool = input.getRealPool();
+  // x6 (drop 2): the pool is read in place and only the REQUESTED statistics
+  // are computed, each by the same expression as before, so a requested value
+  // is bit-identical to output-x64.5's. Dependencies: var/stdev/skew/kurt need
+  // the mean, stdev needs var, dmean/dvar need the first derivative, dmean2/
+  // dvar2 the second (which needs the first).
+  const PoolOf(Real)& realPool = input.getRealPool();
 
   for (PoolOf(Real)::const_iterator it = realPool.begin();
        it != realPool.end();
        ++it) {
-    string key = it->first;
-    vector<Real> data = it->second;
+    const string& key = it->first;
+    const vector<Real>& data = it->second;
     int dsize = int(data.size());
 
+    const vector<string>& stats = getStats(key);
+    const bool wMean = contains(stats, string("mean")),     wVar = contains(stats, string("var")),
+               wStdev = contains(stats, string("stdev")),   wMedian = contains(stats, string("median")),
+               wSkew = contains(stats, string("skew")),     wKurt = contains(stats, string("kurt")),
+               wMin = contains(stats, string("min")),       wMax = contains(stats, string("max")),
+               wDmean = contains(stats, string("dmean")),   wDvar = contains(stats, string("dvar")),
+               wDmean2 = contains(stats, string("dmean2")), wDvar2 = contains(stats, string("dvar2"));
+
     // mean, variance, and standard deviation
-    Real meanVal = mean(data);
-    Real varianceVal = variance(data, meanVal);
-    Real stdevVal = sqrt(varianceVal);
+    Real meanVal = 0, varianceVal = 0, stdevVal = 0;
+    if (wMean || wVar || wStdev || wSkew || wKurt) meanVal = mean(data);
+    if (wVar || wStdev) varianceVal = variance(data, meanVal);
+    if (wStdev) stdevVal = sqrt(varianceVal);
 
     // median
-    Real medianVal = median(data);
+    Real medianVal = wMedian ? median(data) : 0;
 
     // skewness and kurtosis
-    Real skewnessVal = skewness(data, meanVal);
-    Real kurtosisVal = kurtosis(data, meanVal);
+    Real skewnessVal = wSkew ? skewness(data, meanVal) : 0;
+    Real kurtosisVal = wKurt ? kurtosis(data, meanVal) : 0;
 
     // min and max
     Real minVal = data[0], maxVal = data[0];
-    for (int i=1; i<dsize; ++i) {
-      minVal = min(minVal, data[i]);
-      maxVal = max(maxVal, data[i]);
+    if (wMin || wMax) {
+      for (int i=1; i<dsize; ++i) {
+        minVal = min(minVal, data[i]);
+        maxVal = max(maxVal, data[i]);
+      }
     }
 
     // derived mean & var
-    vector<Real> derived(dsize > 1 ? dsize-1 : 1, 0.0);
-    vector<Real> derived2(dsize > 2 ? dsize-2 : 1, 0.0);
+    Real dmeanVal = 0, d2meanVal = 0, dvarianceVal = 0, d2varianceVal = 0;
+    if (wDmean || wDvar || wDmean2 || wDvar2) {
+      vector<Real> derived(dsize > 1 ? dsize-1 : 1, 0.0);
+      vector<Real> derived2(dsize > 2 ? dsize-2 : 1, 0.0);
 
-    for (int i=0; i<dsize-1; ++i) {
-      derived[i] = data[i+1] - data[i];
+      for (int i=0; i<dsize-1; ++i) {
+        derived[i] = data[i+1] - data[i];
+      }
+      for (int i=0; i<dsize-2; ++i) {
+        derived2[i] = derived[i+1] - derived[i];
+      }
+
+      // we need to perform the absolute value conversion before taking the
+      // variance so that the mean and variance caclulation both use the absolute
+      // value technique and thus consistent
+      for (int i=0; i<(int)derived.size(); i++) derived[i] = abs(derived[i]);
+      for (int i=0; i<(int)derived2.size(); i++) derived2[i] = abs(derived2[i]);
+      if (wDmean)  dmeanVal = mean(derived);
+      if (wDmean2) d2meanVal = mean(derived2);
+      if (wDvar)   dvarianceVal = variance(derived, mean(derived));
+      if (wDvar2)  d2varianceVal = variance(derived2, mean(derived2));
     }
-    for (int i=0; i<dsize-2; ++i) {
-      derived2[i] = derived[i+1] - derived[i];
-    }
-
-    Real dmeanVal, d2meanVal, dvarianceVal, d2varianceVal;
-
-    // we need to perform the absolute value conversion before taking the
-    // variance so that the mean and variance caclulation both use the absolute
-    // value technique and thus consistent
-    for (int i=0; i<(int)derived.size(); i++) derived[i] = abs(derived[i]);
-    for (int i=0; i<(int)derived2.size(); i++) derived2[i] = abs(derived2[i]);
-    dmeanVal = mean(derived);
-    d2meanVal = mean(derived2);
-    dvarianceVal = variance(derived, mean(derived));
-    d2varianceVal = variance(derived2, mean(derived2));
 
     // figure out which computed stats to add to the output pool
-    const vector<string>& stats = getStats(key);
     for (int i=0; i<(int)stats.size(); ++i) {
       if      (stats[i] == "mean")   output.set(key + ".mean", meanVal);
       else if (stats[i] == "median") output.set(key + ".median", medianVal);
@@ -190,14 +206,16 @@ void PoolAggregator::aggregateSingleVectorRealPool(const Pool& input, Pool& outp
 }
 
 void PoolAggregator::aggregateVectorRealPool(const Pool& input, Pool& output) {
-  PoolOf(vector<Real>) vectorRealPool = input.getVectorRealPool();
+  // x6 (drop 2): read in place, compute only the requested statistics (see
+  // aggregateRealPool); the covariance block below already was conditional
+  const PoolOf(vector<Real>)& vectorRealPool = input.getVectorRealPool();
 
   for (PoolOf(vector<Real>)::const_iterator it = vectorRealPool.begin();
        it != vectorRealPool.end();
        ++it) {
 
-    string key = it->first;
-    vector<vector<Real> > data = it->second;
+    const string& key = it->first;
+    const vector<vector<Real> >& data = it->second;
     int dsize = data.size();
 
     if (dsize == 0) continue;
@@ -222,74 +240,91 @@ void PoolAggregator::aggregateVectorRealPool(const Pool& input, Pool& output) {
     }
     if (skipDescriptor) continue;
 
+    const vector<string>& stats = getStats(key);
+    const bool wMean = contains(stats, string("mean")),     wVar = contains(stats, string("var")),
+               wStdev = contains(stats, string("stdev")),   wMedian = contains(stats, string("median")),
+               wSkew = contains(stats, string("skew")),     wKurt = contains(stats, string("kurt")),
+               wMin = contains(stats, string("min")),       wMax = contains(stats, string("max")),
+               wDmean = contains(stats, string("dmean")),   wDvar = contains(stats, string("dvar")),
+               wDmean2 = contains(stats, string("dmean2")), wDvar2 = contains(stats, string("dvar2")),
+               wCov = contains(stats, string("cov")),       wIcov = contains(stats, string("icov"));
 
     // mean & var
-    vector<Real> meanVals = meanFrames(data);
-    vector<Real> varVals = varianceFrames(data);
+    vector<Real> meanVals, varVals, stdevVals;
+    if (wMean) meanVals = meanFrames(data);
+    if (wVar || wStdev) varVals = varianceFrames(data);
 
     // stdev
-    vector<Real> stdevVals(varVals);
-    std::transform(stdevVals.begin(), stdevVals.end(), stdevVals.begin(), static_cast<Real (*)(Real)>(std::sqrt));
+    if (wStdev) {
+      stdevVals = varVals;
+      std::transform(stdevVals.begin(), stdevVals.end(), stdevVals.begin(), static_cast<Real (*)(Real)>(std::sqrt));
+    }
 
     // median
-    vector<Real> medianVals = medianFrames(data);
+    vector<Real> medianVals;
+    if (wMedian) medianVals = medianFrames(data);
 
     // skewness & kurtosis
-    vector<Real> skewnessVals = skewnessFrames(data);
-    vector<Real> kurtosisVals = kurtosisFrames(data);
+    vector<Real> skewnessVals, kurtosisVals;
+    if (wSkew) skewnessVals = skewnessFrames(data);
+    if (wKurt) kurtosisVals = kurtosisFrames(data);
 
     // min & max
-    vector<Real> minVals(vsize, 0.0), maxVals(vsize, 0.0);
-    for (int j=0; j<vsize; j++) minVals[j] = maxVals[j] = data[0][j]; // init values
-    for (int i=1; i<dsize; i++) {
-      for (int j=0; j<vsize; j++) {
-        minVals[j] = min(data[i][j], minVals[j]);
-        maxVals[j] = max(data[i][j], maxVals[j]);
+    vector<Real> minVals, maxVals;
+    if (wMin || wMax) {
+      minVals.assign(vsize, 0.0); maxVals.assign(vsize, 0.0);
+      for (int j=0; j<vsize; j++) minVals[j] = maxVals[j] = data[0][j]; // init values
+      for (int i=1; i<dsize; i++) {
+        for (int j=0; j<vsize; j++) {
+          minVals[j] = min(data[i][j], minVals[j]);
+          maxVals[j] = max(data[i][j], maxVals[j]);
+        }
       }
     }
 
     // derived mean & var
-    vector<vector<Real> > derived(dsize > 1 ? dsize-1 : 1, vector<Real>(vsize, 0.0));
-    vector<vector<Real> > derived2(dsize > 2 ? dsize-2 : 1, vector<Real>(vsize, 0.0));
+    vector<Real> dmeanVals, d2meanVals, dvarVals, d2varVals;
+    if (wDmean || wDvar || wDmean2 || wDvar2) {
+      vector<vector<Real> > derived(dsize > 1 ? dsize-1 : 1, vector<Real>(vsize, 0.0));
+      vector<vector<Real> > derived2(dsize > 2 ? dsize-2 : 1, vector<Real>(vsize, 0.0));
 
-    // first derivative
-    for (int i=0; i<dsize-1; i++) {
-      for (int j=0; j<vsize; j++) {
-        derived[i][j] += data[i+1][j] - data[i][j];
+      // first derivative
+      for (int i=0; i<dsize-1; i++) {
+        for (int j=0; j<vsize; j++) {
+          derived[i][j] += data[i+1][j] - data[i][j];
+        }
       }
-    }
 
-    // second derivative
-    for (int i=0; i<dsize-2; i++) {
-      for (int j=0; j<vsize; j++) {
-        derived2[i][j] += derived[i+1][j] - derived[i][j];
+      // second derivative
+      for (int i=0; i<dsize-2; i++) {
+        for (int j=0; j<vsize; j++) {
+          derived2[i][j] += derived[i+1][j] - derived[i][j];
+        }
       }
-    }
 
-    for (int i=0; i<int(derived.size()); i++) {
-      for (int j=0; j<int(derived[i].size()); j++) {
-        derived[i][j] = abs(derived[i][j]);
+      for (int i=0; i<int(derived.size()); i++) {
+        for (int j=0; j<int(derived[i].size()); j++) {
+          derived[i][j] = abs(derived[i][j]);
+        }
       }
-    }
 
-    for (int i=0; i<int(derived2.size()); i++) {
-      for (int j=0; j<int(derived2[i].size()); j++) {
-        derived2[i][j] = abs(derived2[i][j]);
+      for (int i=0; i<int(derived2.size()); i++) {
+        for (int j=0; j<int(derived2[i].size()); j++) {
+          derived2[i][j] = abs(derived2[i][j]);
+        }
       }
-    }
 
-    vector<Real> dmeanVals = meanFrames(derived);
-    vector<Real> d2meanVals = meanFrames(derived2);
-    vector<Real> dvarVals = varianceFrames(derived);
-    vector<Real> d2varVals = varianceFrames(derived2);
+      if (wDmean)  dmeanVals = meanFrames(derived);
+      if (wDmean2) d2meanVals = meanFrames(derived2);
+      if (wDvar)   dvarVals = varianceFrames(derived);
+      if (wDvar2)  d2varVals = varianceFrames(derived2);
+    }
 
     // only compute cov and icov matrix if asked, because it could throw an
-    // exception if matrix is singular...
-    const vector<string>& stats = getStats(key);
-
+    // exception if matrix is singular... and the inverse only if icov is asked
     vector<vector<Real> > cov(vsize), icov(vsize);
 
-    if (contains(stats, string("cov")) || contains(stats, string("icov"))) {
+    if (wCov || wIcov) {
 
       // create an Array2D and copy all the data values into it
       TNT::Array2D<Real> frames(dsize, vsize);
@@ -302,7 +337,7 @@ void PoolAggregator::aggregateVectorRealPool(const Pool& input, Pool& output) {
       vector<Real> framesMean; // not used
       TNT::Array2D<Real> covTnt, icovTnt;
 
-      Algorithm* sg = AlgorithmFactory::create("SingleGaussian");
+      Algorithm* sg = AlgorithmFactory::create("SingleGaussian", "computeInverse", wIcov);
       sg->input("matrix").set(frames);
       sg->output("mean").set(framesMean);
       sg->output("covariance").set(covTnt);
@@ -317,10 +352,16 @@ void PoolAggregator::aggregateVectorRealPool(const Pool& input, Pool& output) {
       int covSize = covTnt.dim1();
       for (int i=0; i<covSize; ++i) {
         cov[i].resize(covSize);
-        icov[i].resize(covSize);
         for (int j=0; j<covSize; ++j) {
           cov[i][j] = covTnt[i][j];
-          icov[i][j] = icovTnt[i][j];
+        }
+      }
+      if (wIcov) {
+        for (int i=0; i<covSize; ++i) {
+          icov[i].resize(covSize);
+          for (int j=0; j<covSize; ++j) {
+            icov[i][j] = icovTnt[i][j];
+          }
         }
       }
     }

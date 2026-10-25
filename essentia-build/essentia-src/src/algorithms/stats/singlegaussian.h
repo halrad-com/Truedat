@@ -43,7 +43,15 @@ class SingleGaussian : public Algorithm {
     declareOutput(_inverseCovariance, "inverseCovariance", "the inverse of the covariance matrix");
   }
 
-  void declareParameters() {}
+  void declareParameters() {
+    // x6 (drop 2): a caller that reads only the covariance skips the LU
+    // inverse; the inverseCovariance output is then left empty
+    declareParameter("computeInverse", "whether to compute the inverse covariance matrix", "{true,false}", true);
+  }
+
+  void configure() {
+    _computeInverse = parameter("computeInverse").toBool();
+  }
 
   void compute();
 
@@ -52,6 +60,7 @@ class SingleGaussian : public Algorithm {
   static const char* description;
 
  protected:
+  bool _computeInverse;
   std::vector<Real> meanMatrix(const TNT::Array2D<Real>& matrix, int dim) const;
   TNT::Array2D<Real> transposeMatrix(const TNT::Array2D<Real>& matrix) const;
   TNT::Array2D<Real> covarianceMatrix(const TNT::Array2D<Real>& matrix, bool lowmem = false) const;

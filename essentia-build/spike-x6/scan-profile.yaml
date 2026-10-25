@@ -1,0 +1,25 @@
+# x6 SCAN profile (drop 2): compute and emit only what truedat reads
+# (scan-allowlist.txt). The 2-arg call stays the FULL profile; this file is
+# the reference for the profile the C# side passes once drop 2 is accepted.
+#
+# Statistics per namespace, from the allowlist: lowlevel reads .mean on every
+# descriptor and .stdev on six; tonal reads .mean plus hpcp_entropy.stdev;
+# rhythm reads .mean; mfcc reads mean + cov (mfccStdev is the cov diagonal);
+# gfcc reads mean. Keys below are the extractor's existing profile keys.
+lowlevel.stats: [mean, stdev]
+tonal.stats: [mean, stdev]
+rhythm.stats: [mean]
+lowlevel.mfccStats: [mean, cov]
+lowlevel.gfccStats: [mean]
+# x6 switches (default 1 = the full extractor's behaviour; 0 = cut):
+#   x6.melbands128   the 128-band mel branch: read by nothing, main or frames
+#   x6.bandsStorage  per-frame melbands / erbbands / barkbands vectors in the
+#                    pool: their shape/flatness/crest descriptors still consume
+#                    them in-graph; only the storage and aggregation go
+#   x6.md5           MD5 over the encoded packets (metadata.audio_properties.
+#                    md5_encoded): read by nothing, but its cost did not measure
+#                    (cpu-table.txt) and cutting it changes the edges frames
+#                    file's descriptor set, so the scan profile leaves it ON
+x6.melbands128: 0
+x6.bandsStorage: 0
+x6.md5: 1

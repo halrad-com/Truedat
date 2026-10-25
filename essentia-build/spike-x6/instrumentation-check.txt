@@ -1,0 +1,13 @@
+x6profile instrumentation changes no output. Profiler build (spike-x6/out/build-p,
+extractor md5 f4fd747efb6b8ccae226c5c7e5fe3c31 = the .6 tree + x6profile in the
+scheduler, MusicExtractor and main) on spike-x5/sine60.wav, 2-arg call:
+
+  decoder-only .6 (2fe852f564c894691e144697c6a0d200)   7d216c27d737dee8b526c8d4ebfa0bac
+  build-p, ESSENTIA_PROFILE unset                       7d216c27d737dee8b526c8d4ebfa0bac
+  build-p, ESSENTIA_PROFILE=out/sine60.profile.tsv      7d216c27d737dee8b526c8d4ebfa0bac
+
+cmp: byte-identical, profiler off and on. The profile table it wrote
+(out/sine60.profile.tsv) names 7 phases and 66 pool-storage instances; the
+per-call costs are wall time of single-threaded process() calls, so they are
+CPU time when nothing else holds the core - which is why no build runs while a
+measurement pass does.

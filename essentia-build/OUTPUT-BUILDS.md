@@ -233,12 +233,26 @@ truncated files, 65,535-block FLAC — synthetic rows regenerating byte-identica
 real files):
 
 - **PCM parity against FFmpeg 7.1.1** built from the extractor's own FFmpeg source, flags and
-  toolchain (`spike-x6/references.txt`): `.6` sample count and f32 PCM byte-identical on
-  **45 of 45** rows (`parity-x6.txt`). The `.5` loader (an intermediate build whose extractor is
-  byte-identical to `.5` on `sine60.wav`) is byte-identical on every row except the three stereo
-  65,535-block FLACs, where it crashes (`parity-build-a.txt`). So with this FFmpeg the loop
-  defects lost no samples on any codec here — its decoders return one frame per packet and no
-  delayed frames — and the capacity defect is the only one real files reach.
+  toolchain (`spike-x6/references.txt`): `.6` f32 PCM byte-identical (same length, same bytes)
+  on all **43 decoded** rows, and the two Opus rows refused as expected (`parity-x6.txt`). The
+  `.5` loader (an intermediate build whose extractor is byte-identical to `.5` on `sine60.wav`)
+  is byte-identical on every decoded row except the three stereo 65,535-block FLACs, where it
+  crashes (`parity-build-a.txt`). So for the codecs **in this corpus** — FLAC, PCM WAV/AIFF,
+  MP3, AAC, WMA v2, Vorbis, ALAC, WavPack — the loop defects lost no samples: those decoders
+  return one frame per packet and no delayed frames here. **Where the loop defects DID lose
+  audio — codecs whose packets carry many frames:** two real files, added to the corpus
+  after review (2026-10-24) named the gap:
+  - **WMA Lossless** (44.1 kHz stereo 16-bit, ~5 min): `.6` 13,337,604 frames, byte-identical
+    to the reference; the `.5` loader 2,133,778 — **84 % lost**, from frame 28,672 on.
+  - **WMA Pro** (96 kHz stereo 24-bit): `.6` 27,463,836 frames, byte-identical; the `.5` loader
+    3,440,640 — **87 % lost**, from frame 62,464 on.
+  - **APE** (no sample here, no FFmpeg encoder): by the pinned source, `libavformat/ape.c`
+    packs 294,912 samples into one packet (APE 3950–3970) and `libavcodec/apedec.c` emits 4,608
+    per decode call, leaving the packet partially consumed — the same shape, so the same loss.
+  The `.5` extractor on such a file does not fail: it analyses the fraction it decoded (the
+  loader also logs one `avcodec_send_packet error: Invalid data` per dropped packet). Every
+  `.5` entry for an APE, WMA Lossless or WMA Pro file is therefore wrong and is the refresh set
+  once `.6` ships; WMA v2 (the common `.wma`) is bit-identical in both and needs nothing.
 - **Decoder-state fixtures** (`essentia_test_audioloader_decodeloop`, the loader's own loop
   against a scripted decoder: multi-frame packets, `EAGAIN` backpressure, delayed frames at
   drain, drain-once, mid-stream error, an `EAGAIN`-forever decoder): `.5` loop 5 of 8 fail,
@@ -248,10 +262,14 @@ real files):
   conversion on the big-block rows, heap-buffer-overflow in `libswresample/audioconvert.c` via
   `swr_convert` on the three stereo rows and nothing on the mono control (`asan-*report.txt`).
 - **End-to-end, `.5` vs `.6`**, 2-arg call, judged against a `.5` × 3 same-binary band
-  (`repeat-band.*`): on every row `.5` analyses, 0 values beyond 2× the statistic family's
-  band; synthetic rows move 0 keys at all. Per-key (2× the key's own three-run band) flags 56
-  values on four real files, and an out-of-sample `.6` vs `.6` pair flags 50 on the same four —
-  the run-to-run noise `.3` documented, not the change (`field-table-*.txt`).
+  (`repeat-band.*`). On the 34 rows where `.5` repeats exactly (every synthetic row and two
+  real files), `.6` is **exactly equal** on every key. On the five real rows that are noisy
+  run-to-run, the per-key test (2× each key's own three-run band) flags 56 values; an
+  out-of-sample `.6` vs `.6` pair flags 50 on the same files, so the flagged keys are the
+  run-to-run noise `.3` documented — three runs under-sample it, which is why exact rows carry
+  the gate. The pooled statistic-family test is reported too but is weak: the `min` family's
+  band is 1.91, so 2× it exceeds the relative metric's ceiling of 2 and cannot fail
+  (`field-table-*.txt`).
 - **Call shapes** (`additive-check.txt`): 2-arg and 4-arg main JSON differ from `.5` only in
   `extractor_build`; 3-arg JSON frames byte-identical; the ESPB file differs in one byte, the
   header tag.
@@ -260,4 +278,115 @@ Against the shipped `dist/truedat/ffmpeg.exe` (FFmpeg 8.x) AAC in MP4 decodes 28
 shorter (8.x trims the end padding) and AAC/WMA differ in the last bits; both loaders are
 bit-exact against 7.1.1 there, so these are FFmpeg-version effects (`references.txt`).
 Not verified: an Opus decoder (none in this FFmpeg build), multichannel input, real files with
-large FLAC blocks (none found), non-ASCII paths.
+large FLAC blocks (none found), non-ASCII paths, APE (no sample, no encoder).
+
+Corrections after review (2026-10-24): the codec statement above was narrowed from "every
+codec" to the corpus, and the WMA rows added; the parity checker rules on bytes (earlier tables
+kept as `parity-*-v1.txt`); the per-key band is the primary end-to-end test.
+
+**APE through the full extractor (found by an executed review, 2026-10-24; fixed in the drop 2
+build).** The decoder-only binary above decodes an APE file correctly in isolation but the full
+extractor exits 1 on it: `acquireForWrite: Requested number of tokens (176800) > phantom size
+(4096) in StereoDemuxer::left`. Its loader emitted every frame of a packet in one scheduler
+step; an APE packet is 294,912 samples (64 frames of 4,608), `StereoDemuxer`'s output buffer
+is 65,536 tokens with a 4,096 phantom, and the demuxer had a pre-existing status bug — it
+answered a full output with `NO_INPUT`, so the scheduler never rescheduled it, and at end of
+stream it asked for the whole backlog at once. Nothing in the corpus had a packet that large
+(the 65,535-sample FLAC block was one sample under). Two fixes, both in the drop 2 binary:
+the loader emits **one decoded frame per `process()` call** (`audioloader_decode.h` `step()`:
+libavcodec's decoder holds the rest; a packet it refuses with `EAGAIN` is kept and re-sent after
+the next receive; the drain packet is sent once; the `AVFrame` is reused across `reset()`,
+closing the leak noted below), which for every one-frame-per-packet codec is exactly `.5`'s
+downstream rhythm; and `StereoDemuxer` returns `NO_OUTPUT` when its output is full (one line,
+`stereodemuxer.cpp`, from the operator's review session). Gates: the fixtures in step form, a
+64-frames-per-packet scenario added; `luckynight.ape` as corpus row `r_ape` — `.6` loader
+byte-exact, `.5` loader 175,104 of 2,667,168 frames; the full extractor completes on it under
+the 2-arg call and the scan profile with length 60.48; `spike-x6/test_ape_regression.py` 3/3;
+ASan 48 rows, 0 reports; the sine output byte-identical to the decoder-only binary.
+
+### Drop 2 — the scan profile: compute only what truedat reads (2026-10-25)
+
+Same build id; the decoder-only binary above stays in history at `7319de5`. The 2-arg call and
+any `.5` profile are the FULL extractor, unchanged. New, all additive:
+
+- **Measurement first.** `src/essentia/utils/x6profile.*`: with `ESSENTIA_PROFILE` naming a
+  file, the scheduler times every streaming `process()` call and `MusicExtractor` its phases,
+  and the run appends a per-algorithm table; otherwise one predictable branch per call. Output
+  byte-identical on and off (`spike-x6/instrumentation-check.txt`). The full extractor's CPU
+  over the corpus, before any cut, is `spike-x6/cpu-baseline.txt`: network1 57 % (onset front
+  end ~21 %), network2 17 % (HPCP 9 %), the EBU R128 pass 14 %, replay gain 7 %, four
+  decode+resample passes 19 % in total, **aggregation 3.4 %, output 1.1 %**.
+- **Output-neutral code, every profile:** `PoolAggregator` computes only the requested
+  statistics, each by the expression it always used, reading the pool in place
+  (`poolaggregator.cpp`); `SingleGaussian` takes `computeInverse` and skips the LU inverse
+  when `icov` is not asked for (`singlegaussian.{h,cpp}`).
+- **Profile switches** (`src/essentia/utils/extractor_music/x6options.h`; absent = on):
+  `x6.melbands128` (the 128-band mel branch, read by nothing), `x6.bandsStorage` (per-frame
+  melbands / erbbands / barkbands vectors in the pool; their shape, flatness and crest
+  descriptors still consume them in-graph), `x6.md5` (MD5 over the encoded packets).
+- **The scan profile** (`spike-x6/scan-profile.yaml`; `scan-edges-profile.yaml` adds
+  `EdgeProducer`'s `outputFrames` + `framesInclude` lines): the extractor's existing
+  per-namespace statistics lists narrowed to what `ParseEssentiaOutput` reads
+  (`lowlevel.stats: [mean, stdev]`, `tonal.stats: [mean, stdev]`, `rhythm.stats: [mean]`,
+  `lowlevel.mfccStats: [mean, cov]`, `lowlevel.gfccStats: [mean]`) and the three switches off.
+  Allowlist: `spike-x6/scan-allowlist.txt` (94 keys read of 599 emitted, `cut-candidates.txt`).
+
+Incremental build (`run-x6-build.sh`, one-shot scheduled task, `-j6`): 4 sources recompiled,
+**7m07s** (22:25:46 → 22:32:53 PDT 2026-10-24), on top of the drop 1 object cache; this binary
+also carries the APE fix above. `essentia_streaming_extractor_music.exe`: MD5
+**`64b55cec008649c673fa13c9ab8dd4b6`**.
+
+**Measurement** (`spike-x6/cpu-table.txt`; every pass alone on the machine, elapsed per
+phase/algorithm, process CPU per run; 45 decodable rows). Same-binary spread on this binary
+and night: +4.2 % elapsed, +9.9 % wall between two identical full-profile passes, so only the
+rows a cut touches are read as results. Each cut alone: the statistics lists take the
+aggregation phase from 2.81 s to 0.18 s and the JSON write from 1.04 s to 0.83 s; the 128-band
+mel branch is 0.48 s of `MelBands` plus 0.82 s of aggregation; the band-vector storage is
+0.21 s of `PoolStorage` plus 0.84 s of aggregation; the packet MD5 is not measurable. The scan
+profile (all of them): aggregation 2.81 → 0.11 s, output −0.21 s, `MelBands` −0.48 s,
+`PoolStorage` −0.26 s — **about 3 % of the extractor's time, measured; the end-to-end totals
+move inside the run-to-run spread.** The main output shrinks from ~600 keys to the ~100
+truedat reads. The CPU is in features truedat reads: the onset front end
+(`OnsetDetection[method=complex]` ×2 12.9 % + `CartesianToPolar` 8.4 %; the `hfc` method is
+0.1 %), `HPCP[size=120]` 5.8 % and `HPCP[size=36]` ×2 3.8 %, the EBU R128 pass 14.5 %, four
+decode+resample passes ~19 %. FFT-class work is 2.5 % of the total, which closes the FFTW /
+`-march` toolchain question with a number; the JSON write is 1.2 %. The `build-p` baseline in
+`cpu-baseline.txt` was ~10 % high in every phase from its own profiler's per-call keying
+(`s3` keys by instance); the shares held to within a point.
+
+**Verification** (`spike-x6/README.md`; gate tables `spike-x6/gate-*.txt`, bands `s3-band.*`,
+`espb-band.tsv`; 45 decodable rows, 37 of which the extractor repeats exactly run to run —
+every synthetic row plus three real files including APE — and 8 noisy real rows):
+
+- **The full profile is the full extractor.** `profiles/full.yaml` (every key at its default)
+  against the 2-arg call: the 37 exact rows identical on every key, 0 key-set differences
+  (`field-table-sfull-sraw.txt`). The same pair is the noise reference for the noisy rows: two
+  identical-profile runs of the same binary differ on 179 values by the per-key test and on 3 by
+  the family test, which is what a 2–4-run band under-samples.
+- **Scan profile.** Every allowlisted key present on all 45 rows and equal to the full output:
+  exactly on the 37 exact rows (`gate-scan-sfull-sscan.txt`); on the 8 noisy rows, 0 by the
+  family test and one value by the per-key test — `lowlevel.barkbands_crest.mean` on one AAC
+  file, relative difference 2.3e-4 against that key's four-run band of 1.1e-4 and a mean-family
+  band of 1.2e-3 (the gate's rule marks it; it is the size of the extractor's own repeat
+  noise). `metadata.audio_properties.length` — the key truedat's under-decode gate
+  reads — is present on the APE, WMA Lossless and WMA Pro rows with the file's duration. The
+  scan output carries 187 keys (94 read; the rest are the metadata block and the per-namespace
+  `.stdev` of descriptors truedat reads only the mean of), down from 599
+  (`cut-candidates.txt` run on the scan output).
+- **Edges call shape.** The frames file under the scan+edges profile against the full edges
+  profile: 45 rows PASS — descriptor set, dtypes, counts and dims identical, the 37 exact rows
+  byte-identical, the noisy rows inside a three-run frames band
+  (`gate-edges-sedges-sscanedges.txt`, `espb-band.tsv`). The first scan profile also switched
+  the packet MD5 off; that removed `metadata.audio_properties.md5_encoded` from the frames file
+  (the include is a prefix) for a saving that did not measure, so the scan profiles leave it on.
+- **Loader step + demuxer guard against the registered decoder-only `.6`** on the 45 original
+  rows (`field-table-x6a-sraw.txt`, `gate-edges-x6ea-sedges.txt`): the 34 exactly-repeating
+  rows identical in the main output and byte-identical in the frames file; on the noisy rows the
+  one family exceedance (`spectral_spread.dvar` on one FLAC, 2.4× a 3-run band) is also exceeded
+  by the same binary against itself, so no fix is attributed any movement.
+- Fixtures 8/8 (step form); ASan 48 rows, 0 reports; `test_ape_regression.py` 3/3.
+
+Not verified: the APE, WMA Lossless and WMA Pro rows have no `.5` extractor output to compare
+against (the `.5` analysis of them is wrong by construction); any decoder not in the corpus;
+multichannel; non-ASCII paths; whole-scan wall time — this binary was not raced against `.5`
+on a library, and the per-cut numbers are elapsed on a shared machine.

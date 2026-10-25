@@ -202,5 +202,6 @@ void SingleGaussian::compute() {
 
   covariance = covarianceMatrix(matrix, false);
 
-  inverseCovariance = inverseMatrix(covariance);
+  if (_computeInverse) inverseCovariance = inverseMatrix(covariance);
+  else inverseCovariance = Array2D<Real>();
 }

@@ -1,0 +1,3 @@
+outputFrames: 1
+outputFormat: json
+framesInclude: [lowlevel.loudness_ebu128, lowlevel.mfcc, tonal.hpcp, rhythm.beats_position, rhythm.beats_loudness, lowlevel.spectral_centroid, lowlevel.spectral_flux, lowlevel.spectral_rolloff, lowlevel.spectral_entropy, lowlevel.spectral_complexity, lowlevel.dissonance, lowlevel.pitch_salience, lowlevel.zerocrossingrate, lowlevel.spectral_rms, lowlevel.spectral_energy, lowlevel.spectral_strongpeak, metadata.audio_properties]
