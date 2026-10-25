@@ -163,7 +163,12 @@ are different acts, and only the second one is a backup of the thing the files c
   rendered through the same catalog writer, so a store source and a catalog source merge identically;
   the fields the writer cuts come across from the store itself. What does not come across: the source
   store's edge rows, identity aliases, conflicts and run history — a store source carries descriptions
-  and copy facts. `--chunk` shards run without a store (a store-backed shard is refused), so a shard
+  and copy facts. The later source wins a path, and what it wins with is what it **carries**: a field
+  the winning entry does not carry — absent, or JSON `null`, the same thing — never clears a stored
+  value (a supplied zero or empty string is a value and lands); the fields the catalog writer cuts
+  follow the winner by content identity (same `audioStreamSha256` and hash kind) and never cross
+  identities; a merge that fails partway supplies nothing; a copy merged in from another library has
+  no `trackId` (the ids are library-local), while an existing copy keeps its own. `--chunk` shards run without a store (a store-backed shard is refused), so a shard
   merge is a merge of catalogs.
 
 ## Looking inside
