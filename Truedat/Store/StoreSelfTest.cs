@@ -39,6 +39,7 @@ namespace Truedat.Store
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
             Block(assert, "MoveRootCounts", () => TestMoveRootCounts(assert));
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
+            Block(assert, "ImportPinsSourceCatalog", () => TestImportPinsSourceCatalog(assert));
             Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
             Block(assert, "ImportFoldBacksUp", () => TestImportFoldBacksUp(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
@@ -1416,6 +1417,36 @@ namespace Truedat.Store
                     ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\inner\a.flac"] = E('a', 2), [@"X:\music\b.flac"] = E('b', 2) }, @"X:\music", "primary", true, "essentia", "selftest", "fixture", null, null);
                 var backups = Directory.GetFiles(dir, "truedat.db.bak.roots.*");
                 assert(backups.Length == 1, $"R1: the import's root fold backs the store up first ({backups.Length} backup(s) beside the store)");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // Operator 2026-10-25 ("the files imported should be zipped and backed up... they get clobbered then what"): a store publish
+        // replaces mbxmoods.json with no backup, and the editing verbs' zips rotate out after keep-backups. So the catalog a store
+        // imports is pinned first, as a zip named by its content, which rotation never matches and a repeat import does not duplicate.
+        static void TestImportPinsSourceCatalog(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-pin-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
+                WriteCatalog(cat, VerdictSelfTest.Fixture());
+                var original = File.ReadAllBytes(cat);
+                using (StoreLog.Quiet())
+                {
+                    ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                    StoreScan.Publish(store, cat, out _);                                       // the store's first publication replaces the file
+                    ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                }
+                CatalogArchive.RotateBackups(cat, 1);
+                var pins = Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip");
+                byte[]? held = null;
+                if (pins.Length >= 1) using (var ms = new MemoryStream()) { CatalogArchive.ExtractCatalogTo(pins.OrderBy(p => File.GetCreationTimeUtc(p)).First(), ms); held = ms.ToArray(); }
+                assert(pins.Length == 2 && held != null && held.SequenceEqual(original),
+                    $"import pins its source catalog: {pins.Length} pinned zip(s) after import, publish, re-import of the published file and a rotation (expected 2: the original and the published one), the first byte-identical to the original: {held != null && held.SequenceEqual(original)}");
+                using (StoreLog.Quiet()) ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                assert(Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip").Length == 2, "importing the same catalog again pins nothing new (the pin is named by content)");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

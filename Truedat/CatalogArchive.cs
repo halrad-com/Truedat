@@ -92,6 +92,19 @@ namespace Truedat
             return bakPath;
         }
 
+        /// <summary>The fail-safe for a catalog a store imports (operator 2026-10-25): once the store holds it, every scan publishes over
+        /// mbxmoods.json from the store with no backup, and the editing verbs' zips rotate out after keep-backups. So the imported file is
+        /// zipped beside itself first as <c>&lt;catalog&gt;.imported.&lt;sha256 prefix&gt;.zip</c>: named by content, so importing the same
+        /// bytes again writes nothing new, and never matched by <see cref="RotateBackups"/> (its prefix is ".bak."). Restores with --restore
+        /// like any backup. Returns the pin's path (existing or new); null when there is no single catalog file to pin.</summary>
+        internal static string? PinImported(string catalogPath, string sha256)
+        {
+            if (!File.Exists(catalogPath) || string.IsNullOrEmpty(sha256)) return null;
+            var pin = $"{catalogPath}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}.zip";
+            if (!File.Exists(pin)) WriteZipBackup(catalogPath, pin);
+            return pin;
+        }
+
         /// <summary>Keep the newest <paramref name="keepN"/> timestamped backups for a
         /// catalog (names matching "&lt;catalog file name&gt;.bak.*"), deleting older
         /// ones. Rotation, never truncation: keepN &lt;= 0 keeps everything. The

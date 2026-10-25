@@ -437,6 +437,9 @@ namespace Truedat.Store
             r.Entries = loaded; r.Catalog = catalog;
             (r.CatalogSha256, r.CatalogBytes) = HashCatalog(catalog);
             StoreLog.Info($"catalog {catalog}: {loaded} entries, {r.CatalogBytes:N0} bytes, sha256 {r.CatalogSha256.Substring(0, 12)}…");
+            // Fail-safe: once the store holds this catalog, every publication replaces the file. Keep the imported bytes first.
+            var pinned = global::Truedat.CatalogArchive.PinImported(catalog, r.CatalogSha256);
+            if (pinned != null) StoreLog.Info($"catalog kept as it was imported: {pinned}");
 
             var now = DateTime.UtcNow.ToString("o");
             using var os = OpenStore.Open(o.StorePath, create: true, VersionInfo.Display, now);
