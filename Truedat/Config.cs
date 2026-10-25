@@ -66,46 +66,46 @@ namespace Truedat
         /// token (see BuildArgs).</summary>
         internal static readonly Setting[] Settings = new[]
         {
-            new Setting { Key = "no-stage",        Kind = Kind.Bool, Default = "false", Help = "read sources directly, never stage a local copy" },
-            new Setting { Key = "no-quick-cache",  Kind = Kind.Bool, Default = "false", Help = "disable the head-64k quick cache tier" },
-            new Setting { Key = "no-bitusage",     Kind = Kind.Bool, Default = "false", Help = "skip the bitUsage signal (one ffmpeg pass per track)" },
-            new Setting { Key = "no-hf-analysis",  Kind = Kind.Bool, Default = "false", Help = "skip the HF signals (one ffmpeg pass per track)" },
+            new Setting { Key = "no-stage",        Kind = Kind.Bool, Default = "false", Help = "never copy sources locally first" },
+            new Setting { Key = "no-quick-cache",  Kind = Kind.Bool, Default = "false", Help = "skip the head-64k cache check" },
+            new Setting { Key = "no-bitusage",     Kind = Kind.Bool, Default = "false", Help = "skip the bitUsage signal" },
+            new Setting { Key = "no-hf-analysis",  Kind = Kind.Bool, Default = "false", Help = "skip the HF signals" },
             // SMFM is parked dark (operator 2026-10-14): off unless `smfm` or --smfm turns it on. `no-smfm` stays as the
             // override that beats `smfm`, and so an existing config carrying it still loads.
-            new Setting { Key = "smfm",            Kind = Kind.Bool, Default = "false", Help = "read Sony SMFM tags (off unless set; --no-smfm overrides for one run)" },
-            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Default = "false", Help = "never read Sony SMFM tags, even when smfm is set" },
-            new Setting { Key = "file-md5",        Kind = Kind.Bool, Default = "false", Help = "compute and store the whole-file MD5" },
-            new Setting { Key = "enableshortfiles",Kind = Kind.Bool, Default = "false", Help = "analyze files under the short-file threshold" },
-            new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Default = "false", Help = "do not hold the machine awake during a scan" },
-            new Setting { Key = "refresh-features",Kind = Kind.Bool, Default = "false", Help = "re-analyze entries missing a later feature wave" },
+            new Setting { Key = "smfm",            Kind = Kind.Bool, Default = "false", Help = "read Sony SMFM tags" },
+            new Setting { Key = "no-smfm",         Kind = Kind.Bool, Default = "false", Help = "never read SMFM tags (beats smfm)" },
+            new Setting { Key = "file-md5",        Kind = Kind.Bool, Default = "false", Help = "store the whole-file MD5" },
+            new Setting { Key = "enableshortfiles",Kind = Kind.Bool, Default = "false", Help = "analyze very short files" },
+            new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Default = "false", Help = "let the machine sleep during a scan" },
+            new Setting { Key = "refresh-features",Kind = Kind.Bool, Default = "false", Help = "re-analyze entries missing new fields" },
             new Setting { Key = "refresh-smfm",    Kind = Kind.Bool, Default = "false", Help = "re-read SMFM tags on cache hits" },
-            new Setting { Key = "audit",           Kind = Kind.Bool, Default = "false", Help = "verbose per-track diagnostics to stderr" },
+            new Setting { Key = "audit",           Kind = Kind.Bool, Default = "false", Help = "per-track diagnostics to stderr" },
             new Setting { Key = "parallel",        Kind = Kind.Int,  Min = 1, Max = 1024,    Default = "cores-2", Help = "worker count" },
-            new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Default = "no limit", Help = "percent CPU cap for subprocesses" },
-            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Default = "5", Help = "catalog backups to retain (0 = keep all)" },
-            new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Default = "30", Help = "duration that tags a track as long" },
-            new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Default = "48000", Help = "skip tracks longer than this (seconds)" },
-            new Setting { Key = "stage-dir",       Kind = Kind.Text, Default = "%TEMP%\\.truedat-stage", Help = "where staged copies are written" },
+            new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Default = "none", Help = "CPU % cap for subprocesses" },
+            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Default = "5", Help = "catalog backups kept (0 = all)" },
+            new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Default = "30", Help = "minutes that count as a long track" },
+            new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Default = "48000", Help = "skip tracks longer than this (s)" },
+            new Setting { Key = "stage-dir",       Kind = Kind.Text, Default = "%TEMP%\\.truedat-stage", Help = "where staged copies go" },
             // A directory, not a target: it says WHERE store files live (<dir>\<library-id>\truedat.db),
             // never WHICH store a run uses — that is still derived from the catalog the run is pointed at.
-            new Setting { Key = "store-dir",       Kind = Kind.Text, Default = "beside the catalog (local per-library path when the catalog is on a share)", Help = "directory holding store files instead of the library folder" },
+            new Setting { Key = "store-dir",       Kind = Kind.Text, Default = "beside catalog", Help = "where store files go" },
             // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
             // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
-            new Setting { Key = "store",           Kind = Kind.Bool, Default = "true", Help = "every scan writes the store (default location); a scan with no store makes one. false turns it off" },
-            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "true", Help = "every scan folds edge rows into the store (needs extractor output-x64.5; skipped with a note otherwise). false turns it off" },
+            new Setting { Key = "store",           Kind = Kind.Bool, Default = "true", Help = "write the store every scan" },
+            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "true", Help = "fold edge rows into the store" },
             // store-v3 T05 (operator, 2026-10-15: "opt in for the arrays. just keep the minimal mvp by default"): with edges on, also keep the
             // edge arrays (series, beats, sub-window summaries, MFCC/spectral vectors) in the store. Off = the default row (scalars + HPCP).
             // Sticky per track: a track that already holds arrays keeps them whatever this says; --edge-arrays-drop is the only discard.
-            new Setting { Key = "edge-arrays",     Kind = Kind.Bool, Default = "false", Help = "with edges on, also keep the edge arrays (opt-in capture); off = the default edge row" },
+            new Setting { Key = "edge-arrays",     Kind = Kind.Bool, Default = "false", Help = "also keep the edge arrays" },
             // The one entry that is not purely a knob: it makes a scan run --fixup afterwards
             // (as a child process). It earns its place because "keep the catalog matching what
             // is on disk" is a standing policy, not a per-invocation decision — and it removes
             // nothing a hand-run --fixup would not, with the same guards and the same refusals.
-            new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Default = "false", Help = "reconcile the catalog against disk after a full scan" },
+            new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Default = "false", Help = "run --fixup after a full scan" },
             // Operator 2026-10-23: the end-of-scan summary is what gets saved and compared; saving it by hand was a copy, a notepad
             // and a file name every run. Beside the catalog as mbxmoods-scan-<start date>-<n>.txt (Program.ScanSummaryFileName).
-            new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the end-of-scan summary beside the catalog as mbxmoods-scan-<date>-<n>.txt. false turns it off" },
+            new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the scan summary to a file" },
         };
 
         private static readonly Dictionary<string, Setting> ByKey =

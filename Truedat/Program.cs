@@ -1092,21 +1092,37 @@ namespace Truedat
             // named a state it then declined to show — you could read the whole screen and
             // still not know what any of it does when left alone.
             Console.WriteLine("  Settable (a typed flag always wins over these):");
-            Console.WriteLine($"    {"key",-18} {"accepts",-14} {"value",-22} {"default",-22} what it does");
-            foreach (var s in TruedatConfig.Settings)
-            {
-                string type = s.Kind == TruedatConfig.Kind.Bool ? "true|false"
-                    : s.Kind == TruedatConfig.Kind.Int ? $"{s.Min}..{s.Max}" : "<text>";
-                // Marked rather than merely shown: on a screen where most rows are defaults,
-                // the one the operator changed is the only one they are looking for.
-                bool set = cfg.Values.TryGetValue(s.Key, out var val);
-                string shown = set ? val + "  <-- set" : "[default]";
-                Console.WriteLine($"    {s.Key,-18} {type,-14} {shown,-22} {s.Default,-22} {s.Help}");
-            }
+            foreach (var line in ConfigListingLines(cfg.Values, ReportWidth)) Console.WriteLine(line);
             Console.WriteLine();
             Console.WriteLine("  truedat --config <key> <value>   set it");
             Console.WriteLine("  truedat --config reset           remove the file");
             Console.WriteLine("  truedat --no-config              ignore it for one run");
+        }
+
+        /// <summary>The settable keys for bare <c>--config</c>: per key, the key and the value in force on one line, what it does and
+        /// what it accepts wrapped beneath it, every line inside <paramref name="width"/>. It was a five-column table whose rows ran past
+        /// 200 columns, so a console wrapped every row and the store/edges values read as the off-switch rows around them (operator,
+        /// 2026-10-25: "its full fucking screen and still cant fucking read it"). A value the config file sets is marked, because on
+        /// a screen of defaults the changed one is the one the operator is looking for.</summary>
+        internal static List<string> ConfigListingLines(IDictionary<string, string> values, int width)
+        {
+            string header = "    " + "key".PadRight(17) + " " + "value".PadRight(10) + " what it does";
+            var lines = new List<string> { header.Length <= width ? header : "    " + "key".PadRight(17) + " value" };
+            bool anySet = false;
+            foreach (var s in TruedatConfig.Settings)
+            {
+                bool set = values.TryGetValue(s.Key, out var v);
+                anySet |= set;
+                string value = set ? v + " *" : s.Default;
+                string head = "    " + s.Key.PadRight(17) + " " + value;
+                string one = "    " + s.Key.PadRight(17) + " " + value.PadRight(10) + " " + s.Help;
+                if (value.Length <= 10 && one.Length <= width) { lines.Add(one); continue; }
+                if (head.Length <= width) lines.Add(head);
+                else { lines.Add("    " + s.Key); lines.Add("        " + value); }
+                foreach (var l in WrapNote(s.Help, Math.Max(20, width - 8))) lines.Add("        " + l);
+            }
+            if (anySet) lines.Add("    * set in the config file");
+            return lines;
         }
 
         /// <summary>
@@ -2925,7 +2941,8 @@ namespace Truedat
                 else if (canonical == "smfm") smfmOn = true;
                 else if (canonical == "version" || canonical == "v")
                 {
-                    Console.WriteLine(VersionInfo.Display);
+                    Console.WriteLine(VersionInfo.Display);   // first line stays the bare stamp, for anything that reads it
+                    PrintEnvironment();
                     Environment.ExitCode = 0;
                     return;
                 }
@@ -11142,6 +11159,13 @@ namespace Truedat
             catch { return 0; }
         }
 
+        /// <summary>Installed physical memory in bytes; 0 when the query fails.</summary>
+        internal static long TotalPhysicalBytes()
+        {
+            try { var m = new MemoryStatusEx(); return GlobalMemoryStatusEx(m) ? (long)m.ullTotalPhys : 0; }
+            catch { return 0; }
+        }
+
         /// <summary>The extractor's command line: input and output always; the profile as the third argument when there is one; the
         /// binary frames path only when edges asked for it. One place, so the three shapes cannot drift.</summary>
         internal static string ExtractorArguments(string toolPath, string tempJson, string? profile, string? frames)
@@ -12052,6 +12076,73 @@ namespace Truedat
                 }
             }
             catch { /* extractor-build detection is best-effort */ }
+        }
+
+        /// <summary><c>-v</c> is a quick environment check (operator, 2026-10-25): every tool and dependency truedat uses, its version,
+        /// and whether it was found — one line each, the path on its own line beneath, so it fits a narrow window.</summary>
+        static void PrintEnvironment()
+        {
+            void Row(string name, string value, string? path = null)
+            {
+                Console.WriteLine("  " + name.PadRight(10) + " " + value);
+                if (path != null) Console.WriteLine("  " + "".PadRight(10) + " " + path);
+            }
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            Row("Windows", RuntimeInformation.OSDescription.Replace("Microsoft Windows ", "").Trim() + (Environment.Is64BitProcess ? " x64" : " x86"));
+            Row(".NET", RuntimeInformation.FrameworkDescription.Replace(".NET Framework ", ""));
+            Row("CPU", $"{Environment.ProcessorCount} logical cores, {Math.Max(1, Environment.ProcessorCount - 2)} workers by default");
+            long total = TotalPhysicalBytes(), avail = AvailablePhysicalBytes();
+            Row("RAM", total > 0 ? $"{total / 1073741824.0:F1} GB, {avail / 1073741824.0:F1} GB available" : "unknown");
+
+            var ex = FindTool("essentia_streaming_extractor_music.exe", baseDir, Environment.CurrentDirectory);
+            if (ex == null) Row("extractor", "NOT FOUND (a scan cannot run)");
+            else Row("extractor", ExtractorBuildLabel(ExtractorMd5(ex)), ex);
+            var ff = _ffmpegPath.Value;
+            if (ff == null) Row("ffmpeg", "not found (no multi-channel, opus or authenticity signals)");
+            else Row("ffmpeg", ToolVersion(ff) ?? "found, version unreadable", ff);
+            var fp = _ffprobePath.Value;
+            if (fp == null) Row("ffprobe", "not found (--transcode only)");
+            else Row("ffprobe", ToolVersion(fp) ?? "found, version unreadable", fp);
+
+            var sq = global::Truedat.Store.SqliteProbe.Probe();
+            Row("SQLite", sq.Ok ? $"{sq.VersionText} (Windows winsqlite3)" : "NOT USABLE: " + sq.Message);
+            Row("TagLib#", typeof(TagLib.File).Assembly.GetName().Version.ToString());
+            Row("JSON", "System.Text.Json " + typeof(System.Text.Json.JsonDocument).Assembly.GetName().Version);
+            string cfg = Path.Combine(baseDir, "truedat.config.json");
+            Row("config", File.Exists(cfg) ? "present" : "none (built-in defaults)", cfg);
+        }
+
+        /// <summary>The extractor's build as one short label: the build name from <see cref="KnownExtractors"/> and whether it is the current one.</summary>
+        internal static string ExtractorBuildLabel(string? md5)
+        {
+            if (md5 == null) return "found, unreadable";
+            if (!KnownExtractors.TryGetValue(md5, out var desc))
+                return $"unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...)";
+            int dash = desc.IndexOf(" — ", StringComparison.Ordinal);
+            string name = dash > 0 ? desc.Substring(0, dash) : desc;
+            return string.Equals(md5, LatestExtractorMd5, StringComparison.OrdinalIgnoreCase) ? name + " (current)" : name + " (older; update the extractor)";
+        }
+
+        /// <summary>The version token from an ffmpeg/ffprobe <c>-version</c> first line ("ffmpeg version X Copyright ...").</summary>
+        internal static string? FfmpegVersionFrom(string? firstLine)
+        {
+            if (string.IsNullOrWhiteSpace(firstLine)) return null;
+            var parts = firstLine!.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length >= 3 && parts[1] == "version" ? parts[2] : null;
+        }
+
+        static string? ToolVersion(string exe)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(exe, "-version") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                using var p = Process.Start(psi);
+                if (p == null) return null;
+                string? first = p.StandardOutput.ReadLine();
+                if (!p.WaitForExit(5000)) { try { p.Kill(); } catch { } }
+                return FfmpegVersionFrom(first);
+            }
+            catch { return null; }
         }
 
         static string? FindTool(string exeName, params string[] searchDirs)
@@ -20888,6 +20979,25 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 foreach (var cs in TruedatConfig.Settings)
                     Assert(!string.IsNullOrWhiteSpace(cs.Default),
                         $"config: '{cs.Key}' declares its built-in default");
+
+                // --config fits the window: every line inside the width, and each key's value in force on the key's own line.
+                foreach (int cw in new[] { 40, 78 })
+                {
+                    var cl = ConfigListingLines(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), cw);
+                    int widest = 0; foreach (var l in cl) widest = Math.Max(widest, l.Length);
+                    Assert(widest <= cw, $"config-listing: every line fits {cw} columns (widest {widest})");
+                    string storeHead = "    " + "store".PadRight(17) + " " + (cw >= 78 ? "true".PadRight(10) + " write the store every scan" : "true");
+                    Assert(cl.Contains(storeHead), $"config-listing: store's value sits on the key's own line at {cw} columns ({string.Join(" | ", cl.FindAll(l => l.Contains("store")))})");
+                    Assert(cl.Exists(l => l.StartsWith("    " + "edges".PadRight(17) + " true", StringComparison.Ordinal)), $"config-listing: edges' value sits on the key's own line at {cw} columns");
+                }
+                // -v environment check: the extractor reads as its build name and whether it is current; ffmpeg as its version token.
+                Assert(ExtractorBuildLabel(LatestExtractorMd5) == "output-x64.7 (current)", $"env: the current extractor is labelled current ({ExtractorBuildLabel(LatestExtractorMd5)})");
+                Assert(ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d") == "output-x64.5 (older; update the extractor)", $"env: an older known build says so ({ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d")})");
+                Assert(ExtractorBuildLabel("0123456789abcdef0123456789abcdef").StartsWith("unrecognized build", StringComparison.Ordinal), "env: an unknown build is unrecognized");
+                Assert(FfmpegVersionFrom("ffmpeg version 2026-10-08-git-ec420ba161-full_build-www.gyan.dev Copyright (c) 2000-2026") == "2026-10-08-git-ec420ba161-full_build-www.gyan.dev", "env: ffmpeg's version token is read");
+                Assert(FfmpegVersionFrom("") == null && FfmpegVersionFrom("garbage") == null, "env: no version line reads as none");
+                var clSet = ConfigListingLines(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["store"] = "false" }, 78);
+                Assert(clSet.Contains("    " + "store".PadRight(17) + " " + "false *".PadRight(10) + " write the store every scan"), "config-listing: a value the file sets is starred");
 
                 Assert(SuggestFlag("refresh-featuers") == "refresh-features",
                     "SuggestFlag corrects a transposition typo");
