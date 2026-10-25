@@ -67,11 +67,15 @@ def id_by_path():
     (manifest.tsv and real-files.tsv are gitignored), so an unmatched path is an
     error here rather than a label."""
     m = {}
-    with open(os.path.join(HERE, "manifest.tsv"), encoding="utf-8") as f:
-        next(f)
-        for line in f:
-            parts = line.rstrip("\n").split("\t")
-            m[norm_path(parts[2])] = parts[0]
+    for name in ("manifest.tsv", "manifest-prod.tsv"):   # -prod: make-prod-corpus.sh's converted rows
+        path = os.path.join(HERE, name)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            next(f)
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                m[norm_path(parts[2])] = parts[0]   # relative rows match the relative label run-repeat.sh passes
     return m
 
 

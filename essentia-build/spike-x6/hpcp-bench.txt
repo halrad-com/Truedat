@@ -1,0 +1,22 @@
+x7 step 0 - HPCP sizing bench (essentia_standard_x7_hpcp_bench), real rows of manifest-prod.tsv
+times are the minimum over the repeats, seconds per pass over every frame; hpcp_* minus the input copy
+
+id              audio s frames  pk/frm       key    chords    tuning      walk   alloc36  alloc120  fused%ch    buf%3
+r_mp3             305.2   6573    59.4    0.0611    0.3284    0.5896    0.1499    0.0004    0.0004     45.7%     0.1%
+r_m4a             547.6  11793    58.9    0.1132    0.5623    1.0386    0.2655    0.0007    0.0007     47.2%     0.1%
+r_m4a_2           191.7   4129    58.1    0.0392    0.1937    0.3795    0.0930    0.0002    0.0002     48.0%     0.1%
+r_wma             324.7   6992    59.6    0.0682    0.3417    0.6355    0.1705    0.0004    0.0004     49.9%     0.1%
+r_flac_hd         186.7   4022    58.7    0.0363    0.1920    0.3713    0.0897    0.0003    0.0003     46.7%     0.1%
+r_flac_live       290.4   6254    60.0    0.0637    0.3190    0.6227    0.1464    0.0003    0.0004     45.9%     0.1%
+r_wav             178.2   3839    60.0    0.0370    0.1964    0.3656    0.0890    0.0002    0.0002     45.3%     0.1%
+r_wmalossless     302.4   6514    59.4    0.0640    0.3216    0.5969    0.1520    0.0004    0.0004     47.3%     0.1%
+r_wmapro          286.1   6162    59.3    0.0600    0.3065    0.5634    0.1406    0.0003    0.0004     45.9%     0.1%
+r_ape              60.5   1304    59.9    0.0121    0.0620    0.1164    0.0290    0.0001    0.0001     46.9%     0.1%
+
+pooled: key 0.5549 s  chords 2.8236 s  tuning 5.2797 s  (three 8.6581 s; tuning / chords = 1.87)
+  fused chords+tuning saves the shared walk once: 1.3258 s = 47.0% of chords, 15.3% of the three HPCPs
+  member LO/HI buffers save the per-call allocation: 0.0032 s (36) + 0.0034 s (120) = 0.1% of the three HPCPs
+  frames 57582; per frame: chords 49.04 us, tuning 91.69 us, walk 23.02 us
+
+To put these on the extractor's scale, multiply each share by the HPCP rows of the same input's
+x6profile table (step0-decode.txt: HPCP[size=36] is key + chords together, HPCP[size=120] is tuning).

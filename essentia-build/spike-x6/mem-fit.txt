@@ -1,0 +1,11 @@
+rows 10  slope 0.4141 MiB per audio-second (1.456 GiB per audio-hour)  intercept 106.6 MiB
+  r_ape          length    60.48 s  peak   134.5 MiB  fit   131.6  resid   +2.9
+  r_wav          length   178.19 s  peak   179.9 MiB  fit   180.4  resid   -0.4
+  r_flac_hd      length   186.69 s  peak   183.6 MiB  fit   183.9  resid   -0.3
+  r_m4a_2        length   191.68 s  peak   187.9 MiB  fit   186.0  resid   +1.9
+  r_wmapro       length   286.08 s  peak   224.2 MiB  fit   225.1  resid   -0.9
+  r_flac_live    length   290.35 s  peak   225.0 MiB  fit   226.8  resid   -1.8
+  r_wmalossless  length   302.44 s  peak   230.4 MiB  fit   231.8  resid   -1.4
+  r_mp3          length   305.19 s  peak   232.2 MiB  fit   233.0  resid   -0.8
+  r_wma          length   324.66 s  peak   238.5 MiB  fit   241.0  resid   -2.5
+  r_m4a          length   547.60 s  peak   336.8 MiB  fit   333.4  resid   +3.4

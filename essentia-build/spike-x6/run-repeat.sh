@@ -22,7 +22,11 @@
 #           scanedges   scan-edges-profile.yaml --frames-bin out/<label>/<id>.bin
 #           full        3-arg call with profiles/full.yaml (= the 2-arg call)
 #           cut=<name>  3-arg call with profiles/cut-<name>.yaml (one cut alone)
-#   no mode = the plain 2-arg call (input output), truedat's scan-only shape.
+#           prod        run over manifest-prod.tsv (make-prod-corpus.sh: the
+#                       hi-res rows converted to 44.1k as truedat does) instead
+#                       of manifest.tsv
+#   no mode = the plain 2-arg call (input output), the .5-era scan-only shape
+#   (truedat calls a scan-profile-capable build with scan/scanedges since 2026-10-25).
 # Output: out/<label>/<id>.json (+ .bin, .log) and out/<label>/runs.tsv
 # (id, rc, wall ms). Status: out/repeat-<first label>.log, last line REPEAT_DONE.
 # Minutes per real track: launch through a one-shot scheduled task.
@@ -51,18 +55,21 @@ case "$modes" in *.full.*)      profile=profiles/full.yaml ;; esac
 case "$modes" in *.cut=*)       cut="${modes#*.cut=}"; profile="profiles/cut-${cut%%.*}.yaml" ;; esac
 profiling=""
 case "$modes" in *.prof.*) profiling=1 ;; esac
+manifest=manifest.tsv
+case "$modes" in *.prod.*) manifest=manifest-prod.tsv ;; esac
+[ -f "$manifest" ] || { echo "no $manifest"; exit 1; }
 [ -z "$profile" ] || [ -f "$profile" ] || { echo "no profile $profile"; exit 1; }
 
 status="out/repeat-$1.log"
 mkdir -p out
-echo "START $(date) spec=$spec exe=$exe profile=${profile:-(2-arg)} bin=${bin:-0} prof=${profiling:-0} labels=$*" > "$status"
+echo "START $(date) spec=$spec exe=$exe profile=${profile:-(2-arg)} bin=${bin:-0} prof=${profiling:-0} manifest=$manifest labels=$*" > "$status"
 md5sum "$exe" >> "$status" 2>&1
 for label in "$@"; do
   mkdir -p "out/$label"
   printf 'id\trc\tms\n' > "out/$label/runs.tsv"
   prof=""
   if [ -n "$profiling" ]; then prof="out/$label/profile.tsv"; : > "$prof"; fi
-  tail -n +2 manifest.tsv | while IFS=$'\t' read -r id kind path expect note; do
+  tail -n +2 "$manifest" | while IFS=$'\t' read -r id kind path expect note; do
     extra=()
     [ -n "$profile" ] && extra=("$profile")
     [ -n "$bin" ] && extra+=(--frames-bin "out/$label/$id.bin")

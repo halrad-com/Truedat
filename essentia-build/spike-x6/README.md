@@ -21,6 +21,10 @@ tracked; generated audio, decoded PCM, extractor outputs and build trees are not
 | `scan-allowlist.txt`, `cut_candidates.py` | The extractor keys truedat reads, and the full output split against them (`cut-candidates.txt`). |
 | `scan-profile.yaml`, `scan-edges-profile.yaml`, `profiles/` | The reduced profiles, the full profile spelled out, and one profile per cut for measuring each alone. |
 | `run-drop2-passes.sh`, `gitbash.cmd` | Wrappers that run the measurement and gate passes from a one-shot scheduled task. |
+| `run-drop3-passes.sh` | The drop 3 stage passes (`m1`/`m2` builds) against the drop 2 outputs; the stages are folded into `.7` (`.6` is frozen at drop 2). |
+| `mem_fit.py`, `mem-fit.txt` | Peak working set (the `peakws_mib` field of the `x6profile` header) against audio length over the real rows: the per-audio-second memory slope. |
+| `make-prod-corpus.sh`, `prod_share.py`, `step0-decode.txt` | `.7` step 0: the production-shaped corpus (rows above 44.1 kHz converted with truedat's own pre-resample command first, `manifest-prod.tsv`, local) run through `run-repeat.sh <build>.prof.scanedges.prod`, and what a shared decode could recover from it. |
+| `run-hpcp-bench.sh`, `hpcp_summary.py`, `hpcp-bench.txt` | `.7` step 0: `essentia_standard_x7_hpcp_bench` (`src/examples/standard_x7_hpcp_bench.cpp`) on the real rows - the three HPCP configurations, the walk a fused chords+tuning HPCP would share, and the per-call buffer allocation. |
 | `test_ape_regression.py`, `ape-regression.md` | Standalone APE regression (existing binaries, offline): loader byte-exact, full extraction, 48 kHz analysis case; the pinned fixture is `corpus/ape_luckynight.ape`. |
 | `*-v1.txt` | Earlier versions of a table, kept beside the current one where a tool's rule changed. |
 

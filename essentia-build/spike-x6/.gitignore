@@ -7,6 +7,7 @@ pcm/
 # a machine's own file paths: never in this public repo
 real-files.tsv
 manifest.tsv
+manifest-prod.tsv
 out/
 asan/work/
 ref/*.exe
@@ -15,3 +16,4 @@ ref/*.exe
 *.json
 *.json_frames
 *.bin
+__pycache__/
