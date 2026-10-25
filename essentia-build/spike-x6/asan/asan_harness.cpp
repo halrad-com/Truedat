@@ -118,13 +118,23 @@ int main(int argc, char** argv) {
     frames += bytes / (4 * channels);
   };
   auto receive = [&] { return avcodec_receive_frame(ctx, frame); };
-
-  while (av_read_frame(demux, pkt) == 0) {
-    if (pkt->stream_index == streamIdx)
-      decodePacket([&] { return avcodec_send_packet(ctx, pkt); }, receive, onFrame);
-    av_packet_unref(pkt);
+  // the loader's step loop, verbatim in shape: one frame per step
+  DecodeState st;
+  auto readPacket = [&]() -> int {
+    for (;;) {
+      av_packet_unref(pkt);
+      int r = av_read_frame(demux, pkt);
+      if (r != 0) return r;
+      if (pkt->stream_index == streamIdx) return 0;
+    }
+  };
+  auto send = [&] { int s = avcodec_send_packet(ctx, pkt); if (s != AVERROR(EAGAIN)) av_packet_unref(pkt); return s; };
+  auto sendDrain = [&] { return avcodec_send_packet(ctx, NULL); };
+  for (;;) {
+    int r = step(st, readPacket, send, sendDrain, receive, onFrame);
+    if (r == STEP_FINISHED) break;
+    if (r < 0) { char b[128]; av_strerror(r, b, sizeof b); fprintf(stderr, "decode step: %s\n", b); }
   }
-  drain([&] { return avcodec_send_packet(ctx, NULL); }, receive, onFrame);
 
   if (fclose(out) != 0) writeFailed = true;
   printf("samples=%llu rate=%d channels=%d codec=%s\n", frames, ctx->sample_rate, channels, codec->name);

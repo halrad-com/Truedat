@@ -146,10 +146,18 @@ void AudioLoader::openAudioFile(const string& filename) {
 
     av_init_packet(&_packet);
 
-    _decodedFrame = av_frame_alloc();
+    // one frame for the loader's lifetime: reset() reopens the file, and
+    // allocating a fresh frame each time leaked the previous one
     if (!_decodedFrame) {
-        throw EssentiaException("AudioLoader: Could not allocate audio frame");
+        _decodedFrame = av_frame_alloc();
+        if (!_decodedFrame) {
+            throw EssentiaException("AudioLoader: Could not allocate audio frame");
+        }
     }
+    else {
+        av_frame_unref(_decodedFrame);
+    }
+    _decodeState = audioloader_detail::DecodeState();
 
     av_md5_init(_md5Encoded);
 }
@@ -216,50 +224,64 @@ AlgorithmStatus AudioLoader::process() {
         throw EssentiaException("AudioLoader: Trying to call process() on an AudioLoader algo which hasn't been correctly configured.");
     }
 
-    // read frames until we get a good one
-    do {
-        // frees the previous iteration's packet when it belonged to another
-        // stream (e.g. cover art); a no-op on the blank packet we enter with
-        av_packet_unref(&_packet);
-        int result = av_read_frame(_demuxCtx, &_packet);
-        //E_DEBUG(EAlgorithm, "AudioLoader: called av_read_frame(), got result = " << result);
-        if (result != 0) {
-            // 0 = OK, < 0 = error or EOF
-            if (result != AVERROR_EOF) {
-                char errstring[1204];
-                av_strerror(result, errstring, sizeof(errstring));
-                ostringstream msg;
-                msg << "AudioLoader: Error reading frame: " << errstring;
-                E_WARNING(msg.str());
+    // One decoded frame per call (audioloader_decode.h explains why). The
+    // decoder is fed, and the drain packet sent, as part of the same call, so
+    // every call either pushes a frame or finishes the stream.
+    using namespace audioloader_detail;
+
+    // the next AUDIO packet into _packet: 0, AVERROR_EOF, or a read error
+    // (logged, then treated as end of stream, as before)
+    auto readPacket = [this]() -> int {
+        for (;;) {
+            av_packet_unref(&_packet);   // the previous packet, or one of another stream (cover art)
+            int result = av_read_frame(_demuxCtx, &_packet);
+            if (result != 0) {
+                if (result != AVERROR_EOF) {
+                    char errstring[1204];
+                    av_strerror(result, errstring, sizeof(errstring));
+                    E_WARNING("AudioLoader: Error reading frame: " << errstring);
+                }
+                return result;
             }
-            shouldStop(true);
-            flushPacket();
-            closeAudioFile();
-            if (_computeMD5) {
-                av_md5_final(_md5Encoded, _checksum);
-                _md5.push(uint8_t_to_hex(_checksum, 16));
-            }
-            else {
-                string md5 = "";
-                _md5.push(md5);
-            }
-            return FINISHED;
+            if (_packet.stream_index != _streamIdx) continue;
+            if (_computeMD5) av_md5_update(_md5Encoded, _packet.data, _packet.size);
+            return 0;
         }
-    } while (_packet.stream_index != _streamIdx);
+    };
+    auto send = [this]() -> int {
+        int s = avcodec_send_packet(_audioCtx, &_packet);
+        // accepted (the decoder holds its own reference) or rejected: release it;
+        // refused with EAGAIN: keep it, step() re-sends it after receiving
+        if (s != AVERROR(EAGAIN)) av_packet_unref(&_packet);
+        return s;
+    };
 
-    // compute md5 first
-    if (_computeMD5) {
-        av_md5_update(_md5Encoded, _packet.data, _packet.size);
+    for (;;) {
+        int r = step(_decodeState, readPacket, send,
+                     [this] { return avcodec_send_packet(_audioCtx, NULL); },
+                     [this] { return avcodec_receive_frame(_audioCtx, _decodedFrame); },
+                     [this] { emitDecodedFrame(); });
+        if (r == STEP_EMITTED) return OK;
+        if (r == STEP_FINISHED) break;
+        if (r < 0) {
+            char errstring[1204];
+            av_strerror(r, errstring, sizeof(errstring));
+            E_WARNING("AudioLoader: decoding error: " << errstring);
+        }
+        // STEP_FED / STEP_DRAINING / a logged error: nothing to push yet, step again
     }
-    
-    // decode this packet; every frame the decoder hands back is pushed by
-    // emitDecodedFrame() before decodePacket() returns
-    decodePacket();
 
-    // needs to be freed using modern API !!
-    av_packet_unref(&_packet);
-    
-    return OK;
+    shouldStop(true);
+    closeAudioFile();
+    if (_computeMD5) {
+        av_md5_final(_md5Encoded, _checksum);
+        _md5.push(uint8_t_to_hex(_checksum, 16));
+    }
+    else {
+        string md5 = "";
+        _md5.push(md5);
+    }
+    return FINISHED;
 }
 
 
@@ -339,36 +361,6 @@ int AudioLoader::decode_audio_frame(AVCodecContext* audioCtx,
     // For the modern API, we consume the entire packet when we send it
     return packet->size;
 }
-
-void AudioLoader::flushPacket() {
-    // End of stream: the drain packet (NULL) tells the decoder to release
-    // the frames it is holding back; see audioloader_decode.h
-    av_packet_unref(&_packet);
-    audioloader_detail::drain(
-        [this] { return avcodec_send_packet(_audioCtx, NULL); },
-        [this] { return avcodec_receive_frame(_audioCtx, _decodedFrame); },
-        [this] { emitDecodedFrame(); });
-}
-
-
-/**
- * Sends the AVPacket stored in _packet to the decoder and pushes every frame
- * the send/receive loop (audioloader_decode.h) hands back, via emitDecodedFrame().
- */
-
-int AudioLoader::decodePacket() {
-    int result = audioloader_detail::decodePacket(
-        [this] { return avcodec_send_packet(_audioCtx, &_packet); },
-        [this] { return avcodec_receive_frame(_audioCtx, _decodedFrame); },
-        [this] { emitDecodedFrame(); });
-    if (result < 0) {
-        char errstring[1204];
-        av_strerror(result, errstring, sizeof(errstring));
-        E_WARNING("AudioLoader: decoding error: " << errstring);
-    }
-    return result;
-}
-
 
 /**
  * Converts the frame in _decodedFrame to interleaved float in _convert (sized

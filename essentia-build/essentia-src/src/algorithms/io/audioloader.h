@@ -45,6 +45,7 @@ class AudioLoader : public Algorithm {
   // and grown on demand (audioloader_decode.h); output-x64.5 used a fixed
   // 384,000-byte buffer here, which a 65535-sample stereo frame overflowed
   audioloader_detail::ConvertBuffer _convert;
+  audioloader_detail::DecodeState _decodeState;   // one frame per process(), see the header
   int _dataSize;
 
   AVFormatContext* _demuxCtx;
@@ -71,8 +72,6 @@ class AudioLoader : public Algorithm {
   void pushCodecInfo(std::string codec, int bit_rate);
   int decode_audio_frame(AVCodecContext* audioCtx, float* output,
                          int* outputSize, AVPacket* packet);
-  int decodePacket();
-  void flushPacket();
   void emitDecodedFrame();
   void copyFFmpegOutput();
 

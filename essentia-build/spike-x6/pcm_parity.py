@@ -7,8 +7,12 @@ parity-<label>-<ref>.txt beside this script and prints it.
     python -I pcm_parity.py <label> [same|shipped]
 
 A row passes when
-    expect=decode       the loader exited 0, produced the same number of sample
-                        frames as ffmpeg, and the f32 PCM is byte-identical
+    expect=decode       the loader exited 0 and its f32 file is BYTE-IDENTICAL
+                        to ffmpeg's: same byte length (so the same number of
+                        sample frames, and no trailing partial sample) and the
+                        same bytes. Float differences are reported as a
+                        diagnostic only; +0/-0 or NaN-vs-NaN pairs with
+                        different bytes FAIL, as bytes do.
     expect=unsupported  the loader refused the file (exit != 0): the extractor's
                         FFmpeg has no decoder for it
 
@@ -64,7 +68,11 @@ def loader_info(label, row_id):
 
 
 def compare(ref_path, out_path, ch):
-    """(ref frames, out frames, first differing frame or None, max |diff|) over the overlap."""
+    """(ref bytes, out bytes, first differing frame or None, max |float diff|).
+
+    The verdict is on BYTES: first is the frame holding the first byte that
+    differs (None when the overlap is byte-identical); the byte lengths decide
+    the rest. maxabs is a diagnostic over the differing floats."""
     first = None
     maxabs = 0.0
     with open(ref_path, 'rb') as fa, open(out_path, 'rb') as fb:
@@ -72,23 +80,27 @@ def compare(ref_path, out_path, ch):
         while True:
             ba = fa.read(CHUNK * 4)
             bb = fb.read(CHUNK * 4)
-            n = min(len(ba), len(bb)) // 4
+            n = min(len(ba), len(bb))
             if n == 0:
                 break
-            if ba[:n * 4] != bb[:n * 4]:
-                xa = array.array('f')
-                xa.frombytes(ba[:n * 4])
-                xb = array.array('f')
-                xb.frombytes(bb[:n * 4])
+            if ba[:n] != bb[:n]:
                 for i in range(n):
-                    if xa[i] != xb[i] or (xa[i] != xa[i]) != (xb[i] != xb[i]):
+                    if ba[i] != bb[i]:
                         if first is None:
-                            first = (pos + i) // ch
+                            first = (pos + i) // 4 // ch
+                        break
+                m = n // 4 * 4
+                xa = array.array('f')
+                xa.frombytes(ba[:m])
+                xb = array.array('f')
+                xb.frombytes(bb[:m])
+                for i in range(m // 4):
+                    if xa[i] != xb[i]:
                         d = abs(xa[i] - xb[i])
                         if d > maxabs:
                             maxabs = d
             pos += n
-    return os.path.getsize(ref_path) // 4 // ch, os.path.getsize(out_path) // 4 // ch, first, maxabs
+    return os.path.getsize(ref_path), os.path.getsize(out_path), first, maxabs
 
 
 def main():
@@ -102,7 +114,8 @@ def main():
     version = open(version_path, encoding='utf-8').readline().strip() if os.path.exists(version_path) else '?'
 
     lines = ['x6 PCM parity: loader "%s" vs reference "%s" = %s' % (label, ref_name, version),
-             'f32le, native rate and channel count on both sides; frames = samples per channel',
+             'f32le, native rate and channel count on both sides; frames = samples per channel;'
+             ' PASS = byte-identical file (same length, same bytes); max|d| is a float diagnostic',
              '',
              '%-4s %-26s %-6s %-8s %-6s %-2s %-5s %10s %10s %9s %10s %9s  %s' % (
                  '', 'id', 'kind', 'codec', 'rate', 'ch', 'fmt', 'ref', 'loader', 'lost',
@@ -126,11 +139,17 @@ def main():
             ok, note = False, 'loader rc=%d %s' % (inf['rc'], inf['msg'])
         else:
             ch = int(inf['fields'].get('channels', p['ch']) or p['ch'] or 1)
-            n_ref, n_out, first, maxabs = compare(ref, out, ch)
-            ok = n_ref == n_out and first is None
-            cols = [str(n_ref), str(n_out), str(n_ref - n_out),
+            b_ref, b_out, first, maxabs = compare(ref, out, ch)
+            ok = b_ref == b_out and first is None
+            frame = 4 * ch
+            cols = [str(b_ref // frame), str(b_out // frame), str((b_ref - b_out) // frame),
                     '-' if first is None else str(first), '%.3g' % maxabs if first is not None else '0',
                     '']
+            if b_ref % frame or b_out % frame:
+                note = (note + ' ' if note else '') + 'PARTIAL FRAME: %d / %d bytes' % (b_ref, b_out)
+                ok = False
+            elif first is not None and maxabs == 0:
+                note = (note + ' ' if note else '') + 'bytes differ with equal float values (+0/-0 or NaN)'
         fails += 0 if ok else 1
         lines.append('%-4s %-26s %-6s %-8s %-6s %-2s %-5s %10s %10s %9s %10s %9s  %s' % (
             'PASS' if ok else 'FAIL', row['id'], row['kind'], p['codec'], p['rate'], p['ch'], p['fmt'],

@@ -1,4 +1,4 @@
-x6 ASan run 'asan': Sat Oct 24 21:14:00 PDT 2026
+x6 ASan run 'asan': Sat Oct 24 22:25:47 PDT 2026
 harness: asan/asan_harness.cpp + essentia-src/src/essentia/utils/audioloader_decode.h
 ffmpeg:  START Sat Oct 24 20:50:35 PDT 2026 ffmpeg-7.1.1 prefix=/home/builder/x6-asan/prefix (--toolchain=gcc-asan --disable-asm)
 ASAN_OPTIONS=detect_leaks=1
@@ -48,5 +48,8 @@ r_flac_hd                    rc=0   asan_reports=0  samples=8961156 rate=48000 c
 r_flac_live                  rc=0   asan_reports=0  samples=12804288 rate=44100 channels=2 codec=flac
 r_wav                        rc=0   asan_reports=0  samples=7858304 rate=44100 channels=1 codec=pcm_s16le
 r_opus                       rc=2   asan_reports=0  
+r_wmalossless                rc=0   asan_reports=0  samples=13337604 rate=44100 channels=2 codec=wmalossless
+r_wmapro                     rc=0   asan_reports=0  samples=27463836 rate=96000 channels=2 codec=wmapro
+r_ape                        rc=0   asan_reports=0  samples=2667168 rate=44100 channels=2 codec=ape
 
-45 row(s), 0 with ASan/LSan reports
+48 row(s), 0 with ASan/LSan reports

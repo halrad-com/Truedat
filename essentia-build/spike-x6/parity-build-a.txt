@@ -1,5 +1,5 @@
 x6 PCM parity: loader "build-a" vs reference "same" = ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers
-f32le, native rate and channel count on both sides; frames = samples per channel
+f32le, native rate and channel count on both sides; frames = samples per channel; PASS = byte-identical file (same length, same bytes); max|d| is a float diagnostic
 
      id                         kind   codec    rate   ch fmt          ref     loader      lost first diff    max|d|  note
 PASS flac16_44k_st              synthetic flac     44100  2  s16       166257     166257         0          -         0  
@@ -47,5 +47,8 @@ PASS r_flac_hd                  real   flac     48000  2  s32      8961156    89
 PASS r_flac_live                real   flac     44100  2  s16     12804288   12804288         0          -         0  
 PASS r_wav                      real   pcm_s16le 44100  1  s16      7858304    7858304         0          -         0  
 PASS r_opus                     real   opus     48000  2  fltp                                                        refused: ERROR: AudioLoader: Unsupported codec!
+FAIL r_wmalossless              real   wmalossless 44100  2  s16p    13337604    2133778  11203826      28672         2  WMA Lossless: packets carry many frames
+FAIL r_wmapro                   real   wmapro   96000  2  fltp    27463836    3440640  24023196      62464      1.33  WMA Pro 96k/24: packets carry many frames
+FAIL r_ape                      real   ape      44100  2  s16p     2667168     175104   2492064     147456      1.06  APE (FFmpeg public sample luckynight.ape): one packet = 294,912 samples
 
-45 row(s), 3 failure(s)
+48 row(s), 6 failure(s)

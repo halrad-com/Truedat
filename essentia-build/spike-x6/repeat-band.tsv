@@ -865,3 +865,43 @@ lowlevel.zerocrossingrate.max	max	0.0319149	3
 lowlevel.zerocrossingrate.mean	mean	0.000368134	5
 lowlevel.zerocrossingrate.stdev	stdev	0.00296676	5
 lowlevel.zerocrossingrate.var	var	0.00592465	5
+#rows
+#row	flac16_44k_st	0
+#row	flac16_44k_mo	0
+#row	flac16_48k_st	0
+#row	flac24_96k_st	0
+#row	flac24_192k_st	0
+#row	flac16_192k_mo	0
+#row	flac16_44k_mo_bigblock	0
+#row	flac16_44k_st_short	0
+#row	wav_s16_44k_st	0
+#row	wav_s24_96k_st	0
+#row	wav_f32_48k_st	0
+#row	wav_f32_192k_st	0
+#row	wav_s16_192k_mo	0
+#row	aiff_s16_44k_st	0
+#row	mp3_44k_st	0
+#row	mp3_48k_mo	0
+#row	mp3_44k_st_short	0
+#row	aac_44k_st	0
+#row	aac_48k_mo	0
+#row	aac_96k_st	0
+#row	aac_44k_st_short	0
+#row	wma_44k_st	0
+#row	wma_48k_st	0
+#row	vorbis_44k_st	0
+#row	vorbis_48k_mo	0
+#row	alac16_44k_st	0
+#row	alac24_96k_st	0
+#row	alac24_192k_st	0
+#row	wv_s16_44k_st	0
+#row	wv_s32_96k_st	0
+#row	mp3_44k_st_trunc	0
+#row	flac16_44k_st_trunc	0
+#row	r_mp3	750
+#row	r_m4a	727
+#row	r_m4a_2	831
+#row	r_wma	770
+#row	r_flac_hd	518
+#row	r_flac_live	0
+#row	r_wav	0

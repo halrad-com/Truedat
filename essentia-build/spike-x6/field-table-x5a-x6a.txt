@@ -1,5 +1,6 @@
 x6 per-field table: x5a (baseline) vs x6a (candidate)
-judged against repeat-band.tsv: STRICT = beyond 2x the key's own same-binary band; FAMILY = beyond 2x its family's pooled band
+judged against repeat-band.tsv: STRICT = beyond 2x the key's own same-binary band (primary); FAMILY = beyond 2x its family's pooled band (secondary)
+FAMILY is uninformative for a family whose 2x band reaches the metric's ceiling (rel diff <= 2): min (2x band 3.81)
 pcm = parity-build-a.txt verdict for the baseline loader
 
 id                         codec              pcm                       moved  strict  family   set  top family-beyond keys
@@ -48,5 +49,7 @@ r_flac_hd                  flac/48000/2ch     PASS                        520   
 r_flac_live                flac/44100/2ch     PASS                          0       0       0     0  
 r_wav                      pcm_s16le/44100/1ch PASS                          0       0       0     0  
 r_opus                     opus/48000/2ch     PASS                     (missing: x5a,x6a)
+r_wmalossless              wmalossless/44100/2ch FAIL lost=11203826       (missing: x5a,x6a)
+r_wmapro                   wmapro/96000/2ch   FAIL lost=24023196       (missing: x5a,x6a)
 
 totals: strict-beyond 56, family-beyond 0, set/non-numeric 0

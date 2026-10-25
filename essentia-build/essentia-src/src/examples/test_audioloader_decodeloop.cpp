@@ -1,15 +1,17 @@
 /*
  * truedat x6 synthetic decoder-state fixtures (not part of any shipped binary).
  *
- * Drives the AudioLoader's send/receive loop (essentia/utils/audioloader_decode.h,
- * the exact code the loader runs) with a scripted fake decoder, to reach decoder
- * states a corpus may never trigger: several frames per packet, send
- * backpressure (EAGAIN) from a decoder whose output completes asynchronously,
- * several delayed frames released only at drain, a decode error mid-stream, and
- * an API-violating decoder that must not make the loop spin.
+ * Drives the AudioLoader's decode step (essentia/utils/audioloader_decode.h,
+ * the exact code the loader runs, one frame per step) with a scripted fake
+ * decoder, to reach decoder states a corpus may never trigger: several frames
+ * per packet, send backpressure (EAGAIN) from a decoder whose output completes
+ * asynchronously, several delayed frames released only at drain, a decode
+ * error mid-stream, and an API-violating decoder that must not make the loop
+ * spin.
  *
  * Every scenario checks the EXACT frame sequence delivered (order, no loss, no
- * duplicates), not a count.
+ * duplicates), that the drain packet was sent once, and that no step emitted
+ * more than one frame.
  *
  *   essentia_test_audioloader_decodeloop      -> one line per scenario, exit 0 iff all pass
  */
@@ -82,18 +84,29 @@ struct FakeDecoder {
   }
 };
 
-struct Result { std::vector<Frame> frames; std::vector<int> packetErrors; int drainResult = 0; };
+struct Result { std::vector<Frame> frames; int errors = 0; int steps = 0; int maxFramesPerStep = 0; bool finished = false; };
 
-// The loader's call pattern: decodePacket per demuxed packet, then drain at EOF.
+// The loader's call pattern: step() until STEP_FINISHED, counting frames per step;
+// a packet source of `packets` packets then EOF.
 Result run(FakeDecoder& d, int packets) {
   Result res;
+  DecodeState st;
+  int next = 0, current = -1;
+  auto readPacket = [&]() -> int { if (next >= packets) return AVERROR_EOF; current = next++; return 0; };
+  auto send = [&] { return d.send(current); };
+  auto sendDrain = [&] { return d.sendDrain(); };
   auto receive = [&] { return d.receive(); };
-  auto onFrame = [&] { res.frames.push_back(d.current); };
-  for (int p = 0; p < packets; ++p) {
-    int r = decodePacket([&] { return d.send(p); }, receive, onFrame);
-    if (r < 0) res.packetErrors.push_back(p);
+  int framesThisStep = 0;
+  auto onFrame = [&] { res.frames.push_back(d.current); ++framesThisStep; };
+  for (;;) {
+    framesThisStep = 0;
+    int r = step(st, readPacket, send, sendDrain, receive, onFrame);
+    ++res.steps;
+    if (framesThisStep > res.maxFramesPerStep) res.maxFramesPerStep = framesThisStep;
+    if (r < 0) ++res.errors;
+    if (r == STEP_FINISHED) { res.finished = true; break; }
+    if (res.steps > 100000) break;     // a spinning loop fails the scenario instead of hanging
   }
-  res.drainResult = drain([&] { return d.sendDrain(); }, receive, onFrame);
   return res;
 }
 
@@ -113,11 +126,15 @@ void check(const char* name, bool ok, const std::string& detail) {
 }
 
 std::string counts(const Result& r, size_t want, const FakeDecoder& d) {
-  char buf[160];
-  snprintf(buf, sizeof buf, "frames %u/%u, packet errors %u, drain sends %d, api calls %ld",
-           (unsigned)r.frames.size(), (unsigned)want, (unsigned)r.packetErrors.size(),
-           d.drainSends, d.calls);
+  char buf[200];
+  snprintf(buf, sizeof buf, "frames %u/%u, errors %d, drain sends %d, steps %d, max frames/step %d, api calls %ld%s",
+           (unsigned)r.frames.size(), (unsigned)want, r.errors, d.drainSends, r.steps, r.maxFramesPerStep,
+           d.calls, r.finished ? "" : ", NOT FINISHED");
   return buf;
+}
+
+bool shape(const Result& r, const FakeDecoder& d) {   // invariants every scenario must hold
+  return r.finished && d.drainSends == 1 && r.maxFramesPerStep <= 1;
 }
 
 } // namespace
@@ -127,36 +144,35 @@ int main() {
 
   { // control: one frame per packet, nothing held back
     FakeDecoder d; Result r = run(d, N); auto want = expected(N, 1);
-    check("one-frame-per-packet", r.frames == want && r.packetErrors.empty(), counts(r, want.size(), d));
+    check("one-frame-per-packet", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
   }
-  { // a packet that decodes to several frames (WMA, APE, some PCM demuxers)
+  { // a packet that decodes to several frames (APE, WMA Lossless, WMA Pro)
     FakeDecoder d; d.framesPerPacket = 3; Result r = run(d, N); auto want = expected(N, 3);
-    check("three-frames-per-packet", r.frames == want && r.packetErrors.empty(), counts(r, want.size(), d));
+    check("three-frames-per-packet", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
+  }
+  { // one 64-frame packet, as APE packs 294,912 samples in 4,608-sample frames
+    FakeDecoder d; d.framesPerPacket = 64; Result r = run(d, 3); auto want = expected(3, 64);
+    check("sixty-four-frames-per-packet", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
   }
   { // asynchronous completion: send() answers EAGAIN while output is pending
     FakeDecoder d; d.lag = 2; Result r = run(d, N); auto want = expected(N, 1);
-    check("send-backpressure-eagain", r.frames == want && r.packetErrors.empty(), counts(r, want.size(), d));
+    check("send-backpressure-eagain", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
   }
   { // async completion and several frames per packet together
     FakeDecoder d; d.lag = 2; d.framesPerPacket = 2; Result r = run(d, N); auto want = expected(N, 2);
-    check("eagain-with-multiframe-packets", r.frames == want && r.packetErrors.empty(), counts(r, want.size(), d));
+    check("eagain-with-multiframe-packets", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
   }
   { // several delayed frames released only at drain (AV_CODEC_CAP_DELAY decoders)
     FakeDecoder d; d.delay = 4; Result r = run(d, N); auto want = expected(N, 1);
-    check("four-delayed-frames-at-drain", r.frames == want && r.packetErrors.empty(), counts(r, want.size(), d));
-  }
-  { // the drain packet is sent exactly once
-    FakeDecoder d; d.delay = 4; run(d, N);
-    check("drain-sent-once", d.drainSends == 1, "drain sends " + std::to_string(d.drainSends));
+    check("four-delayed-frames-at-drain", r.frames == want && r.errors == 0 && shape(r, d), counts(r, want.size(), d));
   }
   { // a decode error loses that frame only; every later packet still decodes
     FakeDecoder d; d.errorPacket = 7; Result r = run(d, N); auto want = expected(N, 1, 7);
-    bool errorReported = r.packetErrors.size() == 1 && r.packetErrors[0] == 7;
-    check("decode-error-mid-stream", r.frames == want && errorReported, counts(r, want.size(), d));
+    check("decode-error-mid-stream", r.frames == want && r.errors == 1 && shape(r, d), counts(r, want.size(), d));
   }
   { // EAGAIN from both send and receive breaks the API; the loop must not spin
     FakeDecoder d; d.violate = true; Result r = run(d, 3);
-    bool bounded = d.calls < 100;
+    bool bounded = r.finished && d.calls < 100;
     check("api-violation-does-not-spin", bounded && r.frames.empty(), counts(r, 0, d));
   }
 
