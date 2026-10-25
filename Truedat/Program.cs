@@ -5473,8 +5473,12 @@ namespace Truedat
                     return;
                 }
                 if (_storePath != null)
-                    Environment.ExitCode = RunStoreBackedVerb("remap", "--fixup --remap", moodsForRemap, () => { RunFixupRemap(moodsForRemap, parts[0], parts[1]); return Environment.ExitCode; },
-                        remapOld: parts[0], remapNew: parts[1]);   // store-v3 T06
+                {
+                    var remapSources = new Dictionary<string, string>(PathComparer.Instance);
+                    Environment.ExitCode = RunStoreBackedVerb("remap", "--fixup --remap", moodsForRemap,
+                        () => { RunFixupRemap(moodsForRemap, parts[0], parts[1], remapSources); return Environment.ExitCode; },
+                        remapOld: parts[0], remapNew: parts[1], remapSources: remapSources);   // store-v3 T06
+                }
                 else RunFixupRemap(moodsForRemap, parts[0], parts[1]);
                 return;
             }
@@ -8340,7 +8344,7 @@ namespace Truedat
         /// reported in the summary. Backup is written as &lt;moodsPath&gt;.bak.&lt;timestamp&gt;
         /// before the atomic replace.
         /// </summary>
-        static void RunFixupRemap(string moodsPath, string oldPrefix, string newPrefix)
+        static void RunFixupRemap(string moodsPath, string oldPrefix, string newPrefix, Dictionary<string, string>? sources = null)
         {
             Console.WriteLine("=== Fixup Mode (prefix remap) ===");
             Console.WriteLine($"  Moods file:  {moodsPath}");
@@ -8404,11 +8408,13 @@ namespace Truedat
                         newTracks.Remove(newKey);  // later-wins
                     }
                     newTracks[newKey] = trackData;
+                    if (sources != null) sources[newKey] = oldKey;
                     remapped++;
                 }
                 else
                 {
                     newTracks[oldKey] = trackData;
+                    if (sources != null) sources[oldKey] = oldKey;
                     unchanged++;
                 }
             }
@@ -11275,7 +11281,8 @@ namespace Truedat
             => !string.IsNullOrEmpty(a.AudioStreamSha256) && !string.IsNullOrEmpty(b.AudioStreamSha256)
                && !SameContentIdentity(a, b, path);
 
-        internal static int RunStoreBackedVerb(string hubVerb, string flag, string catalogPath, Func<int> runVerb, string? remapOld = null, string? remapNew = null)
+        internal static int RunStoreBackedVerb(string hubVerb, string flag, string catalogPath, Func<int> runVerb, string? remapOld = null, string? remapNew = null,
+            IReadOnlyDictionary<string, string>? remapSources = null)
         {
             var store = _storePath!;
             var rec = global::Truedat.Store.StoreResult.Begin(hubVerb);
@@ -11287,6 +11294,12 @@ namespace Truedat
                 return exit;
             }
 
+            // Maintenance writes the primary library. Refuse an explicitly exported mirror/endpoint before opening or publishing:
+            // the previous late role collision left the store intact but had already replaced that export with the primary catalog.
+            if (global::Truedat.Store.CatalogOrigin.TryRead(catalogPath, out var origin)
+                && (origin.RootRole == "mirror" || origin.RootRole == "endpoint"))
+                return Fail($"Error: {flag} writes the primary library, but {catalogPath} is an export of the {origin.RootRole} root {origin.RootPath}; nothing was changed.", 1);
+
             // (1) precondition + the store's entries
             var before = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             var load = global::Truedat.Store.StoreScan.LoadAuthoritative(store, catalogPath, before);
@@ -11297,7 +11310,8 @@ namespace Truedat
             var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out _);
             if (pubEx != null) return Fail($"Error: {flag} could not publish the store's state before running ({CheckpointCause.Describe(pubEx)}); nothing was changed.", 1);
 
-            // (3) the verb, unchanged
+            // (3) The explicit remap records which original path won each output key while its existing later-wins loop runs.
+            // A hash cannot identify a moved copy (and a hashless copy still has an identity). The caller's local map can.
             int verbExit = runVerb();
 
             // (4) its result -> the store, one transaction
@@ -11324,7 +11338,7 @@ namespace Truedat
             // by sha after a rename). A MERGE can put DIFFERENT content at a path, so there the supply is bound to the winner's content
             // identity (sha + hash kind): the merge source's entry first (its non-null values), the destination's row behind it, and
             // neither across identities — a path match alone attached an earlier store's histogram to a later catalog's content.
-            foreach (var kv in after)
+            foreach (var kv in remapSources == null ? after : Enumerable.Empty<KeyValuePair<string, TrackEntry>>())
             {
                 before.TryGetValue(kv.Key, out var b0);
                 var observedByFile = kv.Value.CopyObserved;   // the merged file's own mask (merge only); WithPolicyCutFrom returns a fresh entry
@@ -11357,24 +11371,22 @@ namespace Truedat
             long generationBefore = load.Generation;
             try
             {
-                if (remapOld != null && remapNew != null)
+                if (remapSources != null)
                 {
-                    // When the remapped prefix IS one of the library's roots (any of them — a library may sit on several drives),
-                    // the remap moves that whole root: one transaction, the root row and every display path under it.
-                    string oldRoot = remapOld.Replace('/', '\\').TrimEnd('\\'), newRoot = remapNew.Replace('/', '\\').TrimEnd('\\');
-                    using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o"));
-                    var hit = os.Dal.LibraryRoots().Where(x => string.Equals(x.Path.Replace('/', '\\').TrimEnd('\\'), oldRoot, StringComparison.OrdinalIgnoreCase)).ToList();
-                    if (hit.Count > 0)
+                    // A failed verb supplies no map. A successful explicit remap edits only paths, all in this transaction:
+                    // the original IDs, measurements, copy observations, and their history stay together.
+                    if (verbExit == 0 && remapSources.Count > 0
+                        && (remapSources.Count != before.Count || remapSources.Any(kv => !string.Equals(kv.Key, kv.Value, StringComparison.Ordinal))))
                     {
+                        var now = DateTime.UtcNow.ToString("o");
+                        using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, now);
                         using var tx = os.Db.BeginTransaction();
-                        foreach (var h in hit) moved += os.Dal.MoveRoot(h.Id, h.Path, newRoot);
+                        var machine = os.Machine.ForWrites(os.Dal, true, now);
+                        moved = os.Dal.RemapLocations(remapSources, before.Keys, remapOld!, remapNew!, machine, now);
                         if (moved > 0) os.Dal.AdvanceGeneration();
                         tx.Complete();
-                        // The move accounts for exactly the renamed paths; whatever the verb changed on the library's OTHER roots
-                        // still goes to the store below.
-                        removed.RemoveAll(k => global::Truedat.Store.CanonicalPath.Contains(oldRoot, k));
-                        foreach (var k in changed.Keys.Where(k => global::Truedat.Store.CanonicalPath.Contains(newRoot, k)).ToList()) changed.Remove(k);
                     }
+                    removed.Clear();
                 }
                 if (removed.Count + changed.Count > 0)
                 {
@@ -15962,21 +15974,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                     // The same result arriving under a RENAMED key — a --remap of a sub-folder, a path reconciled by --fixup — had no
                     // `before` row under that key to restore from, so the histogram went to the store as a clear after all (EV3 pre-tag
-                    // review, H1). The stored row is found by the content hash, which a rename does not change.
+                    // review, H1). The explicit remap now supplies its actual original-path map and preserves the whole location.
                     int exit2;
+                    var remapSources = new Dictionary<string, string>(PathComparer.Instance);
                     saveOut = Console.Out; Console.SetOut(TextWriter.Null);
                     try
                     {
                         using (global::Truedat.Store.StoreLog.Quiet())
                             exit2 = RunStoreBackedVerb("remap", "--remap", cat, () =>
                             {
-                                var all = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-                                LoadExistingMoods(cat, all);
-                                var renamed = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-                                foreach (var kv in all) renamed[kv.Key.Replace(@"D:\music\t.flac", @"D:\music\sub\t.flac")] = kv.Value;
-                                SaveResults(cat, renamed);
+                                RunFixupRemap(cat, @"D:\music\t.flac", @"D:\music\sub\t.flac", remapSources);
                                 return 0;
-                            });
+                            }, @"D:\music\t.flac", @"D:\music\sub\t.flac", remapSources);
                     }
                     finally { Console.SetOut(saveOut); }
                     var histByPath = new Dictionary<string, double[]?>(PathComparer.Instance);

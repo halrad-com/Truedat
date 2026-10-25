@@ -375,11 +375,12 @@ namespace Truedat.Store
         /// <summary>The row an arriving entry's copy facts produce over the stored ones, or null when nothing changes. Per copy column:
         /// not observed (<paramref name="observed"/> bit clear) or agreeing (<see cref="CopyAgrees"/>) keeps the STORED value — a
         /// new copy row stores NULL for an unobserved column; anything else is the arrival. Copy facts describe the file, so an
-        /// observed difference is the newer observation and wins exactly. <paramref name="observed"/> null = every column observed
-        /// (a scan's entry). <paramref name="catalogImport"/> is the caller's explicit statement that the arrival is a catalog
+        /// supplied difference is the newer observation and wins exactly. An arriving NULL preserves the stored value unless
+        /// <paramref name="clearNull"/> allows an explicit clear (a verb, or a supplied empty string parsed as NULL). <paramref name="observed"/> null = every
+        /// column eligible (a scan's entry). <paramref name="catalogImport"/> is the caller's explicit statement that the arrival is a catalog
         /// import, the only arrival the written-precision equivalence applies to (keeper 070, TDA 054: a scan's value is a fresh
         /// measurement and replaces exactly). <paramref name="firstDifference"/> names the first column written, for the log.</summary>
-        internal static object?[]? MergeCopy(object?[]? storedCopy, object?[] row, ulong? observed, bool catalogImport, out string? firstDifference)
+        internal static object?[]? MergeCopy(object?[]? storedCopy, object?[] row, ulong? observed, bool catalogImport, out string? firstDifference, bool clearNull = false)
         {
             firstDifference = storedCopy == null ? "no copy row yet" : null;
             var merged = (object?[])row.Clone();
@@ -387,7 +388,7 @@ namespace Truedat.Store
             {
                 var stored = storedCopy?[k];
                 var arriving = row[CopyIdx[k]];
-                if ((observed is ulong m && (m & (1UL << k)) == 0) || (storedCopy != null && CopyAgrees(k, stored, arriving, catalogImport)))
+                if ((!clearNull && arriving == null) || (observed is ulong m && (m & (1UL << k)) == 0) || (storedCopy != null && CopyAgrees(k, stored, arriving, catalogImport)))
                 {
                     merged[CopyIdx[k]] = stored;
                     continue;

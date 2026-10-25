@@ -551,9 +551,22 @@ namespace Truedat.Store
             var sha = string.IsNullOrEmpty(entry.AudioStreamSha256) ? null : entry.AudioStreamSha256;
             var kind = FacetKinds.ForShaSource(entry.AudioStreamSha256Source, isFlac);
 
-            long? existingLoc = dal.FindLocation(rf.Value.Id, canon, out _);
+            long? existingLoc = dal.FindLocation(rf.Value.Id, canon, out var previousEntity);
             bool isNewLocation = existingLoc == null;
+            // Capture the LOCATION's old identity before resolution can join another entity or re-key this one. Copy facts from
+            // that previous content cannot describe its replacement. Only two scalar columns are needed, not the feature vectors.
+            string? previousKey = null, previousKind = null;
+            if (existingLoc != null)
+            {
+                using var prior = dal.Db.Prepare("SELECT c.content_key, c.content_key_kind FROM track_location l JOIN track_content c ON c.entity_id = l.entity_id WHERE l.id = ?;");
+                prior.Bind(1, existingLoc.Value);
+                if (prior.Step()) { previousKey = prior.GetString(0); previousKind = prior.GetString(1); }
+            }
             var res = EntityResolver.Resolve(dal, sha, kind, rf.Value.Id, canon, source, now, matchPathAcrossRoots: mirror);
+            bool replaceCopy = sha != null && !string.IsNullOrEmpty(previousKey) && previousKind != "entity"
+                && (!string.Equals(previousKey, sha, StringComparison.OrdinalIgnoreCase) || previousKind != kind)
+                // A legacy FLAC alias resolving to this same entity remains an older observation, not replacement content.
+                && !(previousEntity == res.EntityId && previousKind == FacetKinds.ShaFrames && kind == FacetKinds.ShaTaglibRegion);
             switch (res.How)
             {
                 case ResolveHow.Created: r.EntitiesCreated++; break;
@@ -567,12 +580,12 @@ namespace Truedat.Store
             var contentKey = sha ?? ("entity:" + res.EntityId);
 
             // Recency (review #4b): an OLDER catalog imported over a newer store must not regress a row. Same
-            // content key and an older lastModified than the store holds -> skip, count stale, touch nothing.
-            if (existingLoc != null)
+            // content key and an older lastModified than the store holds -> skip, count stale, touch nothing. An exact verb already
+            // chose its result (a merge uses source order), so file mtime cannot override that explicit choice.
+            if (!ExactArrival && existingLoc != null)
             {
                 var storedLm = dal.LocationLastModified(existingLoc.Value);
-                var storedKey = dal.FeatureContentKey(existingLoc.Value);
-                if (storedLm != null && storedKey == contentKey
+                if (storedLm != null && previousKey == contentKey
                     && DateTime.ParseExact(storedLm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime()
                        > entry.LastModified.ToUniversalTime())
                 {
@@ -607,7 +620,7 @@ namespace Truedat.Store
                 ? dal.InsertRun(producerKey, producerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
-            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged);
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged, replaceCopy);
             // T19: the verdict projection, from the rows AS STORED, for every copy of this media (a content change re-derives them all).
             VerdictStore.DeriveForEntity(dal, res.EntityId, now);
 
@@ -663,7 +676,7 @@ namespace Truedat.Store
         /// Copy facts describe the file, so the newer observation wins, exactly — per column, for the columns the arrival observed
         /// (<see cref="TrackEntryMapper.MergeCopy"/>). Equal arrivals write nothing at all.</summary>
         internal static void WriteDescriptionAndCopy(StoreDal dal, long locationId, string entityId, string contentKey, string contentKeyKind,
-            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r, bool locationChanged = false)
+            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r, bool locationChanged = false, bool replaceCopy = false)
         {
             var row = TrackEntryMapper.ToRow(entry);
             bool contentWritten = false, copyWritten = locationChanged, drifted = false;   // a new or changed location (mtime, state) is a copy fact too
@@ -804,14 +817,18 @@ namespace Truedat.Store
             // Keeper 067: a merge, not a whole-row replace. A copy fact the arriving catalog did not carry keeps the stored value (a
             // catalog without trackId — the export cut — wrote 0 over every stored id), and a value equal to the stored one at the
             // writer's precision is the same observation (a 1-dp catalog duration downgraded the store's 6-dp one on any rewrite).
-            var existingCopy = dal.ReadCopyValues(locationId);
+            var existingCopy = replaceCopy ? null : dal.ReadCopyValues(locationId);
+            if (replaceCopy) StoreLog.Debug($"copy content changed on {displayPath}: previous content supplies no copy facts");
             bool catalogImport = string.Equals(producerKey, "import", StringComparison.Ordinal);   // a scan's arrival is a fresh measurement (keeper 070)
             // D4 (execution review 2026-10-21): a legacy-hash alias is a KNOWN-OLDER observation — "newer wins" cannot apply to its copy
             // facts either. It may fill a copy fact the store has no value for; it never replaces one (the older catalog's title and a
             // fabricated head hash were going over the scan's).
             ulong? observedCopy = entry.CopyObserved;
             if (legacyAlias) observedCopy = (entry.CopyObserved ?? TrackEntryMapper.AllCopyObserved) & TrackEntryMapper.CopyMaskWhereNull(existingCopy);
-            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff);
+            // The catalog reader excludes absent/NULL keys from its mask, but marks a supplied empty string (for example MD5)
+            // even when parsing maps it to NULL. Honor that supplied value; a raw scan's unavailable NULL still preserves the store.
+            bool clearNull = ExactArrival || (catalogImport && entry.CopyObserved.HasValue);
+            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff, clearNull: clearNull);
             if (copyRow != null)
             {
                 StoreLog.Debug($"copy facts written for {displayPath}: {copyDiff}");

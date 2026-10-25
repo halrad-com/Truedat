@@ -107,14 +107,7 @@ namespace Truedat.Store
             // over one role is what let `x:\MIRROR`, `X:/mirror` and `X:\mirror\` walk past a held MIRROR row and insert a second
             // row for one path, leaving the store with the same path as both a mirror and a primary.
             var want = CanonicalPath.Root(path);
-            long? existing = null;
-            string? held = null;
-            foreach (var r in RootsForMachine(machineId))
-                if (string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; held = r.Role; break; }
-            // codex rescan 2026-10-23 R1: the same machine's row under ANOTHER role is not this root. Returning it sent a primary write
-            // under a mirror root, so the collision is refused rather than relabelled.
-            if (existing.HasValue && !string.Equals(held, role, StringComparison.OrdinalIgnoreCase))
-                throw new StoreException($"Root {path} is already registered on this machine as a {held} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {held}.");
+            long? existing = FindRootForRole(machineId, path, role);
             if (!existing.HasValue && role == "primary")
             {
                 // A primary root is a path of the LIBRARY, whichever machine registered it (codex 2026-10-23 F1): the same path in any
@@ -126,6 +119,21 @@ namespace Truedat.Store
             Exec("INSERT INTO library_root(machine_id, path, role, created_utc) VALUES (?, ?, ?, ?);", machineId, path, role, nowUtc);
             StoreLog.Info($"root registered: {path} ({role})");
             return Db.LastInsertRowId;
+        }
+
+        // Registration and a whole-root move use the same path/role rule. A move checks the root's owner, which need not
+        // be the current writer after a store is copied to another machine. This lookup never creates a root.
+        long? FindRootForRole(string machineId, string path, string role)
+        {
+            var want = CanonicalPath.Root(path);
+            foreach (var root in RootsForMachine(machineId))
+            {
+                if (!string.Equals(CanonicalPath.Root(root.Path), want, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(root.Role, role, StringComparison.OrdinalIgnoreCase))
+                    throw new StoreException($"Root {path} is already registered on this machine as a {root.Role} root; it cannot also be a {role} root. Register the {role} under a different path, or import that catalog as a {root.Role}.");
+                return root.Id;
+            }
+            return null;
         }
 
         /// <summary>Every root this machine registered, whatever its role — the set <see cref="EnsureRoot"/> matches a request
@@ -294,11 +302,7 @@ namespace Truedat.Store
                 {
                     keep = NewerCopy(locId, dup.Value);
                     long drop = keep == locId ? dup.Value : locId;
-                    Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
-                    Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
-                    Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
-                    Exec("DELETE FROM track_copy WHERE location_id = ?;", drop);
-                    Exec("DELETE FROM track_location WHERE id = ?;", drop);
+                    FoldLocationInto(keep, drop);
                     fold.Merged++;
                 }
                 // Only now (the duplicate, if any, is gone) can the inner location take its place under the outer root.
@@ -419,12 +423,85 @@ namespace Truedat.Store
         /// <summary>T06 (--fixup --remap whose old prefix IS the root): move the root row and every location's display path under it, in
         /// the caller's transaction. Locations keep their ids, entities, copies and history — a re-key, not a delete-and-add. Returns the
         /// number of locations whose display path changed.</summary>
-        internal int MoveRoot(long rootId, string oldRootPath, string newRootPath)
+        internal int MoveRoot(long rootId, string newRootPath)
         {
+            newRootPath = CanonicalPath.Root(newRootPath);
+            var owner = Row("SELECT machine_id FROM library_root WHERE id = ?;", s => s.GetString(0), null, rootId)
+                ?? throw new StoreException($"Root {rootId} no longer exists.");
+            FindRootForRole(owner, newRootPath, "primary");
             Exec("UPDATE library_root SET path = ? WHERE id = ?;", newRootPath, rootId);
-            Exec("UPDATE track_location SET display_path = ? || substr(display_path, ?) WHERE root_id = ? AND substr(lower(display_path), 1, ?) = lower(?);",
-                 newRootPath, oldRootPath.Length + 1, rootId, oldRootPath.Length, oldRootPath);
+            // rel_path already records the suffix. Raw display-prefix slicing loses separators on trailing-root spellings,
+            // and SQLite lower() cannot match Unicode casing. Neither spelling should decide whether a location moves.
+            Exec("UPDATE track_location SET display_path = ? || '\\' || replace(rel_path, '/', '\\') WHERE root_id = ?;", newRootPath, rootId);
             return Db.Changes;
+        }
+
+        /// <summary>An explicit prefix remap, using the original-path winner recorded by the catalog verb. The caller owns one
+        /// transaction for the roots, collisions, path edits, and generation. No content or copy values are rewritten.</summary>
+        internal int RemapLocations(IReadOnlyDictionary<string, string> sources, IEnumerable<string> originalPaths,
+            string oldPrefix, string newPrefix, string machineId, string nowUtc)
+        {
+            var roots = LibraryRoots();
+            var locations = new Dictionary<string, long>(PathComparer.Instance);
+            using (var st = Db.Prepare("SELECT l.display_path, l.id FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE r.role = 'primary' AND l.state = 'present';"))
+                while (st.Step()) locations[st.GetString(0)!] = st.GetInt64(1);
+            var winners = sources.Select(kv => (Path: kv.Key, Original: kv.Value, Id: locations[kv.Value])).ToList();
+            var kept = new HashSet<string>(sources.Values, PathComparer.Instance);
+            int collisions = 0;
+            foreach (var old in originalPaths.Where(p => !kept.Contains(p)))
+            {
+                string destination = old.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase) ? newPrefix + old.Substring(oldPrefix.Length) : old;
+                long keep = locations[sources[destination]], drop = locations[old];
+                FoldLocationInto(keep, drop);
+                collisions++;
+            }
+
+            string oldRoot = CanonicalPath.Root(oldPrefix), newRoot = CanonicalPath.Root(newPrefix);
+            foreach (var root in roots.Where(r => string.Equals(CanonicalPath.Root(r.Path), oldRoot, StringComparison.OrdinalIgnoreCase)))
+            {
+                // An existing destination root already owns that path. Otherwise the whole-root move keeps its root ID too.
+                if (!roots.Any(r => r.Id != root.Id && string.Equals(CanonicalPath.Root(r.Path), newRoot, StringComparison.OrdinalIgnoreCase)))
+                    MoveRoot(root.Id, newRoot);
+            }
+            roots = LibraryRoots();
+            // A moved root may now sit inside an existing primary. Route to the outermost root that FoldNestedRoots will
+            // retain, so its retired destination collisions are handled before a cleanup can choose a different copy.
+            long? RootFor(string path) => roots.Where(r => CanonicalPath.Contains(r.Path, path))
+                .OrderBy(r => CanonicalPath.Root(r.Path).Length).ThenBy(r => r.Id).Select(r => (long?)r.Id).FirstOrDefault();
+            var changed = winners.Where(w => !string.Equals(w.Path, w.Original, StringComparison.Ordinal)).ToList();
+            foreach (var root in CanonicalPath.InferRoots(changed.Where(w => RootFor(w.Path) == null).Select(w => w.Path)))
+                EnsureRoot(machineId, root, "primary", nowUtc);
+            roots = LibraryRoots();
+
+            // A prefix may move a path onto another source's old key. Free the changed keys first; these invalid file-path keys
+            // exist only inside this transaction, so every failure restores the originals and no reader sees a partial move.
+            foreach (var w in changed)
+                Exec("UPDATE track_location SET canonical_path = ? WHERE id = ?;", ":remap:" + w.Id, w.Id);
+            foreach (var w in changed)
+            {
+                long rootId = RootFor(w.Path) ?? throw new StoreException($"No library root for remapped path: {w.Path}");
+                string path = roots.First(r => r.Id == rootId).Path;
+                CanonicalPath.Split(path, w.Path, out var relative, out var canonical);
+                // A retired destination is not in the catalog's collision list, but still owns its unique location key.
+                var duplicate = FindLocation(rootId, canonical, out _);
+                if (duplicate.HasValue && duplicate.Value != w.Id) { FoldLocationInto(w.Id, duplicate.Value); collisions++; }
+                Exec("UPDATE track_location SET root_id = ?, rel_path = ?, canonical_path = ?, display_path = ? WHERE id = ?;",
+                    rootId, relative, canonical, CanonicalPath.Root(path) + "\\" + relative.Replace('/', '\\'), w.Id);
+            }
+            var folds = FoldNestedRoots();
+            if (collisions > 0 || folds.Any(f => f.Merged > 0)) VerdictStore.DeriveAll(this, nowUtc);
+            foreach (var fold in folds) StoreLog.Info("root " + fold);
+            StoreLog.Info($"prefix remap: {changed.Count} locations moved, {collisions} collisions; retained copies and history preserved");
+            return changed.Count + collisions;
+        }
+
+        void FoldLocationInto(long keep, long drop)
+        {
+            Exec("UPDATE run SET location_id = ? WHERE location_id = ?;", keep, drop);
+            Exec("UPDATE check_result SET location_id = ? WHERE location_id = ?;", keep, drop);
+            Exec("DELETE FROM verdict WHERE location_id = ?;", drop);
+            Exec("DELETE FROM track_copy WHERE location_id = ?;", drop);
+            Exec("DELETE FROM track_location WHERE id = ?;", drop);
         }
 
         /// <summary>T18 / T06 D1: retire a location (the file moved away or the entry was removed) — its media, description, copy row

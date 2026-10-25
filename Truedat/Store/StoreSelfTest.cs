@@ -32,6 +32,8 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C5: import)");
             Block(assert, "LedgerImport", () => TestLedgerReaders(assert));
             Block(assert, "Import", () => TestImport(assert));
+            Block(assert, "MergeSafety", () => MergeSafetySelfTest.Run(assert));
+            Block(assert, "RootRemap", () => RootRemapSelfTest.Run(assert));
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
@@ -575,7 +577,16 @@ namespace Truedat.Store
                 older[@"D:\Music\old\legacy.flac"].Features!.Genre = "Jazz";
                 const string sqlCopy = "SELECT p.title || '|' || coalesce(p.genre, '<null>') FROM track_copy p JOIN track_location l ON l.id = p.location_id WHERE l.display_path = 'D:\\Music\\old\\legacy.flac';";
                 string bpmScan, runScan;
-                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o"))) { bpmScan = os.Db.ExecScalar(sqlBpm) ?? ""; runScan = os.Db.ExecScalar(sqlRun) ?? ""; }
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                {
+                    bpmScan = os.Db.ExecScalar(sqlBpm) ?? ""; runScan = os.Db.ExecScalar(sqlRun) ?? "";
+                    assert(os.Db.ExecScalar(sqlCopy) == "Senjara|",
+                        "a scan's unobserved genre preserves the previously stored explicit empty string");
+                    // This alias-fill fixture needs a genuinely missing genre. A NULL scan observation cannot create it
+                    // by erasing an earlier value, so seed the missing field explicitly and keep the fill assertion below.
+                    os.Db.Exec("UPDATE track_copy SET genre = NULL WHERE location_id = (SELECT id FROM track_location WHERE display_path = 'D:\\Music\\old\\legacy.flac');");
+                    assert(os.Db.ExecScalar(sqlCopy) == "Senjara|<null>", "fixture: the legacy alias has a genuinely unobserved genre to fill");
+                }
                 assert(bpmScan == "1500", $"fixture: the scan's description is in place (bpm {bpmScan}, expected 1500)");
                 WriteCatalog(catalog, older);   // the old catalog again: legacy hash, bpm 77
                 var r7 = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = catalog, LibraryRoot = @"D:\Music" });
