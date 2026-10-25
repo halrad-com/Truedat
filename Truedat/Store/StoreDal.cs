@@ -432,7 +432,9 @@ namespace Truedat.Store
             Exec("UPDATE library_root SET path = ? WHERE id = ?;", newRootPath, rootId);
             // rel_path already records the suffix. Raw display-prefix slicing loses separators on trailing-root spellings,
             // and SQLite lower() cannot match Unicode casing. Neither spelling should decide whether a location moves.
-            Exec("UPDATE track_location SET display_path = ? || '\\' || replace(rel_path, '/', '\\') WHERE root_id = ?;", newRootPath, rootId);
+            // Only the rows whose display path actually changes count (review 2026-10-24 #7): a remap to the spelling the root already has is
+            // a no-op, and must not report moves or advance the generation.
+            Exec("UPDATE track_location SET display_path = ? || '\\' || replace(rel_path, '/', '\\') WHERE root_id = ? AND display_path IS NOT (? || '\\' || replace(rel_path, '/', '\\'));", newRootPath, rootId, newRootPath);
             return Db.Changes;
         }
 
@@ -445,13 +447,17 @@ namespace Truedat.Store
             var locations = new Dictionary<string, long>(PathComparer.Instance);
             using (var st = Db.Prepare("SELECT l.display_path, l.id FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE r.role = 'primary' AND l.state = 'present';"))
                 while (st.Step()) locations[st.GetString(0)!] = st.GetInt64(1);
-            var winners = sources.Select(kv => (Path: kv.Key, Original: kv.Value, Id: locations[kv.Value])).ToList();
+            // Review 2026-10-24 #6: a path the verb kept that the store does not hold as a present primary location is a refusal naming the
+            // path, never a KeyNotFoundException. Both dictionaries use truedat's path comparer — the one every catalog key space uses.
+            long Loc(string path) => locations.TryGetValue(path, out var id) ? id : throw new StoreException($"remap: {path} has no present primary location in the store");
+            var winners = sources.Select(kv => (Path: kv.Key, Original: kv.Value, Id: Loc(kv.Value))).ToList();
             var kept = new HashSet<string>(sources.Values, PathComparer.Instance);
             int collisions = 0;
             foreach (var old in originalPaths.Where(p => !kept.Contains(p)))
             {
                 string destination = old.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase) ? newPrefix + old.Substring(oldPrefix.Length) : old;
-                long keep = locations[sources[destination]], drop = locations[old];
+                if (!sources.TryGetValue(destination, out var winnerPath)) throw new StoreException($"remap: {old} maps onto {destination}, for which the catalog verb kept no winner");
+                long keep = Loc(winnerPath), drop = Loc(old);
                 FoldLocationInto(keep, drop);
                 collisions++;
             }

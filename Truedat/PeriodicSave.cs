@@ -157,20 +157,28 @@ namespace Truedat
         /// does not apply; a checkpoint already running is waited for, not skipped (its analyses are then saved, and nothing is written
         /// twice); nothing completed since the last durable save means nothing to write; a stage that failed persistently is not tried
         /// again. Returns the outcome, or null when nothing was attempted.</summary>
-        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save, bool force = false)
+        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save, bool force = false) => SaveNow(save, force, out _);
+
+        /// <param name="pending">The completed analyses THIS attempt was asked to save, read under the lock — so a stop's report is what
+        /// its own save covered, not a count another checkpoint wrote after the lock was released (review 2026-10-24 #8).</param>
+        internal CheckpointOutcome? SaveNow(Func<CheckpointOutcome> save, bool force, out int pending)
         {
+            pending = 0;
             if (_persistent != null) return null;
             lock (_lock)
             {
                 // codex rescan R6: the analysis counter cannot see cache-only work (tag refreshes, moved files), so a stop FORCES the
                 // checkpoint; the period's own "nothing new" rule is for the periodic path. A persistent failure still blocks it.
                 if (_persistent != null || (!force && Volatile.Read(ref _sinceDurable) == 0)) return null;
-                return Attempt(save);
+                var outcome = Attempt(save);
+                pending = Volatile.Read(ref _lastAttemptPending);
+                return outcome;
             }
         }
 
-        /// <summary>The completed analyses the LAST attempt was asked to save (read under the lock, so a stop's report is what its save
-        /// covered — not a count sampled before it waited for a running checkpoint).</summary>
+        /// <summary>The completed analyses the LAST attempt was asked to save, whichever caller made it. A stop reads its OWN count from
+        /// <see cref="SaveNow(Func{CheckpointOutcome}, bool, out int)"/>, under the lock — never this, which a periodic checkpoint can
+        /// overwrite once the lock is released (review 2026-10-24 #8).</summary>
         internal int LastAttemptPending => Volatile.Read(ref _lastAttemptPending);
         int _lastAttemptPending;
 

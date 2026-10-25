@@ -254,7 +254,7 @@ namespace Truedat
         public double? HiresConfidence;
         public string LossyTranscodeLikely = "n/a";      // "yes" | "no" | "unknown" | "n/a"
         public double? LossyTranscodeConfidence;
-        public string Method = Program.HfStructureMethodCurrent;  // Phase 5 corpus1 thresholds UNCHANGED (23/23 hi-res correct overall: 5/5 real → "yes", 3/3 fake-upsampled → "unknown", 15/15 n/a; the lossless-24-bit subset that actually exercises the hi-res vote is 8/8) + the 2026-08-28 rate gate: hiresGenuine requires sampleRate > 44100, since a 24/44.1 file makes no hi-res claim and the panel has no bandwidth evidence at CD rate. Tag bumped because the same file can now answer differently than it did under corpus1 — that is an algorithm generation change, not a retune
+        public string Method = "truedat-v1-fft-rategate-2026-08-28";  // the VERDICT algorithm/threshold generation: Phase 5 corpus1 thresholds + the 2026-08-28 rate gate (hiresGenuine requires sampleRate > 44100 — a 24/44.1 file makes no hi-res claim). Its OWN tag, not the HF measurement tag (HfStructureMethodCurrent): a measurement-method bump re-tags no verdict, and a verdict retune marks no structure stale for --refresh-authenticity (review 2026-10-24 #2; d772e71 had tied the two)
         public string SpeechLikely = "n/a";               // "yes" | "no" | "unknown" | "n/a" — talk content vs music
         public double? SpeechConfidence;
         public string SpeechMethod = "truedat-speech-v1.3-untuned-2026-08-13";
@@ -1467,6 +1467,7 @@ namespace Truedat
         // Nothing consumes fileMd5 (MBXHub indexes audioStreamSha256 only);
         // --file-md5 restores full maintenance for external-interop use.
         internal static bool _fileMd5Enabled = false;
+        internal static bool _storeMachineAdopt = false;   // --machine-adopt: every path that writes a store reads this — the import AND the store-backed verbs (review 2026-10-24 #3: --fixup --remap had adoption hard-coded on)
 
         // --keep-backups N: how many timestamped catalog backups to keep after a
         // mutating mode (--fixup / --remap / --merge-moods / --migrate) writes one.
@@ -2556,7 +2557,6 @@ namespace Truedat
             bool storeImportMode = false;
             string? storeLibraryRoot = null;
             string storeRootRole = "primary";
-            bool storeMachineAdopt = false;
             string? storeExportPath = null;      // --store-export <out.json>: the store -> catalog, through the unchanged writer
             string? storeExportRoot = null;      // --export-root <path>: which root to export when the store has several
             string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
@@ -2722,7 +2722,7 @@ namespace Truedat
                 else if (canonical == "store-import") storeImportMode = true;
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
                 else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
-                else if (canonical == "machine-adopt") storeMachineAdopt = true;
+                else if (canonical == "machine-adopt") _storeMachineAdopt = true;
                 else if (canonical == "store-export" && i + 1 < args.Length) storeExportPath = args[++i];
                 else if (canonical == "export-root" && i + 1 < args.Length) storeExportRoot = args[++i];
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
@@ -3457,7 +3457,7 @@ namespace Truedat
                     CatalogPath = importCatalog,
                     LibraryRoot = storeLibraryRoot,
                     RootRole = storeRootRole,
-                    MachineAdopt = storeMachineAdopt,
+                    MachineAdopt = _storeMachineAdopt,
                     Audit = auditLog,
                 });
                 return;
@@ -11381,7 +11381,7 @@ namespace Truedat
                         var now = DateTime.UtcNow.ToString("o");
                         using var os = global::Truedat.Store.OpenStore.Open(store, create: false, VersionInfo.Display, now);
                         using var tx = os.Db.BeginTransaction();
-                        var machine = os.Machine.ForWrites(os.Dal, true, now);
+                        var machine = os.Machine.ForWrites(os.Dal, _storeMachineAdopt, now);
                         moved = os.Dal.RemapLocations(remapSources, before.Keys, remapOld!, remapNew!, machine, now);
                         if (moved > 0) os.Dal.AdvanceGeneration();
                         tx.Complete();
@@ -22339,6 +22339,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         $"R: an older hfEnergyMethod or hfSpectralStructure.method is stale too; the current pair is not ({AuthenticityStale(oldHf)}/{AuthenticityStale(oldHfs)}/{AuthenticityStale(curHf)})");
                     Assert(HfEnergyMethodCurrent != "managed-fft-radix2-30s-mid-native" && HfStructureMethodCurrent != "truedat-v1-fft-rategate-2026-08-28",
                         "R: F4 moved both HF tags — a pre-F4 value from a failed or short decode is not this build's");
+                    // Review 2026-10-24 #2: d772e71 tied the VERDICT's algorithm tag to the HF measurement tag. They are different things —
+                    // a measurement-method bump (F4) changes no verdict threshold, and a verdict retune must not mark every structure stale.
+                    Assert(new TruedatVerdict().Method != HfStructureMethodCurrent && new TruedatVerdict().Method == "truedat-v1-fft-rategate-2026-08-28",
+                        $"the verdict's algorithm tag is its own, not the HF measurement tag ({new TruedatVerdict().Method} vs {HfStructureMethodCurrent})");
                     // codex recheck 2026-10-24 C1: the producer wrote the ENERGY tag into the structure, so every freshly analysed track
                     // failed the staleness check and --refresh-authenticity re-analysed it on every run — it never converged.
                     var produced = new TrackFeatures { DynamicRange = 10, LoudnessMomentary = -12, HfEnergyRatio = 0.01, HfEnergyMethod = HfEnergyMethodCurrent, HfSpectralStructure = HfStructureOf(0.3, 2.0, 0.1) };

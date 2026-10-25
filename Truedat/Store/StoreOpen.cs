@@ -76,6 +76,9 @@ namespace Truedat.Store
         static void FoldNestedRoots(SqliteDb db, StoreDal dal, string nowUtc)
         {
             if (!dal.HasNestedRoots()) return;
+            // Default safe (operator 2026-10-15): this repair DELETES rows — the losing duplicate location's copy and verdict — so the store
+            // is copied beside itself first, as the schema migration does (review 2026-10-24 #5). VACUUM INTO runs outside the transaction.
+            string backup = SchemaMigrator.BackupBeside(db, "roots");
             List<RootFold> folds;
             using (var tx = db.BeginTransaction())
             {
@@ -85,7 +88,7 @@ namespace Truedat.Store
                 if (folds.Count > 0) dal.AdvanceGeneration();
                 tx.Complete();
             }
-            foreach (var f in folds) StoreLog.Warn("root " + f);
+            foreach (var f in folds) StoreLog.Warn("root " + f + $" — the store was backed up first: {backup}");
         }
 
         /// <summary>spectralFlatness is Essentia's spectral_flatness_db: FlatnessDB over the Bark bands, emitted by the music extractor as

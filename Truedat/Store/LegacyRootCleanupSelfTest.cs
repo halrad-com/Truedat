@@ -133,6 +133,10 @@ namespace Truedat.Store
             string repaired;
             using (var os = OpenStore.Open(dir.Store, false, VersionInfo.Display, Now()))
             {
+                // Review 2026-10-24 #5: the fold deletes the losing duplicate location's copy and verdict rows — default safe means a copy of
+                // the store beside it first, as the schema migration does.
+                assert(System.IO.Directory.GetFiles(System.IO.Path.GetDirectoryName(dir.Store)!, System.IO.Path.GetFileName(dir.Store) + ".bak.roots.*").Length == 1,
+                    label + ": the alias repair on open backed the store up first (.bak.roots.<stamp> beside it)");
                 var db = os.Db;
                 long survivor = Id(db, $"SELECT id FROM library_root WHERE machine_id <> {Q(Foreign)};");
                 assert((survivor == first || survivor == alias) && Id(db, "SELECT count(*) FROM library_root;") == 2

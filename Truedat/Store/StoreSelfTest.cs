@@ -37,6 +37,7 @@ namespace Truedat.Store
             Console.WriteLine("Store self-test (C6: export + round-trip gate)");
             Block(assert, "Export", () => TestExport(assert));
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
+            Block(assert, "MoveRootCounts", () => TestMoveRootCounts(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
             Block(assert, "FlatnessDefinition", () => TestFlatnessDefinition(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
@@ -1322,6 +1323,32 @@ namespace Truedat.Store
         /// choice — the containing root IS the library — so the store keeps ONE: the fold runs where a root is minted (prevention)
         /// and at open (repair of a store an earlier build left nested), and every reader sees one root.
         /// </summary>
+        // Review 2026-10-24 #7: MoveRoot counted every row under the root as moved, so a remap to the spelling the root already had
+        // advanced the generation and reported a move for a no-op.
+        static void TestMoveRootCounts(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-moveroot-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db");
+                var e = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120 }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) };
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\Music\a.flac"] = e }, @"D:\Music", "primary", true, "essentia", "selftest", "fixture", null, null);
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    long root = os.Dal.LibraryRoots().Single().Id;
+                    int same = os.Dal.MoveRoot(root, @"D:\Music\");
+                    int moved = os.Dal.MoveRoot(root, @"E:\Music");
+                    assert(same == 0 && moved == 1, $"MoveRoot counts only the locations whose display path changed: same spelling {same} (expected 0), new drive {moved} (expected 1)");
+                    tx.Complete();
+                }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         static void TestNestedRoots(Action<bool, string> assert)
         {
             var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "nested-" + Guid.NewGuid().ToString("N").Substring(0, 8));

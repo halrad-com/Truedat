@@ -62,9 +62,6 @@ namespace Truedat.Store
             string? backup = null;
             if (current > 0)
             {
-                var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
-                backup = $"{db.Path}.bak.v{current}.{stamp}";
-                for (int n = 2; File.Exists(backup); n++) backup = $"{db.Path}.bak.v{current}.{stamp}-{n}";   // two migrations in one second (self-tests) never collide
                 // The backup is a second copy of the whole store (a real store is hundreds of MB to a few GB); refuse up front, with the
                 // numbers, rather than fail half way through VACUUM INTO on a full disk (review finding 7).
                 try
@@ -81,7 +78,7 @@ namespace Truedat.Store
                 }
                 catch (StoreException) { throw; }
                 catch (Exception ex) { StoreLog.Debug($"free-space check skipped: {ex.Message}"); }   // an exotic path (UNC without a drive) — VACUUM INTO's own error is the fallback
-                db.Exec($"VACUUM INTO '{backup.Replace("'", "''")}';");
+                backup = BackupBeside(db, $"v{current}");
                 StoreLog.Info($"store is schema v{current}; this build uses v{target}. Migrating now; backup first at {backup}");
                 // A table rebuild (v3 re-stores every row into typed tables, then renames) follows SQLite's documented recipe: foreign-key
                 // enforcement off for the rebuild, on again after. The rows are copied as they are; whatever referential state the old
@@ -111,6 +108,19 @@ namespace Truedat.Store
             }
             finally { if (current > 0) db.Exec("PRAGMA foreign_keys=ON;"); }
             StoreLog.Info($"schema now v{StoreSchema.CurrentVersion}" + (backup != null ? $" (backup of the previous store: {backup})" : ""));
+        }
+
+        /// <summary>A consistent snapshot of the store beside it — VACUUM INTO (SQLite ≥ 3.27) — named for what is about to change it
+        /// (<c>.bak.v2.&lt;stamp&gt;</c> for a migration, <c>.bak.roots.&lt;stamp&gt;</c> for the fold on open). Shared by the schema migration
+        /// and every repair on open that deletes rows: nothing deletes without a copy first (default safe, review 2026-10-24 #5).
+        /// Must run outside a transaction.</summary>
+        internal static string BackupBeside(SqliteDb db, string label)
+        {
+            var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+            string backup = $"{db.Path}.bak.{label}.{stamp}";
+            for (int n = 2; File.Exists(backup); n++) backup = $"{db.Path}.bak.{label}.{stamp}-{n}";   // two in one second (self-tests) never collide
+            db.Exec($"VACUUM INTO '{backup.Replace("'", "''")}';");
+            return backup;
         }
 
         /// <summary>Disk the migration needs beyond the store itself: the VACUUM INTO backup (about the store's size) AND the transaction's

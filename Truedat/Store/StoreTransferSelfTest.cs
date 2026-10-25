@@ -122,7 +122,7 @@ namespace Truedat.Store
                 var backups = Directory.GetFiles(d.Root, Path.GetFileName(store) + ".bak.*");
                 assert(backups.Length == 1, $"restore: the store it replaced was snapshotted first ({backups.Length} backup(s))");
                 assert(StoreTransfer.Validate(backups[0]).Entries == 3, "restore: that backup is the 3-location store, consistent and readable");
-                assert(!File.Exists(store + ".restore.tmp"), "restore: no staging file left behind");
+                assert(!File.Exists(store + ".restore.tmp") && !File.Exists(store + ".restore.tmp-wal") && !File.Exists(store + ".restore.tmp-shm"), "restore: no staging file or its WAL pair left behind (review 2026-10-24 #10)");
 
                 // The files are republished FROM the restored store, at its new generation.
                 var republished = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);

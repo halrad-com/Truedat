@@ -195,10 +195,10 @@ namespace Truedat
         /// cache-only updates no counter sees (codex rescan R6: "nothing completed since the last save" skipped a tag-refresh pass's
         /// changes). A checkpoint already running is waited for; a persistently failed stage is not retried. Then the scan's record is
         /// sealed with what happened (<paramref name="seal"/>, codex R7) before the process ends. The report is what THIS save did,
-        /// read after the lock — never a count sampled before the wait (labs 2026-10-24 finding 3).</summary>
+        /// read under the lock from its own attempt — never a count sampled before the wait or written by another checkpoint after it (labs 2026-10-24 finding 3; review #8).</summary>
         internal static string? SaveNow(PeriodicSave p, Func<CheckpointOutcome> checkpoint, int? exitCode, Action<int?, string>? seal)
         {
-            var outcome = p.SaveNow(checkpoint, force: true);
+            var outcome = p.SaveNow(checkpoint, force: true, out int pending);
             string report;
             if (outcome == null)
             {
@@ -210,7 +210,7 @@ namespace Truedat
             }
             else if (outcome.IsDurable)
             {
-                int n = p.LastAttemptPending;
+                int n = pending;   // this save's own count, read under the lock (review 2026-10-24 #8)
                 report = n > 0 ? $"saved {n} completed analyses" : "saved: completed cache updates (no new analyses since the last save)";
             }
             else
