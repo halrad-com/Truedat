@@ -30,13 +30,19 @@ namespace Truedat.Store
             catch (Exception ex) { assert(false, $"StoreStop.EndFinalJoinWindow: threw {ex.GetType().Name}: {ex.Message}"); }
             try { TestLateFinalException(assert); }
             catch (Exception ex) { assert(false, $"StoreStop.LateFinalException: threw {ex.GetType().Name}: {ex.Message}"); }
+            // The exit code is frozen when the seal starts (ScanStop.Fire): a caller joining a held seal waits and is not recorded,
+            // so a record never claims an exit the process may not end with. Pinned for a native stop (null: the OS decides) and
+            // the scan's own 130 in both orders, final-owned and after the final writes (codex stop-exit recheck 2026-10-24).
             foreach (bool afterFinal in new[] { false, true })
-            {
-                try { TestSecondStopWaitsForResultSeal(assert, afterFinal); }
-                catch (Exception ex) { assert(false, $"StoreStop.ConcurrentSeal({afterFinal}): threw {ex.GetType().Name}: {ex.Message}"); }
-            }
+                foreach (var (firstExit, secondExit) in new (int?, int?)[] { (130, 130), (null, 130), (130, null) })
+                {
+                    try { TestSecondStopWaitsForResultSeal(assert, afterFinal, firstExit, secondExit); }
+                    catch (Exception ex) { assert(false, $"StoreStop.ConcurrentSeal({afterFinal}, {Show(firstExit)}->{Show(secondExit)}): threw {ex.GetType().Name}: {ex.Message}"); }
+                }
 
         }
+
+        static string Show(int? exit) => exit?.ToString() ?? "null";
 
         static TrackEntry Entry(string title, char sha) => new TrackEntry
         {
@@ -174,11 +180,11 @@ namespace Truedat.Store
         }
 
         // Setting Settled/sealed before the result write finishes must not release another terminating caller.
-        static void TestSecondStopWaitsForResultSeal(Action<bool, string> assert, bool afterFinal)
+        static void TestSecondStopWaitsForResultSeal(Action<bool, string> assert, bool afterFinal, int? firstExit, int? secondExit)
         {
             using (var f = new Fixture())
             {
-                string label = "StoreStop.ConcurrentSeal." + (afterFinal ? "AfterFinal" : "DuringFinal");
+                string label = "StoreStop.ConcurrentSeal." + (afterFinal ? "AfterFinal" : "DuringFinal") + $" {Show(firstExit)}->{Show(secondExit)}";
                 var enteredSeal = new ManualResetEventSlim(false);
                 var releaseSeal = new ManualResetEventSlim(false);
                 var secondReturned = new ManualResetEventSlim(false);
@@ -198,7 +204,7 @@ namespace Truedat.Store
                     {
                         first = new Thread(() =>
                         {
-                            try { ScanStop.Fire(130); }
+                            try { ScanStop.Fire(firstExit); }
                             catch (Exception ex) { firstError = ex; }
                             finally { firstReturned.Set(); }
                         }) { IsBackground = true };
@@ -214,14 +220,14 @@ namespace Truedat.Store
                     };
                     owner = new Thread(() =>
                     {
-                        try { if (afterFinal) ScanStop.Fire(130); else ScanStop.EndFinal(); }
+                        try { if (afterFinal) ScanStop.Fire(firstExit); else ScanStop.EndFinal(); }
                         catch (Exception ex) { ownerError = ex; }
                     }) { IsBackground = true };
                     owner.Start();
                     if (!enteredSeal.Wait(GuardMs)) throw new InvalidOperationException("Real result sealing did not reach the barrier.");
                     second = new Thread(() =>
                     {
-                        try { ScanStop.Fire(130); }
+                        try { ScanStop.Fire(secondExit); }
                         catch (Exception ex) { secondError = ex; }
                         finally { secondReturned.Set(); }
                     }) { IsBackground = true };
@@ -233,11 +239,13 @@ namespace Truedat.Store
                     bool joined = owner.Join(GuardMs) && second.Join(GuardMs) && (first == null || first.Join(GuardMs));
                     bool hasResult = StoreResult.TryRead(StoreResult.PathFor(f.Store), out var record);
                     assert(joined && ownerError == null && secondError == null && firstError == null && sealCalls == 1
-                           && emergencySaves == 0 && f.Checkpoints == 1 && hasResult && record.ExitCode == 130
+                           && emergencySaves == 0 && f.Checkpoints == 1 && hasResult
                            && record.Outcome == StoreResult.OutcomeInterrupted && record.Reason != StoreResult.ProvisionalReason && record.Export.Performed
                            && record.Store.Generation == f.Generation() && record.Export.Generation == record.Store.Generation
                            && record.Export.Catalog?.Sha256 == Publication.Sha256Hex(f.Catalog),
                         label + ": releasing the seal completes every caller with one result and no second data writer");
+                    assert(hasResult && record.ExitCode == firstExit,
+                        label + $": the recorded exit is the one known when the seal started (recorded {(hasResult ? Show(record.ExitCode) : "no record")}, expected {Show(firstExit)})");
                 }
                 finally
                 {
