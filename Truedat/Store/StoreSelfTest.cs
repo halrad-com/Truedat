@@ -38,6 +38,7 @@ namespace Truedat.Store
             Block(assert, "Export", () => TestExport(assert));
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
             Block(assert, "MoveRootCounts", () => TestMoveRootCounts(assert));
+            Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
             Block(assert, "FlatnessDefinition", () => TestFlatnessDefinition(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
@@ -1323,6 +1324,33 @@ namespace Truedat.Store
         /// choice — the containing root IS the library — so the store keeps ONE: the fold runs where a root is minted (prevention)
         /// and at open (repair of a store an earlier build left nested), and every reader sees one root.
         /// </summary>
+        // Review 2026-10-24 #4: a root this machine held as a MIRROR at the library's own path made every scan refuse (8884c86). A mirror
+        // is one machine's view of ANOTHER machine's library; the scan proving the path is the library here makes that row primary.
+        static void TestMirrorRowAtLibraryPathIsPromoted(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-promote-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var now = DateTime.UtcNow.ToString("o");
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, true, "selftest", now))
+                using (var tx = os.Db.BeginTransaction()) { os.Dal.EnsureRoot(os.Machine.Id, @"X:\music", "mirror", now); tx.Complete(); }
+                var e = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120 }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64) };
+                Exception? thrown = null;
+                try { using (StoreLog.Quiet()) ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\a.flac"] = e }, @"X:\music", "primary", true, "essentia", "selftest", "fixture", null, null); }
+                catch (Exception ex) { thrown = ex; }
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, false, "selftest", now))
+                {
+                    var roots = os.Dal.ListRoots();
+                    assert(thrown == null && roots.Count == 1 && roots[0].Role == "primary" && os.Dal.Count("track_location") == 1,
+                        $"#4: a mirror row this machine held at the library's path is promoted by the scan, not refused (thrown: {thrown?.Message ?? "none"}; roots {roots.Count} [{string.Join(",", roots.Select(r => r.Role))}]; locations {os.Dal.Count("track_location")})");
+                }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         // Review 2026-10-24 #7: MoveRoot counted every row under the root as moved, so a remap to the spelling the root already had
         // advanced the generation and reported a move for a no-op.
         static void TestMoveRootCounts(Action<bool, string> assert)
@@ -1982,11 +2010,18 @@ namespace Truedat.Store
                 assert(r1 == r2 && r3 != r1 && dal.Count("library_root") == 2, "EnsureRoot is idempotent per (machine, path) and distinct per path");
                 // codex rescan 2026-10-23 R1 (TDA R1b): the same machine registering the same path under ANOTHER role got the existing
                 // row back — a primary write then landed under the mirror root, which is R1 in a second coat, and the schema keys
-                // (machine, path) so both cannot exist. A role collision is a refusal naming the root and the role it holds.
+                // (machine, path) so both cannot exist. 8884c86 refused the collision; that stopped every scan over such a store with no
+                // verb to change the role (review 2026-10-24 #4). Operator: the primary request wins — a mirror is one machine's view of
+                // ANOTHER machine's library, so a mirror row at the library's own path on this machine becomes primary. One row, no refusal.
+                long promoted = dal.EnsureRoot(m1.Id, @"X:\Library", "primary", now);
+                assert(promoted == r3 && dal.Count("library_root") == 2 && db.ExecScalar($"SELECT role FROM library_root WHERE id = {r3};") == "primary",
+                    $"#4: a primary request over a path this machine holds as a MIRROR promotes that row — same id, now primary, nothing added (id {promoted} vs {r3}; roots {dal.Count("library_root")})");
+                // The other direction is still a refusal: a MIRROR request over a path this machine holds as primary is the operator
+                // mis-typing a role, not the scan proving anything.
                 string? collision = null;
-                try { dal.EnsureRoot(m1.Id, @"X:\Library", "primary", now); } catch (StoreException ex) { collision = ex.Message; }
-                assert(collision != null && collision.Contains(@"X:\Library") && collision.Contains("mirror") && dal.Count("library_root") == 2,
-                    $"R1b: registering a path this machine holds as a MIRROR as a primary is refused, naming the root and its role, nothing written ({collision ?? "no refusal"}; roots {dal.Count("library_root")})");
+                try { dal.EnsureRoot(m1.Id, @"D:\Music", "mirror", now); } catch (StoreException ex) { collision = ex.Message; }
+                assert(collision != null && collision.Contains(@"D:\Music") && collision.Contains("primary") && dal.Count("library_root") == 2,
+                    $"R1b: registering a path this machine holds as PRIMARY as a mirror is refused, naming the root and its role, nothing written ({collision ?? "no refusal"}; roots {dal.Count("library_root")})");
 
                 // Codex review 2026-10-20 #6: after --machine-adopt the adopting host's roots live under ITS machine row, but default
                 // export and the scan selected roots by the creating machine's id, so the host's own library was left out (and a scan
@@ -1994,10 +2029,10 @@ namespace Truedat.Store
                 // 2026-10-23: a production box adopted a store copied from the scanning box, then scanned a file outside D:\Music.
                 // That registered a root owned by the adopting host, and "this machine's roots only" then dropped the creating
                 // machine's D:\Music: the published catalog fell to 1 track and the next scan re-analysed the whole library.
-                // The library is every primary root, whoever registered it; mirror roots stay out.
+                // The library is every primary root, whoever registered it; mirror roots stay out (r3 is primary now — promoted above).
                 long rB = dal.EnsureRoot(w3, @"E:\Music", "primary", now);
                 var lib = dal.LibraryRoots();
-                assert(lib.Count == 2 && lib.Any(x => x.Id == r1) && lib.Any(x => x.Id == rB) && !lib.Any(x => x.Id == r3),
+                assert(lib.Count == 3 && lib.Any(x => x.Id == r1) && lib.Any(x => x.Id == r3) && lib.Any(x => x.Id == rB),
                     $"the library is every primary root, the creating machine's and the adopting host's, never a mirror root ({string.Join(", ", lib.Select(x => x.Path))})");
                 // codex 2026-10-23 F1: the adopting host importing the same catalog registered D:\Music a second time under its own
                 // machine, so every path under it was two locations — publication kept one, maintenance verbs edited the other.

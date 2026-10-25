@@ -107,6 +107,17 @@ namespace Truedat.Store
             // over one role is what let `x:\MIRROR`, `X:/mirror` and `X:\mirror\` walk past a held MIRROR row and insert a second
             // row for one path, leaving the store with the same path as both a mirror and a primary.
             var want = CanonicalPath.Root(path);
+            // A primary request over a row THIS machine holds at the same path under another role: the scan has proven the path is the
+            // library here, and a mirror is one machine's view of ANOTHER machine's library — so the row becomes primary (review
+            // 2026-10-24 #4: the refusal from 8884c86 stopped every scan over such a store, and no verb could change the role).
+            if (role == "primary")
+                foreach (var r in RootsForMachine(machineId))
+                    if (!string.Equals(r.Role, "primary", StringComparison.OrdinalIgnoreCase) && string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Exec("UPDATE library_root SET role = 'primary' WHERE id = ?;", r.Id);
+                        StoreLog.Info($"root {r.Path} was registered on this machine as a {r.Role}; it is the library's own path here, so it is now primary");
+                        return r.Id;
+                    }
             long? existing = FindRootForRole(machineId, path, role);
             if (!existing.HasValue && role == "primary")
             {
