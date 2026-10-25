@@ -43,14 +43,31 @@ namespace Truedat.Edges
             return sb.ToString();
         }
 
+        /// <summary>The SCAN profile (extractor .6 drop 2, 02d1115: <c>essentia-build/spike-x6/scan-profile.yaml</c> verbatim, comments
+        /// dropped): the extractor computes and emits only the statistics truedat reads (<c>scan-allowlist.txt</c> — lowlevel .mean on
+        /// every descriptor and .stdev on six, tonal .mean + hpcp_entropy.stdev, rhythm .mean, mfcc mean + cov, gfcc mean) and skips the
+        /// 128-band mel branch and the per-frame band storage, which nothing reads. <c>x6.md5</c> stays ON: cutting it changes the edges
+        /// frames file's descriptor set for a cost that did not measure. The output falls from 599 keys to 187 (94 read); the extractor's
+        /// time by about 3 % (cpu-table.txt — the heavy branches all feed keys truedat reads). The 2-arg call stays the FULL extractor.</summary>
+        internal const string ScanProfileKeys =
+            "lowlevel.stats: [mean, stdev]\ntonal.stats: [mean, stdev]\nrhythm.stats: [mean]\nlowlevel.mfccStats: [mean, cov]\nlowlevel.gfccStats: [mean]\n" +
+            "x6.melbands128: 0\nx6.bandsStorage: 0\nx6.md5: 1\n";
+
+        /// <summary>What truedat hands the extractor as its one profile file: the frames block when edges are on, the scan keys when the
+        /// build honours them (<see cref="Program.ScanProfileCapable"/>), both when both — the extractor takes a single profile.</summary>
+        internal static string ProfileTextFor(bool edges, bool scan)
+            => (edges ? ProfileText() : "") + (scan ? ScanProfileKeys : "");
+
         /// <summary>Writes the profile beside the extractor's temp JSON (same directory, so the same ASCII guarantee) and
-        /// returns its path with the frames path the extractor is told to write.</summary>
-        internal static (string ProfilePath, string FramesPath) PrepareFor(string tempJson)
+        /// returns its path with the frames path the extractor is told to write (null when edges are off: no frames file is asked for).
+        /// Null profile when neither edges nor the scan profile apply — the caller makes the plain 2-arg call.</summary>
+        internal static (string? ProfilePath, string? FramesPath) PrepareFor(string tempJson, bool edges = true, bool scan = false)
         {
+            if (!edges && !scan) return (null, null);
             string stem = Path.Combine(Path.GetDirectoryName(tempJson) ?? ".", Path.GetFileNameWithoutExtension(tempJson));
             string profile = stem + ".profile.yaml", frames = stem + ".frames.bin";
-            File.WriteAllText(profile, ProfileText(), new UTF8Encoding(false));
-            return (profile, frames);
+            File.WriteAllText(profile, ProfileTextFor(edges, scan), new UTF8Encoding(false));
+            return (profile, edges ? frames : null);
         }
 
         /// <summary>Frames file → fold → PCM pass. Never throws: a missing or unreadable frames file is a failed result that

@@ -46,6 +46,8 @@ namespace Truedat.Edges
             Console.WriteLine("Edges self-test (S2 C4: the .5 extractor build is a known build)");
             try { TestExtractorBuild(assert); }
             catch (Exception ex) { assert(false, $"ExtractorBuild: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestScanProfile(assert); }
+            catch (Exception ex) { assert(false, $"ScanProfile: threw {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Every committed extractor exe must resolve to its build name, not an MD5 stub: the store's run rows and the
@@ -61,10 +63,91 @@ namespace Truedat.Edges
                 var id = Program.ExtractorBuildId(exe);
                 assert(id == build, $"the committed {build} exe resolves to its build name (got {id})");
             }
-            assert(string.Equals(Program.LatestExtractorMd5, "2fe852f564c894691e144697c6a0d200", StringComparison.OrdinalIgnoreCase),
-                $"the latest known extractor is .6, the decoder-only build 7319de5 (got {Program.LatestExtractorMd5})");
+            assert(string.Equals(Program.LatestExtractorMd5, "64b55cec008649c673fa13c9ab8dd4b6", StringComparison.OrdinalIgnoreCase),
+                $"the latest known extractor is .6 drop 2 (296f87d: one-frame-per-step loader + scan profile; got {Program.LatestExtractorMd5})");
             assert(!EdgeProducer.SupportsFrames("output-x64.4") && EdgeProducer.SupportsFrames("output-x64.5") && EdgeProducer.SupportsFrames("output-x64.6") && !EdgeProducer.SupportsFrames(null),
                 $"binary frames: .4 no, .5 yes, .6 yes, unknown no ({EdgeProducer.SupportedBuildsText})");
+        }
+
+        /// <summary>Extractor .6 drop 2 (02d1115 / 296f87d): the SCAN profile makes the extractor compute only what truedat reads. The
+        /// end-to-end gate the worker could not run: the committed .6 on a real clip, once with the full 2-arg call and once with the scan
+        /// profile truedat writes, both fed through ParseEssentiaOutput — the TrackFeatures must be identical while the raw output is the
+        /// smaller one. The capability is keyed on the exe's MD5 (a .5 or the drop-1 .6 refuses the merge), and the command line has
+        /// exactly three shapes.</summary>
+        static void TestScanProfile(Action<bool, string> assert)
+        {
+            string q(string s) => PathHelper.QuoteArg(s);
+            assert(Program.ExtractorArguments("in.flac", "out.json", null, null) == $"{q("in.flac")} {q("out.json")}"
+                   && Program.ExtractorArguments("in.flac", "out.json", "p.yaml", null) == $"{q("in.flac")} {q("out.json")} {q("p.yaml")}"
+                   && Program.ExtractorArguments("in.flac", "out.json", "p.yaml", "f.bin") == $"{q("in.flac")} {q("out.json")} {q("p.yaml")} --frames-bin {q("f.bin")}",
+                $"extractor command line: 2-arg, 3-arg (profile), 3-arg + --frames-bin — one builder, three shapes ({Program.ExtractorArguments("in.flac", "out.json", "p.yaml", "f.bin")})");
+            assert(EdgeProducer.ProfileTextFor(false, true) == EdgeProducer.ScanProfileKeys
+                   && EdgeProducer.ProfileTextFor(true, true) == EdgeProducer.ProfileText() + EdgeProducer.ScanProfileKeys
+                   && EdgeProducer.ProfileTextFor(true, false) == EdgeProducer.ProfileText()
+                   && EdgeProducer.ScanProfileKeys.Contains("x6.md5: 1\n"),
+                "profile text: scan keys alone, frames + scan keys, frames alone; x6.md5 stays ON (the frames prefix needs md5_encoded)");
+            var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "output-x64.6", "essentia_streaming_extractor_music.exe"));
+            var clip = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x6", "corpus", "flac16_44k_st_short.flac"));
+            if (exe == null || clip == null) { Console.WriteLine("  SKIP  scan-profile end to end: output-x64.6 exe or spike-x6 corpus clip not found from the test binary"); return; }
+            assert(Program.ScanProfileCapable(exe), "the committed .6 (drop 2+) honours the scan profile — its MD5 is in ScanProfileCapableMd5s");
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "truedat-scanprofile-" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                string fullJson = System.IO.Path.Combine(dir, "full.json"), scanJson = System.IO.Path.Combine(dir, "scan.json");
+                var (profile, frames) = EdgeProducer.PrepareFor(scanJson, edges: false, scan: true);
+                assert(profile != null && frames == null && System.IO.File.ReadAllText(profile) == EdgeProducer.ScanProfileKeys,
+                    "PrepareFor(scan only) writes the scan keys beside the output and asks for no frames file");
+                int rcFull = RunExtractor(exe, Program.ExtractorArguments(clip, fullJson, null, null));
+                int rcScan = RunExtractor(exe, Program.ExtractorArguments(clip, scanJson, profile, null));
+                assert(rcFull == 0 && rcScan == 0 && System.IO.File.Exists(fullJson) && System.IO.File.Exists(scanJson),
+                    $"the .6 extractor completes the clip under both calls (full rc {rcFull}, scan rc {rcScan})");
+                if (rcFull != 0 || rcScan != 0) return;
+                string fullText = System.IO.File.ReadAllText(fullJson), scanText = System.IO.File.ReadAllText(scanJson);
+                int fullLeaves = CountLeaves(fullText), scanLeaves = CountLeaves(scanText);
+                assert(scanLeaves < fullLeaves / 2, $"the scan profile took effect: {scanLeaves} leaf values vs {fullLeaves} under the full call");
+                var fullF = Program.ParseEssentiaOutput(fullText); var scanF = Program.ParseEssentiaOutput(scanText);
+                string a = System.Text.Json.JsonSerializer.Serialize(fullF), b = System.Text.Json.JsonSerializer.Serialize(scanF);
+                assert(fullF != null && scanF != null && a == b,
+                    "ParseEssentiaOutput reads the SAME TrackFeatures from the scan-profile output as from the full one" + (a == b ? "" : " — first difference: " + FirstDifference(a, b)));
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
+        }
+
+        static int RunExtractor(string exe, string arguments)
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exe, Arguments = arguments, UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            })!;
+            var so = p.StandardOutput.ReadToEndAsync(); var se = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(120000)) { try { p.Kill(); } catch { } return -1; }
+            return p.ExitCode;
+        }
+
+        static int CountLeaves(string json)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            int n = 0;
+            void Walk(System.Text.Json.JsonElement e)
+            {
+                switch (e.ValueKind)
+                {
+                    case System.Text.Json.JsonValueKind.Object: foreach (var pr in e.EnumerateObject()) Walk(pr.Value); break;
+                    case System.Text.Json.JsonValueKind.Array: foreach (var it in e.EnumerateArray()) Walk(it); break;
+                    default: n++; break;
+                }
+            }
+            Walk(doc.RootElement);
+            return n;
+        }
+
+        static string FirstDifference(string a, string b)
+        {
+            int i = 0; while (i < a.Length && i < b.Length && a[i] == b[i]) i++;
+            int from = Math.Max(0, i - 40);
+            return $"@{i}: full ...{a.Substring(from, Math.Min(90, a.Length - from))}... | scan ...{b.Substring(from, Math.Min(90, b.Length - from))}...";
         }
 
         // ---------------------------------------------------------------- the store rows

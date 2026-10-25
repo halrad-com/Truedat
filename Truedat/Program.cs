@@ -11052,11 +11052,13 @@ namespace Truedat
         // loop dropped most of each APE file — any .5 APE analysis is truncated and .6
         // changes it (WMA Lossless: same decoder family, untested). The refresh set after
         // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
-        internal const string LatestExtractorMd5 = "2fe852f564c894691e144697c6a0d200";
-        internal const string LatestExtractorSummary = "output-x64.6: .5 plus the decoder fix (large-block FLAC no longer crashes the extractor)";
+        internal const string LatestExtractorMd5 = "64b55cec008649c673fa13c9ab8dd4b6";
+        internal const string LatestExtractorSummary = "output-x64.6: .5 plus the decoder fix (large-block FLAC, APE, WMA Lossless/Pro decode in full) and the scan profile (computes only what truedat reads)";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix (current)",
+            // Every accepted .6 drop keeps its MD5 here under the same name (option A): a deployed earlier drop must still resolve by name.
+            ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (current: drop 2, 296f87d)",
+            ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — drop 1 (7319de5): decoder fix only; fails on APE (StereoDemuxer overflow) and refuses the scan profile — superseded by drop 2",
             ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges; crashes on 65535-block stereo FLAC (.6 fixes)",
             ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support; no binary frames (--edges needs .5)",
             ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3 — optimized, 13-hour file support; INACCURATE bpm (first-peak key-collision bug)",
@@ -11064,16 +11066,48 @@ namespace Truedat
             ["05c4c77bb204026e87b3a593e0d0ed2e"] = "output-x64.1 — 200-min cap only; NOT optimized (~3x slower), inaccurate bpm",
         };
 
+        /// <summary>The extractor builds (by MD5, never by name — every .6 drop shares the name) that honour the SCAN profile
+        /// (<see cref="global::Truedat.Edges.EdgeProducer.ScanProfileKeys"/>): drop 2 of .6 (02d1115) and later, which carry the
+        /// profile-merge fix. The drop-1 .6 and every .5 refuse the merge ("different data type") when handed those keys, so they
+        /// get the full 2-arg call. Each accepted drop adds its MD5 here beside its KnownExtractors row.</summary>
+        static readonly HashSet<string> ScanProfileCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "64b55cec008649c673fa13c9ab8dd4b6",   // .6 drop 2 (296f87d)
+        };
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _extractorMd5ByPath = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Whether the extractor at <paramref name="exePath"/> honours the scan profile — its MD5, hashed once per path per run.</summary>
+        internal static bool ScanProfileCapable(string exePath)
+            => ScanProfileCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
+
+        /// <summary>The extractor's command line: input and output always; the profile as the third argument when there is one; the
+        /// binary frames path only when edges asked for it. One place, so the three shapes cannot drift.</summary>
+        internal static string ExtractorArguments(string toolPath, string tempJson, string? profile, string? frames)
+        {
+            var sb = new StringBuilder(PathHelper.QuoteArg(toolPath)).Append(' ').Append(PathHelper.QuoteArg(tempJson));
+            if (profile != null) sb.Append(' ').Append(PathHelper.QuoteArg(profile));
+            if (frames != null) sb.Append(" --frames-bin ").Append(PathHelper.QuoteArg(frames));
+            return sb.ToString();
+        }
+
+        static string? ExtractorMd5(string exePath)
+        {
+            try
+            {
+                using (var m = System.Security.Cryptography.MD5.Create())
+                using (var fs = File.OpenRead(exePath))
+                    return BitConverter.ToString(m.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+            }
+            catch { return null; }
+        }
+
         /// <summary>The extractor build as a short producer version for the store's run rows: the known build name
         /// (<c>output-x64.5</c>) when the MD5 is in the table, else <c>md5:&lt;12 hex&gt;</c>, else <c>unknown</c>. S2 C3.</summary>
         internal static string ExtractorBuildId(string exePath)
         {
             try
             {
-                string md5;
-                using (var m = System.Security.Cryptography.MD5.Create())
-                using (var fs = File.OpenRead(exePath))
-                    md5 = BitConverter.ToString(m.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+                string md5 = ExtractorMd5(exePath) ?? throw new IOException("unreadable");
                 if (KnownExtractors.TryGetValue(md5, out var desc))
                 {
                     int dash = desc.IndexOf(" —", StringComparison.Ordinal);
@@ -25637,10 +25671,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // siblings of the temp JSON (same ASCII-only directory), both deleted in the finally; the startup sweep covers a
             // killed scan. A profile that cannot be written is a failed fold for this track, never a failed track.
             string? edgesProfile = null, edgesFrames = null, edgesPrepError = null;
-            if (_stageOpts.Edges)
+            // Extractor .6 drop 2: a build that honours the scan profile gets it on every analysis (EdgeProducer.ScanProfileKeys — only
+            // the statistics truedat reads; a .5 or the drop-1 .6 given those keys hits the extractor's profile-merge refusal, so the
+            // capability is keyed on the exe's MD5, never the build name). A profile that cannot be written falls back to the full
+            // 2-arg call — never a failed track; with edges on that is also a failed fold for this track, as before.
+            bool scanProfile = ScanProfileCapable(essentiaExe);
+            if (_stageOpts.Edges || scanProfile)
             {
-                try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson); }
-                catch (Exception ex) { edgesPrepError = $"could not write the edges profile beside the extractor output: {ex.Message}"; }
+                try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson, edges: _stageOpts.Edges, scan: scanProfile); }
+                catch (Exception ex) { edgesPrepError = $"could not write the extractor profile beside the extractor output: {ex.Message}"; }
             }
             RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
             try
@@ -25648,9 +25687,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var psi = new ProcessStartInfo
                 {
                     FileName = essentiaExe,
-                    Arguments = edgesProfile != null
-                        ? $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)} {PathHelper.QuoteArg(edgesProfile)} --frames-bin {PathHelper.QuoteArg(edgesFrames!)}"
-                        : $"{PathHelper.QuoteArg(toolPath)} {PathHelper.QuoteArg(tempJson)}",
+                    Arguments = ExtractorArguments(toolPath, tempJson, edgesProfile, edgesFrames),
                     // Redirect (and drain) Essentia's stdout — without this, essentia's own
                     // progress prints inherit truedat's stdout and pollute the JSON channel
                     // in --analyze-file --json-output mode (Shell parses stdout as a single
