@@ -240,7 +240,7 @@ namespace Truedat.Store
             if (anyCopyOnly)
                 using (var tx = db.BeginTransaction())
                 {
-                    copyOnlyRun = dal.InsertRun("import", "1", null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", null, null, "in progress", "scan-cache:" + source);
+                    copyOnlyRun = dal.InsertRun("import", "1", null, null, null, null, now, null, Environment.MachineName, VersionInfo.Display, "failed", null, null, "in progress", ScanCachePrefix + source);
                     tx.Complete();
                 }
             try
@@ -356,7 +356,7 @@ namespace Truedat.Store
                     try
                     {
                         if (copyOnly != null && copyOnly.Contains(keys[i]))
-                            ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], copyOnlyRun, "import", "1", false, "scan-cache:" + source, now, r, null, storeDir, null, deferred, false);
+                            ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], copyOnlyRun, "import", "1", false, ScanCachePrefix + source, now, r, null, storeDir, null, deferred, false);
                         else
                             ImportEntry(dal, rootIds, mirror, keys[i], tracks[keys[i]], sharedRun, producerKey, producerVersion, runPerEntry, source, now, r, pendingArtifact, storeDir, edges, deferred, spillLost);
                     }
@@ -400,6 +400,9 @@ namespace Truedat.Store
         /// <summary>T06: set by a catalog-changing verb around its store write — the arriving entries are the verb's EXACT result (content
         /// and copy facts, nulls included: a strip or a migrate clears). Never set by a scan or an import. Single-threaded verbs only.</summary>
         [ThreadStatic] internal static bool ExactArrival;
+        /// <summary>Source prefix of a scan's cache-hit flush (ScanSink.RecordCacheHit): written under the import producer so it is never a
+        /// measurement, but it is the SCAN's entry, not a catalog's — its NULLs are not present, never a supplied empty string.</summary>
+        internal const string ScanCachePrefix = "scan-cache:";
 
         /// <summary>Test seam (codex 2026-10-23 F5): fail inside the last batch's transaction, where the run outcomes are written.</summary>
         internal static bool FailRunOutcomeForTest;
@@ -617,7 +620,8 @@ namespace Truedat.Store
                 ? dal.InsertRun(producerKey, producerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
-            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged, replaceCopy);
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged, replaceCopy,
+                scanCacheHit: source.StartsWith(ScanCachePrefix, StringComparison.Ordinal));
             // T19: the verdict projection, from the rows AS STORED, for every copy of this media (a content change re-derives them all).
             VerdictStore.DeriveForEntity(dal, res.EntityId, now);
 
@@ -673,7 +677,8 @@ namespace Truedat.Store
         /// Copy facts describe the file, so the newer observation wins, exactly — per column, for the columns the arrival observed
         /// (<see cref="TrackEntryMapper.MergeCopy"/>). Equal arrivals write nothing at all.</summary>
         internal static void WriteDescriptionAndCopy(StoreDal dal, long locationId, string entityId, string contentKey, string contentKeyKind,
-            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r, bool locationChanged = false, bool replaceCopy = false)
+            long runId, string producerKey, string producerVersion, TrackEntry entry, string displayPath, string now, ImportReport r, bool locationChanged = false, bool replaceCopy = false,
+            bool scanCacheHit = false)
         {
             var row = TrackEntryMapper.ToRow(entry);
             bool contentWritten = false, copyWritten = locationChanged, drifted = false;   // a new or changed location (mtime, state) is a copy fact too
@@ -822,11 +827,16 @@ namespace Truedat.Store
             // fabricated head hash were going over the scan's).
             ulong? observedCopy = entry.CopyObserved;
             if (legacyAlias) observedCopy = (entry.CopyObserved ?? TrackEntryMapper.AllCopyObserved) & TrackEntryMapper.CopyMaskWhereNull(existingCopy);
-            // A scan's entry IS the file's observation: a NULL it carries is a value (a whole-file MD5 the scan nulled after a tag-only edit
-            // must not come back from the store on republish — operator 2026-10-24). The catalog reader marks a supplied empty string even
-            // though parsing maps it to NULL, so a masked import clears too; only a maskless catalog import keeps the store on NULL.
-            bool clearNull = !catalogImport || ExactArrival || entry.CopyObserved.HasValue;
-            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff, clearNull: clearNull);
+            // NULL is not present (operator 2026-10-25): no arrival's NULL clears a stored copy fact — not a scan's either. A scan without
+            // --file-md5 never looked at the MD5, a scan with the SMFM reader off never looked at SMFM, and an XML without a genre says
+            // nothing about the stored one. What DOES clear: a verb's exact edit (ExactArrival), a catalog import whose reader marked a
+            // supplied empty string (parsing maps it to NULL, so the mask carries the fact that it was supplied), and the scan's explicit
+            // removals (CopyCleared — the whole-file MD5 a tag-only edit made stale, which must not come back on republish; 5b9b8f3 got
+            // that case by making every scan NULL clear, and every reviewer since found the NULLs it should not have cleared). A known-older
+            // legacy alias fills only, so it clears nothing.
+            bool clearNull = ExactArrival || (catalogImport && !scanCacheHit && entry.CopyObserved.HasValue);
+            ulong cleared = legacyAlias ? 0UL : entry.CopyCleared ?? 0UL;
+            var copyRow = TrackEntryMapper.MergeCopy(existingCopy, row, observedCopy, catalogImport, out var copyDiff, clearNull: clearNull, cleared: cleared);
             if (copyRow != null)
             {
                 StoreLog.Debug($"copy facts written for {displayPath}: {copyDiff}");

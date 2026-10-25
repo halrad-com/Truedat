@@ -123,9 +123,10 @@ namespace Truedat.Store
                 "MergeSafety legacy alias: merge also preserves the existing legacy-alias contract");
         }
 
-        // A scan's entry is the file's observation: a NULL it carries is a value, not an absence. The scan nulls a whole-file MD5
-        // that a tag-only edit made stale, and the catalog it writes carries none — the store holds what the scan writes, so a
-        // republish cannot bring the stale MD5 back (operator 2026-10-24: the regression d79cec7 shipped).
+        // NULL is not present (operator 2026-10-25, the rule that holds for EVERY arrival): a scan's NULL copy fact never clears a stored
+        // observation — a scan without --file-md5 did not look at the MD5, a scan with the SMFM reader off did not look at SMFM. The
+        // one case where the scan KNOWS a stored fact is wrong (the whole-file MD5 after a tag-only edit) is an explicit removal,
+        // CopyCleared, not a NULL. 5b9b8f3 made every scan NULL clear to get that one case; this replaces it.
         static void FreshScanNull(Action<bool, string> assert)
         {
             using (var f = new Fixture())
@@ -152,15 +153,27 @@ namespace Truedat.Store
                 assert(f.Cell("p.title || '|' || c.bpm", PathA) == measured.Features.Title + "|1300",
                     "MergeSafety fresh scan (" + mode + "): the ordinary scan writer stores supplied title and BPM");
                 string? facts = f.Cell("coalesce(p.fileMd5, '<null>') || '|' || coalesce(p.smfmBpm, '<null>') || '|' || (p.smfmScores IS NULL) || '|' || coalesce(p.fingerprint_v1_audioHead64kMd5, '<null>')", PathA);
-                assert(facts == "<null>|<null>|1|<null>",
-                    "MergeSafety fresh scan (" + mode + "): the scan's NULL clears the stored MD5, SMFM and fingerprint — the store holds what the scan writes (got " + facts + ")");
+                assert(facts == Md5 + "|95000000|0|" + Md5,
+                    "MergeSafety fresh scan (" + mode + "): the scan's NULL keeps the stored MD5, SMFM and fingerprint — NULL is not present (got " + facts + ")");
+                var invalidating = new TrackEntry
+                {
+                    LastModified = DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                    AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
+                    Features = new TrackFeatures { Title = "Freshly measured " + mode, Bpm = 130 },
+                    CopyObserved = mask, CopyCleared = TrackEntryMapper.CopyMaskOf("fileMd5"),
+                };
+                ImportCommand.ExecuteEntries(f.Store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [PathA] = invalidating },
+                    Root, "primary", true, "essentia", "merge-safety", "synthetic fresh scan", null, null);
+                facts = f.Cell("coalesce(p.fileMd5, '<null>') || '|' || coalesce(p.smfmBpm, '<null>') || '|' || (p.smfmScores IS NULL) || '|' || coalesce(p.fingerprint_v1_audioHead64kMd5, '<null>')", PathA);
+                assert(facts == "<null>|95000000|0|" + Md5,
+                    "MergeSafety fresh scan (" + mode + "): an explicit clear removes exactly the MD5 and nothing else (got " + facts + ")");
             }
         }
 
         // The library scan's cache-hit tiers rebuild the catalog entry WITHOUT analysing (Program.cs quick-head tier: a tag-only edit
-        // keeps the analysis and sets FileMd5 = null because the whole-file digest is stale) and hand it to ScanSink.RecordCacheHit,
-        // which flushes under the import producer. That NULL is the scan's decision about the file; the stale digest must leave the
-        // store, or the next publish writes it back into the catalog (codex checkpoint 2026-10-24 P2 — the fix 5b9b8f3 missed this path).
+        // keeps the analysis, sets FileMd5 = null because the whole-file digest is stale AND marks it CopyCleared) and hand it to
+        // ScanSink.RecordCacheHit, which flushes under the import producer. The explicit clear is what removes the stale digest, so
+        // the next publish cannot write it back (codex 2026-10-24 P2); a rebuilt entry carrying a plain NULL keeps the stored MD5.
         static void LibraryCacheHitNull(Action<bool, string> assert)
         {
             using var f = new Fixture();
@@ -174,13 +187,26 @@ namespace Truedat.Store
                     LastModified = DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind),
                     AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
                     Features = new TrackFeatures { Title = "Tags edited", Bpm = 120 },
-                    FileMd5 = null,   // the quick-head tier's invalidation
+                    FileMd5 = null,   // a plain NULL: not present
                 };
                 ScanSink.RecordCacheHit(PathA, rebuilt);
                 var flush = ScanSink.Flush(f.Store, "merge-safety", null, final: true);
                 string? facts = f.Cell("coalesce(p.fileMd5, '<null>') || '|' || p.title", PathA);
-                assert(flush.Ok && facts == "<null>|Tags edited",
-                    "MergeSafety library cache hit: the MD5 the scan nulled after a tag-only edit leaves the store through the cache-hit flush (got " + facts + ", flush ok " + flush.Ok + ")");
+                assert(flush.Ok && facts == Md5 + "|Tags edited",
+                    "MergeSafety library cache hit: a rebuilt entry's NULL MD5 keeps the stored one — NULL is not present (got " + facts + ", flush ok " + flush.Ok + ")");
+                ScanSink.Reset(); ScanSink.StoreDirectory = System.IO.Path.GetDirectoryName(f.Store);
+                var invalidated = new TrackEntry
+                {
+                    LastModified = DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind).AddMinutes(1),
+                    AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
+                    Features = new TrackFeatures { Title = "Tags edited again", Bpm = 120 },
+                    FileMd5 = null, CopyCleared = TrackEntryMapper.CopyMaskOf("fileMd5"),   // the quick-head tier's invalidation
+                };
+                ScanSink.RecordCacheHit(PathA, invalidated);
+                flush = ScanSink.Flush(f.Store, "merge-safety", null, final: true);
+                facts = f.Cell("coalesce(p.fileMd5, '<null>') || '|' || p.title", PathA);
+                assert(flush.Ok && facts == "<null>|Tags edited again",
+                    "MergeSafety library cache hit: the MD5 the quick-head tier invalidated leaves the store through the cache-hit flush (got " + facts + ", flush ok " + flush.Ok + ")");
             }
             finally { ScanSink.Reset(); ScanSink.StoreDirectory = previousDir; }
         }

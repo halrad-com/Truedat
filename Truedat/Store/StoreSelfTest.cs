@@ -585,8 +585,8 @@ namespace Truedat.Store
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
                     bpmScan = os.Db.ExecScalar(sqlBpm) ?? ""; runScan = os.Db.ExecScalar(sqlRun) ?? "";
-                    assert(os.Db.ExecScalar(sqlCopy) == "Senjara|<null>",
-                        "a scan's NULL genre is the file's observation and lands over the stored explicit empty string (the store holds what the scan writes)");
+                    assert(os.Db.ExecScalar(sqlCopy) == "Senjara|",
+                        "a scan's NULL genre is not present and keeps the stored explicit empty string (NULL never clears, operator 2026-10-25)");
                 }
                 assert(bpmScan == "1500", $"fixture: the scan's description is in place (bpm {bpmScan}, expected 1500)");
                 WriteCatalog(catalog, older);   // the old catalog again: legacy hash, bpm 77
@@ -598,8 +598,8 @@ namespace Truedat.Store
                     assert(r7.ContentReplaced == 0 && r7.ContentRekeyed == 0 && key7 == "2222222222222222222222222222222222222222222222222222222222222222" && bpm7 == "1500" && run7 == runScan,
                         $"an older catalog's legacy FLAC hash leaves a scan's description and its run untouched (replaced {r7.ContentReplaced}, rekeyed {r7.ContentRekeyed}, key {key7}, bpm {bpm7} expected 1500, run {run7} expected {runScan})");
                     var copy7 = os.Db.ExecScalar(sqlCopy);
-                    assert(copy7 == "Senjara|Jazz",
-                        $"an older catalog's legacy FLAC hash leaves the scan's copy facts in place and only fills what the store lacks (title|genre = {copy7}, expected Senjara|Jazz)");
+                    assert(copy7 == "Senjara|",
+                        $"an older catalog's legacy FLAC hash leaves the scan's copy facts in place and only fills what the store lacks — a stored empty string is a value, not a gap (title|genre = {copy7}, expected Senjara|)");
                 }
             }
             finally { try { Directory.Delete(dir, true); } catch { } }

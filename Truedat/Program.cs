@@ -282,6 +282,10 @@ namespace Truedat
         // Transient, never written (keeper 067): which copy facts the catalog entry actually carried, as a TrackEntryMapper copy-column
         // bitmask — set only when a catalog is read for the store (LoadExistingMoodsForStore). Null = every column observed (a scan).
         public ulong? CopyObserved;
+        // Transient, never written: copy facts the scan KNOWS are no longer true of the file and removes on purpose (today only the
+        // whole-file MD5 a tag-only edit made stale, at the quick-head cache tier). NULL is not present and never clears a stored value
+        // (operator 2026-10-25); this mask is the explicit removal that does. TrackEntryMapper copy-column bits, like CopyObserved.
+        public ulong? CopyCleared;
         // Likewise for the CONTENT columns (TrackEntryMapper.ObservedContentMask, ContentIdx order): set beside CopyObserved when a catalog
         // is read for the store, so a merge can tell an omitted field from a supplied zero or empty string. Null = not recorded.
         public ulong[]? ContentObserved;
@@ -4317,6 +4321,7 @@ namespace Truedat
                                     trackEntry = RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
                                         freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, null, afQuickFp);
                                     trackEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                    trackEntry.CopyCleared = global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");   // an explicit removal, not a NULL
                                     afHitTag = "cached·head";
                                     afFingerprintV1 = trackEntry.FingerprintV1;
                                     afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -5112,6 +5117,7 @@ namespace Truedat
                                             fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, null, flQuickFp);
                                         flHeadEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                        flHeadEntry.CopyCleared = global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");   // an explicit removal, not a NULL
                                         var flHeadSmfmTag = _refreshSmfm && ApplySmfmInPlace(flHeadEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flHeadSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flHeadEntry;
@@ -6404,6 +6410,7 @@ namespace Truedat
                                             {
                                                 var headEntry = RebuildCacheEntry(existing, t, currentLastMod, null, msQuickFp);
                                                 headEntry.FileMd5 = null;  // stale whole-file MD5; --verify --backfill refills
+                                                headEntry.CopyCleared = global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");   // an explicit removal, not a NULL
                                                 var headSmfmTag = _refreshSmfm && ApplySmfmInPlace(headEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (headSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = headEntry;

@@ -376,11 +376,13 @@ namespace Truedat.Store
         /// not observed (<paramref name="observed"/> bit clear) or agreeing (<see cref="CopyAgrees"/>) keeps the STORED value — a
         /// new copy row stores NULL for an unobserved column; anything else is the arrival. Copy facts describe the file, so an
         /// supplied difference is the newer observation and wins exactly. An arriving NULL preserves the stored value unless
-        /// <paramref name="clearNull"/> allows an explicit clear (a verb, or a supplied empty string parsed as NULL). <paramref name="observed"/> null = every
+        /// <paramref name="clearNull"/> allows an explicit clear (a verb, or a supplied empty string parsed as NULL) — NULL is not present
+        /// (operator 2026-10-25), for a scan as much as for an import. A column in <paramref name="cleared"/> is an explicit removal: it is
+        /// written NULL whatever the stored value (the scan's stale whole-file MD5 after a tag-only edit). <paramref name="observed"/> null = every
         /// column eligible (a scan's entry). <paramref name="catalogImport"/> is the caller's explicit statement that the arrival is a catalog
         /// import, the only arrival the written-precision equivalence applies to (keeper 070, TDA 054: a scan's value is a fresh
         /// measurement and replaces exactly). <paramref name="firstDifference"/> names the first column written, for the log.</summary>
-        internal static object?[]? MergeCopy(object?[]? storedCopy, object?[] row, ulong? observed, bool catalogImport, out string? firstDifference, bool clearNull = false)
+        internal static object?[]? MergeCopy(object?[]? storedCopy, object?[] row, ulong? observed, bool catalogImport, out string? firstDifference, bool clearNull = false, ulong cleared = 0)
         {
             firstDifference = storedCopy == null ? "no copy row yet" : null;
             var merged = (object?[])row.Clone();
@@ -388,6 +390,12 @@ namespace Truedat.Store
             {
                 var stored = storedCopy?[k];
                 var arriving = row[CopyIdx[k]];
+                if ((cleared & (1UL << k)) != 0)
+                {
+                    merged[CopyIdx[k]] = null;
+                    if (stored != null && firstDifference == null) firstDifference = $"{Cols[CopyIdx[k]].Name}: stored {Describe(stored)} cleared";
+                    continue;
+                }
                 if ((!clearNull && arriving == null) || (observed is ulong m && (m & (1UL << k)) == 0) || (storedCopy != null && CopyAgrees(k, stored, arriving, catalogImport)))
                 {
                     merged[CopyIdx[k]] = stored;
@@ -453,6 +461,19 @@ namespace Truedat.Store
 
         /// <summary>Every copy column observed.</summary>
         internal static ulong AllCopyObserved => AllCopyObservedExcept();
+
+        /// <summary>The copy-column bits for the named columns — a <see cref="TrackEntry.CopyCleared"/> mask (an explicit removal).</summary>
+        internal static ulong CopyMaskOf(params string[] names)
+        {
+            ulong mask = 0;
+            foreach (var n in names)
+            {
+                int k = CopyIndexOf(n);
+                if (k < 0) throw new InvalidOperationException($"{n} is not a copy column");
+                mask |= 1UL << k;
+            }
+            return mask;
+        }
 
         /// <summary>What a store-backed VERB observes of a copy: everything the published catalog carries — i.e. every copy column except
         /// the ones the field policy keeps out of the file (trackId). Those arrive as the type's default (0), a value nobody observed, and
