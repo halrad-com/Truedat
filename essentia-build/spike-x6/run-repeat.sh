@@ -12,6 +12,8 @@
 #           m1 = out/build-m1 (drop 3 stage 1: peak-working-set in the x6profile
 #           header + StereoMuxer guard)   m2 = out/build-m2 (stage 2: no whole-pool
 #           copies at the end of MusicExtractor::compute)
+#           c1..c4 = out/build-c<N> (the .7 changes, docs: run-x7-passes.sh)
+#           x7 = ../output-x64.7
 #           or a path to an extractor exe
 #   modes:  prof        ESSENTIA_PROFILE on: each run appends its per-algorithm
 #                       table to out/<label>/profile.tsv (a build without
@@ -45,6 +47,8 @@ case "$build" in
   s2) exe=out/build-s2/essentia_streaming_extractor_music.exe ;;
   m1) exe=out/build-m1/essentia_streaming_extractor_music.exe ;;
   m2) exe=out/build-m2/essentia_streaming_extractor_music.exe ;;
+  c1|c2|c3|c4) exe=out/build-$build/essentia_streaming_extractor_music.exe ;;   # .7 change builds
+  x7) exe=../output-x64.7/essentia_streaming_extractor_music.exe ;;
   *)  exe="$build" ;;
 esac
 profile=""; bin=""

@@ -195,6 +195,7 @@ def gate(full, cand):
            " other rows within 2x the descriptor's same-binary band (espb-band.tsv)",
            "", "%-26s %-6s %5s %9s %9s %7s  %s" % ("id", "exact", "descs", "moved", "max_rel", "beyond", "note")]
     fails = compared = 0
+    tags = set()
     codes = run_codes(cand)
     # coverage first (overwatch review V1): every row the FULL run wrote a frames
     # file for must have a fresh one from the candidate, with exit 0
@@ -219,23 +220,35 @@ def gate(full, cand):
         pa, pb = bin_path(full, i), bin_path(cand, i)
         exact = i in exact_rows
         with open(pa, "rb") as fa, open(pb, "rb") as fb:
-            identical = fa.read() == fb.read()
-        _, a = read_espb(pa)
-        _, b = read_espb(pb)
+            ba, bb = fa.read(), fb.read()
+        tag_a, a = read_espb(pa)
+        tag_b, b = read_espb(pb)
+        tags.add((tag_a, tag_b))
+        # the header tag is the extractor's build id - the one difference a new
+        # build is allowed (the JSON gates' extractor_build key): compare the
+        # bytes with the candidate's tag replaced by the baseline's; a tag of
+        # another length would shift every offset, so then the decoded values
+        # decide (they must all be equal on an exact row)
+        if tag_a != tag_b and len(tag_a.encode("utf-8")) == len(tag_b.encode("utf-8")):
+            bb = bb[:28] + tag_a.encode("utf-8") + bb[28 + len(tag_a.encode("utf-8")):]
+        identical = ba == bb
         problems, diffs = compare(a, b)
         moved = sum(m for m, _ in diffs.values())
         max_rel = max([r for _, r in diffs.values()] or [0.0])
         beyond = [(r, n) for n, (m, r) in diffs.items() if m and r > 2 * per_desc.get(n, 0.0)]
+        if tag_a != tag_b and not identical and not problems and moved == 0 and \
+                len(tag_a.encode("utf-8")) != len(tag_b.encode("utf-8")):
+            identical = True   # tags of different lengths: every value equal is the test
         ok = not problems and (identical if exact else not beyond)
-        # the header tag carries the build id: both are output-x64.6 here, so an
-        # exact row must be byte-identical, tag included
         fails += 0 if ok else 1
         note = "; ".join(problems[:2]) if problems else ("" if ok else "; ".join("%s %.2g" % (n, r) for r, n in sorted(beyond, reverse=True)[:3]))
         if exact and not identical and not problems and moved == 0:
             note = "exact row, 0 values moved, but bytes differ (header?)"
         out.append("%-26s %-6s %5d %9d %9.3g %7d  %s%s" % (
             i, "yes" if exact else "band", len(a), moved, max_rel, len(beyond), "" if ok else "FAIL ", note))
-    out += ["", "%d row(s) compared, %d failure(s)" % (compared, fails),
+    out += ["", "header tags (build id; a differing tag is masked, not judged): " +
+            ", ".join("%s -> %s" % t for t in sorted(tags)),
+            "%d row(s) compared, %d failure(s)" % (compared, fails),
             "PASS" if fails == 0 and compared > 0 else ("FAIL: no row compared" if not compared else "FAIL")]
     text = "\n".join(out) + "\n"
     with open(os.path.join(HERE, "gate-edges-%s-%s.txt" % (full, cand)), "w", encoding="utf-8") as f:

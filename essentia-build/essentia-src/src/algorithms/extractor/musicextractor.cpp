@@ -187,11 +187,14 @@ void MusicExtractor::setExtractorDefaultOptions() {
 void MusicExtractor::compute() {
   const string& audioFilename = _audiofile.get();
 
-  Pool& resultsStats = _resultsStats.get();
-  Pool& resultsFrames = _resultsFrames.get();
-
-  Pool results;
-  Pool stats;
+  // x6 (drop 3): compute straight into the output pools. The extractor used to
+  // fill a local `results` and `stats` and copy both into the outputs at the
+  // end of compute(), so the whole frame-level pool was held twice at the
+  // run's peak; the copies were the only readers of the locals.
+  Pool& results = _resultsFrames.get();
+  Pool& stats = _resultsStats.get();
+  results.clear();
+  stats.clear();
 
   streaming::AlgorithmFactory& factory = streaming::AlgorithmFactory::instance();
 
@@ -299,7 +302,7 @@ void MusicExtractor::compute() {
 
   E_INFO("MusicExtractor: Compute aggregation");
   x6profile::setPhase("6 aggregation");
-  { x6profile::Scope total("total"); stats = computeAggregation(results); }
+  { x6profile::Scope total("total"); computeAggregation(results, stats); }
 
   // pre-trained classifiers are only available in branches devoted for that
   // (eg: 2.0.1)
@@ -314,13 +317,10 @@ void MusicExtractor::compute() {
 #endif
   }
   E_INFO("All done");
-  
-  resultsStats = stats;
-  resultsFrames = results;
 }
 
 
-Pool MusicExtractor::computeAggregation(Pool& pool){
+void MusicExtractor::computeAggregation(Pool& pool, Pool& poolStats){
 
   // choose which descriptors stats to output
   const char* defaultStats[] = { "mean", "var", "stdev", "median", "min", "max", "dmean", "dmean2", "dvar", "dvar2" };
@@ -353,7 +353,6 @@ Pool MusicExtractor::computeAggregation(Pool& pool){
   standard::Algorithm* aggregator = standard::AlgorithmFactory::create("PoolAggregator",
                                                                        "defaultStats", arrayToVector<string>(defaultStats),
                                                                        "exceptions", exceptions);
-  Pool poolStats;
   aggregator->input("input").set(pool);
   aggregator->output("output").set(poolStats);
 
@@ -397,8 +396,6 @@ Pool MusicExtractor::computeAggregation(Pool& pool){
   //poolStats.set(string("tonal.chords_count"), pool.value<vector<string> >("tonal.chords_progression").size());
 
   delete aggregator;
-
-  return poolStats;
 }
 
 

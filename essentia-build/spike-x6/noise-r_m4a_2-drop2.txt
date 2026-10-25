@@ -1,0 +1,7 @@
+r_m4a_2: 4 labels: sscan noise-s-1 noise-s-2 noise-s-3
+
+lowlevel.barkbands_crest.mean                           spread 0.000188  sscan=9.329849243  noise-s-1=9.328495979  noise-s-2=9.328098297  noise-s-3=9.329741478
+lowlevel.melbands_spread.mean                           spread 0.00228  sscan=24.59655571  noise-s-1=24.65283394  noise-s-2=24.64882088  noise-s-3=24.62056351
+lowlevel.melbands_spread.stdev                          spread 0.0165  sscan=18.99085617  noise-s-1=19.31033325  noise-s-2=19.28064537  noise-s-3=19.12284088
+
+3 key(s) listed

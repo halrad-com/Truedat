@@ -93,7 +93,8 @@ class MusicExtractor : public Algorithm {
   void computeChromaPrint(const std::string& audioFilename, Pool& results);
 #endif
 
-  Pool computeAggregation(Pool& pool);
+  // x6 (drop 3): fills poolStats in place (was returned by value and copied)
+  void computeAggregation(Pool& pool, Pool& poolStats);
 
  public:
 
