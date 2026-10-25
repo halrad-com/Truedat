@@ -1,0 +1,10 @@
+V2 check (464b6f7): the HPCP harness exits nonzero on a failure. Inputs are out/hpcp-bench.raw from the tools-build-t1 run, edited to inject one failure each.
+hpcp_summary.py:
+ok rc=0 : EQUIVALENCE: PASS (10 row(s), every one compared, all bit-identical)|
+mismatch rc=1 : r_mp3          MISMATCH: 3 frame(s) differ|EQUIVALENCE: FAIL - r_mp3|
+nofused rc=1 : r_mp3          no fused comparison|EQUIVALENCE: FAIL - r_mp3|
+failed rc=1 : r_mp3          FAILED: the bench exited 2|EQUIVALENCE: FAIL - r_mp3|
+run-hpcp-bench.sh, on an isolated copy with a stand-in bench that replays a saved row and exits 1 for one row:
+all ok: rc=0 HPCP_DONE Sun Oct 25 12:08:35 PDT 2026 rc=0 (bench failures 0, summary rc 0)
+one row fails: rc=1 HPCP_DONE Sun Oct 25 12:08:36 PDT 2026 rc=1 (bench failures 1, summary rc 1)
+Not exercised: the native bench's own exit 1 on a mismatch, which cannot be forced without changing its source (verified by reading: rc = 1 when frames differ).

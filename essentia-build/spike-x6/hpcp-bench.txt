@@ -2,22 +2,24 @@ x7 step 0 - HPCP sizing bench (essentia_standard_x7_hpcp_bench), real rows of ma
 times are the minimum over the repeats, seconds per pass over every frame; hpcp_* minus the input copy
 
 id              audio s frames  pk/frm       key    chords    tuning      walk   alloc36  alloc120  fused%ch    buf%3
-r_mp3             305.2   6573    59.4    0.0620    0.3199    0.5924    0.1575    0.0004    0.0004     49.2%     0.1%
-r_m4a             547.6  11793    58.9    0.1114    0.5727    1.0773    0.2753    0.0007    0.0008     48.1%     0.1%
-r_m4a_2           191.7   4129    58.1    0.0377    0.1956    0.3638    0.0982    0.0003    0.0003     50.2%     0.1%
-r_wma             324.7   6992    59.6    0.0664    0.3399    0.6334    0.1633    0.0004    0.0005     48.0%     0.1%
-r_flac_hd         186.7   4022    58.7    0.0383    0.2006    0.3631    0.0909    0.0002    0.0002     45.3%     0.1%
-r_flac_live       290.4   6254    60.0    0.0580    0.3051    0.5698    0.1493    0.0003    0.0004     48.9%     0.1%
-r_wav             178.2   3839    60.0    0.0361    0.1862    0.3483    0.1711    0.0002    0.0003     91.9%     0.1%
-r_wmalossless     302.4   6514    59.4    0.0603    0.3168    0.6017    0.1647    0.0003    0.0004     52.0%     0.1%
-r_wmapro          286.1   6162    59.3    0.0602    0.2956    0.5577    0.1443    0.0007    0.0008     48.8%     0.2%
-r_ape              60.5   1304    59.9    0.0122    0.0620    0.1165    0.0296    0.0001    0.0001     47.8%     0.1%
+r_mp3             305.2   6573    59.4    0.0594    0.3088    0.5777    0.1563    0.0003    0.0004     50.6%     0.1%
+r_m4a             547.6  11793    58.9    0.1063    0.5506    1.0286    0.2614    0.0006    0.0007     47.5%     0.1%
+r_m4a_2           191.7   4129    58.1    0.0363    0.1846    0.3548    0.0933    0.0002    0.0002     50.5%     0.1%
+r_wma             324.7   6992    59.6    0.0638    0.3338    0.6218    0.1558    0.0003    0.0004     46.7%     0.1%
+r_flac_hd         186.7   4022    58.7    0.0360    0.1849    0.3462    0.0902    0.0002    0.0002     48.8%     0.1%
+r_flac_live       290.4   6254    60.0    0.0572    0.2959    0.5522    0.1427    0.0003    0.0004     48.2%     0.1%
+r_wav             178.2   3839    60.0    0.0349    0.1781    0.3362    0.0849    0.0002    0.0002     47.7%     0.1%
+r_wmalossless     302.4   6514    59.4    0.0592    0.3057    0.5686    0.1441    0.0005    0.0004     47.1%     0.1%
+r_wmapro          286.1   6162    59.3    0.0557    0.2909    0.5421    0.1416    0.0003    0.0003     48.7%     0.1%
+r_ape              60.5   1304    59.9    0.0118    0.0606    0.1154    0.0288    0.0001    0.0001     47.6%     0.1%
 
-pooled: key 0.5427 s  chords 2.7945 s  tuning 5.2237 s  (three 8.5609 s; tuning / chords = 1.87)
-  fused chords+tuning saves the shared walk once: 1.4442 s = 51.7% of chords, 16.9% of the three HPCPs
-  member LO/HI buffers save the per-call allocation: 0.0037 s (36) + 0.0040 s (120) = 0.1% of the three HPCPs
-  frames 57582; per frame: chords 48.53 us, tuning 90.72 us, walk 25.08 us
-  HPCPFused (x7) on 10 row(s): frames differing from HPCP chords/tuning: 0 (BIT-IDENTICAL); time 6.5619 s vs 8.0183 s separate = 18.2% saved
+pooled: key 0.5208 s  chords 2.6938 s  tuning 5.0435 s  (three 8.2581 s; tuning / chords = 1.87)
+  fused chords+tuning saves the shared walk once: 1.2990 s = 48.2% of chords, 15.7% of the three HPCPs
+  member LO/HI buffers save the per-call allocation: 0.0032 s (36) + 0.0033 s (120) = 0.1% of the three HPCPs
+  frames 57582; per frame: chords 46.78 us, tuning 87.59 us, walk 22.56 us
+  HPCPFused (x7) on 10 row(s): frames differing from HPCP chords/tuning: 0 (BIT-IDENTICAL); time 6.3641 s vs 7.7373 s separate = 17.7% saved
 
 To put these on the extractor's scale, multiply each share by the HPCP rows of the same input's
 x6profile table (step0-decode.txt: HPCP[size=36] is key + chords together, HPCP[size=120] is tuning).
+
+EQUIVALENCE: PASS (10 row(s), every one compared, all bit-identical)
