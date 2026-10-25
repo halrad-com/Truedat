@@ -39,6 +39,8 @@ namespace Truedat.Store
             Block(assert, "NestedRoots", () => TestNestedRoots(assert));
             Block(assert, "MoveRootCounts", () => TestMoveRootCounts(assert));
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
+            Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
+            Block(assert, "ImportFoldBacksUp", () => TestImportFoldBacksUp(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
             Block(assert, "FlatnessDefinition", () => TestFlatnessDefinition(assert));
             Console.WriteLine("Store self-test (C7: verbs answering from the store)");
@@ -1347,6 +1349,73 @@ namespace Truedat.Store
                     assert(thrown == null && roots.Count == 1 && roots[0].Role == "primary" && os.Dal.Count("track_location") == 1,
                         $"#4: a mirror row this machine held at the library's path is promoted by the scan, not refused (thrown: {thrown?.Message ?? "none"}; roots {roots.Count} [{string.Join(",", roots.Select(r => r.Role))}]; locations {os.Dal.Count("track_location")})");
                 }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // Review 2026-10-25 R1: another machine held the path as PRIMARY and this machine held it as a mirror. The promotion ran first,
+        // made a second primary at the same path, and the import's fold then deleted one machine's copy of a song the import was not even
+        // about — with no backup. A primary is a path of the library whoever registered it, so the held primary is reused and this
+        // machine's mirror is left exactly as it was. (fileMd5 is only a marker telling the two copy rows apart.)
+        static void TestPromotionReusesAnotherMachinesPrimary(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-promote2-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var now = DateTime.UtcNow.ToString("o");
+                TrackEntry Song(string md5) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120 }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('a', 64), FileMd5 = md5 };
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\song.flac"] = Song("11111111111111111111111111111111") }, @"X:\music", "primary", true, "essentia", "selftest", "fixture", null, null);
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, false, "selftest", now))
+                using (var tx = os.Db.BeginTransaction())
+                {
+                    // The primary becomes another machine's (a store copied from that box), and this machine holds the path as a mirror.
+                    const string foreign = "f0f0f0f0-0000-0000-0000-000000000001";
+                    os.Dal.InsertMachine(foreign, "selftest-foreign", now);
+                    os.Db.Exec($"UPDATE library_root SET machine_id = '{foreign}';");
+                    long mirror = os.Dal.EnsureRoot(os.Machine.Id, @"X:\music", "mirror", now);
+                    var mine = Song("22222222222222222222222222222222");
+                    CanonicalPath.Split(@"X:\music", @"X:\music\song.flac", out var rel, out var canon);
+                    var entity = EntityResolver.Resolve(os.Dal, mine.AudioStreamSha256, FacetKinds.ShaFrames, mirror, canon, "fixture", now);
+                    long loc = os.Dal.UpsertLocation(entity.EntityId, mirror, rel, canon, @"X:\music\song.flac", now, now);
+                    os.Dal.UpsertCopy(loc, null, TrackEntryMapper.ToRow(mine), now);
+                    tx.Complete();
+                }
+                var add = new TrackEntry { Features = new TrackFeatures { Artist = "B", Title = "N", Bpm = 90 }, LastModified = new DateTime(2026, 5, 2, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('b', 64) };
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\new.flac"] = add }, @"X:\music", "primary", true, "essentia", "selftest", "fixture", null, null);
+                using (StoreLog.Quiet())
+                using (var os = OpenStore.Open(store, false, "selftest", now))
+                {
+                    string? Q(string sql) => os.Db.ExecScalar(sql);
+                    var roles = Q("SELECT group_concat(role, ',') FROM (SELECT role FROM library_root ORDER BY id);");
+                    var md5s = Q("SELECT group_concat(fileMd5, ',') FROM (SELECT c.fileMd5 FROM track_copy c JOIN track_location l ON l.id = c.location_id WHERE l.display_path LIKE '%song.flac' ORDER BY c.fileMd5);");
+                    var newRoot = Q("SELECT r.role FROM track_location l JOIN library_root r ON r.id = l.root_id WHERE l.display_path LIKE '%new.flac';");
+                    assert(roles == "primary,mirror" && md5s == "11111111111111111111111111111111,22222222222222222222222222222222" && newRoot == "primary",
+                        $"R1: a primary import over another machine's primary keeps both copies and both roots (roots [{roles}], song copies [{md5s}], new.flac under [{newRoot}])");
+                }
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // Review 2026-10-25 R1 (second half): a fold the IMPORT has to run (a root minted around one the store already held) deletes the
+        // losing duplicate's copy, so it is backed up first — as the open-time repair does.
+        static void TestImportFoldBacksUp(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-foldbak-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db");
+                TrackEntry E(char h, int day) => new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T", Bpm = 120 }, LastModified = new DateTime(2026, 5, day, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string(h, 64) };
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\inner\a.flac"] = E('a', 1) }, @"X:\music\inner", "primary", true, "essentia", "selftest", "fixture", null, null);
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"X:\music\inner\a.flac"] = E('a', 2), [@"X:\music\b.flac"] = E('b', 2) }, @"X:\music", "primary", true, "essentia", "selftest", "fixture", null, null);
+                var backups = Directory.GetFiles(dir, "truedat.db.bak.roots.*");
+                assert(backups.Length == 1, $"R1: the import's root fold backs the store up first ({backups.Length} backup(s) beside the store)");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

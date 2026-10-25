@@ -107,9 +107,19 @@ namespace Truedat.Store
             // over one role is what let `x:\MIRROR`, `X:/mirror` and `X:\mirror\` walk past a held MIRROR row and insert a second
             // row for one path, leaving the store with the same path as both a mirror and a primary.
             var want = CanonicalPath.Root(path);
-            // A primary request over a row THIS machine holds at the same path under another role: the scan has proven the path is the
-            // library here, and a mirror is one machine's view of ANOTHER machine's library — so the row becomes primary (review
-            // 2026-10-24 #4: the refusal from 8884c86 stopped every scan over such a store, and no verb could change the role).
+            if (role == "primary")
+            {
+                // A primary root is a path of the LIBRARY, whichever machine registered it (codex 2026-10-23 F1): the same path in any
+                // spelling — separators, trailing separator, case — is the same root, oldest row first. Asked BEFORE any promotion below:
+                // promoting this machine's mirror beside another machine's primary made two primaries at one path, and the fold that
+                // followed deleted one machine's copy rows with no backup (review 2026-10-25 R1).
+                foreach (var r in LibraryRoots())
+                    if (string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase)) return r.Id;
+            }
+            // A primary request over a row THIS machine holds at the same path under another role, and no primary at that path anywhere:
+            // the scan has proven the path is the library here, and a mirror is one machine's view of ANOTHER machine's library — so the
+            // row becomes primary (review 2026-10-24 #4: the refusal from 8884c86 stopped every scan over such a store, and no verb could
+            // change the role).
             if (role == "primary")
                 foreach (var r in RootsForMachine(machineId))
                     if (!string.Equals(r.Role, "primary", StringComparison.OrdinalIgnoreCase) && string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase))
@@ -119,13 +129,6 @@ namespace Truedat.Store
                         return r.Id;
                     }
             long? existing = FindRootForRole(machineId, path, role);
-            if (!existing.HasValue && role == "primary")
-            {
-                // A primary root is a path of the LIBRARY, whichever machine registered it (codex 2026-10-23 F1): the same path in any
-                // spelling — separators, trailing separator, case — is the same root, oldest row first.
-                foreach (var r in LibraryRoots())
-                    if (string.Equals(CanonicalPath.Root(r.Path), want, StringComparison.OrdinalIgnoreCase)) { existing = r.Id; break; }
-            }
             if (existing.HasValue) return existing.Value;
             Exec("INSERT INTO library_root(machine_id, path, role, created_utc) VALUES (?, ?, ?, ?);", machineId, path, role, nowUtc);
             StoreLog.Info($"root registered: {path} ({role})");

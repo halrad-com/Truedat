@@ -190,10 +190,11 @@ namespace Truedat.Store
             var allPaths = new List<string>(entries.Keys);
             if (failures != null) foreach (var f in failures) allPaths.Add(f.Path);
             if (retirePaths != null) allPaths.AddRange(retirePaths);
-            var rootIds = new List<(string Path, long Id)>();
             var roots = new List<string>();
-            using (var tx = db.BeginTransaction())
+            var rootIds = RegisterRoots(db, dal, now, () =>
             {
+                roots.Clear();
+                var rootIds = new List<(string Path, long Id)>();
                 if (libraryRoot != null)
                 {
                     roots.Add(libraryRoot);
@@ -218,9 +219,8 @@ namespace Truedat.Store
                     }
                     if (rootIds.Count == 0 && allPaths.Count > 0) throw new StoreException("No library root could be inferred from the paths; pass --library-root.");
                 }
-                rootIds = FoldNestedRoots(dal, rootIds, now);
-                tx.Complete();
-            }
+                return rootIds;
+            });
             r.Roots.AddRange(rootIds.Select(x => x.Path));
             bool mirror = role == "mirror";
             bool runPerEntry = producerKey != "import";
@@ -452,15 +452,9 @@ namespace Truedat.Store
             // 2. Roots: given, else inferred and reported so a wrong inference is visible.
             var roots = o.LibraryRoot != null ? new List<string> { o.LibraryRoot } : CanonicalPath.InferRoots(tracks.Keys);
             if (roots.Count == 0) throw new StoreException("No library root could be inferred from the catalog keys; pass --library-root.");
-            var rootIds = new List<(string Path, long Id)>();
-            using (var tx = db.BeginTransaction())
-            {
-                foreach (var root in roots) rootIds.Add((root, dal.EnsureRoot(writerMachine, root, role, now)));
-                // The whole catalog's root may contain a root the store already had (a scan's first checkpoint minted a sub-folder):
-                // without the fold, every entry under the old root was written a SECOND time under the new one and both roots stayed.
-                rootIds = FoldNestedRoots(dal, rootIds, now);
-                tx.Complete();
-            }
+            // The whole catalog's root may contain a root the store already had (a scan's first checkpoint minted a sub-folder): without
+            // the fold, every entry under the old root was written a SECOND time under the new one and both roots stayed.
+            var rootIds = RegisterRoots(db, dal, now, () => roots.Select(root => (root, dal.EnsureRoot(writerMachine, root, role, now))).ToList());
             r.Roots.AddRange(roots);
             StoreLog.Info($"roots ({role}): {string.Join(", ", roots)}" + (o.LibraryRoot == null ? " [inferred]" : ""));
 
@@ -954,6 +948,28 @@ namespace Truedat.Store
         /// <summary>The prevention half of <see cref="StoreDal.FoldNestedRoots"/>, in the caller's transaction, right after a root is
         /// minted: a new root may contain one the store already had, or sit inside one. Folding there means no commit ever leaves
         /// nested primaries (they made every later publication refuse), and this import is routed through the surviving roots.</summary>
+        /// <summary>Root registration for a write, in its own transaction. When the roots it registers leave none to fold, it commits.
+        /// A fold DELETES the losing duplicate location's copy and verdict, so it never runs without a backup: the registration rolls
+        /// back, the store is copied beside itself (VACUUM INTO, outside any transaction, as the open-time repair does), and the
+        /// registration runs again with the fold (review 2026-10-25 R1: registering a root must never cost data unrecoverably).</summary>
+        static List<(string Path, long Id)> RegisterRoots(SqliteDb db, StoreDal dal, string now, Func<List<(string Path, long Id)>> register)
+        {
+            using (var tx = db.BeginTransaction())
+            {
+                var ids = register();
+                if (!dal.HasNestedRoots()) { tx.Complete(); return ids; }
+            }
+            string backup = SchemaMigrator.BackupBeside(db, "roots");
+            List<(string Path, long Id)> folded;
+            using (var tx = db.BeginTransaction())
+            {
+                folded = FoldNestedRoots(dal, register(), now);
+                tx.Complete();
+            }
+            StoreLog.Warn($"roots folded; the store was backed up first: {backup}");
+            return folded;
+        }
+
         static List<(string Path, long Id)> FoldNestedRoots(StoreDal dal, List<(string Path, long Id)> rootIds, string now)
         {
             var folds = dal.FoldNestedRoots();

@@ -80,10 +80,15 @@ namespace Truedat.Edges
         {
             const long GiB = 1L << 30;
             double MiB(long bytes) => Math.Round(bytes / 1048576.0, 1);
-            var got = new[] { MiB(Program.SpoolCapBytes(8 * GiB, 4)), MiB(Program.SpoolCapBytes(8 * GiB, 8)), MiB(Program.SpoolCapBytes(8 * GiB, 20)),
-                              MiB(Program.SpoolCapBytes(16 * GiB, 20)), MiB(Program.SpoolCapBytes(32 * GiB, 20)), MiB(Program.SpoolCapBytes(0, 8)), MiB(Program.SpoolCapBytes(1 * GiB, 20)) };
-            assert(got[0] == 256 && got[1] == 227.6 && got[2] == 62.4 && got[3] == 172.6 && got[4] == 256 && got[5] == 0 && got[6] == 0,
-                $"spool cap MiB at 8 GiB x4/x8/x20, 16 GiB x20, 32 GiB x20, no RAM reading, 1 GiB x20: {string.Join(" / ", got)} (expected 256 / 227.6 / 62.4 / 172.6 / 256 / 0 / 0)");
+            // Per track (review 2026-10-25 R3): the worker's share minus the extractor's own 106.6 + 0.4141 MiB/s for THIS track, so the bound
+            // holds whatever the channel count or rate the spool records. Unknown length or no RAM reading = 0 (no spool).
+            var got = new[] { MiB(Program.SpoolCapBytes(8 * GiB, 4, 600)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 60)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 300)),
+                              MiB(Program.SpoolCapBytes(8 * GiB, 20, 600)), MiB(Program.SpoolCapBytes(16 * GiB, 20, 300)), MiB(Program.SpoolCapBytes(8 * GiB, 8, 0)), MiB(Program.SpoolCapBytes(0, 8, 300)) };
+            assert(got[0] == 256 && got[1] == 114.3 && got[2] == 14.9 && got[3] == 0 && got[4] == 256 && got[5] == 0 && got[6] == 0,
+                $"spool cap MiB at 8 GiB x4 600 s, x20 60/300/600 s, 16 GiB x20 300 s, unknown length, no RAM reading: {string.Join(" / ", got)} (expected 256 / 114.3 / 14.9 / 0 / 256 / 0 / 0)");
+            // The reviewer's mono case: 8 GiB, 20 workers, a 5-minute 44.1 kHz mono track spools 300 x 176,400 B. The cap must not admit it,
+            // so the track decodes per pass and stays inside its 245.76 MiB share (the old run-wide 62.4 MiB cap admitted it: 280.6 MiB peak).
+            assert(Program.SpoolCapBytes(8 * GiB, 20, 300) < 300L * 176400, "spool cap: a 5-minute mono track on 8 GiB x20 is not spooled past the worker's share");
             assert(EdgeProducer.ProfileTextFor(false, true, 123456789) == EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 123456789\n"
                    && EdgeProducer.ProfileTextFor(true, true, 0) == EdgeProducer.ProfileText() + EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 0\n"
                    && EdgeProducer.ProfileTextFor(false, true, null) == EdgeProducer.ScanProfileKeys,

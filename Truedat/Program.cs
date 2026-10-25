@@ -1768,7 +1768,7 @@ namespace Truedat
                 if (_powerRequestBroken)
                     SetThreadExecutionState(ES_SYSTEM_REQUIRED);
                 _keepAwakeHeld = true;
-                Console.WriteLine("keep-awake: holding system awake while work runs (display may sleep; --allow-sleep to disable)");
+                Console.Error.WriteLine("keep-awake: holding system awake while work runs (display may sleep; --allow-sleep to disable)");
             }
         }
 
@@ -1809,7 +1809,7 @@ namespace Truedat
             {
                 KeepAwakeRelease();
                 if (workMode && !_allowSleep)
-                    Console.WriteLine("keep-awake: on battery — normal sleep applies (plug in to keep the run going)");
+                    Console.Error.WriteLine("keep-awake: on battery — normal sleep applies (plug in to keep the run going)");
             }
             else if (want && held && _powerRequestBroken)
             {
@@ -7049,10 +7049,11 @@ namespace Truedat
 
             if (failed > 0)
             {
-                // Source loss (exit 3, noted above) and Ctrl+C outrank a failure count: those notes stay.
+                // Source loss (exit 3, noted above) and Ctrl+C outrank a failure count: those notes stay, and source loss keeps its exit
+                // code (review 2026-10-25 R6 — it dropped to 1 here, so a launcher read an ordinary failure where the library had gone).
                 if (Volatile.Read(ref scanSourceLost) == 0 && !wasCancelled)
                     global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeFailed, $"{failed} track(s) failed analysis — see mbxmoods-errors.csv");
-                Environment.ExitCode = 1;
+                Environment.ExitCode = ExitAfterFailedTracks(Environment.ExitCode, Volatile.Read(ref scanSourceLost) != 0);
             }
             ExitOnFinalWriteFailure(finalWrites);
             if (checkpointFailure != null) ReportPersistentCheckpointFailure(checkpointFailure, periodicSave, Volatile.Read(ref notStartedAfterCheckpointFailure), finalWrites,
@@ -11112,32 +11113,38 @@ namespace Truedat
         internal static bool SpoolCapable(string exePath)
             => SpoolCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
 
-        /// <summary>The per-track RAM spool cap that keeps ALL workers together inside 60 % of RAM on their worst spooled track. Per worker
-        /// that track costs 106.6 + 0.4141 L + 0.33646 L MiB — the extractor's measured fit plus the stereo f32 spool (essentia-build/spike-x6/
-        /// mem-fit.txt, drop 2, 10 real rows) — with L = cap / 0.33646 s (352,800 B/s), which solves to cap = (0.6 RAM / N - 106.6) / (1 + 0.4141 / 0.33646),
-        /// clamped to [0, 256 MiB]. Operator 2026-10-25: it has to work at 8 GB (8 GiB x8 = 227.6 MiB; x20 = 62.4 MiB, short tracks only).
-        /// Zero = no spool: the extractor decodes per pass exactly as before, same output.</summary>
-        internal static long SpoolCapBytes(long availableRamBytes, int workers)
+        /// <summary>The RAM spool cap for ONE track: what is left of this worker's share (60 % of available RAM / N) once the extractor's own
+        /// cost for this track is taken out — 106.6 + 0.4141 MiB per audio-second (essentia-build/spike-x6/mem-fit.txt, drop 2, 10 real rows) —
+        /// clamped to [0, 256 MiB]. So extractor + spool stays inside the share whatever the track's channel count or sample rate: the spool
+        /// records the SOURCE format, and the earlier run-wide cap, which assumed stereo 44.1 kHz, let a mono track spool twice the duration
+        /// past it (review 2026-10-25 R3). Unknown duration = 0. Zero = no spool: the extractor decodes per pass as before, same output.
+        /// Operator 2026-10-25: it has to work at 8 GB.</summary>
+        internal static long SpoolCapBytes(long availableRamBytes, int workers, double durationSec)
         {
-            // Base and slope are the measured fit; the spool rate is exact by construction: stereo f32 at 44.1 kHz = 352,800 B per second.
-            const double BaseMiB = 106.6, ExtractorMiBPerSec = 0.4141, SpoolMiBPerSec = 352800.0 / 1048576, Share = 0.6, CeilingMiB = 256;
-            if (availableRamBytes <= 0) return 0;
+            const double BaseMiB = 106.6, ExtractorMiBPerSec = 0.4141, Share = 0.6, CeilingMiB = 256;
+            if (availableRamBytes <= 0 || !(durationSec > 0)) return 0;
             int n = Math.Max(1, workers);
-            double cap = (Share * (availableRamBytes / 1048576.0) / n - BaseMiB) / (1 + ExtractorMiBPerSec / SpoolMiBPerSec);
+            double cap = Share * (availableRamBytes / 1048576.0) / n - BaseMiB - ExtractorMiBPerSec * durationSec;
             return (long)(Math.Max(0, Math.Min(CeilingMiB, cap)) * 1048576);
+        }
+
+        /// <summary>A track's length for the spool cap: TagLib's header read (~1 ms, no audio decoded); 0 when it cannot say.</summary>
+        static double TrackSecondsForSpool(string path)
+        {
+            try { using var f = TagLib.File.Create(path); return f.Properties?.Duration.TotalSeconds ?? 0; }
+            catch { return 0; }
         }
 
         /// <summary>How many extractors this run starts at once — set by the scan modes beside their Parallel.ForEach; 1 until then.</summary>
         internal static int _extractorWorkers = 1;
 
-        /// <summary>The run's spool cap, from the RAM AVAILABLE when the first track is analysed (not the installed total: a RAM drive or a
-        /// busy box shrinks it) and the run's worker count. Computed once and logged once.</summary>
-        static readonly Lazy<long> _runSpoolCap = new Lazy<long>(() =>
+        /// <summary>The RAM AVAILABLE when the first track is analysed (not the installed total: a RAM drive or a busy box shrinks it), read
+        /// once and logged once — to stderr, so <c>--json-output</c>'s stdout stays one JSON document (review 2026-10-25 R2).</summary>
+        static readonly Lazy<long> _runAvailableRam = new Lazy<long>(() =>
         {
             long avail = AvailablePhysicalBytes();
-            long cap = SpoolCapBytes(avail, _extractorWorkers);
-            Console.WriteLine($"  Spool:      {cap / 1048576.0:F0} MB per track in RAM (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
-            return cap;
+            Console.Error.WriteLine($"  Spool:      up to {SpoolCapBytes(avail, _extractorWorkers, 1) / 1048576.0:F0} MB per track in RAM, less for long tracks (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
+            return avail;
         });
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -12124,6 +12131,10 @@ namespace Truedat
         }
 
         /// <summary>The version token from an ffmpeg/ffprobe <c>-version</c> first line ("ffmpeg version X Copyright ...").</summary>
+        /// <summary>The scan's exit code once some tracks failed: 1, unless the library went away mid-scan — its code (3) outranks a failure
+        /// count, so a launcher can tell "the source vanished" from "a few files would not analyse" (review 2026-10-25 R6).</summary>
+        internal static int ExitAfterFailedTracks(int current, bool sourceLost) => sourceLost ? current : 1;
+
         internal static string? FfmpegVersionFrom(string? firstLine)
         {
             if (string.IsNullOrWhiteSpace(firstLine)) return null;
@@ -20996,6 +21007,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ExtractorBuildLabel("0123456789abcdef0123456789abcdef").StartsWith("unrecognized build", StringComparison.Ordinal), "env: an unknown build is unrecognized");
                 Assert(FfmpegVersionFrom("ffmpeg version 2026-10-08-git-ec420ba161-full_build-www.gyan.dev Copyright (c) 2000-2026") == "2026-10-08-git-ec420ba161-full_build-www.gyan.dev", "env: ffmpeg's version token is read");
                 Assert(FfmpegVersionFrom("") == null && FfmpegVersionFrom("garbage") == null, "env: no version line reads as none");
+                // R6 (review 2026-10-25): a scan with failed tracks exits 1, unless the library went away mid-scan — then the source-loss
+                // code set earlier (3) stands. It used to drop to 1 for two months behind a comment saying source loss outranks it.
+                Assert(ExitAfterFailedTracks(3, sourceLost: true) == 3 && ExitAfterFailedTracks(0, sourceLost: false) == 1,
+                    $"exit: source loss keeps 3 over a failure count ({ExitAfterFailedTracks(3, true)}), failures alone exit 1 ({ExitAfterFailedTracks(0, false)})");
                 var clSet = ConfigListingLines(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["store"] = "false" }, 78);
                 Assert(clSet.Contains("    " + "store".PadRight(17) + " " + "false *".PadRight(10) + " write the store every scan"), "config-listing: a value the file sets is starred");
 
@@ -25848,11 +25863,20 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // capability is keyed on the exe's MD5, never the build name). A profile that cannot be written falls back to the full
             // 2-arg call — never a failed track; with edges on that is also a failed fold for this track, as before.
             bool scanProfile = ScanProfileCapable(essentiaExe);
-            if (_stageOpts.Edges || scanProfile)
+            bool spools = SpoolCapable(essentiaExe);
+            if (_stageOpts.Edges || scanProfile || spools)
             {
-                long? spoolCap = SpoolCapable(essentiaExe) ? _runSpoolCap.Value : (long?)null;   // .7: the RAM spool's per-track ceiling
+                // .7: this track's RAM spool ceiling (its own length against the worker's share).
+                long? spoolCap = spools ? SpoolCapBytes(_runAvailableRam.Value, _extractorWorkers, TrackSecondsForSpool(audioPath)) : (long?)null;
                 try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson, edges: _stageOpts.Edges, scan: scanProfile, spoolMaxBytes: spoolCap); }
                 catch (Exception ex) { edgesPrepError = $"could not write the extractor profile beside the extractor output: {ex.Message}"; }
+                // Without the profile .7 spools up to its own 256 MiB default, past the cap just computed — the 2-arg fallback would lift
+                // the memory bound silently (review 2026-10-25 R4), so for a spooling build the track fails with the reason instead.
+                if (spools && edgesProfile == null)
+                {
+                    try { if (File.Exists(tempJson)) File.Delete(tempJson); } catch { }
+                    return (null, edgesPrepError ?? "could not write the extractor profile that carries the RAM spool cap");
+                }
             }
             RaiseEssentiaPeak(Interlocked.Increment(ref _essentiaActive));   // paired decrement in finally
             try
