@@ -21,6 +21,7 @@
 #define ESSENTIA_DYNAMICCOMPLEXITY_H
 
 #include "algorithm.h"
+#include <numeric>
 
 namespace essentia {
 namespace standard {
@@ -55,34 +56,58 @@ class DynamicComplexity : public Algorithm {
   static const char* category;
   static const char* description;
 
+  // The steps of compute(), shared with the streaming form (output-x64.7 B5), which runs them
+  // sample by sample and frame by frame instead of holding the whole track: the frame length,
+  // the smearing weights, one step of the B-curve filter, one frame's smeared energy, and
+  // everything after the per-frame dB series (VdB is consumed in place).
+  int frameSize() const { return _frameSize; }
+  void smearing(std::vector<Real>& weight, Real& c, Real& Vweight) const;
+  static inline Real filterFirst(Real x) { return kB0 * x; }
+  static inline Real filterStep(Real x, Real xPrev, Real yPrev) { return kB0*x + kB1*xPrev - kA1*yPrev; }
+  static inline Real nextLevel(Real Vms, Real Vweight, Real c, const std::vector<Real>& weight,
+                               std::vector<Real>::const_iterator energy) {
+    return Vweight*Vms + (1-c)*std::inner_product(weight.begin(), weight.end(), energy, 0.0);
+  }
+  void fromLevels(std::vector<Real>& VdB, Real& complexity, Real& loudness) const;
+
  protected:
+  // the cheap B-curve's coefficients: nominator { b0, b1 }, denominator { 1, a1 }
+  static const Real kB0, kB1, kA1;
   void filter(std::vector<Real>& result, const std::vector<Real>& input) const;
 };
 
 } // namespace standard
 } // namespace essentia
 
-#include "streamingalgorithmcomposite.h"
-#include "pool.h"
+#include "accumulatoralgorithm.h"
 
 namespace essentia {
 namespace streaming {
 
-class DynamicComplexity : public AlgorithmComposite {
+// Streams the signal (output-x64.7 B5): it keeps the filter's previous input and output, the
+// frame being filled and one dB level per completed frame, not the whole track - it used to
+// store every sample in a pool and run the standard algorithm at the end. Same values: the
+// standard algorithm's own steps do the arithmetic, over the same samples in the same order.
+class DynamicComplexity : public AccumulatorAlgorithm {
 
  protected:
-  SinkProxy<Real> _signal;
+  Sink<Real> _signal;
   Source<Real> _complexity;
   Source<Real> _loudness;
 
-  Pool _pool;
-  Algorithm* _poolStorage;
-  standard::Algorithm* _dynAlgo;
+  standard::DynamicComplexity* _dynAlgo;
+  int _frameSize;
+  std::vector<Real> _weight;
+  Real _c, _Vweight;
+  long long _n;             // samples consumed
+  Real _xPrev, _yPrev;      // the filter's previous input and output
+  std::vector<Real> _frame; // filtered, squared samples of the frame being filled
+  Real _Vms;
+  std::vector<Real> _VdB;   // dB level of each completed frame
 
  public:
   DynamicComplexity();
   ~DynamicComplexity() {
-    delete _poolStorage;
     delete _dynAlgo;
   }
 
@@ -91,14 +116,10 @@ class DynamicComplexity : public AlgorithmComposite {
     declareParameter("frameSize", "the frame size [s]", "(0,inf)", 0.2);
   }
 
-  void declareProcessOrder() {
-    declareProcessStep(ChainFrom(_poolStorage));
-    declareProcessStep(SingleShot(this));
-  }
-
   void configure();
-  AlgorithmStatus process();
   void reset();
+  void consume();
+  void finalProduce();
 
   static const char* name;
   static const char* category;

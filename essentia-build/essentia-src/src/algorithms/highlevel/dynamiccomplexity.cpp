@@ -39,6 +39,22 @@ void DynamicComplexity::configure() {
   _frameSize = int(floor(parameter("frameSize").toReal() * _sampleRate));
 }
 
+const Real DynamicComplexity::kB0 = 0.98595;
+const Real DynamicComplexity::kB1 = -0.98595;
+const Real DynamicComplexity::kA1 = -0.9719;
+
+void DynamicComplexity::smearing(vector<Real>& weight, Real& c, Real& Vweight) const {
+  c = exp(-1.0/(0.035*_sampleRate));
+
+  // create weight vector
+  weight.assign(_frameSize, (Real)0.0);
+  Vweight = 1.0;
+  for (int i=_frameSize-1; i>=0; i--) {
+    weight[i] = Vweight;
+    Vweight *= c;
+  }
+}
+
 void DynamicComplexity::compute() {
   const vector<Real>& signal = _signal.get();
   Real& complexity = _complexity.get();
@@ -50,15 +66,9 @@ void DynamicComplexity::compute() {
     return;
   }
 
-  Real c = exp(-1.0/(0.035*_sampleRate));
-
-  // create weight vector
-  vector<Real> weight(_frameSize, (Real)0.0);
-  Real Vweight = 1.0;
-  for (int i=_frameSize-1; i>=0; i--) {
-    weight[i] = Vweight;
-    Vweight *= c;
-  }
+  Real c, Vweight;
+  vector<Real> weight;
+  smearing(weight, c, Vweight);
 
   // cheap B-curve loudness compensation
   vector<Real> samps;
@@ -77,12 +87,16 @@ void DynamicComplexity::compute() {
   }
 
   for (int i=0; i<framenum; i++) {
-    Vms = Vweight*Vms + (1-c)*inner_product(weight.begin(), weight.end(),
-                                            samps.begin()+i*_frameSize, 0.0);
+    Vms = nextLevel(Vms, Vweight, c, weight, samps.begin()+i*_frameSize);
     VdB[i] = pow2db(Vms); //20 * log10(sqrt(Vms) + 1e-9);
   }
 
+  fromLevels(VdB, complexity, loudness);
+}
+
+void DynamicComplexity::fromLevels(vector<Real>& VdB, Real& complexity, Real& loudness) const {
   // erase silence at beginning
+  int framenum = VdB.size();
   int beginIdx = 0;
   while ((beginIdx < framenum) && (VdB[beginIdx] == DB_SILENCE_CUTOFF)) beginIdx++;
   VdB.erase(VdB.begin(), VdB.begin() + beginIdx);
@@ -125,67 +139,94 @@ void DynamicComplexity::compute() {
 }
 
 void DynamicComplexity::filter(vector<Real>& result, const vector<Real>& input) const {
-  static const Real nominator[] = { 0.98595, -0.98595 };
-  static const Real denominator[] = { 1.0, -0.9719 };
-
   result.resize(input.size());
 
-  Real b0 = nominator[0];
-  Real b1 = nominator[1];
-  Real a1 = denominator[1];
-  result[0] = b0 * input[0];
+  result[0] = filterFirst(input[0]);
   for (int i=1; i<(int)input.size(); i++) {
-    result[i] = b0*input[i] + b1*input[i-1] - a1*result[i-1];
+    result[i] = filterStep(input[i], input[i-1], result[i-1]);
   }
 }
 
 } // namespace standard
 } // namespace essentia
 
-#include "poolstorage.h"
 #include "algorithmfactory.h"
 
 namespace essentia {
 namespace streaming {
 
-DynamicComplexity::DynamicComplexity() : AlgorithmComposite() {
+DynamicComplexity::DynamicComplexity() : _dynAlgo(0), _frameSize(0), _c(0), _Vweight(0),
+                                         _n(0), _xPrev(0), _yPrev(0), _Vms(0) {
 
-  _dynAlgo = standard::AlgorithmFactory::create("DynamicComplexity");
-  _poolStorage = new PoolStorage<Real>(&_pool, "internal.signal");
+  standard::Algorithm* algo = standard::AlgorithmFactory::create("DynamicComplexity");
+  _dynAlgo = dynamic_cast<standard::DynamicComplexity*>(algo);
+  if (!_dynAlgo) {
+    delete algo;
+    throw EssentiaException("DynamicComplexity: the factory's standard DynamicComplexity is not standard::DynamicComplexity");
+  }
 
-  declareInput(_signal, "signal", "the input audio signal");
-  declareOutput(_complexity, 0, "dynamicComplexity", "the dynamic complexity coefficient");
-  declareOutput(_loudness, 0, "loudness", "an estimate of the loudness [dB]");
-
-  _signal >> _poolStorage->input("data");
+  declareInputStream(_signal, "signal", "the input audio signal");
+  declareOutputResult(_complexity, "dynamicComplexity", "the dynamic complexity coefficient");
+  declareOutputResult(_loudness, "loudness", "an estimate of the loudness [dB]");
+  reset();
 }
 
 void DynamicComplexity::configure() {
-  _dynAlgo->configure("sampleRate", parameter("sampleRate").toInt(),
-                      "frameSize", parameter("frameSize").toReal());
-}
-
-AlgorithmStatus DynamicComplexity::process() {
-  if (!shouldStop()) return PASS;
-
-  const vector<Real>& signal = _pool.value<vector<Real> >("internal.signal");
-  Real complexity;
-  Real loudness;
-
-  _dynAlgo->input("signal").set(signal);
-  _dynAlgo->output("dynamicComplexity").set(complexity);
-  _dynAlgo->output("loudness").set(loudness);
-  _dynAlgo->compute();
-
-  _complexity.push(complexity);
-  _loudness.push(loudness);
-
-  return FINISHED;
+  // through the base: standard::DynamicComplexity's own configure() hides the name/value overloads
+  standard::Algorithm* base = _dynAlgo;
+  base->configure("sampleRate", parameter("sampleRate").toInt(),
+                  "frameSize", parameter("frameSize").toReal());
+  _frameSize = _dynAlgo->frameSize();
+  _dynAlgo->smearing(_weight, _c, _Vweight);
+  reset();
 }
 
 void DynamicComplexity::reset() {
-  AlgorithmComposite::reset();
+  Algorithm::reset();             // stop flag + output buffers, as the composite did
+  AccumulatorAlgorithm::reset();
   _dynAlgo->reset();
+  _n = 0;
+  _xPrev = 0;
+  _yPrev = 0;
+  _frame.clear();
+  _frame.reserve(max(_frameSize, 0));
+  _Vms = 0.0;
+  _VdB.clear();
+}
+
+void DynamicComplexity::consume() {
+  const vector<Real>& signal = *((const vector<Real>*)_signal.getTokens());
+
+  // the standard form, one sample at a time: filter the whole signal, square it, then smear
+  // each whole frame from sample 0 (a partial last frame is never read there, nor here)
+  for (int i=0; i<(int)signal.size(); i++) {
+    Real x = signal[i];
+    Real y = (_n == 0) ? standard::DynamicComplexity::filterFirst(x)
+                       : standard::DynamicComplexity::filterStep(x, _xPrev, _yPrev);
+    _xPrev = x;
+    _yPrev = y;
+    _n++;
+    _frame.push_back(y * y);
+    if ((int)_frame.size() == _frameSize) {
+      _Vms = standard::DynamicComplexity::nextLevel(_Vms, _Vweight, _c, _weight, _frame.begin());
+      _VdB.push_back(pow2db(_Vms));
+      _frame.clear();
+    }
+  }
+}
+
+void DynamicComplexity::finalProduce() {
+  Real complexity;
+  Real loudness;
+  if (_n == 0) {   // the standard form's empty-signal answer
+    complexity = 0;
+    loudness = DB_SILENCE_CUTOFF;
+  }
+  else {
+    _dynAlgo->fromLevels(_VdB, complexity, loudness);
+  }
+  _complexity.push(complexity);
+  _loudness.push(loudness);
 }
 
 

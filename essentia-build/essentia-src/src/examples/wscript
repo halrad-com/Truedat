@@ -98,6 +98,7 @@ example_sources_truedat = [
     ('test_audioloader_decodeloop', ),
     ('standard_x7_hpcp_bench', ),   # x7 step 0: HPCP sizing (measurement only)
     ('test_audioloader_spool', ),   # x7: the in-memory shared-decode spool
+    ('test_b5_streaming', ),        # x7 B5: streaming Danceability / DynamicComplexity == standard, bit for bit
 ]
 
 

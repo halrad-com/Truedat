@@ -54,10 +54,15 @@ class Danceability : public Algorithm {
   static const char* category;
   static const char* description;
 
+  // The two halves of compute(), shared with the streaming form (output-x64.7 B5), which feeds
+  // them 10 ms frame by 10 ms frame instead of holding the whole track: the samples per 10 ms
+  // frame, one frame's stddev, and everything after the stddev series (s is consumed in place).
+  int frameSizeSamples() const;
+  Real stddev(const std::vector<Real>& array, int start, int end) const;
+  void fromFrameStddev(std::vector<Real>& s, Real& danceability, std::vector<Real>& dfa) const;
+
  protected:
   std::vector<int> _tau;
-
-  Real stddev(const std::vector<Real>& array, int start, int end) const;
 
   // inline version
   /**
@@ -112,22 +117,26 @@ class Danceability : public Algorithm {
 } // namespace standard
 } // namespace essentia
 
-#include "streamingalgorithmcomposite.h" 
-#include "pool.h"
-                                                                                
+#include "accumulatoralgorithm.h"
+
 namespace essentia {
 namespace streaming {
 
-class Danceability : public AlgorithmComposite {
+// Streams the signal (output-x64.7 B5): it keeps the current 10 ms frame and one stddev per
+// completed frame, not the whole track - it used to store every sample in a pool and run the
+// standard algorithm at the end. Same values: the standard algorithm's own stddev() and
+// fromFrameStddev() do the arithmetic, over the same samples in the same order.
+class Danceability : public AccumulatorAlgorithm {
 
  protected:
-  SinkProxy<Real> _signal;
+  Sink<Real> _signal;
   Source<Real> _danceability;
   Source<std::vector<Real> > _dfa;
 
-  Pool _pool;
-  Algorithm* _poolStorage;
-  standard::Algorithm * _danceabilityAlgo;
+  standard::Danceability* _danceabilityAlgo;
+  int _frameSize;
+  std::vector<Real> _frame;  // samples of the 10 ms frame being filled
+  std::vector<Real> _s;      // stddev of each completed frame
 
  public:
   Danceability();
@@ -140,20 +149,10 @@ class Danceability : public AlgorithmComposite {
     declareParameter("sampleRate", "the sampling rate of the audio signal [Hz]", "(0,inf)", 44100.);
   }
 
-  void configure() {
-    _danceabilityAlgo->configure(INHERIT("minTau"),
-                                 INHERIT("maxTau"),
-                                 INHERIT("tauMultiplier"),
-                                 INHERIT("sampleRate"));                       
-  }
-
-  void declareProcessOrder() {                                                  
-    declareProcessStep(SingleShot(_poolStorage));                               
-    declareProcessStep(SingleShot(this));                                       
-  }
-
-  AlgorithmStatus process();
+  void configure();
   void reset();
+  void consume();
+  void finalProduce();
 
   static const char* name;
   static const char* category;

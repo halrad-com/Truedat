@@ -1,0 +1,253 @@
+essentia_test_b5_streaming (tools-build-b5, MD5 6010364d72e37091f2ff67ac255c1585): synthetic signals, then with r_m4a, then with r_flac_live
+== b5-synth
+# noise: 1323123 samples, danceability 1.92666769, dfa[35], dynamic_complexity 0.0568843968, loudness -16.8628139
+PASS noise chunk 7 danceability
+PASS noise chunk 7 dfa
+PASS noise chunk 7 dynamic_complexity
+PASS noise chunk 7 loudness
+PASS noise chunk 441 danceability
+PASS noise chunk 441 dfa
+PASS noise chunk 441 dynamic_complexity
+PASS noise chunk 441 loudness
+PASS noise chunk 4096 danceability
+PASS noise chunk 4096 dfa
+PASS noise chunk 4096 dynamic_complexity
+PASS noise chunk 4096 loudness
+PASS noise chunk 65536 danceability
+PASS noise chunk 65536 dfa
+PASS noise chunk 65536 dynamic_complexity
+PASS noise chunk 65536 loudness
+PASS noise chunk 1323123 danceability
+PASS noise chunk 1323123 dfa
+PASS noise chunk 1323123 dynamic_complexity
+PASS noise chunk 1323123 loudness
+# swell: 1323077 samples, danceability 0.906223953, dfa[35], dynamic_complexity 6.54695749, loudness -13.7878513
+PASS swell chunk 7 danceability
+PASS swell chunk 7 dfa
+PASS swell chunk 7 dynamic_complexity
+PASS swell chunk 7 loudness
+PASS swell chunk 441 danceability
+PASS swell chunk 441 dfa
+PASS swell chunk 441 dynamic_complexity
+PASS swell chunk 441 loudness
+PASS swell chunk 4096 danceability
+PASS swell chunk 4096 dfa
+PASS swell chunk 4096 dynamic_complexity
+PASS swell chunk 4096 loudness
+PASS swell chunk 65536 danceability
+PASS swell chunk 65536 dfa
+PASS swell chunk 65536 dynamic_complexity
+PASS swell chunk 65536 loudness
+PASS swell chunk 1323077 danceability
+PASS swell chunk 1323077 dfa
+PASS swell chunk 1323077 dynamic_complexity
+PASS swell chunk 1323077 loudness
+# short: 300 samples, danceability 0, dfa[35], dynamic_complexity 0, loudness -100
+PASS short chunk 7 danceability
+PASS short chunk 7 dfa
+PASS short chunk 7 dynamic_complexity
+PASS short chunk 7 loudness
+PASS short chunk 441 danceability
+PASS short chunk 441 dfa
+PASS short chunk 441 dynamic_complexity
+PASS short chunk 441 loudness
+PASS short chunk 4096 danceability
+PASS short chunk 4096 dfa
+PASS short chunk 4096 dynamic_complexity
+PASS short chunk 4096 loudness
+PASS short chunk 65536 danceability
+PASS short chunk 65536 dfa
+PASS short chunk 65536 dynamic_complexity
+PASS short chunk 65536 loudness
+PASS short chunk 300 danceability
+PASS short chunk 300 dfa
+PASS short chunk 300 dynamic_complexity
+PASS short chunk 300 loudness
+PASS short chunk 1 danceability
+PASS short chunk 1 dfa
+PASS short chunk 1 dynamic_complexity
+PASS short chunk 1 loudness
+# empty: standard danceability 0, dynamic_complexity 0, loudness -100
+PASS: 0 failure(s)
+== b5-r_m4a
+# noise: 1323123 samples, danceability 1.92666769, dfa[35], dynamic_complexity 0.0568843968, loudness -16.8628139
+PASS noise chunk 7 danceability
+PASS noise chunk 7 dfa
+PASS noise chunk 7 dynamic_complexity
+PASS noise chunk 7 loudness
+PASS noise chunk 441 danceability
+PASS noise chunk 441 dfa
+PASS noise chunk 441 dynamic_complexity
+PASS noise chunk 441 loudness
+PASS noise chunk 4096 danceability
+PASS noise chunk 4096 dfa
+PASS noise chunk 4096 dynamic_complexity
+PASS noise chunk 4096 loudness
+PASS noise chunk 65536 danceability
+PASS noise chunk 65536 dfa
+PASS noise chunk 65536 dynamic_complexity
+PASS noise chunk 65536 loudness
+PASS noise chunk 1323123 danceability
+PASS noise chunk 1323123 dfa
+PASS noise chunk 1323123 dynamic_complexity
+PASS noise chunk 1323123 loudness
+# swell: 1323077 samples, danceability 0.906223953, dfa[35], dynamic_complexity 6.54695749, loudness -13.7878513
+PASS swell chunk 7 danceability
+PASS swell chunk 7 dfa
+PASS swell chunk 7 dynamic_complexity
+PASS swell chunk 7 loudness
+PASS swell chunk 441 danceability
+PASS swell chunk 441 dfa
+PASS swell chunk 441 dynamic_complexity
+PASS swell chunk 441 loudness
+PASS swell chunk 4096 danceability
+PASS swell chunk 4096 dfa
+PASS swell chunk 4096 dynamic_complexity
+PASS swell chunk 4096 loudness
+PASS swell chunk 65536 danceability
+PASS swell chunk 65536 dfa
+PASS swell chunk 65536 dynamic_complexity
+PASS swell chunk 65536 loudness
+PASS swell chunk 1323077 danceability
+PASS swell chunk 1323077 dfa
+PASS swell chunk 1323077 dynamic_complexity
+PASS swell chunk 1323077 loudness
+# short: 300 samples, danceability 0, dfa[35], dynamic_complexity 0, loudness -100
+PASS short chunk 7 danceability
+PASS short chunk 7 dfa
+PASS short chunk 7 dynamic_complexity
+PASS short chunk 7 loudness
+PASS short chunk 441 danceability
+PASS short chunk 441 dfa
+PASS short chunk 441 dynamic_complexity
+PASS short chunk 441 loudness
+PASS short chunk 4096 danceability
+PASS short chunk 4096 dfa
+PASS short chunk 4096 dynamic_complexity
+PASS short chunk 4096 loudness
+PASS short chunk 65536 danceability
+PASS short chunk 65536 dfa
+PASS short chunk 65536 dynamic_complexity
+PASS short chunk 65536 loudness
+PASS short chunk 300 danceability
+PASS short chunk 300 dfa
+PASS short chunk 300 dynamic_complexity
+PASS short chunk 300 loudness
+PASS short chunk 1 danceability
+PASS short chunk 1 dfa
+PASS short chunk 1 dynamic_complexity
+PASS short chunk 1 loudness
+# empty: standard danceability 0, dynamic_complexity 0, loudness -100
+# file r_m4a: 24148992 samples, danceability 0.873105824, dfa[35], dynamic_complexity 9.69096279, loudness -24.3378429
+PASS file r_m4a chunk 7 danceability
+PASS file r_m4a chunk 7 dfa
+PASS file r_m4a chunk 7 dynamic_complexity
+PASS file r_m4a chunk 7 loudness
+PASS file r_m4a chunk 441 danceability
+PASS file r_m4a chunk 441 dfa
+PASS file r_m4a chunk 441 dynamic_complexity
+PASS file r_m4a chunk 441 loudness
+PASS file r_m4a chunk 4096 danceability
+PASS file r_m4a chunk 4096 dfa
+PASS file r_m4a chunk 4096 dynamic_complexity
+PASS file r_m4a chunk 4096 loudness
+PASS file r_m4a chunk 65536 danceability
+PASS file r_m4a chunk 65536 dfa
+PASS file r_m4a chunk 65536 dynamic_complexity
+PASS file r_m4a chunk 65536 loudness
+PASS file r_m4a chunk 24148992 danceability
+PASS file r_m4a chunk 24148992 dfa
+PASS file r_m4a chunk 24148992 dynamic_complexity
+PASS file r_m4a chunk 24148992 loudness
+PASS: 0 failure(s)
+== b5-r_flac_live
+# noise: 1323123 samples, danceability 1.92666769, dfa[35], dynamic_complexity 0.0568843968, loudness -16.8628139
+PASS noise chunk 7 danceability
+PASS noise chunk 7 dfa
+PASS noise chunk 7 dynamic_complexity
+PASS noise chunk 7 loudness
+PASS noise chunk 441 danceability
+PASS noise chunk 441 dfa
+PASS noise chunk 441 dynamic_complexity
+PASS noise chunk 441 loudness
+PASS noise chunk 4096 danceability
+PASS noise chunk 4096 dfa
+PASS noise chunk 4096 dynamic_complexity
+PASS noise chunk 4096 loudness
+PASS noise chunk 65536 danceability
+PASS noise chunk 65536 dfa
+PASS noise chunk 65536 dynamic_complexity
+PASS noise chunk 65536 loudness
+PASS noise chunk 1323123 danceability
+PASS noise chunk 1323123 dfa
+PASS noise chunk 1323123 dynamic_complexity
+PASS noise chunk 1323123 loudness
+# swell: 1323077 samples, danceability 0.906223953, dfa[35], dynamic_complexity 6.54695749, loudness -13.7878513
+PASS swell chunk 7 danceability
+PASS swell chunk 7 dfa
+PASS swell chunk 7 dynamic_complexity
+PASS swell chunk 7 loudness
+PASS swell chunk 441 danceability
+PASS swell chunk 441 dfa
+PASS swell chunk 441 dynamic_complexity
+PASS swell chunk 441 loudness
+PASS swell chunk 4096 danceability
+PASS swell chunk 4096 dfa
+PASS swell chunk 4096 dynamic_complexity
+PASS swell chunk 4096 loudness
+PASS swell chunk 65536 danceability
+PASS swell chunk 65536 dfa
+PASS swell chunk 65536 dynamic_complexity
+PASS swell chunk 65536 loudness
+PASS swell chunk 1323077 danceability
+PASS swell chunk 1323077 dfa
+PASS swell chunk 1323077 dynamic_complexity
+PASS swell chunk 1323077 loudness
+# short: 300 samples, danceability 0, dfa[35], dynamic_complexity 0, loudness -100
+PASS short chunk 7 danceability
+PASS short chunk 7 dfa
+PASS short chunk 7 dynamic_complexity
+PASS short chunk 7 loudness
+PASS short chunk 441 danceability
+PASS short chunk 441 dfa
+PASS short chunk 441 dynamic_complexity
+PASS short chunk 441 loudness
+PASS short chunk 4096 danceability
+PASS short chunk 4096 dfa
+PASS short chunk 4096 dynamic_complexity
+PASS short chunk 4096 loudness
+PASS short chunk 65536 danceability
+PASS short chunk 65536 dfa
+PASS short chunk 65536 dynamic_complexity
+PASS short chunk 65536 loudness
+PASS short chunk 300 danceability
+PASS short chunk 300 dfa
+PASS short chunk 300 dynamic_complexity
+PASS short chunk 300 loudness
+PASS short chunk 1 danceability
+PASS short chunk 1 dfa
+PASS short chunk 1 dynamic_complexity
+PASS short chunk 1 loudness
+# empty: standard danceability 0, dynamic_complexity 0, loudness -100
+# file r_flac_live: 12804288 samples, danceability 1.15017498, dfa[35], dynamic_complexity 2.80043054, loudness -19.0651531
+PASS file r_flac_live chunk 7 danceability
+PASS file r_flac_live chunk 7 dfa
+PASS file r_flac_live chunk 7 dynamic_complexity
+PASS file r_flac_live chunk 7 loudness
+PASS file r_flac_live chunk 441 danceability
+PASS file r_flac_live chunk 441 dfa
+PASS file r_flac_live chunk 441 dynamic_complexity
+PASS file r_flac_live chunk 441 loudness
+PASS file r_flac_live chunk 4096 danceability
+PASS file r_flac_live chunk 4096 dfa
+PASS file r_flac_live chunk 4096 dynamic_complexity
+PASS file r_flac_live chunk 4096 loudness
+PASS file r_flac_live chunk 65536 danceability
+PASS file r_flac_live chunk 65536 dfa
+PASS file r_flac_live chunk 65536 dynamic_complexity
+PASS file r_flac_live chunk 65536 loudness
+PASS file r_flac_live chunk 12804288 danceability
+PASS file r_flac_live chunk 12804288 dfa
+PASS file r_flac_live chunk 12804288 dynamic_complexity
+PASS file r_flac_live chunk 12804288 loudness
+PASS: 0 failure(s)

@@ -62,12 +62,16 @@ void Danceability::configure() {
   }
 }
 
+int Danceability::frameSizeSamples() const {
+  Real sampleRate = parameter("sampleRate").toReal();
+  return int(0.01 * sampleRate); // 10ms
+}
+
 void Danceability::compute() {
 
   const vector<Real>& signal = _signal.get();
   Real& danceability = _danceability.get();
   vector<Real>& dfa = _dfa.get();
-  Real sampleRate = parameter("sampleRate").toReal();
 
   //---------------------------------------------------------------------
   // preprocessing:
@@ -75,7 +79,7 @@ void Danceability::compute() {
   // store in s(n), then integrate
 
   int numSamples = signal.size();
-  int frameSize = int(0.01 * sampleRate); // 10ms
+  int frameSize = frameSizeSamples();
   int numFrames = numSamples / frameSize;
 
   vector<Real> s(numFrames, 0.0);
@@ -87,7 +91,14 @@ void Danceability::compute() {
     s[i] = stddev(signal, frameBegin, frameEnd);
   }
 
-  // subtract the mean from the array to make it have 0 DC 
+  fromFrameStddev(s, danceability, dfa);
+}
+
+void Danceability::fromFrameStddev(vector<Real>& s, Real& danceability, vector<Real>& dfa) const {
+
+  int numFrames = s.size();
+
+  // subtract the mean from the array to make it have 0 DC
   // (this is optional, that is, it does not affect result)
   Real mean_s = mean(s, 0, s.size());
   for (int i=0; i<numFrames; i++)
@@ -184,7 +195,6 @@ void Danceability::compute() {
 } // namespace standard
 } // namespace essentia
 
-#include "poolstorage.h"
 #include "algorithmfactory.h"
 
 namespace essentia {
@@ -195,44 +205,65 @@ const char* Danceability::category = standard::Danceability::category;
 const char* Danceability::description = standard::Danceability::description;
 
 
-Danceability::Danceability() : AlgorithmComposite() {
+Danceability::Danceability() : _danceabilityAlgo(0), _frameSize(0) {
 
-  _danceabilityAlgo = standard::AlgorithmFactory::create("Danceability");
-  _poolStorage = new PoolStorage<Real>(&_pool, "internal.signal");
+  standard::Algorithm* algo = standard::AlgorithmFactory::create("Danceability");
+  _danceabilityAlgo = dynamic_cast<standard::Danceability*>(algo);
+  if (!_danceabilityAlgo) {
+    delete algo;
+    throw EssentiaException("Danceability: the factory's standard Danceability is not standard::Danceability");
+  }
 
-  declareInput(_signal, 1, "signal", "the input signal");
-  declareOutput(_danceability, 0, "danceability", "the danceability value. Normal values range from 0 to ~3. The higher, the more danceable.");
-  declareOutput(_dfa, 0, "dfa", "the DFA exponent vector for considered segment length (tau) values");
-
-  _signal >> _poolStorage->input("data"); // attach input proxy
+  declareInputStream(_signal, "signal", "the input signal");
+  declareOutputResult(_danceability, "danceability", "the danceability value. Normal values range from 0 to ~3. The higher, the more danceable.");
+  declareOutputResult(_dfa, "dfa", "the DFA exponent vector for considered segment length (tau) values");
+  reset();
 }
 
 
 Danceability::~Danceability() {
   delete _danceabilityAlgo;
-  delete _poolStorage;
+}
+
+void Danceability::configure() {
+  // through the base: standard::Danceability's own configure() hides the name/value overloads
+  standard::Algorithm* base = _danceabilityAlgo;
+  base->configure(INHERIT("minTau"),
+                  INHERIT("maxTau"),
+                  INHERIT("tauMultiplier"),
+                  INHERIT("sampleRate"));
+  _frameSize = _danceabilityAlgo->frameSizeSamples();
+  reset();
 }
 
 void Danceability::reset() {
-  AlgorithmComposite::reset();
-  _poolStorage->reset();
+  Algorithm::reset();             // stop flag + output buffers, as the composite did
+  AccumulatorAlgorithm::reset();
+  _frame.clear();
+  _frame.reserve(max(_frameSize, 0));
+  _s.clear();
 }
 
+void Danceability::consume() {
+  const vector<Real>& signal = *((const vector<Real>*)_signal.getTokens());
 
-AlgorithmStatus Danceability::process() {
-  if (!shouldStop()) return PASS;
+  // the standard form's frames: whole 10 ms frames from sample 0; a partial last frame is
+  // dropped there (numSamples / frameSize), so finalProduce() drops it too
+  for (int i=0; i<(int)signal.size(); i++) {
+    _frame.push_back(signal[i]);
+    if ((int)_frame.size() == _frameSize) {
+      _s.push_back(_danceabilityAlgo->stddev(_frame, 0, _frameSize));
+      _frame.clear();
+    }
+  }
+}
 
+void Danceability::finalProduce() {
   Real danceability;
   vector<Real> dfa;
-  
-  _danceabilityAlgo->input("signal").set(_pool.value<vector<Real> >("internal.signal"));
-  _danceabilityAlgo->output("danceability").set(danceability);
-  _danceabilityAlgo->output("dfa").set(dfa);
-  _danceabilityAlgo->compute();
-  
+  _danceabilityAlgo->fromFrameStddev(_s, danceability, dfa);
   _danceability.push(danceability);
   _dfa.push(dfa);
-  return FINISHED;
 }
 
 } // namespace streaming

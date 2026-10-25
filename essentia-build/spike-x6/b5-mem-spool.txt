@@ -1,0 +1,16 @@
+x7 B5 memory: c3pa (before B5) vs b5pa (after), same profile, production-shaped input
+
+id                len s   peak bef   peak aft     saved     floor
+r_ape              60.5      157.6      137.1     +20.5      20.3
+r_wav             178.2      211.4      151.3     +60.1      60.0
+r_flac_hd         186.7      246.6      183.7     +62.8      62.8
+r_m4a_2           191.7      254.6      190.3     +64.4      64.5
+r_wmapro          286.1      322.6      226.2     +96.4      96.3
+r_flac_live       290.3      324.3      226.8     +97.5      97.7
+r_wmalossless     302.4      333.1      231.4    +101.7     101.8
+r_mp3             305.2      334.2      231.7    +102.4     102.7
+r_wma             324.7      349.9      240.9    +109.1     109.2
+r_m4a             547.6      525.0      330.0    +194.9     184.2
+
+fit c3pa         rows 10  slope 0.7716 MiB per audio-second (2.713 GiB per audio-hour)  intercept 99.7 MiB
+fit b5pa         rows 10  slope 0.4152 MiB per audio-second (1.460 GiB per audio-hour)  intercept 103.9 MiB
