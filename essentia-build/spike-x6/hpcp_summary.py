@@ -10,7 +10,11 @@ two numbers the x7 HPCP item needs, per row and pooled:
 
 Each "hpcp" time has the bench's input copy ("copy") subtracted, since the
 extractor's streaming wrapper copies differently. Standard library only.
-    python -I hpcp_summary.py <raw file>"""
+    python -I hpcp_summary.py <raw file>
+Exit 1 when the equivalence check did not pass: any row whose bench run failed
+(a "failed=" line from run-hpcp-bench.sh), is incomplete, has no fused
+comparison, or has a frame where HPCPFused differs; exit 0 only when every row
+was compared and all were bit-identical."""
 import sys
 from collections import OrderedDict
 
@@ -27,6 +31,9 @@ def parse(path):
                 cur = rows.setdefault(line[4:], {})
                 continue
             if cur is None:
+                continue
+            if line.startswith("failed="):   # run-hpcp-bench.sh: the bench exited nonzero on this row
+                cur["failed"] = line[7:]
                 continue
             if line.startswith("input="):
                 kv = dict(p.split("=", 1) for p in line.split(" ") if "=" in p)
@@ -65,9 +72,20 @@ def main(argv):
                "fused%ch", "buf%3")]
     tot = dict((k, 0.0) for k in keys)
     tot_frames = 0
+    bad = []   # rows that keep the equivalence check from passing
     for rid, r in rows.items():
+        if "failed" in r:
+            out.append("%-14s FAILED: the bench exited %s" % (rid, r["failed"]))
+            bad.append(rid)
+        if "fused" not in r:
+            out.append("%-14s no fused comparison" % rid)
+            bad.append(rid)
+        elif r["fused_diff"]:
+            out.append("%-14s MISMATCH: %d frame(s) differ" % (rid, r["fused_diff"]))
+            bad.append(rid)
         if not all(k in r for k in keys + ("frames",)):
             out.append("%-14s incomplete: %s" % (rid, ", ".join(k for k in keys if k not in r)))
+            bad.append(rid)
             continue
         c = r["copy"]
         key, ch, tu = r["hpcp_key"] - c, r["hpcp_chords"] - c, r["hpcp_tuning"] - c
@@ -104,8 +122,13 @@ def main(argv):
     out += ["",
             "To put these on the extractor's scale, multiply each share by the HPCP rows of the same input's",
             "x6profile table (step0-decode.txt: HPCP[size=36] is key + chords together, HPCP[size=120] is tuning)."]
+    if not rows:
+        bad.append("(no rows)")
+    out.append("")
+    out.append("EQUIVALENCE: PASS (%d row(s), every one compared, all bit-identical)" % len(rows) if not bad else
+               "EQUIVALENCE: FAIL - %s" % ", ".join(sorted(set(bad))))
     sys.stdout.write("\n".join(out) + "\n")
-    return 0
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

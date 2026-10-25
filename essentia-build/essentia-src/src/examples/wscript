@@ -157,12 +157,12 @@ def build(ctx):
     print('→ building from ' + ctx.path.abspath())
 
     if len(ctx.env.EXAMPLE_LIST):
-        def build_example(prog_name, other=None):
+        def build_example(prog_name, other=None, extra_includes=None):
             files = ['%s.cpp' % f for f in [prog_name] + (other or [])]
 
             # If an `other` program has files in a directory we need
             # to add an additional includes
-            includes = ['.', '..']
+            includes = ['.', '..'] + (extra_includes or [])
 
             ctx(features='c cxx cxxprogram check_static',
                 source = ctx.path.ant_glob(' '.join(files)),
@@ -188,8 +188,10 @@ def build(ctx):
                     build_example(e[0], e[1])
 
         if 'streaming_extractor_music' in ctx.env.EXAMPLE_LIST:
+            # the truedat tests may include an algorithm's own header (test_b5_streaming subclasses the
+            # streaming Danceability / DynamicComplexity), whose quoted includes resolve in these two
             for e in example_sources_truedat:
-                build_example(e[0])
+                build_example(e[0], extra_includes=['../essentia', '../essentia/streaming'])
 
 
     if ctx.env.WITH_VAMP:

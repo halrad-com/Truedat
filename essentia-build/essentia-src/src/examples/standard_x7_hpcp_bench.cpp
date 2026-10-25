@@ -196,6 +196,10 @@ int main(int argc, char* argv[]) {
       delete ch; delete tu; delete fu;
       printf("fused seconds=%.6f frames_differing_36=%u frames_differing_120=%u check=%.6g\n",
              best, (unsigned)badA, (unsigned)badB, check);
+      if (badA || badB) {   // an equivalence failure is a failed run, not just a printed count
+        cerr << "MISMATCH: HPCPFused differs from HPCP chords/tuning on " << badA << " / " << badB << " frame(s)" << endl;
+        rc = 1;
+      }
     }
 
     // ---- 2. the shared walk alone (what a fused chords+tuning HPCP computes once) ----
