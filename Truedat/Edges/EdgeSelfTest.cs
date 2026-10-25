@@ -65,30 +65,31 @@ namespace Truedat.Edges
                 var id = Program.ExtractorBuildId(exe);
                 assert(id == build, $"the committed {build} exe resolves to its build name (got {id})");
             }
-            assert(string.Equals(Program.LatestExtractorMd5, "6af75d493dfb3b4949ec1fd433b4c58c", StringComparison.OrdinalIgnoreCase),
+            assert(string.Equals(Program.LatestExtractorMd5, "0fb6f804f8f53dad65c4c963e6447e47", StringComparison.OrdinalIgnoreCase),
                 $"the latest known extractor is .7 (9844483: fused HPCP + shared decode; got {Program.LatestExtractorMd5})");
             assert(!EdgeProducer.SupportsFrames("output-x64.4") && EdgeProducer.SupportsFrames("output-x64.5") && EdgeProducer.SupportsFrames("output-x64.6")
                    && EdgeProducer.SupportsFrames("output-x64.7") && !EdgeProducer.SupportsFrames(null),
                 $"binary frames: .4 no, .5 / .6 / .7 yes, unknown no ({EdgeProducer.SupportedBuildsText})");
         }
 
-        /// <summary>Extractor .7's RAM spool cap (x7.spoolMaxBytes), written by truedat so ALL workers together stay inside 60 % of RAM: the
-        /// worst spooled track costs 106.6 + 0.4141 L + 0.3365 L MiB (the measured fit, essentia-build/spike-x6/mem-fit.txt) with L = cap /
-        /// 0.3365, so cap = min(256, max(0, (0.6 RAM / N - 106.6) / (1 + 0.4141 / 0.3365))). Pinned against ram-tiers.txt; a box with
-        /// no RAM reading gets 0 = no spool (today's four decodes, same output).</summary>
+        /// <summary>Extractor .7's RAM spool cap (x7.spoolMaxBytes), written by truedat per track so extractor + spool stay inside the
+        /// worker's share (60 % of available RAM / N): the share minus the extractor's measured cost for that track (b5-mem.txt), clamped
+        /// to [0, 256 MiB]. Unknown length or no RAM reading = 0 = no spool (the extractor decodes per pass, same output).</summary>
         static void TestSpoolCap(Action<bool, string> assert)
         {
             const long GiB = 1L << 30;
             double MiB(long bytes) => Math.Round(bytes / 1048576.0, 1);
-            // Per track (review 2026-10-25 R3): the worker's share minus the extractor's own 106.6 + 0.4141 MiB/s for THIS track, so the bound
+            // Per track (review 2026-10-25 R3): the worker's share minus the extractor's own 109.1 + 0.0656 MiB/s for THIS track, so the bound
             // holds whatever the channel count or rate the spool records. Unknown length or no RAM reading = 0 (no spool).
             var got = new[] { MiB(Program.SpoolCapBytes(8 * GiB, 4, 600)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 60)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 300)),
                               MiB(Program.SpoolCapBytes(8 * GiB, 20, 600)), MiB(Program.SpoolCapBytes(16 * GiB, 20, 300)), MiB(Program.SpoolCapBytes(8 * GiB, 8, 0)), MiB(Program.SpoolCapBytes(0, 8, 300)) };
-            assert(got[0] == 256 && got[1] == 114.3 && got[2] == 14.9 && got[3] == 0 && got[4] == 256 && got[5] == 0 && got[6] == 0,
-                $"spool cap MiB at 8 GiB x4 600 s, x20 60/300/600 s, 16 GiB x20 300 s, unknown length, no RAM reading: {string.Join(" / ", got)} (expected 256 / 114.3 / 14.9 / 0 / 256 / 0 / 0)");
-            // The reviewer's mono case: 8 GiB, 20 workers, a 5-minute 44.1 kHz mono track spools 300 x 176,400 B. The cap must not admit it,
-            // so the track decodes per pass and stays inside its 245.76 MiB share (the old run-wide 62.4 MiB cap admitted it: 280.6 MiB peak).
-            assert(Program.SpoolCapBytes(8 * GiB, 20, 300) < 300L * 176400, "spool cap: a 5-minute mono track on 8 GiB x20 is not spooled past the worker's share");
+            assert(got[0] == 256 && got[1] == 132.7 && got[2] == 117.0 && got[3] == 97.3 && got[4] == 256 && got[5] == 0 && got[6] == 0,
+                $"spool cap MiB at 8 GiB x4 600 s, x20 60/300/600 s, 16 GiB x20 300 s, unknown length, no RAM reading: {string.Join(" / ", got)} (expected 256 / 132.7 / 117.0 / 97.3 / 256 / 0 / 0)");
+            // Whatever the source format (the reviewer's mono case included), extractor + spool never exceed the worker's share: the cap
+            // is what is left after the extractor's own cost for that length, so a long track gets a small cap or none (8 GiB x20, 1 h).
+            const double ShareMiB = 0.6 * 8 * 1024 / 20;
+            assert(Program.SpoolCapBytes(8 * GiB, 20, 300) / 1048576.0 + 109.1 + 0.0656 * 300 <= ShareMiB + 0.01 && Program.SpoolCapBytes(8 * GiB, 20, 3600) == 0,
+                "spool cap: extractor + spool stay inside the worker's share on 8 GiB x20, and an hour-long track is not spooled there");
             assert(EdgeProducer.ProfileTextFor(false, true, 123456789) == EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 123456789\n"
                    && EdgeProducer.ProfileTextFor(true, true, 0) == EdgeProducer.ProfileText() + EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 0\n"
                    && EdgeProducer.ProfileTextFor(false, true, null) == EdgeProducer.ScanProfileKeys,

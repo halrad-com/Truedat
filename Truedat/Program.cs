@@ -11072,11 +11072,11 @@ namespace Truedat
         // loop dropped most of each APE file — any .5 APE analysis is truncated and .6
         // changes it (WMA Lossless: same decoder family, untested). The refresh set after
         // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
-        internal const string LatestExtractorMd5 = "6af75d493dfb3b4949ec1fd433b4c58c";
+        internal const string LatestExtractorMd5 = "0fb6f804f8f53dad65c4c963e6447e47";
         internal const string LatestExtractorSummary = "output-x64.7: .6 plus one decode per file (kept in RAM for the later passes) and one HPCP pass for chords and tuning - same output, ~11% less extractor time";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["6af75d493dfb3b4949ec1fd433b4c58c"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track) and fused chords/tuning HPCP; same output (current, 9844483)",
+            ["0fb6f804f8f53dad65c4c963e6447e47"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track), fused chords/tuning HPCP, and streaming Danceability/DynamicComplexity; same output (current, 220d877)",
             // Every accepted .6 drop keeps its MD5 here under the same name (option A): a deployed earlier drop must still resolve by name.
             ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (drop 2, 296f87d; the .7 fallback)",
             ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — drop 1 (7319de5): decoder fix only; fails on APE (StereoDemuxer overflow) and refuses the scan profile — superseded by drop 2",
@@ -11094,7 +11094,7 @@ namespace Truedat
         static readonly HashSet<string> ScanProfileCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "64b55cec008649c673fa13c9ab8dd4b6",   // .6 drop 2 (296f87d)
-            "6af75d493dfb3b4949ec1fd433b4c58c",   // .7 (9844483)
+            "0fb6f804f8f53dad65c4c963e6447e47",   // .7 (220d877)
         };
         static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _extractorMd5ByPath = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -11107,21 +11107,21 @@ namespace Truedat
         /// on .5 and .6, worker mails 048/049), so this set says which builds READ it, not which would break.</summary>
         static readonly HashSet<string> SpoolCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "6af75d493dfb3b4949ec1fd433b4c58c",   // .7 (9844483)
+            "0fb6f804f8f53dad65c4c963e6447e47",   // .7 (220d877)
         };
 
         internal static bool SpoolCapable(string exePath)
             => SpoolCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
 
         /// <summary>The RAM spool cap for ONE track: what is left of this worker's share (60 % of available RAM / N) once the extractor's own
-        /// cost for this track is taken out — 106.6 + 0.4141 MiB per audio-second (essentia-build/spike-x6/mem-fit.txt, drop 2, 10 real rows) —
+        /// cost for this track is taken out — 109.1 + 0.0656 MiB per audio-second (essentia-build/spike-x6/b5-mem.txt, .7 with B5, 10 real rows) —
         /// clamped to [0, 256 MiB]. So extractor + spool stays inside the share whatever the track's channel count or sample rate: the spool
         /// records the SOURCE format, and the earlier run-wide cap, which assumed stereo 44.1 kHz, let a mono track spool twice the duration
         /// past it (review 2026-10-25 R3). Unknown duration = 0. Zero = no spool: the extractor decodes per pass as before, same output.
         /// Operator 2026-10-25: it has to work at 8 GB.</summary>
         internal static long SpoolCapBytes(long availableRamBytes, int workers, double durationSec)
         {
-            const double BaseMiB = 106.6, ExtractorMiBPerSec = 0.4141, Share = 0.6, CeilingMiB = 256;
+            const double BaseMiB = 109.1, ExtractorMiBPerSec = 0.0656, Share = 0.6, CeilingMiB = 256;
             if (availableRamBytes <= 0 || !(durationSec > 0)) return 0;
             int n = Math.Max(1, workers);
             double cap = Share * (availableRamBytes / 1048576.0) / n - BaseMiB - ExtractorMiBPerSec * durationSec;
