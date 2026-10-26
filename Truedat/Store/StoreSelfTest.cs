@@ -41,6 +41,7 @@ namespace Truedat.Store
             Block(assert, "MoveRootCounts", () => TestMoveRootCounts(assert));
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
             Block(assert, "ImportPinsSourceCatalog", () => TestImportPinsSourceCatalog(assert));
+            Block(assert, "ImportPinsGappedSourceCatalog", () => TestImportPinsGappedSourceCatalog(assert));
             Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
             Block(assert, "ImportFoldBacksUp", () => TestImportFoldBacksUp(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
@@ -1458,17 +1459,42 @@ namespace Truedat.Store
             try
             {
                 var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
-                WriteCatalog(cat + ".1", VerdictSelfTest.Fixture());
-                WriteCatalog(cat + ".2", FixtureEntries(@"D:\music"));
+                var first = VerdictSelfTest.Fixture(); var second = FixtureEntries(@"D:\music");
+                var expectedPaths = new HashSet<string>(first.Keys.Concat(second.Keys), PathComparer.Instance);
+                WriteCatalog(cat + ".1", first);
+                WriteCatalog(cat + ".2", second);
                 var part1 = File.ReadAllBytes(cat + ".1"); var part2 = File.ReadAllBytes(cat + ".2");
                 assert(CatalogArchive.CatalogFiles(cat).Count == 2 && CatalogArchive.CatalogFiles(cat)[1] == cat + ".2",
                     "CatalogFiles names the numbered parts in order when the single file is absent");
+                Dictionary<string, string> storedBefore;
+                string? historyBefore;
+                const string historySql = "SELECT group_concat(id || ':' || outcome || ':' || source, '|') FROM (SELECT id, outcome, source FROM run ORDER BY id);";
                 using (StoreLog.Quiet())
                 {
                     var rep = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
-                    assert(rep.Entries > 0, $"fixture: the split catalog imports ({rep.Entries} entries)");
-                    StoreScan.Publish(store, cat, out _);
+                    assert(rep.Entries == expectedPaths.Count && rep.CatalogBytes == part1.Length + part2.Length,
+                        $"the split import accounts for every part: {rep.Entries}/{expectedPaths.Count} entries, {rep.CatalogBytes}/{part1.Length + part2.Length} bytes");
+                    var firstPin = Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip").Single();
+                    var pinBytes = File.ReadAllBytes(firstPin);
+                    ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                    assert(Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip").Length == 1 && File.ReadAllBytes(firstPin).SequenceEqual(pinBytes),
+                        "a repeat split import reuses the same byte-identical pin");
+                    storedBefore = StoreDictionary.Load(store, null, out _).ToDictionary(kv => kv.Key, kv => EntryJson(kv.Key, kv.Value), PathComparer.Instance);
+                    using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                    {
+                        historyBefore = os.Db.ExecScalar(historySql);
+                        assert(os.Dal.Count("run") == 2 && os.Db.ExecScalar("SELECT count(*) FROM run WHERE producer_key = 'import' AND outcome = 'ok';") == "2"
+                            && historyBefore != null && historyBefore.Contains($"import:{cat}@{rep.CatalogSha256}:{rep.CatalogBytes}"),
+                            "both split imports retain successful history identifying the original catalog hash and total bytes");
+                    }
+                    var publishError = StoreScan.Publish(store, cat, out var published);
+                    assert(publishError == null && published.Entries == expectedPaths.Count,
+                        $"split publication succeeds with every record ({published.Entries}/{expectedPaths.Count}; {publishError?.Message ?? "no error"})");
                 }
+                CatalogArchive.WriteZipBackup(cat, cat + ".bak.20261024.000001.zip");
+                CatalogArchive.WriteZipBackup(cat, cat + ".bak.20261024.000002.zip");
+                assert(CatalogArchive.RotateBackups(cat, 1) == 1 && Directory.GetFiles(dir, "mbxmoods.json.bak.*.zip").Length == 1,
+                    "fixture: rotation removes an ordinary backup before checking the split pin");
                 var pins = Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip");
                 byte[]? got1 = null, got2 = null;
                 if (pins.Length == 1)
@@ -1479,9 +1505,27 @@ namespace Truedat.Store
                     if (e2 != null) using (var ms = new MemoryStream()) { using (var es = e2.Open()) es.CopyTo(ms); got2 = ms.ToArray(); }
                 }
                 assert(pins.Length == 1 && got1 != null && got1.SequenceEqual(part1) && got2 != null && got2.SequenceEqual(part2),
-                    $"a split catalog is pinned whole before its first publication: {pins.Length} pin(s) (expected 1) holding both parts byte-identical ({got1 != null && got1.SequenceEqual(part1)}, {got2 != null && got2.SequenceEqual(part2)})");
+                    $"a split catalog stays pinned whole after repeat import, publication and rotation: {pins.Length} pin(s) (expected 1) holding both parts byte-identical ({got1 != null && got1.SequenceEqual(part1)}, {got2 != null && got2.SequenceEqual(part2)})");
                 assert(File.Exists(cat) && !File.Exists(cat + ".1") && !File.Exists(cat + ".2"),
                     "fixture: publication replaced the parts with the single file (the invariant the pin exists for)");
+                using (StoreLog.Quiet())
+                {
+                    var storedAfter = StoreDictionary.Load(store, null, out _);
+                    assert(expectedPaths.SetEquals(storedAfter.Keys) && storedAfter.Count == storedBefore.Count
+                        && storedAfter.All(kv => storedBefore.TryGetValue(kv.Key, out var before) && before == EntryJson(kv.Key, kv.Value)),
+                        "split publication and backup rotation preserve every stored record and value");
+                    using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
+                        assert(os.Db.ExecScalar(historySql) == historyBefore, "split publication and backup rotation preserve both import history rows unchanged");
+                }
+                if (pins.Length == 1)
+                {
+                    var restored = Path.Combine(dir, "restored.json");
+                    using (var dst = File.Create(restored)) CatalogArchive.ExtractCatalogTo(pins[0], dst);
+                    var restoredEntries = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    Program.LoadExistingMoodsForStore(restored, restoredEntries);
+                    assert(expectedPaths.SetEquals(restoredEntries.Keys),
+                        $"restoring the split pin recovers records from every member ({restoredEntries.Count}/{expectedPaths.Count} records)");
+                }
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
 
@@ -1506,6 +1550,46 @@ namespace Truedat.Store
                 catch (CatalogPinException ex) { thrown = ex.Message; }
                 assert(thrown != null && !File.Exists(store) && File.ReadAllBytes(cat).SequenceEqual(original),
                     $"an import whose pin fails imports nothing: refused {thrown != null}, store created {File.Exists(store)}, catalog unchanged {File.ReadAllBytes(cat).SequenceEqual(original)}");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // The reader accepts available numbered parts even when a number is missing. Every part it imports must be pinned before
+        // publication removes those files; a contiguous-only pin silently loses a later part that the store successfully loaded.
+        static void TestImportPinsGappedSourceCatalog(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-pin-gap-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
+                var first = VerdictSelfTest.Fixture(); var third = FixtureEntries(@"D:\music");
+                var expectedPaths = new HashSet<string>(first.Keys.Concat(third.Keys), PathComparer.Instance);
+                WriteCatalog(cat + ".1", first); WriteCatalog(cat + ".3", third);
+                var part1 = File.ReadAllBytes(cat + ".1"); var part3 = File.ReadAllBytes(cat + ".3");
+                var files = CatalogArchive.CatalogFiles(cat);
+                assert(files.SequenceEqual(new[] { cat + ".1", cat + ".3" }), "pin discovery includes a later part across a missing number, matching the catalog reader");
+                using (StoreLog.Quiet())
+                {
+                    var rep = ImportCommand.Execute(new ImportOptions { StorePath = store, CatalogPath = cat, LibraryRoot = @"D:\music" });
+                    assert(rep.Entries == expectedPaths.Count && rep.CatalogBytes == part1.Length + part3.Length,
+                        $"gapped import accounts for every loaded part ({rep.Entries}/{expectedPaths.Count} records, {rep.CatalogBytes}/{part1.Length + part3.Length} bytes)");
+                    var publishError = StoreScan.Publish(store, cat, out _);
+                    assert(publishError == null && expectedPaths.SetEquals(StoreDictionary.Load(store, null, out _).Keys)
+                        && !File.Exists(cat + ".1") && !File.Exists(cat + ".3"),
+                        $"fixture: publication retains all gapped-source records in the store and removes the original parts ({publishError?.Message ?? "no error"})");
+                }
+                var pins = Directory.GetFiles(dir, "mbxmoods.json.imported.*.zip");
+                byte[]? got1 = null, got3 = null;
+                if (pins.Length == 1)
+                {
+                    using var zip = ZipFile.OpenRead(pins[0]);
+                    var e1 = zip.GetEntry("mbxmoods.json.1"); var e3 = zip.GetEntry("mbxmoods.json.3");
+                    if (e1 != null) using (var ms = new MemoryStream()) { using (var es = e1.Open()) es.CopyTo(ms); got1 = ms.ToArray(); }
+                    if (e3 != null) using (var ms = new MemoryStream()) { using (var es = e3.Open()) es.CopyTo(ms); got3 = ms.ToArray(); }
+                }
+                assert(pins.Length == 1 && got1 != null && got1.SequenceEqual(part1) && got3 != null && got3.SequenceEqual(part3),
+                    $"a gapped split pin retains both deleted source parts byte for byte (part 1: {got1 != null && got1.SequenceEqual(part1)}, part 3: {got3 != null && got3.SequenceEqual(part3)})");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
         }

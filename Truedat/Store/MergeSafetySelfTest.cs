@@ -22,6 +22,10 @@ namespace Truedat.Store
             foreach (bool storedHash in new[] { false, true })
                 foreach (bool winningHash in new[] { false, true })
                     Block(assert, $"NULL preservation ({storedHash}, {winningHash})", () => PreserveAbsent(assert, storedHash, winningHash));
+            foreach (bool explicitNull in new[] { false, true })
+                Block(assert, "ordinary import absent hash", () => OrdinaryImportAbsentHash(assert, explicitNull));
+            foreach (string mode in new[] { "omitted", "NULL", "supplied zero/empty" })
+                Block(assert, "ordinary import absent scalars", () => OrdinaryImportAbsentScalars(assert, mode));
             Block(assert, "fresh scan NULL", () => FreshScanNull(assert));
             Block(assert, "library cache hit NULL", () => LibraryCacheHitNull(assert));
             Block(assert, "legacy alias", () => LegacyAlias(assert));
@@ -102,6 +106,69 @@ namespace Truedat.Store
             exit = f.Merge(winner);
             assert(exit == 0 && f.Values(PathA) == once && f.Generation() == generation,
                 label + ": repeated partial winner leaves values and generation unchanged");
+        }
+
+        // These exercise ordinary import, not merge's source-order/presence reconciliation.
+        // A missing hash must not demote a known description or turn absent measurements into a replacement row.
+        static void OrdinaryImportAbsentHash(Action<bool, string> assert, bool explicitNull)
+        {
+            string label = "MergeSafety ordinary import absent hash (" + (explicitNull ? "NULL" : "omitted") + ")";
+            using var f = new Fixture();
+            f.Seed((PathA, Entry(ShaA, "flac-frames", Old, true)));
+            string history = f.History();
+            var partial = new Dictionary<string, object?>
+            {
+                ["lastModified"] = New, ["title"] = "Partial metadata", ["bpm"] = 120,
+            };
+            if (explicitNull) { partial["audioStreamSha256"] = null; partial["mfcc"] = null; }
+            var report = f.Import(partial);
+            string? identity = f.Cell("c.content_key || '|' || c.content_key_kind || '|' || coalesce(c.audioStreamSha256, '<null>')", PathA);
+            assert(identity == ShaA + "|content_hash:audio-stream-sha256|" + ShaA,
+                label + ": absent SHA keeps the known description identity (got " + identity + ")");
+            string? mfcc = f.Cell("hex(c.mfcc)", PathA);
+            assert(mfcc == "983A00001CA8FFFF",
+                label + ": absent MFCC keeps the stored measurement (got " + mfcc + ")");
+            assert(report.Stale == 0 && f.Cell("p.title || '|' || p.album || '|' || p.fileMd5", PathA)
+                == "Partial metadata|Stored album|" + Md5,
+                label + ": supplied title lands while omitted copy facts survive");
+            assert(f.HasHistory(history) && f.Sql("PRAGMA foreign_key_check;") == null,
+                label + ": earlier run IDs/payloads survive and foreign keys remain valid");
+        }
+
+        // The reader maps missing/null nonnullable scalars to defaults. Presence, not those defaults,
+        // decides what an ordinary import supplies. Explicit zero and empty string must still land.
+        static void OrdinaryImportAbsentScalars(Action<bool, string> assert, string mode)
+        {
+            string label = "MergeSafety ordinary import scalars (" + mode + ")";
+            using var f = new Fixture();
+            var measured = new TrackEntry
+            {
+                LastModified = DateTime.Parse(Old, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                AudioStreamSha256 = ShaA, AudioStreamSha256Source = "flac-frames",
+                Features = new TrackFeatures { Title = "Measured title", Bpm = 120, Key = "C", Mfcc = new[] { 1.5, -2.25 } },
+            };
+            // Synthetic measurements through the real scan writer; no audio/extractor dependency.
+            ImportCommand.ExecuteEntries(f.Store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [PathA] = measured },
+                Root, "primary", true, "essentia", "merge-safety", "synthetic scalar observation", null, null);
+            assert(f.Cell("c.bpm || '|' || quote(c.key) || '|' || hex(c.mfcc)", PathA) == "1200|'C'|983A00001CA8FFFF",
+                label + ": fixture starts with measured BPM, key, and MFCC");
+            string history = f.History();
+            var partial = new Dictionary<string, object?>
+            {
+                ["lastModified"] = New, ["title"] = "Partial metadata",
+                ["audioStreamSha256"] = ShaA, ["audioStreamSha256Source"] = "flac-frames",
+            };
+            if (mode == "NULL") { partial["bpm"] = null; partial["key"] = null; partial["mfcc"] = null; }
+            if (mode == "supplied zero/empty") { partial["bpm"] = 0; partial["key"] = ""; }
+            f.Import(partial);
+            string? scalars = f.Cell("c.bpm || '|' || quote(c.key)", PathA);
+            string expected = mode == "supplied zero/empty" ? "0|''" : "1200|'C'";
+            assert(scalars == expected,
+                label + ": only supplied scalar values replace stored BPM/key (got " + scalars + ", expected " + expected + ")");
+            assert(f.Cell("c.audioStreamSha256 || '|' || hex(c.mfcc) || '|' || p.title", PathA) == ShaA + "|983A00001CA8FFFF|Partial metadata",
+                label + ": omitted measurements survive and supplied title lands");
+            assert(f.HasHistory(history) && f.Sql("PRAGMA foreign_key_check;") == null,
+                label + ": earlier run IDs/payloads survive and foreign keys remain valid");
         }
 
         static void LegacyAlias(Action<bool, string> assert)
