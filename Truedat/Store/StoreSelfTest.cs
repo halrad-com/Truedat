@@ -42,6 +42,7 @@ namespace Truedat.Store
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
             Block(assert, "ImportPinsSourceCatalog", () => TestImportPinsSourceCatalog(assert));
             Block(assert, "ImportPinsGappedSourceCatalog", () => TestImportPinsGappedSourceCatalog(assert));
+            Block(assert, "AutomaticCatalogSeeding", () => TestAutomaticCatalogSeeding(assert));
             Block(assert, "ShaTierMd5Rule", () => TestShaTierMd5Rule(assert));
             Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
             Block(assert, "ImportFoldBacksUp", () => TestImportFoldBacksUp(assert));
@@ -1553,6 +1554,101 @@ namespace Truedat.Store
                     $"an import whose pin fails imports nothing: refused {thrown != null}, store created {File.Exists(store)}, catalog unchanged {File.ReadAllBytes(cat).SequenceEqual(original)}");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // Exercise the scan's actual entry point: explicit import tests missed split-only catalogs being treated as absent here.
+        // Reflection keeps this regression test-only; all Program state touched by seeding is restored before the next block.
+        static void TestAutomaticCatalogSeeding(Action<bool, string> assert)
+        {
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            var ensure = typeof(Program).GetMethod("EnsureDefaultStore", flags)!;
+            var fields = new[] { "_storePath", "_storeDirOpt", "_noStoreTyped", "_noEdgesTyped", "_storeCatalogPath", "_edgesCompanionPath", "_edgesFromConfig" }
+                .Select(name => typeof(Program).GetField(name, flags)!).ToDictionary(f => f, f => f.GetValue(null));
+            void Set(string name, object? value) => typeof(Program).GetField(name, flags)!.SetValue(null, value);
+            var stage = Program._stageOpts; var sinkDir = ScanSink.StoreDirectory; var workRoot = ArtifactStore.WorkRoot;
+            var threshold = StoreLog.Threshold;
+            bool hadStoreConfig = Program._configValues.TryGetValue("store", out var storeConfig);
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-auto-seed-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                Set("_noStoreTyped", false); Set("_noEdgesTyped", true); Set("_storeDirOpt", null);
+                Program._configValues.Remove("store");
+                Program._stageOpts = new Program.StageOptions { StageDir = dir };
+                foreach (var mode in new[] { "single", "split", "gapped", "pin-refused" })
+                    Block(assert, "AutomaticCatalogSeeding " + mode, () =>
+                    {
+                        var caseDir = Path.Combine(dir, mode); Directory.CreateDirectory(caseDir);
+                        var catalog = Path.Combine(caseDir, "mbxmoods.json"); var store = Path.Combine(caseDir, "truedat.db");
+                        var expected = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                        foreach (char letter in new[] { 'a', 'b' })
+                        {
+                            var entry = Entry(new string(letter, 64), "flac-frames", "flac", 180000);
+                            entry.Features!.Title = "Original " + letter; entry.Features.Bpm = letter == 'a' ? 120 : 137;
+                            expected[@"D:\SeedSplitProbe\" + letter + ".flac"] = entry;
+                        }
+                        var originals = new Dictionary<string, byte[]>();
+                        if (mode == "single") WriteCatalog(catalog, expected);
+                        else
+                        {
+                            WriteCatalog(catalog + ".1", expected.Take(1));
+                            WriteCatalog(catalog + (mode == "gapped" ? ".3" : ".2"), expected.Skip(1));
+                        }
+                        foreach (var file in CatalogArchive.CatalogFiles(catalog)) originals[file] = File.ReadAllBytes(file);
+                        assert(originals.Count == (mode == "single" ? 1 : 2) && (mode == "single" || !File.Exists(catalog)),
+                            $"automatic seed {mode}: fixture has only its expected source members");
+                        if (mode == "pin-refused")
+                        {
+                            using var hash = System.Security.Cryptography.SHA256.Create();
+                            var sha = BitConverter.ToString(hash.ComputeHash(originals.OrderBy(kv => kv.Key, StringComparer.Ordinal).SelectMany(kv => kv.Value).ToArray())).Replace("-", "").ToLowerInvariant();
+                            Directory.CreateDirectory($"{catalog}.imported.{sha.Substring(0, 16)}.zip");
+                        }
+                        Set("_storePath", store);
+                        var result = (Program.SeedResult)ensure.Invoke(null, new object[] { catalog, false, false })!;
+                        if (mode == "pin-refused")
+                        {
+                            assert(result == Program.SeedResult.Refused && !File.Exists(store) && !File.Exists(store + "-wal") && !File.Exists(store + "-shm")
+                                && !File.Exists(catalog) && originals.All(kv => File.Exists(kv.Key) && File.ReadAllBytes(kv.Key).SequenceEqual(kv.Value)),
+                                "automatic seed refuses an unwritable pin before creating a store or changing either source part");
+                            return;
+                        }
+                        assert(result == Program.SeedResult.StoreInForce && File.Exists(store),
+                            $"automatic seed {mode}: creates the store and enables it ({result})");
+                        var loaded = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                        var load = StoreScan.LoadAuthoritative(store, catalog, loaded);
+                        bool Matches(IDictionary<string, TrackEntry> actual) => actual.Count == expected.Count && expected.All(kv =>
+                            actual.TryGetValue(kv.Key, out var e) && e.AudioStreamSha256 == kv.Value.AudioStreamSha256
+                            && e.LastModified == kv.Value.LastModified && e.Features?.Title == kv.Value.Features!.Title
+                            && e.Features?.Bpm == kv.Value.Features!.Bpm && e.Features?.Mfcc != null && e.Features.Mfcc.SequenceEqual(kv.Value.Features!.Mfcc!));
+                        assert(!load.Refused && load.Loaded == 2 && Matches(loaded),
+                            $"automatic seed {mode}: authoritative load preserves both records and values ({load.Case}, {load.Loaded}; {load.Refusal ?? "no refusal"})");
+                        var published = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                        Program.LoadExistingMoodsForStore(catalog, published);
+                        assert(File.Exists(catalog) && Matches(published), $"automatic seed {mode}: publication preserves both records and values");
+                        var pins = Directory.GetFiles(caseDir, "mbxmoods.json.imported.*.zip");
+                        assert(pins.Length == 1, $"automatic seed {mode}: keeps exactly one original-catalog pin ({pins.Length})");
+                        if (pins.Length == 1)
+                        {
+                            using var zip = ZipFile.OpenRead(pins[0]);
+                            assert(zip.Entries.Count == originals.Count, $"automatic seed {mode}: pin contains every original member");
+                            foreach (var original in originals)
+                            {
+                                var member = zip.GetEntry(Path.GetFileName(original.Key));
+                                using var bytes = new MemoryStream();
+                                if (member != null) using (var stream = member.Open()) stream.CopyTo(bytes);
+                                assert(member != null && bytes.ToArray().SequenceEqual(original.Value),
+                                    $"automatic seed {mode}: pin preserves {Path.GetFileName(original.Key)} byte for byte");
+                            }
+                        }
+                    });
+            }
+            finally
+            {
+                foreach (var field in fields) field.Key.SetValue(null, field.Value);
+                Program._stageOpts = stage; ScanSink.StoreDirectory = sinkDir; ArtifactStore.WorkRoot = workRoot; StoreLog.Threshold = threshold;
+                if (hadStoreConfig) Program._configValues["store"] = storeConfig!; else Program._configValues.Remove("store");
+                try { Directory.Delete(dir, true); } catch { }
+            }
         }
 
         // codex 2026-10-25 (plan follow-up): the sha cache tiers rebuild an entry from a full body read, then dropped the fresh MD5 to NULL

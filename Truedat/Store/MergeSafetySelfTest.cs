@@ -28,6 +28,7 @@ namespace Truedat.Store
                 Block(assert, "ordinary import absent scalars", () => OrdinaryImportAbsentScalars(assert, mode));
             Block(assert, "fresh scan NULL", () => FreshScanNull(assert));
             Block(assert, "library cache hit NULL", () => LibraryCacheHitNull(assert));
+            Block(assert, "SHA cache MD5", () => ShaCacheMd5(assert));
             Block(assert, "legacy alias", () => LegacyAlias(assert));
         }
 
@@ -276,6 +277,46 @@ namespace Truedat.Store
                     "MergeSafety library cache hit: the MD5 the quick-head tier invalidated leaves the store through the cache-hit flush (got " + facts + ", flush ok " + flush.Ok + ")");
             }
             finally { ScanSink.Reset(); ScanSink.StoreDirectory = previousDir; }
+        }
+
+        // Exercise the same builder -> MD5 rule -> cache flush used after a tag-edited file hits the audio-SHA cache.
+        // The helper alone can miss an old MD5 that the builder copied forward when no new MD5 was requested.
+        static void ShaCacheMd5(Action<bool, string> assert)
+        {
+            var rebuild = typeof(Program).GetMethod("RebuildCacheEntryCore", BindingFlags.NonPublic | BindingFlags.Static)!;
+            bool wasMd5 = Program._fileMd5Enabled;
+            string? previousDir = ScanSink.StoreDirectory;
+            try
+            {
+                foreach (bool measureMd5 in new[] { false, true })
+                {
+                    using var f = new Fixture();
+                    f.Seed((PathA, Entry(ShaA, "flac-frames", Old, true)));
+                    var stored = StoreDictionary.Load(f.Store, null, out _)[PathA];
+                    string history = f.History(), freshMd5 = new string('d', 32);
+                    Program._fileMd5Enabled = measureMd5;
+                    var rebuilt = (TrackEntry)rebuild.Invoke(null, new object?[]
+                    {
+                        stored, 0, "Artist", "Tags edited", "Stored album", "Genre", PathA,
+                        DateTime.Parse(New, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                        measureMd5 ? freshMd5 : null, null, ShaA, "flac-frames",
+                    })!;
+                    Program.RefreshedMd5Rule(rebuilt, stored.FileMd5);
+                    ScanSink.Reset(); ScanSink.StoreDirectory = System.IO.Path.GetDirectoryName(f.Store);
+                    ScanSink.RecordCacheHit(PathA, rebuilt);
+                    var flush = ScanSink.Flush(f.Store, "merge-safety", null, final: true);
+                    string label = "MergeSafety SHA cache (" + (measureMd5 ? "with --file-md5" : "without --file-md5") + ")";
+                    string? md5 = f.Cell("p.fileMd5", PathA);
+                    assert(flush.Ok && md5 == (measureMd5 ? freshMd5 : null),
+                        label + ": the changed file never retains its old whole-file MD5 (got " + (md5 ?? "<null>") + ")");
+                    assert(f.Cell("p.title || '|' || c.audioStreamSha256 || '|' || p.smfmBpm || '|' || hex(c.mfcc)", PathA)
+                        == "Tags edited|" + ShaA + "|95000000|983A00001CA8FFFF",
+                        label + ": supplied tags land while audio identity, SMFM, and MFCC survive");
+                    assert(f.HasHistory(history) && f.Sql("PRAGMA foreign_key_check;") == null,
+                        label + ": prior run metadata survives and foreign keys remain valid");
+                }
+            }
+            finally { Program._fileMd5Enabled = wasMd5; ScanSink.Reset(); ScanSink.StoreDirectory = previousDir; }
         }
 
         static Dictionary<string, object?> Entry(string? sha, string? kind, string modified, bool full)
