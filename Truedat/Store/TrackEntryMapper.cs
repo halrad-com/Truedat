@@ -666,6 +666,15 @@ namespace Truedat.Store
         }
         internal static bool ContentIsObserved(ulong[] mask, int k) => (k >> 6) < mask.Length && (mask[k >> 6] & (1UL << (k & 63))) != 0;
 
+        /// <summary>A ToRow() row with every content column the catalog did NOT carry set to NULL — so the import's write rules read a
+        /// parser default (bpm 0, key "") as "not observed" instead of a value. Columns in the mask are untouched, zero and empty included.</summary>
+        internal static object?[] WithContentNullWhereUnobserved(object?[] row, ulong[] observed)
+        {
+            var merged = (object?[])row.Clone();
+            for (int k = 0; k < ContentIdx.Length; k++) if (!ContentIsObserved(observed, k)) merged[ContentIdx[k]] = null;
+            return merged;
+        }
+
         /// <summary>True when every policy-cut CONTENT column is exactly equal between the two entries — the comparison the catalog bytes
         /// cannot make (codex rescan 2026-10-23 R3).</summary>
         internal static bool ExcludedContentEqual(TrackEntry a, TrackEntry b)

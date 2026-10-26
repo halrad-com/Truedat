@@ -42,6 +42,7 @@ namespace Truedat.Store
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
             Block(assert, "ImportPinsSourceCatalog", () => TestImportPinsSourceCatalog(assert));
             Block(assert, "ImportPinsGappedSourceCatalog", () => TestImportPinsGappedSourceCatalog(assert));
+            Block(assert, "ShaTierMd5Rule", () => TestShaTierMd5Rule(assert));
             Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
             Block(assert, "ImportFoldBacksUp", () => TestImportFoldBacksUp(assert));
             Block(assert, "LegacyRootCleanup", () => LegacyRootCleanupSelfTest.Run(assert));
@@ -1552,6 +1553,34 @@ namespace Truedat.Store
                     $"an import whose pin fails imports nothing: refused {thrown != null}, store created {File.Exists(store)}, catalog unchanged {File.ReadAllBytes(cat).SequenceEqual(original)}");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // codex 2026-10-25 (plan follow-up): the sha cache tiers rebuild an entry from a full body read, then dropped the fresh MD5 to NULL
+        // without --file-md5. With NULL now "not present", that left a stale stored MD5 standing after a tag edit. The rule keeps the fresh
+        // one where an MD5 was held, adds none where none was, and removes a held one explicitly when nothing fresh is at hand.
+        static void TestShaTierMd5Rule(Action<bool, string> assert)
+        {
+            bool was = Program._fileMd5Enabled;
+            try
+            {
+                Program._fileMd5Enabled = false;
+                string fresh = new string('f', 32), held = new string('e', 32);
+                var a = new TrackEntry { FileMd5 = fresh };
+                Program.RefreshedMd5Rule(a, held);
+                assert(a.FileMd5 == fresh && a.CopyCleared == null, $"sha tier: a held MD5 is replaced by the fresh one (got {a.FileMd5 ?? "<null>"}, cleared {a.CopyCleared})");
+                var b = new TrackEntry { FileMd5 = fresh };
+                Program.RefreshedMd5Rule(b, null);
+                assert(b.FileMd5 == null && b.CopyCleared == null, "sha tier: no MD5 is added where none was held (without --file-md5)");
+                var c = new TrackEntry { FileMd5 = null };
+                Program.RefreshedMd5Rule(c, held);
+                assert(c.FileMd5 == null && c.CopyCleared == TrackEntryMapper.CopyMaskOf("fileMd5"),
+                    "sha tier: a held MD5 with nothing fresh to replace it is removed explicitly, never left standing by a NULL");
+                Program._fileMd5Enabled = true;
+                var d = new TrackEntry { FileMd5 = fresh };
+                Program.RefreshedMd5Rule(d, null);
+                assert(d.FileMd5 == fresh && d.CopyCleared == null, "sha tier: under --file-md5 the fresh MD5 is the scan's, as before");
+            }
+            finally { Program._fileMd5Enabled = was; }
         }
 
         // The reader accepts available numbered parts even when a number is missing. Every part it imports must be pinned before

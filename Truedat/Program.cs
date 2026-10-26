@@ -4350,7 +4350,7 @@ namespace Truedat
                                             freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, recompSha, "flac-frames")
                                         : RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
                                             freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                                    if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                                    RefreshedMd5Rule(trackEntry, afEx.FileMd5);
                                     afHitTag = "cached·sha";
                                     afFingerprintV1 = trackEntry.FingerprintV1;
                                     afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -4381,7 +4381,7 @@ namespace Truedat
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                 : RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                            if (!_fileMd5Enabled) trackEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                            RefreshedMd5Rule(trackEntry, xs.Entry.FileMd5);
                             RemoveIfMoved(afMoodsTracks, xs.OldKey!);
                             afHitTag = "cached·sha";
                             afFingerprintV1 = trackEntry.FingerprintV1;
@@ -5153,7 +5153,7 @@ namespace Truedat
                                             : RebuildCacheEntryFromTags(
                                                 fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                                 freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                        if (!_fileMd5Enabled) flShaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                                        RefreshedMd5Rule(flShaPathEntry, fEx.FileMd5);
                                         var flShaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
@@ -5190,7 +5190,7 @@ namespace Truedat
                                         : RebuildCacheEntryFromTags(
                                             xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                    if (!_fileMd5Enabled) flCrossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                                    RefreshedMd5Rule(flCrossShaEntry, xs.Entry.FileMd5);
                                     var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
@@ -6458,7 +6458,7 @@ namespace Truedat
                                                 var shaPathEntry = legacyHit
                                                     ? RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
                                                     : RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
-                                                if (!_fileMd5Enabled) shaPathEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                                                RefreshedMd5Rule(shaPathEntry, existing.FileMd5);
                                                 var shaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
@@ -6497,7 +6497,7 @@ namespace Truedat
                                                 if (propsOk)
                                                 {
                                                     var rekeyEntry = RebuildCacheEntry(existing, t, currentLastMod, bodyHashes.md5, rescueFp, recomputedSha, "flac-frames");
-                                                    if (!_fileMd5Enabled) rekeyEntry.FileMd5 = null;
+                                                    RefreshedMd5Rule(rekeyEntry, existing.FileMd5);
                                                     var rekeySmfmTag = _refreshSmfm && ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                     if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                     allTracks[t.Location] = rekeyEntry;
@@ -6555,7 +6555,7 @@ namespace Truedat
                                         var crossShaEntry = crossLegacyHit
                                             ? RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                             : RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
-                                        if (!_fileMd5Enabled) crossShaEntry.FileMd5 = null;  // unconsumed field; not written without --file-md5
+                                        RefreshedMd5Rule(crossShaEntry, xs.Entry.FileMd5);
                                         var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
@@ -23611,6 +23611,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// "a rescan is an opt in"). A store the scan cannot have — SQLite unavailable on this OS, a seed that fails —
         /// is a note and a scan without it, never a refused scan: a default must not break the command it rides on.
         /// Returns true when a store is now in force for this run.</summary>
+        /// <summary>The sha cache tiers (2 and 4) rebuild an entry from a full body read, so the whole-file MD5 they pass in is the file's
+        /// CURRENT one. Without --file-md5 a scan does not start recording MD5s, but NULL is not present (operator 2026-10-25): dropping a
+        /// held one to NULL used to leave the stored value — stale after a tag edit — in the store and the next publication. So: an entry
+        /// that held an MD5 keeps the fresh one; one that held none stays without; a held MD5 with nothing fresh to replace it is removed
+        /// explicitly (<see cref="TrackEntry.CopyCleared"/>), because the tier knows the file changed since it was taken.</summary>
+        internal static void RefreshedMd5Rule(TrackEntry rebuilt, string? heldMd5)
+        {
+            if (_fileMd5Enabled) return;                                   // --file-md5: the refreshed value is the scan's, as before
+            if (string.IsNullOrEmpty(heldMd5)) { rebuilt.FileMd5 = null; return; }
+            if (string.IsNullOrEmpty(rebuilt.FileMd5))
+                rebuilt.CopyCleared = (rebuilt.CopyCleared ?? 0UL) | global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");
+        }
+
         /// <summary>What <see cref="EnsureDefaultStore"/> decided: no store for this scan; a store in force (created or seeded); or the
         /// scan is REFUSED — the catalog it would seed from could not be pinned beside itself, so the scan must not rewrite it either.</summary>
         internal enum SeedResult { NoStore, StoreInForce, Refused }
@@ -23634,7 +23647,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return SeedResult.NoStore;
             }
 
-            bool catalogHasEntries = File.Exists(catalogPath) && new FileInfo(catalogPath).Length > 0;
+            // A split catalog (numbered parts, no single file) is a catalog too: seed it, pin every part (codex 2026-10-25).
+            bool catalogHasEntries = global::Truedat.CatalogArchive.CatalogFiles(catalogPath).Any(f => new FileInfo(f).Length > 0);
             if (catalogHasEntries)
             {
                 Console.WriteLine($"  Store:      none yet — seeding {storePath} from the catalog (no audio read)");
@@ -24465,7 +24479,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// mbxmoods.json.tmp swap file or mbxmoods.json.bak.&lt;ts&gt;.zip backups that share the
         /// prefix), sorted ascending by index.
         /// </summary>
-        static List<KeyValuePair<int, string>> EnumerateCatalogParts(string moodsPath)
+        internal static List<KeyValuePair<int, string>> EnumerateCatalogParts(string moodsPath)
         {
             var result = new List<KeyValuePair<int, string>>();
             var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";

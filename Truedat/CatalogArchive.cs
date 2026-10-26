@@ -102,14 +102,55 @@ namespace Truedat
         }
 
         /// <summary>The files a catalog path means on disk: the single file when it exists, otherwise the numbered parts
-        /// <c>&lt;catalog&gt;.1</c>, <c>.2</c>, … while they are contiguous (the reader's rule; the INVARIANT is one or the other,
-        /// never both). Empty when neither exists. One rule for the import's hash and its pin, so they cannot disagree.</summary>
+        /// <c>&lt;catalog&gt;.1</c>, <c>.2</c>, … exactly as the reader stitches them (<see cref="Program.EnumerateCatalogParts"/>: every
+        /// numbered part present, in order, a missing number tolerated — the INVARIANT is one file or parts, never both). Empty when
+        /// neither exists. One rule for the reader, the import's hash and its pin: a contiguous-only rule here pinned fewer parts than
+        /// the import had loaded, and publication then deleted the unpinned one (codex 2026-10-25, gapped split catalog).</summary>
         internal static List<string> CatalogFiles(string catalogPath)
         {
-            var files = new List<string>();
-            if (File.Exists(catalogPath)) files.Add(catalogPath);
-            else for (int i = 1; File.Exists(catalogPath + "." + i); i++) files.Add(catalogPath + "." + i);
-            return files;
+            if (File.Exists(catalogPath)) return new List<string> { catalogPath };
+            return Program.EnumerateCatalogParts(catalogPath).Select(p => p.Value).ToList();
+        }
+
+        /// <summary>The part number of a pinned entry name (<c>mbxmoods.json.3</c> → 3), or 0 when the name is not a numbered part.</summary>
+        static int PartNumber(string entryName)
+        {
+            var prefix = CatalogEntryName + ".";
+            return entryName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && int.TryParse(entryName.Substring(prefix.Length), out var n) && n >= 1 ? n : 0;
+        }
+
+        /// <summary>A pin that holds a split catalog restores as ONE catalog: the parts' track objects stitched in part order (a later part
+        /// wins a repeated path, as the reader does), under the first part's header. Streaming per part; the merged track set is held once.</summary>
+        static void MergeCatalogParts(IReadOnlyList<ZipArchiveEntry> parts, Stream dest)
+        {
+            var docs = new List<JsonDocument>();
+            try
+            {
+                var docOptions = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+                foreach (var p in parts) { using var es = p.Open(); docs.Add(JsonDocument.Parse(es, docOptions)); }
+                var tracks = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+                var order = new List<string>();
+                foreach (var d in docs)
+                {
+                    if (d.RootElement.ValueKind != JsonValueKind.Object || !d.RootElement.TryGetProperty("tracks", out var t) || t.ValueKind != JsonValueKind.Object) continue;
+                    foreach (var prop in t.EnumerateObject())
+                    {
+                        if (!tracks.ContainsKey(prop.Name)) order.Add(prop.Name);
+                        tracks[prop.Name] = prop.Value;
+                    }
+                }
+                using var jw = new Utf8JsonWriter(dest);
+                jw.WriteStartObject();
+                if (docs.Count > 0 && docs[0].RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var prop in docs[0].RootElement.EnumerateObject())
+                        if (!prop.NameEquals("tracks")) prop.WriteTo(jw);
+                jw.WritePropertyName("tracks");
+                jw.WriteStartObject();
+                foreach (var name in order) { jw.WritePropertyName(name); tracks[name].WriteTo(jw); }
+                jw.WriteEndObject();
+                jw.WriteEndObject();
+            }
+            finally { foreach (var d in docs) d.Dispose(); }
         }
 
         /// <summary>The fail-safe for a catalog a store imports (operator 2026-10-25): once the store holds it, every scan publishes over
@@ -173,6 +214,12 @@ namespace Truedat
                 case CatalogFormat.Zip:
                     using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
                     {
+                        if (zip.GetEntry(CatalogEntryName) == null)
+                        {
+                            // A pinned split catalog: mbxmoods.json.1, .3, … and no single-file entry. Restore it as one catalog.
+                            var parts = zip.Entries.Where(e => PartNumber(e.Name) > 0).OrderBy(e => PartNumber(e.Name)).ToList();
+                            if (parts.Count > 0) { MergeCatalogParts(parts, dest); break; }
+                        }
                         var entry = FindCatalogEntry(zip)
                             ?? throw new InvalidDataException($"No {CatalogEntryName} entry found in archive: {archivePath}");
                         using var es = entry.Open();

@@ -579,6 +579,14 @@ namespace Truedat.Store
             if (sha != null && isFlac && kind == FacetKinds.ShaFrames && !dal.HasFacetOfKind(res.EntityId, FacetKinds.ShaTaglibRegion)) r.LegacyShaUnrecoverable++;
 
             var contentKey = sha ?? ("entity:" + res.EntityId);
+            var contentKeyKind = sha != null ? kind : "entity";
+            // An arrival WITHOUT a hash over a location whose entity is already described under one: the hash is not present, which
+            // is not a new identity. Treating it as "entity:<id>" re-keyed the description (a key move) and rewrote it from the partial
+            // entry — the sha and the measurements it did not carry went to NULL (codex 2026-10-25, MergeSafety ordinary import absent hash).
+            if (sha == null && previousEntity == res.EntityId && !string.IsNullOrEmpty(previousKey) && previousKind != "entity")
+            {
+                contentKey = previousKey!; contentKeyKind = previousKind!;
+            }
 
             // Recency (review #4b): an OLDER catalog imported over a newer store must not regress a row. Same
             // content key and an older lastModified than the store holds -> skip, count stale, touch nothing. An exact verb already
@@ -621,7 +629,7 @@ namespace Truedat.Store
                 ? dal.InsertRun(producerKey, producerVersion, res.EntityId, sha, sha != null ? kind : null, loc, now,
                     entry.AnalysisDurationSecs.HasValue ? (long?)(entry.AnalysisDurationSecs.Value * 1000) : null, Environment.MachineName, VersionInfo.Display, "ok", null, null, null, source)
                 : sharedRun;
-            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, sha != null ? kind : "entity", runId, producerKey, producerVersion, entry, key, now, r, locationChanged, replaceCopy,
+            WriteDescriptionAndCopy(dal, loc, res.EntityId, contentKey, contentKeyKind, runId, producerKey, producerVersion, entry, key, now, r, locationChanged, replaceCopy,
                 scanCacheHit: source.StartsWith(ScanCachePrefix, StringComparison.Ordinal));
             // T19: the verdict projection, from the rows AS STORED, for every copy of this media (a content change re-derives them all).
             VerdictStore.DeriveForEntity(dal, res.EntityId, now);
@@ -682,6 +690,12 @@ namespace Truedat.Store
             bool scanCacheHit = false)
         {
             var row = TrackEntryMapper.ToRow(entry);
+            // The catalog reader turns an absent bpm into 0 and an absent key into "" — the type's defaults, not values. A catalog import
+            // supplies only what the catalog CARRIED (the reader's ContentObserved mask); every other content column arrives NULL, which the
+            // rules below read as "not observed" (keeps the stored value). A supplied 0 or "" is in the mask and lands. Not for a verb's
+            // exact result (its NULL is a clear, and WithPolicyCutFrom has already put the cut fields back) nor the scan's cache-hit flush.
+            bool plainCatalogImport = string.Equals(producerKey, "import", StringComparison.Ordinal) && !ExactArrival && !scanCacheHit;
+            if (plainCatalogImport && entry.ContentObserved != null) row = TrackEntryMapper.WithContentNullWhereUnobserved(row, entry.ContentObserved);
             bool contentWritten = false, copyWritten = locationChanged, drifted = false;   // a new or changed location (mtime, state) is a copy fact too
 
             var existing = dal.ReadContent(entityId);
