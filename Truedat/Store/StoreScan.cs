@@ -47,7 +47,7 @@ namespace Truedat.Store
         internal static LoadResult LoadAuthoritative(string storePath, string catalogPath, ConcurrentDictionary<string, TrackEntry> target)
         {
             var res = new LoadResult();
-            bool catalogExists = File.Exists(catalogPath) || File.Exists(catalogPath + ".1");
+            bool catalogExists = global::Truedat.CatalogArchive.CatalogFiles(catalogPath).Count > 0;
             var catalog = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             if (catalogExists) Program.LoadExistingMoodsForStore(catalogPath, catalog);
             CatalogOrigin? origin = null;

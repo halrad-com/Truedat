@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 
@@ -32,8 +33,8 @@ namespace Truedat.Store
             Console.WriteLine("Publication self-test (store-v3 T07: SaveResultsPublished writes the real catalog + sidecar through the publisher; the plain save stays v1)");
             try { TestSaveResultsPublished(assert); }
             catch (Exception ex) { assert(false, $"Publication.SaveResultsPublished: threw {ex.GetType().Name}: {ex.Message}"); }
-            Console.WriteLine("Publication self-test (store-v3 T07: a catalog past the single-file limit fails BEFORE touching the live set; keeper review of c89d48a, P2)");
-            try { TestOverflowFailsBeforeMutating(assert); }
+            Console.WriteLine("Publication self-test (store-v3 T07: a catalog past the single-file limit publishes as parts through the publisher, never the plain split save; keeper review of c89d48a, P2)");
+            try { TestOverflowPublishesParts(assert); }
             catch (Exception ex) { assert(false, $"Publication.Overflow: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Publication self-test (store-v3 T07: --store-export reads generation, entries and edge rows from ONE store snapshot; keeper review of c89d48a, P1)");
             try { TestExportSnapshot(assert); }
@@ -198,9 +199,11 @@ namespace Truedat.Store
             }
         }
 
-        /// <summary>Keeper review of c89d48a, P2: the overflow fallback must not bypass the publisher and leave the
-        /// previous companion live beside new parts. Single-file scope: refuse before any live file moves.</summary>
-        static void TestOverflowFailsBeforeMutating(Action<bool, string> assert)
+        /// <summary>A catalog past the single-file limit is published as numbered PARTS through the publisher (the spec: one file OR the
+        /// parts), never by the plain split save — keeper review of c89d48a, P2: that save would leave the previous companion live beside
+        /// new parts. Every part carries the same origin; the set is whole by FilesBehind; split -> single and single -> split leave
+        /// exactly one form; a torn set (parts from different generations) reads as behind, so the next publication rewrites it.</summary>
+        static void TestOverflowPublishesParts(Action<bool, string> assert)
         {
             var saved = Program.CatalogMaxBytes;
             try
@@ -211,27 +214,51 @@ namespace Truedat.Store
                     for (int i = 0; i < 6; i++)
                         dict[@"D:\music\t" + i + ".flac"] = new TrackEntry { Features = new TrackFeatures { Artist = "A", Title = "T" + i, Bpm = 100 + i, Mfcc = new[] { 1.5, -2.25 } }, LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc) };
                     var moods = d.P("mbxmoods.json"); var sidecar = d.P("mbxmoods.mbxs"); var companion = d.P("mbxedges.v1.json");
-                    // A live, complete set at generation 1 with a companion.
                     var o1 = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = 1 };
                     var r1 = Program.SaveResultsPublished(moods, dict, o1, tmp => { Put(tmp, CompanionText(1, "E1")); return true; });
-                    assert(r1 != null && r1.Completed && Marker(companion) == "E1", "overflow setup: live set at generation 1 with companion E1");
-                    var catalogBytes = new FileInfo(moods).Length; var sidecarSha = Publication.Sha256Hex(sidecar);
+                    assert(r1 != null && r1.Completed && Marker(companion) == "E1", "split publish setup: live single-file set at generation 1 with companion E1");
 
                     Program.CatalogMaxBytes = 400;   // the split seam: header + a couple of tracks per part
+                    long gen = 1;
                     foreach (bool edgesOn in new[] { true, false })
                     {
-                        var o2 = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = 2 };
-                        bool threw = false;
-                        try { Program.SaveResultsPublished(moods, dict, o2, edgesOn ? (tmp => { Put(tmp, CompanionText(2, "E2")); return true; }) : null); }
-                        catch (Exception) { threw = true; }
+                        gen++;
                         string which = edgesOn ? "edges on" : "edges off";
-                        assert(threw, $"overflow ({which}): refused with an exception, not a silent fallback");
-                        assert(File.Exists(moods) && new FileInfo(moods).Length == catalogBytes && !File.Exists(moods + ".1"), $"overflow ({which}): the live catalog is untouched and no parts were written");
-                        assert(Publication.Sha256Hex(sidecar) == sidecarSha, $"overflow ({which}): the live sidecar is untouched");
-                        assert(Marker(companion) == "E1", $"overflow ({which}): the live companion E1 is still the set's own (never E1 beside new parts, never retired without a publish)");
-                        assert(!Publication.FilesBehind(moods, sidecar, companion, true, 1, out var why), $"overflow ({which}): the generation-1 set is still whole ({why})");
-                        assert(!File.Exists(moods + ".tmp") && !File.Exists(sidecar + ".tmp") && !File.Exists(companion + ".tmp") && !File.Exists(companion + Publication.CompanionAsideSuffix), $"overflow ({which}): no temps or .prev left");
+                        var o = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = gen };
+                        long g = gen;
+                        var r = Program.SaveResultsPublished(moods, dict, o, edgesOn ? (tmp => { Put(tmp, CompanionText(g, "E" + g)); return true; }) : null);
+                        var parts = Program.EnumerateCatalogParts(moods);
+                        assert(r != null && r.Completed && !File.Exists(moods) && parts.Count >= 2,
+                            $"split publish ({which}): completed as {parts.Count} parts (expected >= 2) with no single mbxmoods.json beside them");
+                        bool allAgree = parts.Count > 0;
+                        foreach (var part in parts)
+                            if (!CatalogOrigin.TryReadHead(part.Value, CatalogOrigin.ContractV2, out var po) || po.Generation != gen || po.SidecarSha256 != r!.SidecarSha256) allAgree = false;
+                        assert(allAgree, $"split publish ({which}): every part carries the v2 origin at generation {gen}, bound to the published sidecar");
+                        assert(CatalogOrigin.TryRead(moods, out var whole) && whole.Generation == gen, $"split publish ({which}): the catalog path reads as generation {gen} through its parts");
+                        assert(!Publication.FilesBehind(moods, sidecar, companion, edgesOn, gen, out var why), $"split publish ({which}): the published set is whole ({why})");
+                        var back = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                        assert(Program.LoadExistingMoodsForStore(moods, back) == dict.Count, $"split publish ({which}): the reader loads every track back from the parts ({back.Count}/{dict.Count})");
+                        assert(edgesOn ? Marker(companion) == "E" + gen : !File.Exists(companion), $"split publish ({which}): the companion is this generation's, or retired with edges off");
+                        assert(!File.Exists(moods + ".tmp") && !File.Exists(sidecar + ".tmp") && !File.Exists(companion + ".tmp") && !File.Exists(companion + Publication.CompanionAsideSuffix)
+                               && parts.All(x => !File.Exists(x.Value + ".tmp")), $"split publish ({which}): no temps or .prev left");
                     }
+
+                    // A torn set — one part rewritten at another generation — is not published; FilesBehind says so.
+                    var firstPart = Program.EnumerateCatalogParts(moods)[0].Value;
+                    File.WriteAllText(firstPart, File.ReadAllText(firstPart).Replace("\"generation\":" + gen, "\"generation\":" + (gen + 7)));
+                    bool tornBehind = Publication.FilesBehind(moods, sidecar, companion, false, gen, out var torn);
+                    assert(!CatalogOrigin.TryRead(moods, out _) && tornBehind,
+                        $"split publish: parts from different generations read as behind (torn set), never as published ({torn})");
+
+                    // Back under the limit: one file again, every part removed (the INVARIANT).
+                    Program.CatalogMaxBytes = saved;
+                    gen++;
+                    var o3 = new CatalogOrigin { Kind = "export", MachineId = "m", StoreSchema = 2, Truedat = "t", Generation = gen };
+                    var r3 = Program.SaveResultsPublished(moods, dict, o3, null);
+                    bool behind3 = Publication.FilesBehind(moods, sidecar, companion, false, gen, out var why3);
+                    assert(r3 != null && r3.Completed && File.Exists(moods) && Program.EnumerateCatalogParts(moods).Count == 0
+                           && !behind3,
+                        $"split -> single: one mbxmoods.json at generation {gen}, the parts removed, the set whole ({why3})");
                 }
             }
             finally { Program.CatalogMaxBytes = saved; }

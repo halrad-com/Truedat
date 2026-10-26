@@ -66,7 +66,22 @@ namespace Truedat.Store
         /// out-of-range number). Never throws.
         /// </summary>
         internal static bool TryRead(string catalogPath, out CatalogOrigin origin)
-            => TryReadHead(catalogPath, ContractV2, out origin);
+        {
+            if (File.Exists(catalogPath) || !(Program.EnumerateCatalogParts(catalogPath) is var parts) || parts.Count == 0)
+                return TryReadHead(catalogPath, ContractV2, out origin);
+            // A split catalog (mbxmoods.json.1 .. .K): EVERY part carries the same origin, and the set reads as published only when they
+            // all agree on the generation and the sidecar binding. A torn set (a publication interrupted between part renames, a part from
+            // another generation) reads as "no v2 origin", so FilesBehind reports it and the next publication rewrites it whole — the same
+            // every-part rule the hub applies (hub:H03a, MBX 51c1e9757).
+            origin = new CatalogOrigin();
+            for (int i = 0; i < parts.Count; i++)
+            {
+                if (!TryReadHead(parts[i].Value, ContractV2, out var o)) return false;
+                if (i == 0) { origin = o; continue; }
+                if (o.Generation != origin.Generation || !string.Equals(o.SidecarSha256, origin.SidecarSha256, StringComparison.Ordinal)) return false;
+            }
+            return true;
+        }
 
         /// <summary>
         /// The same bounded read for any export whose root carries <c>contract</c> and <c>origin</c>
@@ -173,6 +188,11 @@ namespace Truedat.Store
         /// publishes one, because a previous live companion must be retired either way.</summary>
         internal string CompanionPath = "";
         internal string CatalogTmp = "";
+        /// <summary>A SPLIT publication: the part temps and their targets (mbxmoods.json.1 .. .K), in part order. Null = one catalog file
+        /// (<see cref="CatalogTmp"/> -> <see cref="CatalogPath"/>). The catalog step renames every part, then removes the single file and any
+        /// higher-numbered part a larger previous split left — before the companion and the sidecar, so a reader never pairs the new
+        /// sidecar with an old catalog (INVARIANT: one file OR the parts, never both).</summary>
+        internal System.Collections.Generic.List<(string Tmp, string Target)>? CatalogParts;
         internal string SidecarTmp = "";
         /// <summary>Null when this generation publishes no companion (edges off). The old one at
         /// <see cref="CompanionPath"/> is still moved aside and removed on completion.</summary>
@@ -263,7 +283,12 @@ namespace Truedat.Store
         {
             if (plan == null) throw new ArgumentNullException(nameof(plan));
             if (string.IsNullOrEmpty(plan.CompanionPath)) throw new ArgumentException("CompanionPath is the known target path and is always required", nameof(plan));
-            if (!File.Exists(plan.CatalogTmp)) throw new FileNotFoundException("catalog temp missing", plan.CatalogTmp);
+            if (plan.CatalogParts == null && !File.Exists(plan.CatalogTmp)) throw new FileNotFoundException("catalog temp missing", plan.CatalogTmp);
+            if (plan.CatalogParts != null)
+            {
+                if (plan.CatalogParts.Count == 0) throw new ArgumentException("a split publication needs at least one part", nameof(plan));
+                foreach (var p in plan.CatalogParts) if (!File.Exists(p.Tmp)) throw new FileNotFoundException("catalog part temp missing", p.Tmp);
+            }
             if (!File.Exists(plan.SidecarTmp)) throw new FileNotFoundException("sidecar temp missing", plan.SidecarTmp);
             bool newCompanion = !string.IsNullOrEmpty(plan.CompanionTmp);
             if (newCompanion && !File.Exists(plan.CompanionTmp!))
@@ -275,7 +300,8 @@ namespace Truedat.Store
             // Stamp the temps BEFORE any rename (rename preserves the write time).
             var tc = CatalogMtime(nowUtc, plan.SidecarPath);
             var ts = SidecarMtime(tc);
-            File.SetLastWriteTimeUtc(plan.CatalogTmp, tc);
+            if (plan.CatalogParts == null) File.SetLastWriteTimeUtc(plan.CatalogTmp, tc);
+            else foreach (var p in plan.CatalogParts) File.SetLastWriteTimeUtc(p.Tmp, tc);
             File.SetLastWriteTimeUtc(plan.SidecarTmp, ts);
             result.CatalogMtimeUtc = tc;
             result.SidecarMtimeUtc = ts;
@@ -290,9 +316,16 @@ namespace Truedat.Store
             }
             result.Reached = PublicationStep.CompanionAside;
 
-            // (2) catalog — the commit point for upgraded readers
+            // (2) catalog — the commit point for upgraded readers (all parts, then what the new set no longer holds)
             if (stopBefore != null && stopBefore(PublicationStep.Catalog)) return result;
-            Swap(plan.CatalogTmp, plan.CatalogPath);
+            if (plan.CatalogParts == null) Swap(plan.CatalogTmp, plan.CatalogPath);
+            else
+            {
+                foreach (var p in plan.CatalogParts) Swap(p.Tmp, p.Target);
+                if (File.Exists(plan.CatalogPath)) File.Delete(plan.CatalogPath);
+                foreach (var stale in Program.EnumerateCatalogParts(plan.CatalogPath))
+                    if (stale.Key > plan.CatalogParts.Count) File.Delete(stale.Value);
+            }
             result.Reached = PublicationStep.Catalog;
 
             // (3) companion — only when this generation has one

@@ -24312,9 +24312,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// sidecar LAST) with the catalog/sidecar mtimes stamped on the temps. <paramref name="writeCompanionTemp"/>
         /// writes the companion to the temp path it is handed and returns true; null, or false, means this
         /// generation publishes no companion (edges off) — the previous live one is still retired.
-        /// A catalog past <see cref="CatalogMaxBytes"/> cannot be published as one file: the call REFUSES
-        /// (InvalidOperationException) before any live file moves — multipart publication is out of scope,
-        /// and a fallback to the split save would leave the previous companion live beside new parts.
+        /// A catalog past <see cref="CatalogMaxBytes"/> is published as numbered PARTS through the same publisher (every part carries the
+        /// origin; the catalog step renames them all and removes the single file / stale higher parts before the companion and the
+        /// sidecar) — never by falling back to the plain split save, which would leave the previous companion live beside new parts.
         /// </summary>
         internal static global::Truedat.Store.PublicationResult? SaveResultsPublished(string moodsPath,
             ConcurrentDictionary<string, TrackEntry> allTracks, global::Truedat.Store.CatalogOrigin origin, Func<string, bool>? writeCompanionTemp)
@@ -24341,23 +24341,23 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 bool overflow = WriteCatalogSingleTemp(plan.CatalogTmp, items, total, generatedAt, origin);
                 if (overflow)
                 {
-                    // Refuse BEFORE any live file moves (keeper review of c89d48a, P2): the legacy split save
-                    // would bypass the publisher and leave the previous companion live beside new parts —
-                    // a mixed set. Multipart publication is out of scope; the live set stays whole and the
-                    // caller reports the refusal. (The temps are removed by the catch below.)
-                    throw new InvalidOperationException(
-                        $"the catalog ({total:N0} tracks) exceeds the single-file limit of {CatalogMaxBytes:N0} bytes; multipart publication is not supported, so nothing was published — the previous catalog, sidecar and mbxedges.v1.json are untouched.");
+                    // Past the single-file limit: the same set, published as parts (the spec: one file OR the parts). The keeper's c89d48a
+                    // P2 stands — the plain split save is never used here; the publisher renames the parts in the ruled order.
+                    try { File.Delete(plan.CatalogTmp); } catch { }
+                    plan.CatalogParts = WriteCatalogPartTemps(moodsPath, items, total, generatedAt, origin);
                 }
                 var result = global::Truedat.Store.Publication.Publish(plan, DateTime.UtcNow);
-                // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both.
-                DeleteCatalogParts(moodsPath);
-                if (_audit) { try { Console.WriteLine($"  DEBUG publish: {moodsPath} generation {result.Generation} ({new FileInfo(moodsPath).Length / 1024} KB, {total} tracks, sidecar {result.SidecarSha256.Substring(0, 12)}…)"); } catch { } }
+                // INVARIANT: a catalog is EITHER mbxmoods.json OR the numbered parts, never both (a split publication cleared the single
+                // file and the stale parts itself, inside the catalog step).
+                if (plan.CatalogParts == null) DeleteCatalogParts(moodsPath);
+                if (_audit) { try { Console.WriteLine($"  DEBUG publish: {moodsPath} generation {result.Generation} ({(plan.CatalogParts == null ? new FileInfo(moodsPath).Length / 1024 + " KB" : plan.CatalogParts.Count + " parts")}, {total} tracks, sidecar {result.SidecarSha256.Substring(0, 12)}…)"); } catch { } }
                 return result;
             }
             catch
             {
                 // Never leave a half-written .tmp beside the catalog; the caller re-publishes from the committed store.
                 foreach (var t in new[] { plan.CatalogTmp, plan.SidecarTmp, companionTmp }) { try { File.Delete(t); } catch { } }
+                if (plan.CatalogParts != null) foreach (var p in plan.CatalogParts) { try { File.Delete(p.Tmp); } catch { } }
                 throw;
             }
         }
@@ -24431,22 +24431,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// the tracks object because a streaming writer can't know a part's count until its subset
         /// is emitted, and a JSON reader is order-independent — every contract field is present.
         /// </summary>
-        static void SaveResultsSplit(string moodsPath, KeyValuePair<string, TrackEntry>[] items, int total, string generatedAt)
+        /// <summary>Write the catalog as numbered part TEMPS (<c>mbxmoods.json.N.tmp</c>), each kept under <see cref="CatalogMaxBytes"/>, and
+        /// return (temp, target) in part order. One writer for the plain split save and the store's split publication. A published part
+        /// carries the v2 <c>contract</c> + <c>origin</c> after <c>partIndex</c> (inside the bounded head), the same origin in every part.</summary>
+        internal static List<(string Tmp, string Target)> WriteCatalogPartTemps(string moodsPath, KeyValuePair<string, TrackEntry>[] items, int total,
+            string generatedAt, global::Truedat.Store.CatalogOrigin? origin)
         {
-            // A single mbxmoods.json on disk now is the PRE-SPLIT catalog: archive it once, before
-            // the numbered parts supersede it, so the last single-file state stays recoverable.
-            // Routine single-file saves keep only their atomic .bak swap; this heavier compressed
-            // backup fires only at the single -> split transition, and never when already split.
-            if (File.Exists(moodsPath))
-            {
-                try { BackupCatalogCompressed(moodsPath); }
-                catch (Exception ex) { Console.Error.WriteLine($"  Warning: pre-split backup not written: {ex.Message}"); }
-            }
-
+            var parts = new List<(string Tmp, string Target)>();
             int partIndex = 0;
             int i = 0;
-            int written = 0;
-            while (i < items.Length)
+            do
             {
                 partIndex++;
                 var partPath = moodsPath + "." + partIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -24461,6 +24455,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         WriteCatalogHeaderCommon(jw, generatedAt);
                         jw.WriteNumber("totalTrackCount", total);
                         jw.WriteNumber("partIndex", partIndex);
+                        if (origin != null) global::Truedat.Store.CatalogOrigin.WriteHeader(jw, origin);
                         jw.WritePropertyName("tracks");
                         jw.WriteStartObject();
                         // Always place at least one track in a part (even a lone track larger than the
@@ -24477,9 +24472,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     }
                     fs.Flush(flushToDisk: true);
                 }
-                AtomicReplace(partTmp, partPath);
-                written += partCount;
+                parts.Add((partTmp, partPath));
+            } while (i < items.Length);
+            return parts;
+        }
+
+        static void SaveResultsSplit(string moodsPath, KeyValuePair<string, TrackEntry>[] items, int total, string generatedAt)
+        {
+            // A single mbxmoods.json on disk now is the PRE-SPLIT catalog: archive it once, before
+            // the numbered parts supersede it, so the last single-file state stays recoverable.
+            // Routine single-file saves keep only their atomic .bak swap; this heavier compressed
+            // backup fires only at the single -> split transition, and never when already split.
+            if (File.Exists(moodsPath))
+            {
+                try { BackupCatalogCompressed(moodsPath); }
+                catch (Exception ex) { Console.Error.WriteLine($"  Warning: pre-split backup not written: {ex.Message}"); }
             }
+
+            var parts = WriteCatalogPartTemps(moodsPath, items, total, generatedAt, null);
+            foreach (var p in parts) AtomicReplace(p.Tmp, p.Target);
+            int partIndex = parts.Count, written = items.Length;
 
             // The stale single catalog and any higher-numbered parts from a larger previous split are
             // no longer part of the set — remove them so only .1..partIndex remain (the INVARIANT).

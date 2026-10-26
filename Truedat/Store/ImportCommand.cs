@@ -435,7 +435,7 @@ namespace Truedat.Store
             var catalog = Path.GetFullPath(o.CatalogPath!);
             var tracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             int loaded = Program.LoadExistingMoodsForStore(catalog, tracks);
-            if (loaded == 0 && !File.Exists(catalog) && !File.Exists(catalog + ".1"))
+            if (loaded == 0 && global::Truedat.CatalogArchive.CatalogFiles(catalog).Count == 0)
                 throw new StoreException($"Catalog not found: {catalog} (neither the file nor .1 parts).");
             r.Entries = loaded; r.Catalog = catalog;
             (r.CatalogSha256, r.CatalogBytes) = HashCatalog(catalog);
