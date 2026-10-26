@@ -24,6 +24,8 @@ namespace Truedat.Store
                     Block(assert, $"NULL preservation ({storedHash}, {winningHash})", () => PreserveAbsent(assert, storedHash, winningHash));
             foreach (bool explicitNull in new[] { false, true })
                 Block(assert, "ordinary import absent hash", () => OrdinaryImportAbsentHash(assert, explicitNull));
+            foreach (bool explicitNull in new[] { false, true })
+                Block(assert, "first mirror import absent hash", () => FirstMirrorImportAbsentHash(assert, explicitNull));
             foreach (string mode in new[] { "omitted", "NULL", "supplied zero/empty" })
                 Block(assert, "ordinary import absent scalars", () => OrdinaryImportAbsentScalars(assert, mode));
             Block(assert, "fresh scan NULL", () => FreshScanNull(assert));
@@ -134,6 +136,38 @@ namespace Truedat.Store
                 label + ": supplied title lands while omitted copy facts survive");
             assert(f.HasHistory(history) && f.Sql("PRAGMA foreign_key_check;") == null,
                 label + ": earlier run IDs/payloads survive and foreign keys remain valid");
+        }
+
+        // A first mirror location can match a primary entity by relative path without carrying a hash. Its absent values must not
+        // re-key the SHARED description to entity:<id> and erase the primary's measurements (the location itself has no prior key).
+        static void FirstMirrorImportAbsentHash(Action<bool, string> assert, bool explicitNull)
+        {
+            string label = "MergeSafety first mirror import absent hash (" + (explicitNull ? "NULL" : "omitted") + ")";
+            const string mirrorRoot = @"X:\MirrorSafety", mirrorPath = mirrorRoot + @"\a.flac";
+            using var f = new Fixture();
+            var primary = Entry(ShaA, "flac-frames", Old, true); primary["key"] = "C";
+            f.Seed((PathA, primary), (PathB, Entry(ShaB, "flac-frames", Old, true)));
+            const string content = "quote(c.content_key) || '|' || quote(c.content_key_kind) || '|' || quote(c.audioStreamSha256) || '|' || quote(c.audioStreamSha256Source) || '|' || quote(c.bpm) || '|' || quote(c.key) || '|' || hex(c.mfcc) || '|' || quote(c.run_id)";
+            string before = f.Cell(content, PathA)!, copy = f.CopyValues(PathA), neighbor = f.Values(PathB), history = f.History();
+            string? entity = f.Cell("l.entity_id", PathA);
+            var partial = new Dictionary<string, object?> { ["lastModified"] = New, ["title"] = "Mirror metadata" };
+            if (explicitNull)
+                foreach (string field in new[] { "audioStreamSha256", "audioStreamSha256Source", "bpm", "key", "mfcc", "album", "fileMd5" }) partial[field] = null;
+            var report = f.ImportMirror(mirrorRoot, mirrorPath, partial);
+            assert(report.MatchedPath == 1 && report.EntitiesCreated == 0 && report.CreatedNoSha == 0
+                && f.Sql("SELECT count(*) FROM file_entity;") == "2" && f.Cell("l.entity_id", PathA) == entity && f.Cell("l.entity_id", mirrorPath) == entity,
+                label + ": the new mirror location deliberately shares the primary entity without creating one");
+            string? after = f.Cell(content, PathA);
+            assert(after == before && f.Cell(content, mirrorPath) == before,
+                label + ": absent identity and measurements preserve the primary's shared description and measuring run (got " + after + ")");
+            assert(f.CopyValues(PathA) == copy && f.Cell("p.title || '|' || (p.album IS NULL) || '|' || (p.fileMd5 IS NULL)", mirrorPath) == "Mirror metadata|1|1",
+                label + ": mirror metadata stays on its own copy and never borrows or rewrites the primary's copy facts");
+            assert(f.Values(PathB) == neighbor && f.HasHistory(history) && f.Sql("PRAGMA foreign_key_check;") == null,
+                label + ": the unrelated track and earlier history survive with valid foreign keys");
+            string once = f.Values(PathA), mirrorOnce = f.Values(mirrorPath); long generation = f.Generation();
+            f.ImportMirror(mirrorRoot, mirrorPath, partial);
+            assert(f.Values(PathA) == once && f.Values(mirrorPath) == mirrorOnce && f.Generation() == generation && f.HasHistory(history),
+                label + ": repeating the mirror import changes neither shared values, copy facts, nor generation");
         }
 
         // The reader maps missing/null nonnullable scalars to defaults. Presence, not those defaults,
@@ -365,6 +399,8 @@ namespace Truedat.Store
             }
             internal ImportReport Import(Dictionary<string, object?> entry)
                 => ImportCommand.Execute(new ImportOptions { StorePath = Store, CatalogPath = Write("import.json", (PathA, entry)), LibraryRoot = Root });
+            internal ImportReport ImportMirror(string root, string path, Dictionary<string, object?> entry)
+                => ImportCommand.Execute(new ImportOptions { StorePath = Store, CatalogPath = Write("mirror.json", (path, entry)), LibraryRoot = root, RootRole = "mirror" });
             internal int Merge(Dictionary<string, object?> entry)
             {
                 string winner = Write("winner.json", (PathA, entry));

@@ -42,6 +42,8 @@ namespace Truedat.Store
             Block(assert, "MirrorRowPromoted", () => TestMirrorRowAtLibraryPathIsPromoted(assert));
             Block(assert, "ImportPinsSourceCatalog", () => TestImportPinsSourceCatalog(assert));
             Block(assert, "ImportPinsGappedSourceCatalog", () => TestImportPinsGappedSourceCatalog(assert));
+            Block(assert, "CustomCatalogArchiveRecovery", () => TestCustomCatalogArchiveRecovery(assert));
+            Block(assert, "SplitPublicationInfo", () => TestSplitPublicationInfo(assert));
             Block(assert, "AutomaticCatalogSeeding", () => TestAutomaticCatalogSeeding(assert));
             Block(assert, "ShaTierMd5Rule", () => TestShaTierMd5Rule(assert));
             Block(assert, "PromotionReusesPrimary", () => TestPromotionReusesAnotherMachinesPrimary(assert));
@@ -1717,6 +1719,97 @@ namespace Truedat.Store
                     $"a gapped split pin retains both deleted source parts byte for byte (part 1: {got1 != null && got1.SequenceEqual(part1)}, part 3: {got3 != null && got3.SequenceEqual(part3)})");
             }
             finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
+        // Custom --moods names must restore every split member too. Retirement adds a companion JSON to the archive;
+        // selecting that file instead of the custom catalog silently restores zero tracks, although every source byte was kept.
+        static void TestCustomCatalogArchiveRecovery(Action<bool, string> assert)
+        {
+            foreach (var mode in new[] { "custom pin", "custom retired", "custom retired with companion", "canonical retired control" })
+            {
+                var dir = Path.Combine(Path.GetTempPath(), "truedat-custom-archive-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    bool pin = mode == "custom pin", canonical = mode == "canonical retired control";
+                    var cat = Path.Combine(dir, canonical ? "mbxmoods.json" : "custom.json");
+                    var expected = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+                    for (int i = 1; i <= 2; i++)
+                    {
+                        var path = @"D:\archive\track" + i + ".flac";
+                        var entry = new TrackEntry { LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc),
+                            Features = new TrackFeatures { Title = "Track " + i, Bpm = 120 + i, Key = "C" } };
+                        expected[path] = entry;
+                        WriteCatalog(cat + "." + i, new Dictionary<string, TrackEntry> { [path] = entry });
+                    }
+                    if (!pin) File.WriteAllText(Path.ChangeExtension(cat, ".mbxs"), "synthetic sidecar");
+                    if (canonical || mode == "custom retired with companion")
+                        File.WriteAllText(Path.Combine(dir, global::Truedat.Edges.EdgeCompanion.FileName), "{\"contract\":\"mbxedges.v1\",\"tracks\":{}}");
+                    var originals = Directory.GetFiles(dir).ToDictionary(f => Path.GetFileName(f), File.ReadAllBytes);
+                    var archive = pin ? ImportCommand.PinCatalog(cat) : StoreScan.RetirePublishedFiles(cat, archive: true);
+                    assert(archive != null && File.Exists(archive), $"archive recovery {mode}: creates the archive");
+                    if (archive == null || !File.Exists(archive)) continue;
+                    using (var zip = ZipFile.OpenRead(archive))
+                    {
+                        bool exact = zip.Entries.Count == originals.Count;
+                        foreach (var original in originals)
+                        {
+                            var member = zip.GetEntry(original.Key);
+                            if (member == null) { exact = false; continue; }
+                            using var ms = new MemoryStream();
+                            using (var stream = member.Open()) stream.CopyTo(ms);
+                            exact &= ms.ToArray().SequenceEqual(original.Value);
+                        }
+                        assert(exact, $"archive recovery {mode}: every original member is archived byte for byte");
+                    }
+                    assert(originals.Keys.All(name => File.Exists(Path.Combine(dir, name)) == pin),
+                        $"archive recovery {mode}: pinning retains originals; retirement removes only archived originals");
+                    var restored = Path.Combine(dir, "restored.json");
+                    using (var dst = File.Create(restored)) CatalogArchive.ExtractCatalogTo(archive, dst);
+                    var entries = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                    Program.LoadExistingMoodsForStore(restored, entries);
+                    assert(entries.Count == expected.Count && expected.All(kv => entries.TryGetValue(kv.Key, out var entry)
+                        && entry.Features?.Title == kv.Value.Features!.Title && entry.Features?.Bpm == kv.Value.Features.Bpm),
+                        $"archive recovery {mode}: restores both catalog records and values ({entries.Count}/{expected.Count})");
+                }
+                finally
+                {
+                    var tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                    if (Path.GetFullPath(dir).StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase))
+                        try { Directory.Delete(dir, true); } catch { }
+                }
+            }
+        }
+
+        // Store-info must recognize the same numbered publication that the reader and publication guard accept.
+        static void TestSplitPublicationInfo(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "truedat-split-info-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            long savedMax = Program.CatalogMaxBytes; bool savedOff = StoreScan.PublishOff;
+            try
+            {
+                var store = Path.Combine(dir, "truedat.db"); var cat = Path.Combine(dir, "mbxmoods.json");
+                var entries = FixtureEntries(@"D:\split-info");
+                using (StoreLog.Quiet()) ImportCommand.ExecuteEntries(store, entries, @"D:\split-info", "primary", true, "import", "1", "split-info fixture", null, null);
+                Program.CatalogMaxBytes = 400; StoreScan.PublishOff = false;
+                var error = StoreScan.Publish(store, cat, out var published);
+                var loaded = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                Program.LoadExistingMoodsForStore(cat, loaded);
+                assert(error == null && published.Published && published.Entries == entries.Count && !File.Exists(cat)
+                    && CatalogArchive.CatalogFiles(cat).Count > 1 && new HashSet<string>(entries.Keys, PathComparer.Instance).SetEquals(loaded.Keys),
+                    $"split info: fixture publishes every record as numbered parts ({loaded.Count}/{entries.Count}; {error?.Message ?? "ok"})");
+                var info = StoreInfoCommand.Collect(store, cat);
+                assert(info.FilesState == "at-generation" && info.PublishedGeneration == info.Generation && info.Generation == published.Generation,
+                    $"split info: a healthy split publication is current (state {info.FilesState}, published {info.PublishedGeneration}, store {info.Generation})");
+            }
+            finally
+            {
+                Program.CatalogMaxBytes = savedMax; StoreScan.PublishOff = savedOff;
+                var tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                if (Path.GetFullPath(dir).StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase))
+                    try { Directory.Delete(dir, true); } catch { }
+            }
         }
 
         // Review 2026-10-24 #7: MoveRoot counted every row under the root as moved, so a remap to the spelling the root already had
