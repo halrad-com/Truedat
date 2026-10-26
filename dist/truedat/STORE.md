@@ -9,6 +9,12 @@ the identity history. Nothing in the store changes how a scan without `--store`
 behaves, and nothing is installed: truedat uses the SQLite that ships with Windows (`winsqlite3.dll`,
 3.40 or newer, checked at open with a plain refusal when missing).
 
+**Store only.** `truedat --config publish false` (or `--no-publish` for one run) makes the store the
+only output: no `mbxmoods.json`, sidecar or `mbxedges.v1.json` is written beside it. Files already
+there are kept once in `mbxmoods.json.retired.<time>.zip` and removed. Edges still go into the store,
+and `--store-export` / `--edges-export` still write files when asked. `--publish` turns publishing back
+on for one run. Use it only with a hub that reads the store; a hub that reads the files sees nothing.
+
 ## Where it lives
 
 - Beside a local catalog: `<library>\truedat.db`. When the catalog folder is a network share the store
