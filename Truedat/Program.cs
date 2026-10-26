@@ -764,6 +764,8 @@ namespace Truedat
             Console.WriteLine("  --keep-backups N    Keep the newest N timestamped catalog backups after --fixup / --remap /");
             Console.WriteLine("                      --merge-moods / --migrate (rotation, never truncation; 0 = keep all,");
             Console.WriteLine("                      default 5). Backups are compressed .zip (~8-10x smaller than a plain copy).");
+            Console.WriteLine("  --split-mb N        Catalog part size in MB (16-1900, default 1900 = 1.9 GB): past it the catalog is");
+            Console.WriteLine("                      written as mbxmoods.json.1, .2, ... instead of one file."); 
             Console.WriteLine();
             Console.WriteLine("Exclusions:");
             Console.WriteLine("  --exclusions <path> Use this exclusion file instead of mbxmoods-exclude.json beside the");
@@ -988,6 +990,8 @@ namespace Truedat
             "edge-arrays", "edge-arrays-drop", "no-edge-arrays",
             // the saved end-of-scan summary (config key `scan-summary`, default true; the parser accepts the injected flag, the scan reads the value)
             "scan-summary",
+            // the catalog part size (config key `split-mb`, default 1900)
+            "split-mb",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1006,6 +1010,7 @@ namespace Truedat
             // "store" is deliberately absent: its value is optional (bare --store = the default location, S2 C0).
             "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size", "store-dir",
             "budget",   // "edges-export" is deliberately absent: its value is optional (bare = beside the catalog).
+            "split-mb",
         };
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
@@ -1438,7 +1443,9 @@ namespace Truedat
         // CatalogLoadMaxBytes, so what truedat writes is always something truedat can read.
         // A catalog is EITHER a single mbxmoods.json OR the numbered parts, never both. Static
         // (not const) so the self-test can lower it to force a split over a handful of tracks.
-        internal static long CatalogMaxBytes = 1_900_000_000L;   // ~200 MB under the load ceiling
+        internal static long CatalogMaxBytes = SplitMbDefault * BytesPerMb;   // config `split-mb` / --split-mb; operator 2026-10-25: the current 1.9 GB
+        internal const int SplitMbDefault = 1900, SplitMbMin = 16, SplitMbMax = 1900;   // 1900 MB = the 1,900,000,000-byte limit truedat always had
+        internal const long BytesPerMb = 1_000_000L;   // decimal MB, so the default is the old byte limit exactly
 
         // --enableshortfiles: scan very short files that are skipped by default. Off by
         // default -> files under ShortFileMaxSecs (silent spacers, sub-second junk) are
@@ -2803,6 +2810,7 @@ namespace Truedat
                          && !arg.StartsWith("-") && !arg.StartsWith("/"))
                     prettifyOutPath = args[i];
                 else if (canonical == "keep-backups" && i + 1 < args.Length && int.TryParse(args[i + 1], out var kb) && kb >= 0) { _keepBackups = kb; i++; }
+                else if (canonical == "split-mb" && i + 1 < args.Length && int.TryParse(args[i + 1], out var smb) && smb >= SplitMbMin && smb <= SplitMbMax) { CatalogMaxBytes = smb * BytesPerMb; i++; }
                 else if (canonical == "analyze") analyzeMode = true;
                 else if (canonical == "audit") auditLog = true;
                 else if (canonical == "audit-verdicts") { auditLog = true; _auditVerdicts = true; }
@@ -4350,7 +4358,7 @@ namespace Truedat
                                             freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, recompSha, "flac-frames")
                                         : RebuildCacheEntryFromTags(afEx, freshTags.Artist, freshTags.Title,
                                             freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                                    RefreshedMd5Rule(trackEntry, afEx.FileMd5);
+                                    RefreshedMd5Rule(trackEntry, afEx.FileMd5, refreshedMd5);
                                     afHitTag = "cached·sha";
                                     afFingerprintV1 = trackEntry.FingerprintV1;
                                     afAudioStreamSha256 = trackEntry.AudioStreamSha256;
@@ -4381,7 +4389,7 @@ namespace Truedat
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                 : RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
-                            RefreshedMd5Rule(trackEntry, xs.Entry.FileMd5);
+                            RefreshedMd5Rule(trackEntry, xs.Entry.FileMd5, refreshedMd5);
                             RemoveIfMoved(afMoodsTracks, xs.OldKey!);
                             afHitTag = "cached·sha";
                             afFingerprintV1 = trackEntry.FingerprintV1;
@@ -5153,7 +5161,7 @@ namespace Truedat
                                             : RebuildCacheEntryFromTags(
                                                 fEx, freshTags.Artist, freshTags.Title, freshTags.Album,
                                                 freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                        RefreshedMd5Rule(flShaPathEntry, fEx.FileMd5);
+                                        RefreshedMd5Rule(flShaPathEntry, fEx.FileMd5, refreshedMd5);
                                         var flShaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(flShaPathEntry.Features, filePath, fEx.Features.SmfmScores) ? " +smfm" : "";
                                         if (flShaPathSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                         flMoodsTracks[fullPath] = flShaPathEntry;
@@ -5190,7 +5198,7 @@ namespace Truedat
                                         : RebuildCacheEntryFromTags(
                                             xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
-                                    RefreshedMd5Rule(flCrossShaEntry, xs.Entry.FileMd5);
+                                    RefreshedMd5Rule(flCrossShaEntry, xs.Entry.FileMd5, refreshedMd5);
                                     var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
@@ -6458,7 +6466,7 @@ namespace Truedat
                                                 var shaPathEntry = legacyHit
                                                     ? RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp, recomputedSha, "flac-frames")
                                                     : RebuildCacheEntry(existing, t, currentLastMod, refreshedMd5, refreshedFp);
-                                                RefreshedMd5Rule(shaPathEntry, existing.FileMd5);
+                                                RefreshedMd5Rule(shaPathEntry, existing.FileMd5, refreshedMd5);
                                                 var shaPathSmfmTag = _refreshSmfm && ApplySmfmInPlace(shaPathEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                 if (shaPathSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                 allTracks[t.Location] = shaPathEntry;
@@ -6497,7 +6505,7 @@ namespace Truedat
                                                 if (propsOk)
                                                 {
                                                     var rekeyEntry = RebuildCacheEntry(existing, t, currentLastMod, bodyHashes.md5, rescueFp, recomputedSha, "flac-frames");
-                                                    RefreshedMd5Rule(rekeyEntry, existing.FileMd5);
+                                                    RefreshedMd5Rule(rekeyEntry, existing.FileMd5, bodyHashes.md5);
                                                     var rekeySmfmTag = _refreshSmfm && ApplySmfmInPlace(rekeyEntry.Features, scanPath, existing.Features.SmfmScores) ? " +smfm" : "";
                                                     if (rekeySmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                                     allTracks[t.Location] = rekeyEntry;
@@ -6555,7 +6563,7 @@ namespace Truedat
                                         var crossShaEntry = crossLegacyHit
                                             ? RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                             : RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
-                                        RefreshedMd5Rule(crossShaEntry, xs.Entry.FileMd5);
+                                        RefreshedMd5Rule(crossShaEntry, xs.Entry.FileMd5, refreshedMd5);
                                         var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
@@ -17519,6 +17527,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // are edited by hand and nothing else compares them.
                 Assert(CatalogMaxBytes < CatalogLoadMaxBytes,
                     $"catalog: the part-roll threshold ({CatalogMaxBytes:N0}) stays under the load ceiling ({CatalogLoadMaxBytes:N0})");
+                // `split-mb` (operator 2026-10-25): the current 1.9 GB by default, and the largest value the setting accepts still stays under the
+                // load ceiling — so no configured size can write a catalog truedat cannot read back. The config range is the parser's.
+                var splitSetting = global::Truedat.TruedatConfig.Settings.Single(s => s.Key == "split-mb");
+                Assert(SplitMbDefault * BytesPerMb == 1_900_000_000L && splitSetting.Default == SplitMbDefault.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    $"catalog: split-mb defaults to the 1.9 GB limit truedat always had ({SplitMbDefault} MB; config default '{splitSetting.Default}')");
+                Assert(splitSetting.Min == SplitMbMin && splitSetting.Max == SplitMbMax && SplitMbMax * BytesPerMb < CatalogLoadMaxBytes,
+                    $"catalog: split-mb's range ({splitSetting.Min}-{splitSetting.Max} MB) is the parser's and its max stays under the load ceiling"); 
 
                 // A catalog written at the threshold must round-trip through the SHARED loader —
                 // the streaming one, not a string. Proves the helper on real catalog shape; the
@@ -23629,14 +23644,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>The sha cache tiers (2 and 4) rebuild an entry from a full body read, so the whole-file MD5 they pass in is the file's
         /// CURRENT one. Without --file-md5 a scan does not start recording MD5s, but NULL is not present (operator 2026-10-25): dropping a
         /// held one to NULL used to leave the stored value — stale after a tag edit — in the store and the next publication. So: an entry
-        /// that held an MD5 keeps the fresh one; one that held none stays without; a held MD5 with nothing fresh to replace it is removed
-        /// explicitly (<see cref="TrackEntry.CopyCleared"/>), because the tier knows the file changed since it was taken.</summary>
-        internal static void RefreshedMd5Rule(TrackEntry rebuilt, string? heldMd5)
+        /// that held an MD5 takes the fresh one; one that held none stays without; a held MD5 with nothing fresh to replace it is removed
+        /// explicitly (<see cref="TrackEntry.CopyCleared"/>), because the tier knows the file changed since it was taken. The decision is
+        /// made on <paramref name="freshMd5"/> — what the tier COMPUTED — never on the rebuilt entry's value: the cache builder copies the
+        /// source entry's MD5 forward when it is handed none, so "the rebuilt entry has an MD5" says nothing about whether it is current
+        /// (2194e2c's SHA-cache test caught exactly that).</summary>
+        internal static void RefreshedMd5Rule(TrackEntry rebuilt, string? heldMd5, string? freshMd5 = null)
         {
             if (_fileMd5Enabled) return;                                   // --file-md5: the refreshed value is the scan's, as before
             if (string.IsNullOrEmpty(heldMd5)) { rebuilt.FileMd5 = null; return; }
-            if (string.IsNullOrEmpty(rebuilt.FileMd5))
-                rebuilt.CopyCleared = (rebuilt.CopyCleared ?? 0UL) | global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");
+            if (!string.IsNullOrEmpty(freshMd5)) { rebuilt.FileMd5 = freshMd5; return; }
+            rebuilt.FileMd5 = null;
+            rebuilt.CopyCleared = (rebuilt.CopyCleared ?? 0UL) | global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");
         }
 
         /// <summary>What <see cref="EnsureDefaultStore"/> decided: no store for this scan; a store in force (created or seeded); or the

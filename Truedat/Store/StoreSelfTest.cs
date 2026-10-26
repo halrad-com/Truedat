@@ -1661,19 +1661,19 @@ namespace Truedat.Store
             {
                 Program._fileMd5Enabled = false;
                 string fresh = new string('f', 32), held = new string('e', 32);
-                var a = new TrackEntry { FileMd5 = fresh };
-                Program.RefreshedMd5Rule(a, held);
-                assert(a.FileMd5 == fresh && a.CopyCleared == null, $"sha tier: a held MD5 is replaced by the fresh one (got {a.FileMd5 ?? "<null>"}, cleared {a.CopyCleared})");
+                var a = new TrackEntry { FileMd5 = held };   // the cache builder copied the held MD5 forward
+                Program.RefreshedMd5Rule(a, held, fresh);
+                assert(a.FileMd5 == fresh && a.CopyCleared == null, $"sha tier: a held MD5 is replaced by the fresh one the tier computed (got {a.FileMd5 ?? "<null>"}, cleared {a.CopyCleared})");
                 var b = new TrackEntry { FileMd5 = fresh };
-                Program.RefreshedMd5Rule(b, null);
+                Program.RefreshedMd5Rule(b, null, fresh);
                 assert(b.FileMd5 == null && b.CopyCleared == null, "sha tier: no MD5 is added where none was held (without --file-md5)");
-                var c = new TrackEntry { FileMd5 = null };
+                var c = new TrackEntry { FileMd5 = held };   // copied forward, nothing fresh computed: the copy is not current
                 Program.RefreshedMd5Rule(c, held);
                 assert(c.FileMd5 == null && c.CopyCleared == TrackEntryMapper.CopyMaskOf("fileMd5"),
                     "sha tier: a held MD5 with nothing fresh to replace it is removed explicitly, never left standing by a NULL");
                 Program._fileMd5Enabled = true;
                 var d = new TrackEntry { FileMd5 = fresh };
-                Program.RefreshedMd5Rule(d, null);
+                Program.RefreshedMd5Rule(d, null, fresh);
                 assert(d.FileMd5 == fresh && d.CopyCleared == null, "sha tier: under --file-md5 the fresh MD5 is the scan's, as before");
             }
             finally { Program._fileMd5Enabled = was; }

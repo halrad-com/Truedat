@@ -106,6 +106,9 @@ namespace Truedat
             // Operator 2026-10-23: the end-of-scan summary is what gets saved and compared; saving it by hand was a copy, a notepad
             // and a file name every run. Beside the catalog as mbxmoods-scan-<start date>-<n>.txt (Program.ScanSummaryFileName).
             new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the scan summary to a file" },
+            // Operator 2026-10-25: "there should be a size split setting" ... "lets use the current split 1.9". The catalog (scan writer and store
+            // publication alike) rolls into numbered parts past this size. Max stays under the load ceiling (Program.CatalogLoadMaxBytes).
+            new Setting { Key = "split-mb",        Kind = Kind.Int,  Min = 16, Max = 1900, Default = "1900", Help = "catalog part size (MB)" },
         };
 
         private static readonly Dictionary<string, Setting> ByKey =
