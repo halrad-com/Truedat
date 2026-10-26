@@ -8,6 +8,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV4.1] — 2026-10-25
+
+### Added
+
+- Multipart catalog support.
+
 ## [0.5.5.3-EV4] — 2026-10-25
 
 ### Changed
