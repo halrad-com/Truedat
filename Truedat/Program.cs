@@ -12324,8 +12324,11 @@ namespace Truedat
         {
             foreach (var dir in LibrarySearchDirs(exeDirRaw, includeMarkerScan))
             {
+                // A split catalog (mbxmoods.json.1, .2, … and no single file) IS the catalog in that folder: the reader stitches the
+                // parts from the base path. Probing for the single file only walked PAST a library that held parts, on to whatever
+                // catalog sat further up the ladder (2026-10-25: a bare --store-import imported someone else's file).
                 var cand = Path.Combine(dir, MoodsFileName);
-                if (File.Exists(cand)) return cand;
+                if (global::Truedat.CatalogArchive.CatalogFiles(cand).Count > 0) return cand;
             }
             return null;
         }
@@ -21193,6 +21196,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.WriteAllText(strayInToolDir, "{}");
                     Assert(ProbeCatalogBesideExe(toolDir) == libCatalog,
                         "discover: the library's catalog wins over one sitting in the tool folder");
+
+                    // A library holding a SPLIT catalog (parts only, no single file) is found too, and still wins over the tool
+                    // folder's stray — it used to be walked past (2026-10-25).
+                    File.Delete(libCatalog);
+                    File.WriteAllText(libCatalog + ".1", "{}"); File.WriteAllText(libCatalog + ".2", "{}");
+                    Assert(ProbeCatalogBesideExe(toolDir) == libCatalog,
+                        "discover: a library holding only catalog parts (.1, .2) is the catalog found, over a stray in the tool folder");
+                    File.Delete(libCatalog + ".1");
+                    Assert(ProbeCatalogBesideExe(toolDir) == libCatalog,
+                        "discover: a part set with a missing number (.2 only) is still the catalog, as the reader reads it");
+                    File.Delete(libCatalog + ".2");
+                    File.WriteAllText(libCatalog, "{}");
 
                     // Exe dir only: a flat install where the catalog sits beside the exe.
                     File.Delete(libCatalog);
