@@ -108,6 +108,9 @@ namespace Truedat
             new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the scan summary to a file" },
             // Operator 2026-10-25: "there should be a size split setting" ... "lets use the current split 1.9". The catalog (scan writer and store
             // publication alike) rolls into numbered parts past this size. Max stays under the load ceiling (Program.CatalogLoadMaxBytes).
+            // Operator 2026-10-25: a store-only install. With a store in force, false writes the store only — no catalog, sidecar or
+            // edges file (files already there are kept once in a .retired zip and removed). Default true: today's behaviour.
+            new Setting { Key = "publish",         Kind = Kind.Bool, Default = "true", Help = "write catalog files beside the store" },
             new Setting { Key = "split-mb",        Kind = Kind.Int,  Min = 16, Max = 1900, Default = "1900", Help = "catalog part size (MB)" },
         };
 

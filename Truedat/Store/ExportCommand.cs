@@ -26,6 +26,9 @@ namespace Truedat.Store
         public long Generation; public bool Published; public bool Companion;
         /// <summary>For the store-result record (T11): the store opened, its schema, and where the sidecar/companion landed.</summary>
         public string StorePath = ""; public int StoreSchema; public string SidecarPath = ""; public string CompanionPath = "";
+        /// <summary>Config <c>publish false</c>: nothing was published on purpose (StoreScan.PublishOff); RetiredArchive names the zip the
+        /// files already there were kept in, if there were any.</summary>
+        public bool PublicationOff; public string? RetiredArchive;
     }
 
     internal sealed class RoundtripReport

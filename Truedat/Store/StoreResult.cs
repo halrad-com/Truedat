@@ -153,7 +153,12 @@ namespace Truedat.Store
                 Catalog = ok ? Describe(rep.OutPath) : null, Sidecar = ok ? Describe(rep.SidecarPath) : null,
                 Companion = ok && rep.Companion ? Describe(rep.CompanionPath) : null,
             };
-            _scan.Messages.RemoveAll(m => m.Id == "publish-failed");
+            _scan.Messages.RemoveAll(m => m.Id == "publish-failed" || m.Id == "publication-off");
+            if (rep.PublicationOff && error == null)
+            {
+                _scan.Messages.Add(new StoreResultMessage { Id = "publication-off", Text = "publication is off (config publish false / --no-publish): the store is the only output; no catalog, sidecar or mbxedges.v1.json was written" });
+                return;
+            }
             if (!ok) _scan.Messages.Add(new StoreResultMessage { Id = "publish-failed", Text = "the files were not published from the store: " + (error?.Message ?? "the export did not publish") + "; the store is ahead of the files; " + StoreScan.ScanPublishes, Action = "truedat" });
         }
 

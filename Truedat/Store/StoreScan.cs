@@ -198,9 +198,59 @@ namespace Truedat.Store
         /// <summary>T18a-d: publish the catalog + sidecar + edges companion DERIVED from the store (the --store-export publisher: one read
         /// snapshot, generation-stamped, the ruled rename order). Returns null on success, else the failure (the store is unaffected: a
         /// publication failure leaves the files behind the store, which T07 accepts and the next publish repairs).</summary>
-        internal static Exception? Publish(string storePath, string catalogPath, out ExportReport report)
+        /// <summary>Config <c>publish false</c> / <c>--no-publish</c> (operator 2026-10-25: "i just want the store, i dont want to keep the
+        /// legacy mood files around"): a scan, a store-backed verb and a restore write the STORE only — no catalog, sidecar or
+        /// mbxedges.v1.json. Off by default (false), so nothing changes until it is set. Applies only with a store in force; a scan
+        /// without one still writes its catalog (it would otherwise keep nothing). --store-export / --edges-export are deliberate
+        /// exports and ignore it.</summary>
+        internal static bool PublishOff;
+
+        /// <summary>Config + command line -> <see cref="PublishOff"/>: a typed <c>--no-publish</c> always wins; a typed <c>--publish</c> beats a
+        /// config <c>publish false</c>; otherwise the config decides.</summary>
+        internal static bool ResolvePublishOff(bool noPublishTyped, bool publishTyped, bool configSaysOff)
+            => noPublishTyped || (configSaysOff && !publishTyped);
+
+        /// <summary>Remove the published files beside <paramref name="catalogPath"/> (the catalog or its parts, the sidecar, the companion).
+        /// <paramref name="archive"/> true keeps them first as ONE zip, <c>&lt;catalog&gt;.retired.&lt;stamp&gt;.zip</c> (each file under its own
+        /// name; never matched by backup rotation, restorable with --restore): the files a scan finds when publication was switched
+        /// off are never silently deleted. False is for files this run wrote itself (a store-backed verb's working copy). Returns the
+        /// zip's path, or null when nothing was there (or nothing was archived).</summary>
+        internal static string? RetirePublishedFiles(string catalogPath, bool archive)
+        {
+            var files = global::Truedat.CatalogArchive.CatalogFiles(catalogPath);
+            var sidecar = Path.ChangeExtension(catalogPath, ".mbxs");
+            var companion = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
+            if (File.Exists(sidecar)) files.Add(sidecar);
+            if (File.Exists(companion)) files.Add(companion);
+            if (files.Count == 0) return null;
+            string? zip = null;
+            if (archive)
+            {
+                var stamp = DateTime.Now.ToString("yyyyMMdd.HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+                zip = $"{catalogPath}.retired.{stamp}.zip";
+                for (int n = 2; File.Exists(zip); n++) zip = $"{catalogPath}.retired.{stamp}-{n}.zip";
+                global::Truedat.CatalogArchive.WriteZipBackup(files.Select(f => (f, Path.GetFileName(f))).ToList(), zip);
+            }
+            foreach (var f in files) File.Delete(f);
+            return zip;
+        }
+
+        internal static Exception? Publish(string storePath, string catalogPath, out ExportReport report, bool force = false)
         {
             report = new ExportReport();
+            if (PublishOff && !force)
+            {
+                // Publication off: the store is the only output. Files left from before are kept once in a zip and removed, so a later
+                // scan's start-of-scan check never compares the store with a catalog nothing keeps current (T18i reads "rebuild").
+                report.PublicationOff = true;
+                try
+                {
+                    report.RetiredArchive = RetirePublishedFiles(catalogPath, archive: true);
+                    if (report.RetiredArchive != null) StoreLog.Info($"publication off: the files beside the store were kept in {report.RetiredArchive} and removed");
+                    return null;
+                }
+                catch (Exception ex) { return ex; }
+            }
             // The WHOLE library, always (StoreDal.LibraryRoots): a scan or a verb publishes every entry it holds, wherever the files are.
             // Passing the root the scan loaded made it publish one drive's tracks — or refuse, with the library under two roots.
             try { ExportCommand.Execute(new ExportOptions { StorePath = storePath, OutPath = catalogPath }, report); return null; }

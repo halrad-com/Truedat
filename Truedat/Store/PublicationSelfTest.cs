@@ -44,6 +44,58 @@ namespace Truedat.Store
             try { TestOriginRoot(assert); }
             catch (Exception ex) { assert(false, $"Publication.OriginRoot: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { ExportCommand.BeforeRootPicked = null; }
+            Console.WriteLine("Publication self-test (config publish false: the store is the only output; files already there are kept once in a zip and removed)");
+            try { TestPublicationOff(assert); }
+            catch (Exception ex) { assert(false, $"Publication.Off: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { StoreScan.PublishOff = false; }
+        }
+
+        // Operator 2026-10-25: "i just want the store, i dont want to keep the legacy mood files around". Off by default; with it set, a
+        // publication writes nothing and retires what was there into ONE .retired zip (never silently deleted); a store-backed verb's
+        // forced publish still writes its working copy; store-info says "off", not "behind".
+        static void TestPublicationOff(Action<bool, string> assert)
+        {
+            assert(!StoreScan.ResolvePublishOff(false, false, false) && StoreScan.ResolvePublishOff(false, false, true)
+                   && !StoreScan.ResolvePublishOff(false, true, true) && StoreScan.ResolvePublishOff(true, true, false) && StoreScan.ResolvePublishOff(true, false, false),
+                "publish off: unset = on; config false = off; --publish beats config false; --no-publish always wins");
+            using (var d = new Dir())
+            {
+                var store = d.P("truedat.db"); var moods = d.P("mbxmoods.json"); var sidecar = d.P("mbxmoods.mbxs");
+                using (StoreLog.Quiet()) ImportCommand.ExecuteEntries(store, One(@"D:\music\a.flac", 'a', 120), @"D:\music", "primary", true, "import", "1", "fixture", null, null);
+                StoreScan.PublishOff = false;
+                var ex = StoreScan.Publish(store, moods, out var on);
+                assert(ex == null && on.Published && File.Exists(moods) && File.Exists(sidecar) && !on.PublicationOff, "publish off: by default a publication writes the catalog and sidecar");
+                var catalogBytes = File.ReadAllBytes(moods);
+
+                StoreScan.PublishOff = true;
+                ex = StoreScan.Publish(store, moods, out var off);
+                assert(ex == null && off.PublicationOff && !off.Published && !File.Exists(moods) && !File.Exists(sidecar),
+                    $"publish off: a publication writes nothing and the files that were there are removed ({ex?.Message ?? "ok"})");
+                byte[]? kept = null; string[] names = new string[0];
+                if (off.RetiredArchive != null && File.Exists(off.RetiredArchive))
+                    using (var zip = System.IO.Compression.ZipFile.OpenRead(off.RetiredArchive))
+                    {
+                        names = zip.Entries.Select(e => e.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+                        var e = zip.GetEntry("mbxmoods.json");
+                        if (e != null) using (var ms = new MemoryStream()) { using (var es = e.Open()) es.CopyTo(ms); kept = ms.ToArray(); }
+                    }
+                assert(kept != null && kept.SequenceEqual(catalogBytes) && names.SequenceEqual(new[] { "mbxmoods.json", "mbxmoods.mbxs" }),
+                    $"publish off: the removed files are kept once in {(off.RetiredArchive != null ? Path.GetFileName(off.RetiredArchive) : "no zip")} ({string.Join(", ", names)}), the catalog byte for byte");
+                ex = StoreScan.Publish(store, moods, out var again);
+                assert(ex == null && again.RetiredArchive == null && Directory.GetFiles(d.Root, "mbxmoods.json.retired.*.zip").Length == 1,
+                    "publish off: a second publication finds nothing to retire and makes no second zip");
+                var info = StoreInfoCommand.Collect(store, moods);
+                assert(info.FilesState == "off" && info.NextCommand != StoreScan.ScanPublishesCommand, $"publish off: store-info reports the files as off and never asks for a scan to publish them (got {info.FilesState}, next '{info.NextCommand}')");
+
+                ex = StoreScan.Publish(store, moods, out var forced, force: true);
+                assert(ex == null && forced.Published && File.Exists(moods), "publish off: a store-backed verb's forced publish still writes its working copy");
+                assert(StoreScan.RetirePublishedFiles(moods, archive: false) == null && !File.Exists(moods) && !File.Exists(sidecar)
+                       && Directory.GetFiles(d.Root, "mbxmoods.json.retired.*.zip").Length == 1,
+                    "publish off: the verb's working copy is removed afterwards without another zip");
+                StoreScan.PublishOff = false;
+                info = StoreInfoCommand.Collect(store, moods);
+                assert(info.FilesState == "absent", $"publish on again: store-info reports the missing files as absent, to be published (got {info.FilesState})");
+            }
         }
 
         static System.Collections.Generic.Dictionary<string, TrackEntry> One(string path, char sha, double bpm)

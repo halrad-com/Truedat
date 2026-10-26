@@ -891,6 +891,9 @@ namespace Truedat
             Console.WriteLine("                      On by default: a scan with no store makes one, with edges, seeding it from an existing");
             Console.WriteLine("                      catalog first (no audio read, no rescan). --no-store / --no-edges turn it off for one");
             Console.WriteLine("                      run; truedat --config store false (and edges false) for this install.");
+            Console.WriteLine("  --no-publish        Store only: write no catalog, sidecar or edges file beside it (files already there");
+            Console.WriteLine("                      are kept once in mbxmoods.json.retired.<time>.zip and removed). Config key `publish`;");
+            Console.WriteLine("                      --publish turns it back on for one run. Needs a hub that reads the store.");
             Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
             Console.WriteLine("  --store-import      Load the catalog (and the ledgers beside it) into the store, idempotently.");
             Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
@@ -992,6 +995,8 @@ namespace Truedat
             "scan-summary",
             // the catalog part size (config key `split-mb`, default 1900)
             "split-mb",
+            // store-only (config key `publish`, default true): --no-publish writes the store only; --publish beats config `publish false`
+            "publish", "no-publish",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1348,6 +1353,7 @@ namespace Truedat
         internal sealed class PublishState
         {
             internal bool Ok;
+            internal bool Off;   // config publish false: the store is the only output
             internal int Entries;
             internal long Generation;
             internal string? Error;
@@ -2598,6 +2604,7 @@ namespace Truedat
             bool noEdgeArrays = false;            // TDA F5: the one-run override of config edge-arrays = true (sticky tracks still keep theirs)
             string? edgesExportPath = null;
             bool noStore = false, noEdges = false; // --no-store / --no-edges: one-run overrides of the config keys `store` / `edges`
+            bool noPublish = false, publishTyped = false;   // --no-publish / --publish: the config key `publish`
             bool smfmOn = false;                  // --smfm: read Sony SMFM tags (off by default since 2026-10-14; see ResolveNoSmfm)
             bool pathsMode = false;   // --paths: read-only report of every path this run would use
             int statsDetailThreshold = 5;  // --stats-detail N: list per-file when catalog has < N tracks
@@ -2893,6 +2900,8 @@ namespace Truedat
                 else if (canonical == "no-edge-arrays") noEdgeArrays = true;
                 else if (canonical == "edge-arrays-drop") edgeArraysDropMode = true;
                 else if (canonical == "no-store") noStore = true;
+                else if (canonical == "no-publish") noPublish = true;
+                else if (canonical == "publish") publishTyped = true;
                 else if (canonical == "no-quick-cache") _quickCache = false;
                 else if (canonical == "no-dir-batch") DirStatCache.Disabled = true;
                 else if (canonical == "file-md5") _fileMd5Enabled = true;
@@ -2994,6 +3003,7 @@ namespace Truedat
             if (noStore) { storePath = null; _storeFromConfig = false; }
             _noStoreTyped = noStore;
             _noEdgesTyped = noEdges;
+            global::Truedat.Store.StoreScan.PublishOff = global::Truedat.Store.StoreScan.ResolvePublishOff(noPublish, publishTyped, ConfigSaysOff("publish"));
             _storeDirOpt = storeDir;
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
@@ -11460,8 +11470,10 @@ namespace Truedat
             if (load.Refused) return Fail(load.Refusal!.Replace("Nothing was scanned.", $"{flag} changed nothing."), 2);
             if (load.Case == "fresh") return Fail($"Error: {flag} with a store in force, but neither the store nor the catalog holds anything: nothing to change.", 1);
 
-            // (2) the verb reads the store's state
-            var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out _);
+            // (2) the verb reads the store's state. With publication off the verb still needs a FILE to run on: files left from before
+            // are kept once (a .retired zip) and removed, the store's state is written as a working copy, and (5) removes it again.
+            if (global::Truedat.Store.StoreScan.PublishOff) global::Truedat.Store.StoreScan.RetirePublishedFiles(catalogPath, archive: true);
+            var pubEx = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out _, force: true);
             if (pubEx != null) return Fail($"Error: {flag} could not publish the store's state before running ({CheckpointCause.Describe(pubEx)}); nothing was changed.", 1);
 
             // (3) The explicit remap records which original path won each output key while its existing later-wins loop runs.
@@ -11559,7 +11571,9 @@ namespace Truedat
             }
             catch (Exception ex) { storeError = CheckpointCause.Describe(ex); }
 
-            // (5) the files from the store, always
+            // (5) the files from the store, always — or, with publication off, the working copy removed (this run wrote it; no archive)
+            if (global::Truedat.Store.StoreScan.PublishOff)
+                try { global::Truedat.Store.StoreScan.RetirePublishedFiles(catalogPath, archive: false); } catch (Exception ex) { Console.Error.WriteLine($"  WARNING: the working copy beside the store was not removed ({ex.Message})"); }
             var pub2 = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out var rep2);
             rec.Export = new global::Truedat.Store.StoreResultExport
             {
@@ -11744,6 +11758,12 @@ namespace Truedat
                 return false;
             }
             p.Ok = true; p.Error = null; p.Entries = rep.Entries; p.Generation = rep.Generation; p.Succeeded++;
+            if (rep.PublicationOff)
+            {
+                p.Off = true;
+                if (rep.RetiredArchive != null) Console.WriteLine($"  [publication off: the files beside the store were kept in {rep.RetiredArchive} and removed]");
+                return true;
+            }
             Console.WriteLine($"  [published from the store: {rep.Entries} entries, generation {rep.Generation} -> {rep.OutPath}]");
             return true;
         }
@@ -11832,6 +11852,7 @@ namespace Truedat
         internal static List<string> OutputSummaryLines(int inMemory, PublishState? p, string catalogPath)
         {
             if (p == null) return new List<string> { $"  Output:     {inMemory} tracks in moods file" };
+            if (p.Ok && p.Off) return new List<string> { "  Output:     the store only (publication off: config publish false / --no-publish)" };
             if (p.Ok) return new List<string> { $"  Output:     {p.Entries} tracks published to the moods file (generation {p.Generation})" };
             const string pad = "              ";
             var lines = new List<string> { $"  Output:     NOT PUBLISHED — {Path.GetFileName(catalogPath)} was not written from the store" };
@@ -12070,7 +12091,7 @@ namespace Truedat
                 // T18 caller saying "the publication that follows writes it with the catalog and sidecar" — not a missing
                 // argument, so it is not an error. Calling through printed "Error: no catalog beside which to write
                 // mbxedges.v1.json" on a successful scan that had just published that very file.
-                if (edgesOn && t.Edges > 0 && companionPath != null)
+                if (edgesOn && t.Edges > 0 && companionPath != null && !global::Truedat.Store.StoreScan.PublishOff)
                     companionWritten = WriteEdgesCompanion(storePath, companionPath, settings, announce: true, out _, out _);
             }
             else

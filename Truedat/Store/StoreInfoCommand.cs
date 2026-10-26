@@ -38,7 +38,7 @@ namespace Truedat.Store
         public long EdgeArrayTracks;              // edge rows that hold the opt-in arrays (capture state, sticky per media)
         public string CatalogPath = "";           // the catalog beside the store — where a publication lands by default
         public long? PublishedGeneration;         // the generation the catalog on disk carries; null = legacy v1 header or no catalog
-        public string FilesState = "";            // at-generation | behind | absent | legacy
+        public string FilesState = "";            // at-generation | behind | absent | legacy | off (config publish false)
         public string? FilesWhy;                  // when behind: the predicate's own reason
         public string NextCommand = "";           // the command that closes the gap this state names
     }
@@ -222,7 +222,12 @@ namespace Truedat.Store
             var sidecarPath = System.IO.Path.ChangeExtension(i.CatalogPath, ".mbxs");
             var companionPath = System.IO.Path.Combine(catalogDir, global::Truedat.Edges.EdgeCompanion.FileName);
             bool expectCompanion = i.EdgeTracks > 0;
-            if (!File.Exists(i.CatalogPath))
+            if (StoreScan.PublishOff)
+            {
+                // Config publish false: no file is meant to exist, so none is "behind" and there is nothing to run.
+                i.FilesState = "off";
+            }
+            else if (!File.Exists(i.CatalogPath))
             {
                 i.FilesState = "absent";
                 i.NextCommand = StoreScan.ScanPublishesCommand;
