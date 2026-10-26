@@ -112,11 +112,15 @@ namespace Truedat
             return Program.EnumerateCatalogParts(catalogPath).Select(p => p.Value).ToList();
         }
 
-        /// <summary>The part number of a pinned entry name (<c>mbxmoods.json.3</c> → 3), or 0 when the name is not a numbered part.</summary>
-        static int PartNumber(string entryName)
+        /// <summary>A numbered catalog part's entry name split into its catalog name and part number (<c>custom.json.3</c> → custom.json, 3),
+        /// whatever the catalog is called (--moods names it); false when the name is not <c>&lt;name&gt;.json.&lt;N&gt;</c>.</summary>
+        static bool TryPartName(string entryName, out string catalogName, out int part)
         {
-            var prefix = CatalogEntryName + ".";
-            return entryName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && int.TryParse(entryName.Substring(prefix.Length), out var n) && n >= 1 ? n : 0;
+            catalogName = ""; part = 0;
+            int dot = entryName.LastIndexOf('.');
+            if (dot <= 0 || !int.TryParse(entryName.Substring(dot + 1), out part) || part < 1) return false;
+            catalogName = entryName.Substring(0, dot);
+            return catalogName.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>A pin that holds a split catalog restores as ONE catalog: the parts' track objects stitched in part order (a later part
@@ -216,9 +220,13 @@ namespace Truedat
                     {
                         if (zip.GetEntry(CatalogEntryName) == null)
                         {
-                            // A pinned split catalog: mbxmoods.json.1, .3, … and no single-file entry. Restore it as one catalog.
-                            var parts = zip.Entries.Where(e => PartNumber(e.Name) > 0).OrderBy(e => PartNumber(e.Name)).ToList();
-                            if (parts.Count > 0) { MergeCatalogParts(parts, dest); break; }
+                            // A pinned or retired split catalog: <name>.json.1, .3, … and no single-file entry. Restore it as one catalog
+                            // (the canonical name's set first when an archive somehow holds two).
+                            var sets = zip.Entries.Select(e => TryPartName(e.Name, out var n, out var k) ? (Entry: e, Name: n, Part: k) : (Entry: (ZipArchiveEntry?)null, Name: "", Part: 0))
+                                .Where(x => x.Entry != null).GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                                .OrderBy(g => string.Equals(g.Key, CatalogEntryName, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+                            if (sets.Count > 0) { MergeCatalogParts(sets[0].OrderBy(x => x.Part).Select(x => x.Entry!).ToList(), dest); break; }
                         }
                         var entry = FindCatalogEntry(zip)
                             ?? throw new InvalidDataException($"No {CatalogEntryName} entry found in archive: {archivePath}");
@@ -242,10 +250,12 @@ namespace Truedat
             // the manifest or the exclusion file, then to the first entry.
             var e = zip.GetEntry(CatalogEntryName);
             if (e != null) return e;
+            // A retired zip also holds the edges companion (mbxedges.v1.json): never restore that as the catalog.
             e = zip.Entries.FirstOrDefault(x =>
                 x.Name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
                 && !x.Name.Equals(ManifestEntryName, StringComparison.OrdinalIgnoreCase)
-                && !x.Name.Equals(ExcludeEntryName, StringComparison.OrdinalIgnoreCase));
+                && !x.Name.Equals(ExcludeEntryName, StringComparison.OrdinalIgnoreCase)
+                && !x.Name.Equals(global::Truedat.Edges.EdgeCompanion.FileName, StringComparison.OrdinalIgnoreCase));
             return e ?? zip.Entries.FirstOrDefault();
         }
 

@@ -580,12 +580,14 @@ namespace Truedat.Store
 
             var contentKey = sha ?? ("entity:" + res.EntityId);
             var contentKeyKind = sha != null ? kind : "entity";
-            // An arrival WITHOUT a hash over a location whose entity is already described under one: the hash is not present, which
-            // is not a new identity. Treating it as "entity:<id>" re-keyed the description (a key move) and rewrote it from the partial
-            // entry — the sha and the measurements it did not carry went to NULL (codex 2026-10-25, MergeSafety ordinary import absent hash).
-            if (sha == null && previousEntity == res.EntityId && !string.IsNullOrEmpty(previousKey) && previousKind != "entity")
+            // An arrival WITHOUT a hash for an entity that is already described under one: the hash is not present, which is not a new
+            // identity. Treating it as "entity:<id>" re-keyed the description (a key move) and rewrote it from the partial entry — the sha
+            // and the measurements it did not carry went to NULL (codex 2026-10-25, MergeSafety ordinary import absent hash). The key read is
+            // the ENTITY's, not the location's: a first mirror copy matched to the primary by path has no key of its own yet, and the
+            // description it would have re-keyed is the one the primary shares (eb45004, first mirror import absent hash).
+            if (sha == null && dal.ReadContent(res.EntityId) is { } described && described.ContentKeyKind != "entity")
             {
-                contentKey = previousKey!; contentKeyKind = previousKind!;
+                contentKey = described.ContentKey; contentKeyKind = described.ContentKeyKind;
             }
 
             // Recency (review #4b): an OLDER catalog imported over a newer store must not regress a row. Same

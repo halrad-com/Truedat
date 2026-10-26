@@ -227,7 +227,7 @@ namespace Truedat.Store
                 // Config publish false: no file is meant to exist, so none is "behind" and there is nothing to run.
                 i.FilesState = "off";
             }
-            else if (!File.Exists(i.CatalogPath))
+            else if (global::Truedat.CatalogArchive.CatalogFiles(i.CatalogPath).Count == 0)   // the single file or its numbered parts
             {
                 i.FilesState = "absent";
                 i.NextCommand = StoreScan.ScanPublishesCommand;
