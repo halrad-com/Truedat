@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -5144,7 +5144,6 @@ namespace Truedat
                             flStagedSrc ??= OpenStagedSource(filePath, _stageOpts, flFileSize);
                             return flStagedSrc.Path;
                         }
-
                         // One body read serves tiers 2/3/4: both digests come from a single pass
                         // over the staged copy. Lazy — tier-1 hits never read the body.
                         // src rides along so a cache MISS can hand the already-computed
@@ -5156,6 +5155,19 @@ namespace Truedat
                             var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), flFileSize, _fileMd5Enabled, out _, out var leg);
                             if (BodyHashesUsable(s)) flBodyHashes = (m, s, leg, srcTag);   // F6
                             return (m, s, leg, srcTag);
+                        }
+                        // Same contract as the library scan's: the retry re-acquires the handle and
+                        // the body read, so a transient at acquisition time is not handed to
+                        // attempt 2 unchanged and the identity follows the bytes it reads.
+                        void ReacquireSource()
+                        {
+                            var stale = flStagedSrc;
+                            if (stale == null) return;
+                            if (_storePath != null) global::Truedat.Store.ScanSink.Discard(stale.Path);
+                            flStagedSrc = null;
+                            flBodyHashes = null;
+                            stale.Dispose();
+                            EnsureStagedSrc();
                         }
 
                         // Cache hierarchy — same tiers as MoodsMode. Plugin-driven
@@ -5314,7 +5326,8 @@ namespace Truedat
                                 extractTags: true, _stageOpts, CancellationToken.None,
                                 precomputedHashes: flBodyHashes),   // T2: reuse the tier walk's body read, if it happened
                             r => FlGate(r).Failed,
-                            () => false);
+                            () => false,
+                            beforeRetry: ReacquireSource);
                         var flResults = flAttempt.Results;
                         if (flAttempt.Attempts > 1)
                         {
@@ -6289,7 +6302,6 @@ namespace Truedat
                         msStagedSrc ??= OpenStagedSource(scanPath, _stageOpts, msSourceSize);
                         return msStagedSrc.Path;
                     }
-
                     // One body read serves tiers 2/3/4: all digests come from a single pass
                     // over the staged copy. Lazy — tier-1 hits never read the body.
                     // msSourceSize is assigned lazily in multiple branches below, so resolve
@@ -6307,6 +6319,23 @@ namespace Truedat
                         var (m, s, srcTag) = ComputeFileMd5AndAudioSha(EnsureStagedSrc(), msSourceSize, _fileMd5Enabled, out _, out var leg);
                         if (BodyHashesUsable(s)) msBodyHashes = (m, s, leg, srcTag);   // F6: a failed read is not memoised; the worker's resilient hasher gets its turn
                         return (m, s, leg, srcTag);
+                    }
+                    // Re-acquire between the retry's attempts. The handle is opened once per track
+                    // and every attempt reads through it, so a transient AT ACQUISITION — staging
+                    // threw and fell back to the source, or the staged copy went missing under the
+                    // scan — is otherwise handed to attempt 2 unchanged. Attempt 1's stash is keyed
+                    // by the staged path it is about to lose, so it goes with it, and the memoised
+                    // body read goes too: the workers re-read from the fresh copy, so the identity
+                    // recorded describes the bytes the surviving attempt actually saw.
+                    void ReacquireSource()
+                    {
+                        var stale = msStagedSrc;
+                        if (stale == null) return;
+                        if (_storePath != null) global::Truedat.Store.ScanSink.Discard(stale.Path);
+                        msStagedSrc = null;
+                        msBodyHashes = null;
+                        stale.Dispose();
+                        EnsureStagedSrc();
                     }
                     try
                     {
@@ -6724,7 +6753,8 @@ namespace Truedat
                                 extractTags: false, _stageOpts, cts.Token,
                                 precomputedHashes: msBodyHashes),   // T2: reuse the tier walk's body read, if it happened
                             r => MsGate(r).Failed,
-                            () => cts.IsCancellationRequested || Volatile.Read(ref budgetStop) != 0);
+                            () => cts.IsCancellationRequested || Volatile.Read(ref budgetStop) != 0,
+                            beforeRetry: ReacquireSource);
                         var msResults = msAttempt.Results;
                         if (msAttempt.Attempts > 1)
                         {
@@ -18350,6 +18380,58 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var a = RunAnalysisAttempts(() => { calls++; return ExtractorFailed(); }, Gate, () => true);
                     Assert(!a.Ok && a.Attempts == 1 && calls == 1, "retry: a cancelling scan does not re-attempt");
                 }
+
+                // The source handle is acquired ONCE, before attempt 1, and every attempt reads
+                // through it — so a transient at ACQUISITION time (staging threw and fell back to
+                // the source, the staged copy went missing under the scan) is baked into attempt 2
+                // as well, and the retry is structurally unable to clear the one class of transient
+                // it most needs to. The retry re-acquires.
+                {
+                    int reacquired = 0;
+                    var a = RunAnalysisAttempts(() => ExtractorFailed(), Gate, () => false, beforeRetry: () => reacquired++);
+                    Assert(a.Attempts == 2 && reacquired == 1,
+                        $"retry: the source is re-acquired once before the second attempt (got {reacquired})");
+                }
+                {
+                    int reacquired = 0;
+                    var a = RunAnalysisAttempts(() => Healthy(), Gate, () => false, beforeRetry: () => reacquired++);
+                    Assert(a.Attempts == 1 && reacquired == 0,
+                        $"retry: a first-attempt success re-acquires nothing (got {reacquired})");
+                }
+                {
+                    int reacquired = 0;
+                    var a = RunAnalysisAttempts(() => ExtractorFailed(), Gate, () => true, beforeRetry: () => reacquired++);
+                    Assert(a.Attempts == 1 && reacquired == 0,
+                        $"retry: a cancelling scan re-acquires nothing (got {reacquired})");
+                }
+                {
+                    // Order is the whole point: re-acquiring after the attempt that needed it is
+                    // the same bug with extra work.
+                    var order = new List<string>();
+                    RunAnalysisAttempts(() => { order.Add("attempt"); return ExtractorFailed(); }, Gate, () => false,
+                        beforeRetry: () => order.Add("reacquire"));
+                    Assert(string.Join(",", order) == "attempt,reacquire,attempt",
+                        $"retry: the re-acquire runs between the attempts (got {string.Join(",", order)})");
+                }
+            }
+
+            // --- a missing file names WHICH file ---
+            {
+                // "File not found" named neither the path nor which of the two files it meant:
+                // audioPath is the track on a direct read and a GUID-named staged copy when the
+                // caller staged one, so a staged copy that went missing under the scan was
+                // reported against the track — the operator reads "File not found" about a file
+                // that is sitting there (N:\Library, 2026-10-26).
+                var missingTrack = Path.Combine(Path.GetTempPath(), $"truedat-missing-{Guid.NewGuid():N}.flac");
+                var (f1, e1) = AnalyzeWithEssentia("no-such-essentia.exe", missingTrack, 0);
+                Assert(f1 == null && e1 != null && e1.IndexOf(missingTrack, StringComparison.Ordinal) >= 0,
+                    $"missing file: the error names the path it checked (got {e1})");
+                var stagedGone = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.flac");
+                var (f2, e2) = AnalyzeWithEssentia("no-such-essentia.exe", stagedGone, 0, default, missingTrack);
+                Assert(f2 == null && e2 != null && e2.IndexOf("staged copy", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"missing staged copy: the error says it was the staged copy, not the track (got {e2})");
+                Assert(e2 != null && e2.IndexOf(stagedGone, StringComparison.Ordinal) >= 0,
+                    $"missing staged copy: the error names the staged path (got {e2})");
             }
 
             // --- SMFM is carried across cache hits (so it needn't be re-read from the file) ---
@@ -23710,7 +23792,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Func<WorkerResults> runAttempt,
             Func<WorkerResults, List<string>> classify,
             Func<bool> stopRequested,
-            int attemptLimit = AnalysisAttemptLimit)
+            int attemptLimit = AnalysisAttemptLimit,
+            Action? beforeRetry = null)
         {
             var outcome = new AnalysisAttempt();
             for (int attempt = 1; ; attempt++)
@@ -23723,6 +23806,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (outcome.Ok || attempt >= attemptLimit || stopRequested()) return outcome;
                 outcome.FirstFailureReason ??= outcome.EssentiaError ?? string.Join(";", outcome.FailedComponents);
                 outcome.DiscardedAnalyzeTicks += results.AnalyzeTicks;
+                // Between the attempts, never after: the handle every attempt reads through was
+                // acquired before attempt 1, so a transient at acquisition time is otherwise
+                // reproduced exactly by attempt 2 (see the caller's re-stage).
+                beforeRetry?.Invoke();
             }
         }
 
@@ -26009,7 +26096,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         static (TrackFeatures? Features, string? Error) AnalyzeWithEssentia(string essentiaExe, string audioPath, long fileSizeBytes, CancellationToken ct = default, string? displayName = null)
         {
             if (!File.Exists(audioPath))
-                return (null, "File not found");
+                // Name the path, and say WHICH file: audioPath is the track on a direct read and a
+                // GUID-named staged copy when the caller staged one. The bare "File not found" was
+                // recorded against the track either way, so a staged copy that went missing under
+                // the scan read as a missing track — the operator sees it reported about a file
+                // that is sitting right there (N:\Library, 2026-10-26).
+                return (null, displayName != null && !string.Equals(displayName, audioPath, StringComparison.OrdinalIgnoreCase)
+                    ? $"Staged copy missing before analysis: {audioPath}"
+                    : $"File not found: {audioPath}");
             // What the console calls this file: the SOURCE name when the caller staged a GUID-named copy, else the path itself.
             string shown = Path.GetFileName(displayName ?? audioPath);
 
