@@ -8,6 +8,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV4.2] — 2026-10-26
+
+### Changed
+
+- The store and edges are opt in.
+
 ## [0.5.5.3-EV4.1] — 2026-10-25
 
 ### Added
