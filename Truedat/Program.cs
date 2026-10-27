@@ -512,12 +512,17 @@ namespace Truedat
         static readonly AnalysisStageTiming _stageSmfm = new AnalysisStageTiming("SMFM read", "tasks");
         static readonly AnalysisStageTiming _stageTags = new AnalysisStageTiming("tag read", "tasks");
         static readonly AnalysisStageTiming _stageFileMd5 = new AnalysisStageTiming("file MD5", "tasks");   // --file-md5 only: a whole-file read
+        /// <summary>The resample-once ffmpeg conversion (hi-res -> 44.1 kHz). It runs INSIDE the Essentia task — AnalyzeWithEssentia
+        /// calls ResampleTo44k before starting the extractor — so without this row its time was charged to Essentia, in the stage
+        /// block and in the long pole alike. Measured 2026-10-26 on a 96 kHz/24-bit FLAC: Essentia task 2.899 s, of which the
+        /// extractor was 1.761 s; the rest was this. Nested inside the Essentia task, never alongside it.</summary>
+        static readonly AnalysisStageTiming _stageResample = new AnalysisStageTiming("  of which resample", "ffmpeg runs");
         /// <summary>The staging copy per track. Serial — it happens BEFORE the fan-out, so it is not in the long-pole race and is
         /// never counted there. Its link rate is reported separately by <see cref="StagingSummaryLines"/>.</summary>
         static readonly AnalysisStageTiming _stageStagingCopy = new AnalysisStageTiming("staging copy", "copies");
         static readonly AnalysisStageTiming[] _analysisStages =
         {
-            _stageSource, _stageStagingCopy, _stageQueue, _stageEssentiaTask, _stageCompanionWait,
+            _stageSource, _stageStagingCopy, _stageQueue, _stageEssentiaTask, _stageResample, _stageCompanionWait,
             _stageNativeWall, _stageNativeCpu, _stageOutputDrain, _stageParse,
             _stageFingerprint, _stageAudioSha, _stageBitUsage, _stageHf, _stageSmfm, _stageTags, _stageFileMd5,
             _stageMainStash, _stageEdges, _stageEdgeStash, _stageCleanup,
@@ -543,18 +548,23 @@ namespace Truedat
         /// <summary>The long-pole block of a scan summary: per task, the tracks it finished last on, most first. A fact, not a
         /// verdict — the operator ruled out an "X-bound" claim (2026-10-26: at cores-2 with balanced threads the CPU is never
         /// pegged, so a utilisation-based label would be fiction). Empty when no track ran the fan-out.</summary>
-        internal static string BuildLongPoleReport(IReadOnlyDictionary<string, long> counts)
+        internal static string BuildLongPoleReport(IReadOnlyDictionary<string, long> counts, long resampleRuns = 0, double resampleTotalSecs = 0)
         {
             long total = counts.Values.Sum();
             if (total == 0) return "";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
             var sb = new StringBuilder();
             sb.AppendLine("  Long pole (the fan-out task each track waited on last):");
             foreach (var kv in counts.Where(c => c.Value > 0).OrderByDescending(c => c.Value).ThenBy(c => c.Key, StringComparer.Ordinal))
             {
                 double pct = 100.0 * kv.Value / total;
-                sb.AppendLine($"    {kv.Key,-22} {kv.Value,9:N0} tracks  {pct.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),5}%");
+                sb.AppendLine($"    {kv.Key,-22} {kv.Value,9:N0} tracks  {pct.ToString("F1", inv),5}%");
             }
             sb.AppendLine("    The other tasks ran alongside it and cost the track nothing.");
+            // The resample is ffmpeg, not Essentia, but it runs inside the Essentia task, so the Essentia long pole carries it.
+            // Say so with the measured figure whenever it happened, so the extractor is not blamed for ffmpeg's time.
+            if (resampleRuns > 0)
+                sb.AppendLine($"    Essentia's time includes the ffmpeg resample on {resampleRuns:N0} hi-res file(s): {(resampleTotalSecs / resampleRuns).ToString("F3", inv)}s avg.");
             return sb.ToString();
         }
         static long _nativeCpuUnavailable;
@@ -582,7 +592,8 @@ namespace Truedat
         static void PrintAnalysisTimings()
         {
             Console.Write(BuildAnalysisTimingReport(_analysisStages, Interlocked.Read(ref _nativeCpuUnavailable)));
-            Console.Write(BuildLongPoleReport(_longPole));
+            var rs = _stageResample.Snapshot();
+            Console.Write(BuildLongPoleReport(_longPole, rs.Count, rs.TotalSeconds));
         }
 
         // Phantom-key detector: every extractor path NavDbl/OptN looks up is recorded as queried,
@@ -20989,6 +21000,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(lp.Contains("100.0%") || lp.Contains(" 99.") , "long pole report: shares are of the tracks that ran the fan-out");
                 Assert(BuildLongPoleReport(new Dictionary<string, long>()) == "",
                     "long pole report: no fan-out ran (an all-cached scan) -> no block, not a block of zeros");
+                // The resample is ffmpeg running inside the Essentia task; the report must say so, with the measured figure, so the
+                // extractor is not blamed for ffmpeg's time (2026-10-26: 1.1 s of a 2.9 s Essentia task on a 96 kHz file).
+                var withRs = BuildLongPoleReport(counts, resampleRuns: 4, resampleTotalSecs: 4.4);
+                Assert(withRs.Contains("ffmpeg resample on 4 hi-res file(s): 1.100s avg"),
+                    $"long pole report: the resample inside the Essentia task is named with its measured average ({withRs})");
+                Assert(!lp.Contains("resample"), "long pole report: no resample ran -> no resample line");
             }
 
             // --- ETA charges the measured periodic-save cost (2026-07-28) ---
@@ -26117,6 +26134,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             try { Directory.CreateDirectory(dir); } catch { dir = Path.GetTempPath(); }
             string tempPath = Path.Combine(dir, $"truedat_44k_{Guid.NewGuid():N}.wav");   // swept with the rest of the stage dir
             var sw = Stopwatch.StartNew();
+            bool ran = false;   // ffmpeg actually started: from here the time is real, success or not
             try
             {
                 var psi = new ProcessStartInfo
@@ -26129,6 +26147,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     CreateNoWindow = true
                 };
                 using var proc = Process.Start(psi)!;
+                ran = true;
                 ApplyCpuLimit(proc);
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
@@ -26156,6 +26175,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed ({ex.Message}); analysing the original  [{shown}]");
                 try { File.Delete(tempPath); } catch { }
+            }
+            finally
+            {
+                // Every run ffmpeg actually made, success or failure: a failed or timed-out resample still cost the track that time,
+                // inside the Essentia task (AnalyzeWithEssentia calls this before the extractor starts).
+                if (ran) _stageResample.RecordTicks(sw.ElapsedTicks);
             }
             return null;
         }
