@@ -5700,8 +5700,8 @@ namespace Truedat
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             // The store is resolved in the arg block and settled at the scan's entry (EnsureDefaultStore), both of which run
-            // BEFORE the log tee is attached — so every line they print reaches the console and not truedat.log. etlap's log
-            // (2026-10-26) therefore carried no store line at all while the run paired one library's catalog with another
+            // BEFORE the log tee is attached — so every line they print reaches the console and not truedat.log. A field report's
+            // log (2026-10-26) therefore carried no store line at all while the run paired one library's catalog with another
             // library's store. Name it here, beside the two paths it has to agree with, where the tee can see it.
             Console.WriteLine($"  Store:      {_storePath ?? "none — this scan writes the catalog only"}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
@@ -18230,7 +18230,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true, configStoreOff: true),
                     "adopt: config store=false is a standing --no-store, an existing store is left alone");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false, configEdgesOff: true), "adopt: config edges=false is a standing --no-edges");
-                // etlap, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
+                // Field report, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
                 // ProbeCatalogBesideExe stopped there while ResolveITunesXml fell through to the marker scan and found the live
                 // library. The store was derived from the stub's catalog in the arg block and that value then outranked the
                 // scan's real catalog: one library's catalog written against another library's store, 0 paths in common, exit 2.
@@ -23893,7 +23893,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // The arg block resolved the store BEFORE the library was discovered — ResolveITunesXml does not run until the scan
             // sets up — so when nothing NAMED a store its catalog was ProbeCatalogBesideExe's guess. That probe looks for
             // mbxmoods.json while the library probe looks for the XML, and a stub library holding a stale catalog and no XML
-            // splits the two: the scan then writes one library's catalog against another library's store (etlap, 2026-10-26 —
+            // splits the two: the scan then writes one library's catalog against another library's store (field report, 2026-10-26 —
             // 72,360 paths only in the catalog, 72,845 only in the store, nothing in common, exit 2). The scan is the first
             // place that knows the real catalog, so it is where a DERIVED store is re-derived. The test compares against
             // Resolve's own answer rather than the catalog's directory, which is what keeps --store-dir and a network
@@ -23909,7 +23909,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // Adoption is decided in that same arg block, against that same guessed catalog, so a store sitting beside the REAL
             // catalog was never adopted: the scan ran store-less and its advisor recommended --store-import with a 196 MB store
-            // in the folder it was writing to (etlap, 11:26). ShouldCreateDefaultStore only CREATES, so an existing store falls
+            // in the folder it was writing to (the same field report, earlier that day). ShouldCreateDefaultStore only CREATES, so an existing store falls
             // straight through it — adopt here, where the catalog is known. A --chunk shard stays store-less by design.
             if (_storePath == null && !chunked
                 && ShouldAdoptExistingStore(_noStoreTyped, storeAsked: false, storeVerb: false,
