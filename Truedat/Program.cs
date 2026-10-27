@@ -499,12 +499,64 @@ namespace Truedat
         static readonly AnalysisStageTiming _stageEdges = new AnalysisStageTiming("edge fold/PCM", "calls");
         static readonly AnalysisStageTiming _stageEdgeStash = new AnalysisStageTiming("edge write", "calls");
         static readonly AnalysisStageTiming _stageCleanup = new AnalysisStageTiming("extractor cleanup", "calls");
+        // The fan-out's companion tasks, each timed on its own (2026-10-26). They run CONCURRENTLY with the extractor
+        // (RunSourceWorkers: Task.WaitAll), so only the one that finishes last costs the track any wall-clock — every other
+        // task is free. These rows say how long each took; _longPole counts which one finished last. Before this only the
+        // fingerprint and sha tasks were timed, and only to --audit stderr, so nothing could say whether a slow link had
+        // pushed the full-file sha read past the extractor. A task that did not RUN (skipped by a flag, or its digest reused
+        // from the cache-tier walk) records nothing: a zero would be a fabricated measurement that drags the average down.
+        static readonly AnalysisStageTiming _stageFingerprint = new AnalysisStageTiming("fingerprint", "tasks");
+        static readonly AnalysisStageTiming _stageAudioSha = new AnalysisStageTiming("audio sha256", "tasks");
+        static readonly AnalysisStageTiming _stageBitUsage = new AnalysisStageTiming("bit usage", "tasks");
+        static readonly AnalysisStageTiming _stageHf = new AnalysisStageTiming("HF analysis", "tasks");
+        static readonly AnalysisStageTiming _stageSmfm = new AnalysisStageTiming("SMFM read", "tasks");
+        static readonly AnalysisStageTiming _stageTags = new AnalysisStageTiming("tag read", "tasks");
+        static readonly AnalysisStageTiming _stageFileMd5 = new AnalysisStageTiming("file MD5", "tasks");   // --file-md5 only: a whole-file read
+        /// <summary>The staging copy per track. Serial — it happens BEFORE the fan-out, so it is not in the long-pole race and is
+        /// never counted there. Its link rate is reported separately by <see cref="StagingSummaryLines"/>.</summary>
+        static readonly AnalysisStageTiming _stageStagingCopy = new AnalysisStageTiming("staging copy", "copies");
         static readonly AnalysisStageTiming[] _analysisStages =
         {
-            _stageSource, _stageQueue, _stageEssentiaTask, _stageCompanionWait,
+            _stageSource, _stageStagingCopy, _stageQueue, _stageEssentiaTask, _stageCompanionWait,
             _stageNativeWall, _stageNativeCpu, _stageOutputDrain, _stageParse,
+            _stageFingerprint, _stageAudioSha, _stageBitUsage, _stageHf, _stageSmfm, _stageTags, _stageFileMd5,
             _stageMainStash, _stageEdges, _stageEdgeStash, _stageCleanup,
         };
+
+        /// <summary>Per fan-out task, how many tracks it was the LONG POLE on — the task that finished last, which is the only
+        /// one whose time the track actually paid. A direct count of measured durations, so it carries no inference.</summary>
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _longPole
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.Ordinal);
+
+        /// <summary>The fan-out task that finished last. <paramref name="tasks"/> holds each task's measured duration in ticks, or a
+        /// negative value for a task that did not run — skipped by a flag, or its digest reused from the cache-tier walk — which can
+        /// never be the long pole, because it took no time this track paid for. A tie goes to the task listed first (the extractor
+        /// leads the list) so the count is deterministic. Null when nothing ran.</summary>
+        internal static string? PickLongPole(IReadOnlyList<(string Name, long Ticks)> tasks)
+        {
+            string? best = null; long bestTicks = -1;
+            foreach (var (name, ticks) in tasks)
+                if (ticks >= 0 && ticks > bestTicks) { best = name; bestTicks = ticks; }
+            return best;
+        }
+
+        /// <summary>The long-pole block of a scan summary: per task, the tracks it finished last on, most first. A fact, not a
+        /// verdict — the operator ruled out an "X-bound" claim (2026-10-26: at cores-2 with balanced threads the CPU is never
+        /// pegged, so a utilisation-based label would be fiction). Empty when no track ran the fan-out.</summary>
+        internal static string BuildLongPoleReport(IReadOnlyDictionary<string, long> counts)
+        {
+            long total = counts.Values.Sum();
+            if (total == 0) return "";
+            var sb = new StringBuilder();
+            sb.AppendLine("  Long pole (the fan-out task each track waited on last):");
+            foreach (var kv in counts.Where(c => c.Value > 0).OrderByDescending(c => c.Value).ThenBy(c => c.Key, StringComparer.Ordinal))
+            {
+                double pct = 100.0 * kv.Value / total;
+                sb.AppendLine($"    {kv.Key,-22} {kv.Value,9:N0} tracks  {pct.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),5}%");
+            }
+            sb.AppendLine("    The other tasks ran alongside it and cost the track nothing.");
+            return sb.ToString();
+        }
         static long _nativeCpuUnavailable;
 
         internal static string BuildAnalysisTimingReport(IEnumerable<AnalysisStageTiming> stages, long cpuUnavailable)
@@ -528,7 +580,10 @@ namespace Truedat
         }
 
         static void PrintAnalysisTimings()
-            => Console.Write(BuildAnalysisTimingReport(_analysisStages, Interlocked.Read(ref _nativeCpuUnavailable)));
+        {
+            Console.Write(BuildAnalysisTimingReport(_analysisStages, Interlocked.Read(ref _nativeCpuUnavailable)));
+            Console.Write(BuildLongPoleReport(_longPole));
+        }
 
         // Phantom-key detector: every extractor path NavDbl/OptN looks up is recorded as queried,
         // and (when it resolves to a number) as resolved. A path queried but NEVER resolved across a
@@ -13164,6 +13219,7 @@ namespace Truedat
                 long copyStart = Stopwatch.GetTimestamp();
                 File.Copy(sourcePath, dest, overwrite: false);
                 long copyEnd = Stopwatch.GetTimestamp();
+                _stageStagingCopy.RecordTicks(copyEnd - copyStart);   // every stage, network or local: the per-track copy cost
                 // FILE_ATTRIBUTE_TEMPORARY on the staged copy (truedat:backenddev, 2026-10-12): a cache-manager hint that
                 // the file is deleted seconds later and never re-read, so the NVMe need not write it back. Endurance only —
                 // the read-back is served from the page cache either way, so no wall-clock claim; how much write-back it
@@ -15494,6 +15550,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var analyzeStart = Stopwatch.GetTimestamp();
 
             long essentiaFinishedAt = 0;
+            // Each task's measured duration for the long-pole count; -1 = did not run this track (see PickLongPole).
+            // Each is written by exactly one task and read only after Task.WaitAll, which is a full fence.
+            long tEssentia = -1, tFingerprint = -1, tSha = -1, tTags = -1, tBitUsage = -1, tHf = -1, tSmfm = -1, tMd5 = -1;
             var essentiaTask = Task.Run(() =>
             {
                 long taskStartedAt = Stopwatch.GetTimestamp();
@@ -15503,17 +15562,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     long endedAt = Stopwatch.GetTimestamp();
                     _stageEssentiaTask.RecordTicks(endedAt - taskStartedAt);
+                    tEssentia = endedAt - taskStartedAt;
                     Interlocked.Exchange(ref essentiaFinishedAt, endedAt);
                 }
             });
             var fileMd5Task = precomputedHashes != null
                 ? Task.FromResult(precomputedHashes.Value.md5)   // computed with wantMd5=_fileMd5Enabled — null when the flag is off
-                : Task.Run(() => _fileMd5Enabled ? ComputeFileMd5(readPath) : null);
+                : Task.Run(() =>
+                {
+                    if (!_fileMd5Enabled) return null;   // returns at once: not a run, so nothing is recorded and it stays out of the race
+                    long s = Stopwatch.GetTimestamp();
+                    try { return ComputeFileMd5(readPath); }
+                    finally { tMd5 = Stopwatch.GetTimestamp() - s; _stageFileMd5.RecordTicks(tMd5); }
+                });
             var fingerprintTask = Task.Run(() =>
             {
                 var swFp = Stopwatch.StartNew();
                 var fp = ComputeFingerprintV1(readPath, fileSize, identityPath, out var fpErr);
                 swFp.Stop();
+                _stageFingerprint.RecordTicks(swFp.ElapsedTicks);
+                tFingerprint = swFp.ElapsedTicks;
                 if (_audit)
                     Console.Error.WriteLine($"[AUDIT] taglibParseMs={swFp.ElapsedMilliseconds} file=\"{auditName}\"");
                 return (fp, fpErr);
@@ -15529,6 +15597,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // the sha costs the track its whole catalog entry via the health gate.
                 var r = ComputeAudioStreamSha256Resilient(readPath, fileSize, out var shaErr, out _, out var shaRetries);
                 swSha.Stop();
+                _stageAudioSha.RecordTicks(swSha.ElapsedTicks);
+                tSha = swSha.ElapsedTicks;
                 if (shaRetries > 0)
                 {
                     // Surfaced, not silent: a recovered conflict is the signal that the
@@ -15545,29 +15615,58 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 return r;
             });
             var tagsTask = extractTags
-                ? Task.Run(() => (FileTags?)ExtractFileTags(readPath))
+                ? Task.Run(() =>
+                {
+                    long s = Stopwatch.GetTimestamp();
+                    try { return (FileTags?)ExtractFileTags(readPath); }
+                    finally { tTags = Stopwatch.GetTimestamp() - s; _stageTags.RecordTicks(tTags); }
+                })
                 : Task.FromResult<FileTags?>(null);
             // Both optional signals report notApplicable so the scan-health gate can
             // tell "absent by design" (opt-out flag, no ffmpeg, wrong codec/rate,
             // pure silence) from "attempted and failed" — only the latter fails a track.
+            // Their stage ROW records only an applicable run — a real ffmpeg decode — so its average is the cost of that analysis
+            // and its count says how many tracks paid it; a not-applicable bail (a codec check, milliseconds) would otherwise
+            // average a 30 s decode down toward zero. The long-pole race still gets the bail's real duration: it was measured,
+            // it simply cannot win.
             var bitUsageTask = ConditionalTask<(BitUsageSummary? Summary, bool NotApplicable)>(stageOpts.NoBitUsage, () =>
             {
+                long s = Stopwatch.GetTimestamp();
                 double dur = knownDurationSec;
                 if (dur <= 0)
                 {
                     try { using var tf = TagLib.File.Create(readPath); dur = tf.Properties?.Duration.TotalSeconds ?? 0; } catch { }
                 }
                 var summary = ComputeBitUsage(readPath, dur, _ffmpegPath.Value, out var buNa);
+                tBitUsage = Stopwatch.GetTimestamp() - s;
+                if (!buNa) _stageBitUsage.RecordTicks(tBitUsage);
                 return (summary, buNa);
             }, (null, true));
             var hfEnergyTask = ConditionalTask(stageOpts.NoHfAnalysis, () =>
             {
+                long s = Stopwatch.GetTimestamp();
                 var (hr, hm, hs) = ComputeHfAnalysis(readPath, _ffmpegPath.Value, out var hfNa);
+                tHf = Stopwatch.GetTimestamp() - s;
+                if (!hfNa) _stageHf.RecordTicks(tHf);
                 return (hr, hm, hs, hfNa);
             }, ((double?)null, (string?)null, (HfSpectralStructure?)null, true));
-            var smfmTask = ConditionalTask<SmfmReader.SmfmResult?>(stageOpts.NoSmfm, () => SmfmReader.TryRead(readPath), null);
+            var smfmTask = ConditionalTask<SmfmReader.SmfmResult?>(stageOpts.NoSmfm, () =>
+            {
+                long s = Stopwatch.GetTimestamp();
+                try { return SmfmReader.TryRead(readPath); }
+                finally { tSmfm = Stopwatch.GetTimestamp() - s; _stageSmfm.RecordTicks(tSmfm); }
+            }, null);
 
             Task.WaitAll(new Task[] { essentiaTask, fileMd5Task, fingerprintTask, audioStreamSha256Task, tagsTask, bitUsageTask, hfEnergyTask, smfmTask });
+            {
+                // The task that finished last is the only one this track paid wall-clock for. Tasks that did not run stay -1.
+                var pole = PickLongPole(new (string, long)[]
+                {
+                    ("Essentia", tEssentia), ("audio sha256", tSha), ("fingerprint", tFingerprint),
+                    ("HF analysis", tHf), ("bit usage", tBitUsage), ("SMFM read", tSmfm), ("tag read", tTags), ("file MD5", tMd5),
+                });
+                if (pole != null) _longPole.AddOrUpdate(pole, 1, (_, n) => n + 1);
+            }
             // Only the tail after Essentia completes; companion tasks overlap the extractor before this.
             // Includes the waiting worker's wake-up, not a sum of the companion runtimes.
             _stageCompanionWait.RecordSince(Interlocked.Read(ref essentiaFinishedAt));
@@ -20860,6 +20959,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "analysis-timing: report shows mean, maximum, and the measured population");
                 Assert(report.Contains("CPU time unavailable for 3 process attempts"),
                     "analysis-timing: unavailable CPU reads remain explicit, never samples of zero CPU");
+            }
+
+            // --- Long pole: which concurrent fan-out task each track actually waited on (2026-10-26) ---
+            // The fan-out runs under Task.WaitAll, so only the task that finishes last costs the track wall-clock. The operator ruled
+            // out a "CPU-bound"-style verdict (at cores-2 with balanced threads the CPU is never pegged) and asked for measurements
+            // only: name the slowest component, from measured durations, with nothing inferred.
+            {
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", 9_500), ("audio sha256", 400), ("fingerprint", 2) }) == "Essentia",
+                    "long pole: the longest measured task wins");
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", 9_500), ("audio sha256", 12_000) }) == "audio sha256",
+                    "long pole: a full-file read that outlasts the extractor (a slow link) is named, not hidden behind it");
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", 9_500), ("file MD5", -1), ("SMFM read", -1) }) == "Essentia",
+                    "long pole: a task that did not run (-1) is never the long pole");
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", -1), ("bit usage", -1) }) == null,
+                    "long pole: nothing ran -> no name, never a default");
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", 500), ("audio sha256", 500) }) == "Essentia",
+                    "long pole: a tie goes to the task listed first, so the count is deterministic");
+                Assert(PickLongPole(new (string, long)[] { ("Essentia", 0), ("audio sha256", -1) }) == "Essentia",
+                    "long pole: a measured zero is a real duration (it ran), unlike -1 (it did not)");
+
+                var counts = new Dictionary<string, long>(StringComparer.Ordinal) { ["Essentia"] = 72_440, ["audio sha256"] = 7, ["SMFM read"] = 0 };
+                var lp = BuildLongPoleReport(counts);
+                Assert(lp.Contains("Essentia") && lp.Contains("72,440") && lp.Contains("audio sha256") && lp.Contains("7 tracks"),
+                    "long pole report: each task that won names its track count");
+                Assert(lp.IndexOf("Essentia", StringComparison.Ordinal) < lp.IndexOf("audio sha256", StringComparison.Ordinal),
+                    "long pole report: most first");
+                Assert(!lp.Contains("SMFM read"), "long pole report: a task that never won is not listed");
+                Assert(lp.Contains("100.0%") || lp.Contains(" 99.") , "long pole report: shares are of the tracks that ran the fan-out");
+                Assert(BuildLongPoleReport(new Dictionary<string, long>()) == "",
+                    "long pole report: no fan-out ran (an all-cached scan) -> no block, not a block of zeros");
             }
 
             // --- ETA charges the measured periodic-save cost (2026-07-28) ---
