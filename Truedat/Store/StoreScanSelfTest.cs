@@ -99,8 +99,11 @@ namespace Truedat.Store
                 var cut = text.Replace("\"D:\\\\music\\\\b.flac\":", "\"D:\\\\music\\\\zz-renamed.flac\":");
                 File.WriteAllText(cat, cut);
                 var r2 = Load(store, cat, out _);
-                assert(r2.Refused && r2.Case == "equal-generation-disagree" && r2.Refusal!.Contains("zz-renamed.flac") && r2.Refusal.Contains("b.flac"),
-                    $"equal generation but the catalog's paths changed -> refused naming both sides ({r2.Refusal})");
+                var egLedger = File.ReadAllText(Path.Combine(Path.GetDirectoryName(cat)!, StoreScan.DisagreeLedgerName));
+                assert(r2.Refused && r2.Case == "equal-generation-disagree"
+                       && egLedger.Contains("only-in-catalog,D:\\music\\zz-renamed.flac") && egLedger.Contains("only-in-store,D:\\music\\b.flac")
+                       && r2.Refusal!.Contains("Do this, then scan again:") && r2.Refusal.Contains("Detail: " + StoreScan.DisagreeLedgerName),
+                    $"equal generation but the catalog's paths changed -> refused, both sides in the ledger and the action in the message ({r2.Refusal})");
             }
             // store ahead: export at generation N, then a committed change -> store wins
             using (var d = new Dir())
@@ -146,8 +149,24 @@ namespace Truedat.Store
                 newer[@"D:\music\a.flac"] = E("a.flac", 200, 'a');                      // re-analysed: reached the catalog, not the store
                 StoreSelfTest.WriteCatalog(cat, newer);
                 var r2 = Load(store, cat, out _);
-                assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 with different values") && r2.Refusal.Contains(@"D:\music\a.flac") && r2.Refusal.Contains("--store-import"),
-                    $"no origin, a same-path NEW value in the catalog -> refused, naming the path and the remedies ({r2.Refusal})");
+                // Operator, 2026-10-26: this assertion used to require "--store-import" in the text, which is exactly the closed
+                // loop it caused on a 72,447-track library — nothing was only in the catalog, so the import ran, succeeded and
+                // changed nothing, three times. A values-only disagreement must name the two renames that terminate it and must
+                // NOT name the import. The paths go to the ledger, not the message.
+                assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 shared entry holds a different value")
+                       && !r2.Refusal.Contains("--store-import --moods") && r2.Refusal.Contains("ren \"truedat.db\"") && r2.Refusal.Contains("ren \"mbxmoods.json\"")
+                       && !r2.Refusal.Contains(@"D:\music\a.flac"),
+                    $"no origin, a same-path NEW value in the catalog -> refused naming the renames, NOT the import, and no inline paths ({r2.Refusal})");
+                var ledger = Path.Combine(Path.GetDirectoryName(cat)!, StoreScan.DisagreeLedgerName);
+                assert(File.Exists(ledger) && File.ReadAllText(ledger).Contains(@"different-values,D:\music\a.flac"),
+                    "the disagreeing path is in the ledger beside the catalog, not in the refusal text");
+                // ...and when the store IS missing a path, the import is the remedy that works, so it IS named.
+                var added = new Dictionary<string, TrackEntry>(fromStore, PathComparer.Instance);
+                added[@"D:\music\new.flac"] = E("new.flac", 300, 'n');
+                StoreSelfTest.WriteCatalog(cat, added);
+                var r3 = Load(store, cat, out _);
+                assert(r3.Refused && r3.Case == "no-origin-disagree" && r3.Refusal!.Contains("--store-import --moods") && r3.Refusal.Contains("1 path(s) the store is missing"),
+                    $"no origin, a path only in the catalog -> the import CAN add it, so it is named ({r3.Refusal})");
             }
             // The operator's sequence on a real library (MB3, 2026-10-18): a catalog the SCAN wrote, then `--store-import` of it, then a
             // plain scan. The test above writes its catalog FROM the store, so it never met the two differences an import makes by
@@ -181,7 +200,8 @@ namespace Truedat.Store
                 moved[@"D:\music\dup-2.flac"].LastModified = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
                 StoreSelfTest.WriteCatalog(cat, moved);
                 var r2 = Load(store, cat, out _);
-                assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 with different values") && r2.Refusal.Contains("dup-2.flac"),
+                assert(r2.Refused && r2.Case == "no-origin-disagree" && r2.Refusal!.Contains("1 shared entry holds a different value")
+                       && File.ReadAllText(Path.Combine(Path.GetDirectoryName(cat)!, StoreScan.DisagreeLedgerName)).Contains("dup-2.flac"),
                     $"no origin, a duplicate copy whose own lastModified differs -> still refused ({r2.Refusal})");
 
                 // ...and a value that differs beyond the declared precision on a single-copy entry is still a difference
@@ -190,7 +210,8 @@ namespace Truedat.Store
                 changed[@"D:\music\ulp.flac"].Features.SpectralRms = 0.002878;
                 StoreSelfTest.WriteCatalog(cat, changed);
                 var r3 = Load(store, cat, out _);
-                assert(r3.Refused && r3.Case == "no-origin-disagree" && r3.Refusal!.Contains("1 with different values") && r3.Refusal.Contains("ulp.flac"),
+                assert(r3.Refused && r3.Case == "no-origin-disagree" && r3.Refusal!.Contains("1 shared entry holds a different value")
+                       && File.ReadAllText(Path.Combine(Path.GetDirectoryName(cat)!, StoreScan.DisagreeLedgerName)).Contains("ulp.flac"),
                     $"no origin, a value one step beyond the declared precision -> still refused ({r3.Refusal})");
             }
             // A catalog an older build wrote holds the old three-band spectralFlatness average; the store converts its own rows to

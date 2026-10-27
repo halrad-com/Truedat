@@ -28406,7 +28406,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
         }
 
-        static string CsvEscape(string value)
+        internal static string CsvEscape(string value)
         {
             if (string.IsNullOrEmpty(value)) return "";
             value = value.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");

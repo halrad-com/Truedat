@@ -23,8 +23,42 @@ namespace Truedat.Store
             internal string? Note;
         }
 
-        /// <summary>How many paths a refusal names before "and N more".</summary>
-        const int NameAtMost = 10;
+        /// <summary>How many paths a refusal names inline before "and N more". Three, not ten: a refusal has to be READ, and the
+        /// operator's whole reason for not acting on one is that the action was lost in the path list (2026-10-26). A disagreement
+        /// that can run to tens of thousands of paths does not inline them at all — see <see cref="WriteDisagreeLedger"/>.</summary>
+        const int NameAtMost = 3;
+
+        /// <summary>The ledger a path-set disagreement writes beside the catalog, so the refusal can name a file instead of
+        /// printing the paths. Same convention as mbxmoods-skipped.csv / mbxmoods-errors.csv.</summary>
+        internal const string DisagreeLedgerName = "mbxmoods-store-disagree.csv";
+
+        /// <summary>Whether <c>--store-import</c> can change the outcome of a disagreement. It can only ADD what the store is
+        /// missing — it never overwrites a stored measurement (both value-adopting paths in <see cref="ImportCommand"/> are gated
+        /// on <c>!isImport</c>: an import is a seed, not a measurement, so it carries no authority over one). So when nothing is
+        /// only in the catalog, an import provably cannot move anything and must NOT be named as the remedy. Naming it anyway is a
+        /// closed loop: the operator runs it, it succeeds, the same refusal comes back. Field-reported 2026-10-26 after a
+        /// 72,447-track library spent three scans in it; the 2026-10-18 pass fixed the false-positive half of this refusal
+        /// (<see cref="HoldsSameFacts"/>) and left the wrong-remedy half, which this closes.</summary>
+        internal static bool ImportCanResolve(int onlyCatalogCount) => onlyCatalogCount > 0;
+
+        /// <summary>Write the disagreeing paths beside the catalog and return the file's NAME for the refusal to cite, or null when
+        /// it could not be written (a refusal must never be masked by its own diagnostics).</summary>
+        static string? WriteDisagreeLedger(string catalogPath, List<string> onlyCatalog, List<string> onlyStore, List<string>? changed)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath));
+                if (string.IsNullOrEmpty(dir)) return null;
+                var path = Path.Combine(dir!, DisagreeLedgerName);
+                using var w = new StreamWriter(path, false);
+                w.WriteLine("side,path");
+                foreach (var p in onlyCatalog) w.WriteLine($"only-in-catalog,{Program.CsvEscape(p)}");
+                foreach (var p in onlyStore) w.WriteLine($"only-in-store,{Program.CsvEscape(p)}");
+                if (changed != null) foreach (var p in changed) w.WriteLine($"different-values,{Program.CsvEscape(p)}");
+                return DisagreeLedgerName;
+            }
+            catch { return null; }
+        }
 
         /// <summary>
         /// T18i: fill <paramref name="target"/> from the store, after the provenance precondition (TDA 106 table, keeper 129):
@@ -119,10 +153,10 @@ namespace Truedat.Store
                 if (origin.Generation == res.Generation)
                 {
                     if (onlyCatalog.Count > 0 || onlyStore.Count > 0)
-                        return Refuse(res, "equal-generation-disagree",
-                            $"the catalog and the store are both at generation {res.Generation} but disagree on the root's paths " +
-                            $"({onlyCatalog.Count:N0} only in the catalog{Names(onlyCatalog)}; {onlyStore.Count:N0} only in the store{Names(onlyStore)}). " +
-                            "Something changed one without the other; nothing was scanned. Move the catalog aside and scan (the store publishes the whole library), or seed this store from it with --store-import if the catalog is the one you mean.");
+                        return Refuse(res, "equal-generation-disagree", Disagreement(
+                            $"the catalog and the store are both at generation {res.Generation} but disagree on the root's paths",
+                            catalogPath, storePath, onlyCatalog, onlyStore, null,
+                            "Something changed one without the other."));
                     res.Case = "equal-generation";
                     return Fill(res, storeEntries, target);
                 }
@@ -150,14 +184,41 @@ namespace Truedat.Store
                     changed.Add(kv.Key);
             changed.Sort(StringComparer.OrdinalIgnoreCase);
             if (onlyCatalog.Count > 0 || onlyStore.Count > 0 || changed.Count > 0)
-                return Refuse(res, "no-origin-disagree",
-                    $"the catalog (no store origin: written before the store was authoritative) and the store {Path.GetFullPath(storePath)} disagree — " +
-                    $"{onlyCatalog.Count:N0} paths only in the catalog{Names(onlyCatalog)}; {onlyStore.Count:N0} only in the store{Names(onlyStore)}; " +
-                    $"{changed.Count:N0} with different values{Names(changed)}. A store-authoritative scan would replace the catalog's values with the store's. " +
-                    $"If the catalog is the newer, seed or extend the store from it: truedat --store-import --moods \"{catalogPath}\" --store \"{storePath}\" " +
-                    "(it never removes store entries); if the store is the newer, move the catalog aside and the scan re-derives it. Nothing was scanned.");
+                return Refuse(res, "no-origin-disagree", Disagreement(
+                    "the catalog and the store disagree", catalogPath, storePath, onlyCatalog, onlyStore, changed,
+                    "The catalog carries no store origin."));
             res.Case = "no-origin-agree";
             return Fill(res, storeEntries, target);
+        }
+
+        /// <summary>A path-set / value disagreement, written so the ACTION is the first thing read and the paths are not printed at
+        /// all. Operator, 2026-10-26, on the message this replaces: "i see pages of spew and what i really need to do is buried in
+        /// it" — and "even what is buried doesn't work", because it named <c>--store-import</c> for a disagreement an import cannot
+        /// resolve. So: the command(s) that terminate the refusal come first, the counts are one sentence, and the paths go to
+        /// <see cref="DisagreeLedgerName"/> beside the catalog like every other ledger truedat writes.</summary>
+        static string Disagreement(string headline, string catalogPath, string storePath,
+            List<string> onlyCatalog, List<string> onlyStore, List<string>? changed, string why)
+        {
+            var ledger = WriteDisagreeLedger(catalogPath, onlyCatalog, onlyStore, changed);
+            var catName = Path.GetFileName(catalogPath);
+            var dbName = Path.GetFileName(storePath);
+            var nl = Environment.NewLine;
+            bool import = ImportCanResolve(onlyCatalog.Count);
+            var action = import
+                ? $"    truedat --store-import --moods \"{catalogPath}\" --store \"{storePath}\"{nl}" +
+                  $"        adds the {onlyCatalog.Count:N0} path(s) the store is missing; it never removes store entries"
+                : $"    ren \"{catName}\" \"{catName}.bak\"{nl}" +
+                  $"        keeps the STORE's values; the scan republishes the catalog from it{nl}" +
+                  $"    ren \"{dbName}\" \"{dbName}.bak\"{nl}" +
+                  $"        keeps the CATALOG's values; the scan seeds a fresh store from it";
+            return $"{headline}. Nothing was scanned.{nl}{nl}" +
+                   $"  Do {(import ? "this" : "one of these")}, then scan again:{nl}{action}{nl}{nl}" +
+                   (changed == null || changed.Count == 0 ? "  "
+                       : changed.Count == 1 ? "  1 shared entry holds a different value. "
+                       : $"  {changed.Count:N0} shared entries hold different values. ") +
+                   $"{onlyCatalog.Count:N0} paths only in the catalog, {onlyStore.Count:N0} only in the store. {why}" +
+                   (import ? "" : $"{nl}  --store-import cannot resolve a value difference: an import never overwrites a stored measurement.") +
+                   (ledger != null ? $"{nl}{nl}  Detail: {ledger}" : "");
         }
 
         /// <summary>Whether a catalog entry with no store origin and the store's entry for the same path hold the same facts — the
