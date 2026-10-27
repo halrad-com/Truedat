@@ -14,6 +14,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 - New measurements for performance optimization.
 
+### Changed
+
+- Improved error handling and recommendations for store use.
+
 ## [0.5.5.3-EV4.2] — 2026-10-26
 
 ### Changed
