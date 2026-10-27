@@ -18421,7 +18421,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // audioPath is the track on a direct read and a GUID-named staged copy when the
                 // caller staged one, so a staged copy that went missing under the scan was
                 // reported against the track — the operator reads "File not found" about a file
-                // that is sitting there (N:\Library, 2026-10-26).
+                // that is sitting there (field report, 2026-10-26).
                 var missingTrack = Path.Combine(Path.GetTempPath(), $"truedat-missing-{Guid.NewGuid():N}.flac");
                 var (f1, e1) = AnalyzeWithEssentia("no-such-essentia.exe", missingTrack, 0);
                 Assert(f1 == null && e1 != null && e1.IndexOf(missingTrack, StringComparison.Ordinal) >= 0,
@@ -26136,7 +26136,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// The old path consulted stderr alone, under a 5 s cap that substituted an empty string
         /// on expiry — and an empty stderr renders as a bare "Exit code 1", indistinguishable
         /// from a tool that died without a word. Both halves of that cost an operator a real
-        /// diagnosis on a 72k scan (N:\Library, 2026-10-26): the extractor's stdout was drained
+        /// diagnosis on a 72k scan (field report, 2026-10-26): the extractor's stdout was drained
         /// to keep the pipe from filling and then discarded unread, and every run in that series
         /// shows the drain reaching its cap (5.0-5.3 s max over ~72,000 processes), which is the
         /// thread pool delaying the read's completion, not the child being silent.
@@ -26183,7 +26183,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // GUID-named staged copy when the caller staged one. The bare "File not found" was
                 // recorded against the track either way, so a staged copy that went missing under
                 // the scan read as a missing track — the operator sees it reported about a file
-                // that is sitting right there (N:\Library, 2026-10-26).
+                // that is sitting right there (field report, 2026-10-26).
                 return (null, displayName != null && !string.Equals(displayName, audioPath, StringComparison.OrdinalIgnoreCase)
                     ? $"Staged copy missing before analysis: {audioPath}"
                     : $"File not found: {audioPath}");
