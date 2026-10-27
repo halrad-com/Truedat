@@ -22,7 +22,7 @@ by a test on ladder position, not just membership.
 
 **Libraries are not all called `Library` — that is only the DEFAULT library's name.** MusicBee
 names the folder after the library, so every name-based rung above misses a renamed or rebuilt one
-(etlap, 2026-08-21..23: the live library was `<root>\Remote`, its 106 MB XML sat in plain sight two
+(field report, 2026-08-21..23: the live library was `<root>\Remote`, its 106 MB XML sat in plain sight two
 rungs from the exe, and discovery reported it missing — read by the operator as "MusicBee is not
 writing the XML"). So `NamedLibraryDirs` stops guessing the name and looks for the **marker**:
 `MusicBeeLibrarySettings.ini`, which MusicBee drops in every library folder. Scan is bounded twice over: depth

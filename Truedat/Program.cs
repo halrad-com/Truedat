@@ -12495,7 +12495,7 @@ namespace Truedat
 
             // Libraries that are not called "Library". Every rung above names the folder, and
             // MusicBee names it after the LIBRARY — "Library" is only the default's name. A
-            // corruption-recovery rebuild called "Remote" (etlap, 2026-08-21..23) sat two rungs
+            // corruption-recovery rebuild called "Remote" (field report, 2026-08-21..23) sat two rungs
             // from the exe with its 106 MB XML in plain sight and discovery reported it missing,
             // which the operator reasonably read as "MusicBee is not writing the XML".
             //
@@ -12561,7 +12561,7 @@ namespace Truedat
         /// used.</summary>
         internal const string LibraryMarkerName = "MusicBeeLibrarySettings.ini";
 
-        /// <summary>The live library database. Absent on a first-run stub (etlap's Library/ held
+        /// <summary>The live library database. Absent on a first-run stub (a field install's Library/ held
         /// only a 4-byte pfidx), which is exactly why its mtime ranks candidates.</summary>
         internal const string LibraryDbName = "MusicBeeLibrary.mbl";
 
@@ -12638,7 +12638,7 @@ namespace Truedat
             // instances, and MB3's catalog was adopted.
             //
             // Stopping at the nearest level that yields anything keeps the instance's own
-            // libraries competing with each other (etlap's Library + Remote + nxtone all sit under
+            // libraries competing with each other (one field install's Library + Remote + a third all sit under
             // one <root>, so freshest-.mbl still picks the live one) while never letting a
             // neighbour's instance enter the comparison at all. It also means the volume root is
             // not reached in any layout where a library exists nearer.
@@ -21516,7 +21516,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
-            // --- libraries that are not called "Library" (etlap, 2026-08-21..23) -----------
+            // --- libraries that are not called "Library" (field report, 2026-08-21..23) ----
             // Every name-based rung misses a library MusicBee named after itself. Real dirs for
             // the same reason as the block above: the bug is about which directories get looked
             // at, so a stubbed filesystem would reproduce the wrong thing.
@@ -21634,13 +21634,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // Two real libraries -> freshest .mbl wins. This is the multi-library answer:
                     // no prompt, no flag, just live truth. (A caller that knows better passes the
                     // XML positionally and never gets here.)
-                    var nxtone = Path.Combine(root, "nxtone");
-                    Directory.CreateDirectory(nxtone);
+                    var thirdLib = Path.Combine(root, "thirdLib");
+                    Directory.CreateDirectory(thirdLib);
                     ResetNamedLibraryCacheForTest();
-                    File.WriteAllText(Path.Combine(nxtone, LibraryMarkerName), "<Path>ignored</Path>");
-                    var nxDb = Path.Combine(nxtone, LibraryDbName);
+                    File.WriteAllText(Path.Combine(thirdLib, LibraryMarkerName), "<Path>ignored</Path>");
+                    var nxDb = Path.Combine(thirdLib, LibraryDbName);
                     File.WriteAllText(nxDb, "db");
-                    File.WriteAllText(Path.Combine(nxtone, MoodsFileName), "{}");
+                    File.WriteAllText(Path.Combine(thirdLib, MoodsFileName), "{}");
 
                     // Relative to now, never absolute: a hardcoded future date outranks every
                     // real library on the machine forever, which is how a leftover root could
@@ -21649,7 +21649,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), t0.AddDays(-3));
                     File.SetLastWriteTimeUtc(nxDb, t0.AddDays(-1));
                     ResetNamedLibraryCacheForTest();
-                    Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(nxtone, MoodsFileName),
+                    Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(thirdLib, MoodsFileName),
                         "namedlib: with two libraries the freshest MusicBeeLibrary.mbl wins");
 
                     // …and it really is the mtime deciding, not the name order — flip it back.
@@ -21662,7 +21662,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.Delete(Path.Combine(remote, LibraryDbName));
                     File.Delete(nxDb);
                     var ordered = new List<string>(NamedLibraryDirs(new List<string> { toolDir, stub, root }));
-                    Assert(ordered.Contains(remote) && ordered.Contains(nxtone),
+                    Assert(ordered.Contains(remote) && ordered.Contains(thirdLib),
                         "namedlib: stubs without a .mbl are still recognised as library folders");
 
                     // Bounded depth: deeper than LibraryScanMaxDepth is not searched, so a

@@ -2188,7 +2188,7 @@ namespace Truedat.Store
                 "status\tpath\tdetail\tbackfilledFields", $"OK\t{root}\\Tool\\a.flac\t\t", $"DRIFT\t{root}\\Tool\\b.mp3\tsha changed\t",
             });
             File.WriteAllText(Path.Combine(dir, "mbxmoods-verify.receipt.json"),
-                "{\"schemaVersion\":1,\"kind\":\"verify-coverage-receipt\",\"catalog\":{\"path\":\"x\",\"trackCount\":6,\"digest\":\"00\"},\"shard\":{\"index\":1,\"total\":1,\"host\":\"ATOM\"},\"coverage\":{\"entries\":6,\"digest\":\"00\"}}");
+                "{\"schemaVersion\":1,\"kind\":\"verify-coverage-receipt\",\"catalog\":{\"path\":\"x\",\"trackCount\":6,\"digest\":\"00\"},\"shard\":{\"index\":1,\"total\":1,\"host\":\"HOST-A\"},\"coverage\":{\"entries\":6,\"digest\":\"00\"}}");
             var ledger = new ReviewLedger();
             var rec = ledger.Upsert(new ReviewRecord { Path = root + @"\bad\x.flac", Reason = "TagLib: bad header", State = ReviewState.Auto, StateReason = "auto:failed-component:sha", Attempts = 2 },
                 new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc), isRetry: false);
@@ -2386,7 +2386,7 @@ namespace Truedat.Store
             {
                 using var dal = new StoreDal(db);
                 var now = "2026-10-11T10:00:00.0000000Z";
-                var m = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                var m = MachineIdentity.EnsureMinted(dal, "HOST-A", now);
                 long root = dal.EnsureRoot(m.Id, @"D:\Music", "primary", now);
                 var full = FullyPopulatedEntry();
                 const string display = @"D:\Music\Tool\a.flac";
@@ -2434,34 +2434,34 @@ namespace Truedat.Store
                 StoreLog.Sink = lines.Add; StoreLog.SetVerbose(false);
                 using var dal = new StoreDal(db);   // disposed before db: an undisposed DAL kept the file open and left the temp dir behind
                 var now = "2026-10-11T10:00:00.0000000Z";
-                var m1 = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                var m1 = MachineIdentity.EnsureMinted(dal, "HOST-A", now);
                 assert(m1.Id.Length == 36 && m1.Id[14] == '7', "first open mints a UUIDv7 machine id");
-                assert(m1.HostMatches && m1.CreatedByHost == "ATOM", "created-by host recorded, matches");
+                assert(m1.HostMatches && m1.CreatedByHost == "HOST-A", "created-by host recorded, matches");
                 assert(dal.Count("machine") == 1 && dal.MetaGet("machine_id") == m1.Id, "one machine row, id in store_meta");
 
-                var m2 = MachineIdentity.EnsureMinted(dal, "atom", now);
+                var m2 = MachineIdentity.EnsureMinted(dal, "host-a", now);
                 assert(m2.Id == m1.Id && dal.Count("machine") == 1, "second open reads the same id (case-insensitive host), mints nothing");
                 assert(m2.ForWrites(dal, adopt: false, now) == m1.Id, "on the minting host, writes go under the store's own machine id");
                 var warns = lines.FindAll(l => l.Contains(" WARN "));
                 assert(warns.Count == 0, "matching host logs no warning (INFO lines are fine)");
 
                 int before = lines.Count;
-                var m3 = MachineIdentity.EnsureMinted(dal, "MAX1", now);
+                var m3 = MachineIdentity.EnsureMinted(dal, "HOST-B", now);
                 assert(!m3.HostMatches && m3.Id == m1.Id, "a copied store opened on another host keeps the id but HostMatches is false");
                 // Every run that opens a copied store used to print a WARN telling the operator to pass --machine-adopt, though a
                 // scan adopts on its own and the commands that do need it refuse with the same advice. Diagnostic only now.
                 assert(lines.Count == before, $"a host mismatch prints nothing at the default level ({string.Join(" | ", lines.Skip(before))})");
                 StoreLog.SetVerbose(true);
-                MachineIdentity.EnsureMinted(dal, "MAX1", now);
+                MachineIdentity.EnsureMinted(dal, "HOST-B", now);
                 StoreLog.SetVerbose(false);
                 var diag = lines.Skip(before).Where(l => l.Contains(" DEBUG ")).ToList();
-                assert(diag.Count == 1 && diag[0].Contains("ATOM") && diag[0].Contains("MAX1"),
+                assert(diag.Count == 1 && diag[0].Contains("HOST-A") && diag[0].Contains("HOST-B"),
                     $"under --audit the mismatch is one diagnostic line naming both hosts ({(diag.Count > 0 ? diag[0] : "<none>")})");
                 bool refused = false;
                 try { m3.ForWrites(dal, adopt: false, now); } catch (StoreException) { refused = true; }
                 assert(refused, "writes as this machine are refused on a host mismatch without --machine-adopt");
                 var w3 = m3.ForWrites(dal, adopt: true, now);
-                assert(w3 != m1.Id && w3.Length == 36 && dal.Count("machine") == 2 && db.ExecScalar($"SELECT hostname FROM machine WHERE id = '{w3}';") == "MAX1",
+                assert(w3 != m1.Id && w3.Length == 36 && dal.Count("machine") == 2 && db.ExecScalar($"SELECT hostname FROM machine WHERE id = '{w3}';") == "HOST-B",
                     $"#2 --machine-adopt mints a machine row for the CURRENT host and writes go under it, not under the minting machine ({dal.Count("machine")} machines)");
                 assert(m3.ForWrites(dal, adopt: true, now) == w3 && dal.Count("machine") == 2, "adopting twice reuses the host's machine row");
 
@@ -2571,7 +2571,7 @@ namespace Truedat.Store
             {
                 using var dal = new StoreDal(db);   // disposed before db: an undisposed DAL kept the file open and left the temp dir behind
                 var now = "2026-10-11T10:00:00.0000000Z";
-                var m = MachineIdentity.EnsureMinted(dal, "ATOM", now);
+                var m = MachineIdentity.EnsureMinted(dal, "HOST-A", now);
                 long root = dal.EnsureRoot(m.Id, @"D:\Music", "primary", now);
                 long mirror = dal.EnsureRoot(m.Id, @"X:\Library", "mirror", now);
                 const string shaA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -2792,7 +2792,7 @@ namespace Truedat.Store
                     SchemaMigrator.Apply(db, "selftest-v1", targetVersion: 1);
                     assert(SchemaMigrator.ReadVersion(db) == 1 && db.ExecScalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='track_feature';") == "1", "a v1 store can still be built for the migration test (targetVersion seam)");
                     var now = "2026-10-12T10:00:00.0000000Z";
-                    db.Exec($"INSERT INTO machine(id, hostname, created_utc) VALUES ('m1', 'ATOM', '{now}');");
+                    db.Exec($"INSERT INTO machine(id, hostname, created_utc) VALUES ('m1', 'HOST-A', '{now}');");
                     db.Exec($"INSERT INTO library_root(id, machine_id, path, role, created_utc) VALUES (1, 'm1', 'D:\\Music', 'primary', '{now}');");
                     db.Exec($"INSERT INTO file_entity(id, created_utc) VALUES ('e1', '{now}');");
                     db.Exec($"INSERT INTO file_entity(id, created_utc) VALUES ('e2', '{now}');");
