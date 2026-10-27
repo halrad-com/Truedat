@@ -18434,6 +18434,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"missing staged copy: the error names the staged path (got {e2})");
             }
 
+            // --- a failed extractor run reports what it actually said ---
+            {
+                const string info = "[   INFO   ] MusicExtractor: reading file\n[   INFO   ] All done";
+                const string complaint = "AudioLoader: decoding error: Invalid data found";
+                Assert(ExtractorFailureReason(complaint, "", 1, false) == complaint,
+                    $"failure reason: the tool's own complaint on stderr is the reason ({ExtractorFailureReason(complaint, "", 1, false)})");
+                // The extractor's stdout was drained to keep the pipe from filling and then
+                // discarded unread, so a build that explains itself there was reported as silent.
+                // Pinned as the stdout branch's OWN answer, not merely "the text appears somewhere":
+                // the trace fallback below quotes the last line too, so a weaker assert passed with
+                // the branch deleted (caught by mutation, 2026-10-27).
+                Assert(ExtractorFailureReason("", complaint, 1, false) == $"stdout: {complaint}",
+                    $"failure reason: an error on stdout is not thrown away ({ExtractorFailureReason("", complaint, 1, false)})");
+                Assert(ExtractorFailureReason(info, complaint, 1, false).IndexOf(complaint, StringComparison.Ordinal) >= 0,
+                    $"failure reason: trace on stderr does not hide a real error on stdout ({ExtractorFailureReason(info, complaint, 1, false)})");
+                // THE one that cost a diagnosis: the read did not finish, so we know nothing — which
+                // must not render as the extractor having said nothing.
+                var pending = ExtractorFailureReason("", "", 1, true);
+                Assert(pending != "Exit code 1" && pending.IndexOf("could not be read", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"failure reason: an unread stream says so, it does not read as silence ({pending})");
+                Assert(ExtractorFailureReason("", "", 1, false).IndexOf("no output", StringComparison.Ordinal) >= 0,
+                    $"failure reason: a genuinely silent exit says so ({ExtractorFailureReason("", "", 1, false)})");
+                Assert(ExtractorFailureReason(info, "", 1, false).IndexOf("All done", StringComparison.Ordinal) >= 0,
+                    $"failure reason: trace-only output still shows its last line ({ExtractorFailureReason(info, "", 1, false)})");
+                Assert(TryExtractToolError(info, out _) == false && TryExtractToolError(complaint, out _),
+                    "failure reason: trace is not an error, a complaint is");
+                // The caps are the other half of it: a run that failed is the one run whose output
+                // we cannot afford to abandon, and the extractor prints even its errors to stderr,
+                // so an empty stderr after seconds of work is a lost read, not a silent tool.
+                Assert(OutputDrainOnFailureMs > OutputDrainMs,
+                    $"failure reason: a failure waits longer for its words than a success does ({OutputDrainOnFailureMs} vs {OutputDrainMs})");
+            }
+
             // --- SMFM is carried across cache hits (so it needn't be re-read from the file) ---
             {
                 var smfmSrc = new TrackEntry { Features = new TrackFeatures { SmfmScores = new[] { 10, 20, 30 }, SmfmChannel = 2, SmfmBpm = 128.5 } };
@@ -23842,6 +23875,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// preserved for the case that motivated the gate — a file whose header still claims
         /// the full length while only part decodes (ABBA: 62s of a claimed 224s) — because the
         /// fingerprint reads that same overstated header.</summary>
+        /// <summary>How long to wait for a finished extractor's redirected streams. The process has
+        /// already exited, so the pipes are at EOF and the wait is pure thread-pool scheduling: the
+        /// short cap is fine when nothing but a diagnostic would read them, and a FAILURE gets the
+        /// long one because the tool's own words are the only explanation there is.</summary>
+        internal const int OutputDrainMs = 5000;
+        internal const int OutputDrainOnFailureMs = 60000;
+
         /// <summary>Poll interval and idle window for the Essentia stall watchdog.</summary>
         internal const int EssentiaPollSeconds = 5;
         internal const int EssentiaStallIdlePolls = 36;   // 180 s
@@ -26063,10 +26103,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             catch { return null; }
         }
 
-        static string ExtractEssentiaError(string stderr, int exitCode)
+        /// <summary>The tool's own complaint, if it made one: every line that is not an INFO or
+        /// DEBUG trace, last three joined. False when the stream is empty or carries nothing but
+        /// trace — which is NOT the same as the tool having explained itself.</summary>
+        internal static bool TryExtractToolError(string? output, out string message)
         {
-            if (string.IsNullOrWhiteSpace(stderr)) return $"Exit code {exitCode}";
-            var lines = stderr.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            message = "";
+            if (string.IsNullOrWhiteSpace(output)) return false;
+            var lines = output!.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             var errorLines = new List<string>();
             foreach (var line in lines)
             {
@@ -26079,12 +26123,51 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     errorLines.Add(line);
                 }
             }
+            if (errorLines.Count == 0) return false;
+            int start = Math.Max(0, errorLines.Count - 3);
+            message = string.Join(" | ", errorLines.GetRange(start, errorLines.Count - start));
+            return true;
+        }
 
-            if (errorLines.Count > 0)
-            {
-                int start = Math.Max(0, errorLines.Count - 3);
-                return string.Join(" | ", errorLines.GetRange(start, errorLines.Count - start));
-            }
+        /// <summary>
+        /// Why a failed extractor run failed, from BOTH of its streams and from whether we
+        /// managed to read them.
+        ///
+        /// The old path consulted stderr alone, under a 5 s cap that substituted an empty string
+        /// on expiry — and an empty stderr renders as a bare "Exit code 1", indistinguishable
+        /// from a tool that died without a word. Both halves of that cost an operator a real
+        /// diagnosis on a 72k scan (N:\Library, 2026-10-26): the extractor's stdout was drained
+        /// to keep the pipe from filling and then discarded unread, and every run in that series
+        /// shows the drain reaching its cap (5.0-5.3 s max over ~72,000 processes), which is the
+        /// thread pool delaying the read's completion, not the child being silent.
+        ///
+        /// So: stderr first, then stdout, and when neither could be read SAY that rather than
+        /// reporting silence. A reason we never captured must never look like a reason there
+        /// wasn't one.
+        /// </summary>
+        internal static string ExtractorFailureReason(string? stderr, string? stdout, int exitCode, bool outputPending)
+        {
+            if (TryExtractToolError(stderr, out var fromStderr)) return fromStderr;
+            if (TryExtractToolError(stdout, out var fromStdout)) return $"stdout: {fromStdout}";
+            if (outputPending) return $"Exit code {exitCode} (its output could not be read — the drain did not finish)";
+            var lastTrace = LastNonEmptyLine(stderr) ?? LastNonEmptyLine(stdout);
+            return lastTrace != null
+                ? $"Exit code {exitCode} (last line: {lastTrace})"
+                : $"Exit code {exitCode} (no output)";
+        }
+
+        static string? LastNonEmptyLine(string? output)
+        {
+            if (string.IsNullOrWhiteSpace(output)) return null;
+            var lines = output!.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            return lines.Length > 0 ? lines.Last() : null;
+        }
+
+        static string ExtractEssentiaError(string stderr, int exitCode)
+        {
+            if (TryExtractToolError(stderr, out var message)) return message;
+            if (string.IsNullOrWhiteSpace(stderr)) return $"Exit code {exitCode}";
+            var lines = stderr.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             return $"Exit code {exitCode} (stderr: {lines.Last()})";
         }
 
@@ -26384,7 +26467,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                             {
                                 try { proc.Kill(); proc.WaitForExit(5000); } catch { }
                                 timer.Stop();
-                                var partialStderr = stderrTask.Wait(3000) ? stderrTask.Result : "";
+                                // Killed, so it is as dead as a non-zero exit and its words matter as
+                                // much: same wait, same both-streams reading.
+                                bool stallPending = !stderrTask.Wait(OutputDrainOnFailureMs);
+                                var partialStderr = stallPending ? "" : (stderrTask.Result ?? "");
+                                var partialStdout = "";
+                                if (stdoutDrainTask.Wait(OutputDrainOnFailureMs)) partialStdout = stdoutDrainTask.Result ?? "";
+                                else stallPending = true;
                                 var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
                                 Console.Error.WriteLine($"  DEBUG watchdog: killed stalled essentia after {timer.Elapsed.TotalSeconds:F0}s");
                                 Console.Error.WriteLine($"    exe:    {Path.GetFileName(essentiaExe)}");
@@ -26393,7 +26482,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                                 Console.Error.WriteLine($"    size:   {sizeMb:F1} MB");
                                 Console.Error.WriteLine($"    cpu:    {lastCpu.TotalSeconds:F1}s total before stall");
                                 Console.Error.WriteLine($"    stderr: {(partialStderr.Length > 0 ? $"[{partialStderr.Substring(0, Math.Min(300, partialStderr.Length))}]" : "(empty)")}");
-                                var hint = !string.IsNullOrWhiteSpace(partialStderr) ? $" | {ExtractEssentiaError(partialStderr, -1)}" : "";
+                                if (partialStdout.Length > 0) Console.Error.WriteLine($"    stdout: [{partialStdout.Substring(0, Math.Min(300, partialStdout.Length))}]");
+                                var hint = $" | {ExtractorFailureReason(partialStderr, partialStdout, -1, stallPending)}";
                                 return (null, $"Process stalled after {timer.Elapsed.TotalSeconds:F0}s (no CPU for 60s, PID {pid}, {sizeMb:F0} MB){hint}");
                             }
                         }
@@ -26412,18 +26502,38 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 catch { Interlocked.Increment(ref _nativeCpuUnavailable); } // diagnostics must never fail a track
 
-                long drainStartedAt = Stopwatch.GetTimestamp();
-                var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
-                _stageOutputDrain.RecordSince(drainStartedAt);
-                timer.Stop();
+                // The process has exited, so BOTH pipes are at EOF and these reads can only be
+                // waiting on the thread pool — at 32 workers that wait reached the old 5 s cap in
+                // every run of a measured series (output drain max 5.0-5.3 s over ~72,000
+                // processes). The cap then substituted an empty string, and an empty stderr renders
+                // as a bare "Exit code 1": a reason we never read, reported as a tool that said
+                // nothing. A failure waits properly for its own explanation; everything else keeps
+                // the short cap, because nothing but the diagnostics reads these streams.
+                timer.Stop();                      // the process's own life — the drain below is not the analysis
                 var exitCode = proc.ExitCode;
+                long drainStartedAt = Stopwatch.GetTimestamp();
+                bool wantWords = exitCode != 0;
+                bool outputPending = !stderrTask.Wait(wantWords ? OutputDrainOnFailureMs : OutputDrainMs);
+                var stderr = outputPending ? "" : (stderrTask.Result ?? "");
+                var stdout = "";
+                if (wantWords)
+                {
+                    // Drained since launch so a chatty build cannot deadlock on a full pipe, and
+                    // then dropped unread — which threw away the explanation of any build that
+                    // writes it to stdout. On a failure it is evidence, so it is read.
+                    if (stdoutDrainTask.Wait(OutputDrainOnFailureMs)) stdout = stdoutDrainTask.Result ?? "";
+                    else outputPending = true;
+                }
+                _stageOutputDrain.RecordSince(drainStartedAt);
 
                 if (exitCode != 0)
                 {
                     var sizeMb = fileSizeBytes / (1024.0 * 1024.0);
-                    var errorMsg = ExtractEssentiaError(stderr, exitCode);
+                    var errorMsg = ExtractorFailureReason(stderr, stdout, exitCode, outputPending);
                     Console.Error.WriteLine($"  DEBUG essentia: exit {exitCode}, method={pathMethod}, path={toolPath}");
                     if (stderr.Length > 0) Console.Error.WriteLine($"    stderr: [{stderr.Substring(0, Math.Min(300, stderr.Length))}]");
+                    if (stdout.Length > 0) Console.Error.WriteLine($"    stdout: [{stdout.Substring(0, Math.Min(300, stdout.Length))}]");
+                    if (outputPending) Console.Error.WriteLine($"    output: the drain did not finish within {OutputDrainOnFailureMs / 1000}s");
                     return (null, $"{errorMsg} (exit {exitCode}, PID {pid}, {sizeMb:F0} MB, {timer.Elapsed.TotalSeconds:F1}s)");
                 }
 
