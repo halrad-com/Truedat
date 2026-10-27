@@ -3039,6 +3039,7 @@ namespace Truedat
                 string? storeCatalog = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out var storeRefusal);
                 if (storeRefusal != null) { Console.Error.WriteLine(storeRefusal); Environment.ExitCode = 1; return; }
                 bool storeExplicit = !string.IsNullOrEmpty(storePath);
+                _storeExplicit = storeExplicit;
                 storePath = global::Truedat.Store.StoreLocation.Resolve(storeExplicit ? storePath : null, storeDir, storeCatalog!, out var storeWhy);
                 // A config default on an instance that has not scanned yet: the read verbs have no store to answer from, so they
                 // answer from the catalog exactly as without the key (a scan creates the store; a verb never does).
@@ -5632,6 +5633,11 @@ namespace Truedat
             Console.WriteLine($"  truedat:    {VersionInfo.Display}");
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
+            // The store is resolved in the arg block and settled at the scan's entry (EnsureDefaultStore), both of which run
+            // BEFORE the log tee is attached — so every line they print reaches the console and not truedat.log. etlap's log
+            // (2026-10-26) therefore carried no store line at all while the run paired one library's catalog with another
+            // library's store. Name it here, beside the two paths it has to agree with, where the tee can see it.
+            Console.WriteLine($"  Store:      {_storePath ?? "none — this scan writes the catalog only"}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
             Console.WriteLine($"  ffmpeg:     {_ffmpegPath.Value ?? "not found (multi-channel files will be skipped)"}");
 
@@ -18114,6 +18120,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true, configStoreOff: true),
                     "adopt: config store=false is a standing --no-store, an existing store is left alone");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false, configEdgesOff: true), "adopt: config edges=false is a standing --no-edges");
+                // etlap, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
+                // ProbeCatalogBesideExe stopped there while ResolveITunesXml fell through to the marker scan and found the live
+                // library. The store was derived from the stub's catalog in the arg block and that value then outranked the
+                // scan's real catalog: one library's catalog written against another library's store, 0 paths in common, exit 2.
+                Assert(ShouldRederiveStore(storeExplicit: false,
+                        cachedStore: @"C:\MusicBee\Library\truedat.db", derivedStore: @"C:\MusicBee\Remote\truedat.db"),
+                    "store split: a DERIVED store from another folder than the scan's catalog is re-derived");
+                Assert(!ShouldRederiveStore(storeExplicit: true,
+                        cachedStore: @"C:\MusicBee\Library\truedat.db", derivedStore: @"C:\MusicBee\Remote\truedat.db"),
+                    "store split: an explicitly named --store wins, right or wrong — the operator said where");
+                Assert(!ShouldRederiveStore(storeExplicit: false,
+                        cachedStore: @"C:\MusicBee\Remote\truedat.db", derivedStore: @"C:\MusicBee\Remote\truedat.db"),
+                    "store split: the agreeing case re-derives to itself and is left alone");
+                Assert(!ShouldRederiveStore(storeExplicit: false,
+                        cachedStore: @"C:\MusicBee\Remote\TRUEDAT.DB", derivedStore: @"C:\musicbee\remote\truedat.db"),
+                    "store split: Windows paths compare case-insensitively, so case alone is not a split");
+                // --store-dir and a network library's %LOCALAPPDATA% store are MEANT to sit away from the catalog. The comparison is
+                // against Resolve's own answer for the scan's catalog, so both re-derive to themselves — comparing against the
+                // catalog's DIRECTORY instead would drag every one of them back beside the catalog.
+                Assert(!ShouldRederiveStore(storeExplicit: false,
+                        cachedStore: @"D:\stores\9b817c460d90a11b\truedat.db", derivedStore: @"D:\stores\9b817c460d90a11b\truedat.db"),
+                    "store split: --store-dir / a network library's local store re-derives to itself and stays put");
+                Assert(!ShouldRederiveStore(storeExplicit: false, cachedStore: null, derivedStore: @"C:\MusicBee\Remote\truedat.db"),
+                    "store split: nothing cached yet is not a split (the scan derives it fresh)");
                 Assert(FormatLacksRecordedDuration("X.AAC"), "adts: the check ignores case");
                 Assert(!FormatLacksRecordedDuration("x.m4a"), "adts: an .m4a container DOES record a duration");
                 Assert(!FormatLacksRecordedDuration("x.mp3"), "adts: .mp3 is not in this class");
@@ -23634,6 +23664,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>The run's typed --no-edges and --store-dir, kept for the scan-time default below.</summary>
         static bool _noEdgesTyped;
         static string? _storeDirOpt;
+        /// <summary>True when the command line NAMED a store location (<c>--store &lt;path&gt;</c>). A bare <c>--store</c>, the
+        /// config key and an adoption all leave it false: they asked for a store without saying where, so the location was
+        /// DERIVED and <see cref="EnsureDefaultStore"/> may re-derive it once the scan's real catalog is known.</summary>
+        static bool _storeExplicit;
 
         /// <summary>Adopt a store already at the resolved location when nothing on the command line asked for or refused one. The config
         /// file's standing `store false` refuses too (<paramref name="configStoreOff"/>): a false boolean renders no argument, so until
@@ -23651,6 +23685,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// shard and a per-file mode with no --moods catalog all keep it off.</summary>
         internal static bool ShouldCreateDefaultStore(bool storeFileExists, bool noStoreTyped, bool configStoreOff, bool chunked, bool hasCatalogTarget)
             => !storeFileExists && !noStoreTyped && !configStoreOff && !chunked && hasCatalogTarget;
+
+        /// <summary>A store whose location was DERIVED (not named with <c>--store &lt;path&gt;</c>) was derived in the arg block
+        /// from a GUESSED catalog, because the library is not discovered until the scan sets up. Re-derive it once the scan's
+        /// real catalog is known. Compared against <see cref="global::Truedat.Store.StoreLocation.Resolve"/>'s own answer for
+        /// that catalog — never against the catalog's directory — so <c>--store-dir</c> and a network library's
+        /// <c>%LOCALAPPDATA%</c> store, which differ from the catalog's folder by design, re-derive to themselves and stay put.
+        /// An explicitly named store always wins, right or wrong: the operator said where.</summary>
+        internal static bool ShouldRederiveStore(bool storeExplicit, string? cachedStore, string? derivedStore)
+        {
+            if (storeExplicit || string.IsNullOrEmpty(cachedStore) || string.IsNullOrEmpty(derivedStore)) return false;
+            try { return !string.Equals(Path.GetFullPath(cachedStore!), Path.GetFullPath(derivedStore!), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }   // an unparseable path is not evidence of a split; leave the resolved store alone
+        }
 
         /// <summary>True when the config FILE sets <paramref name="key"/> to false — the operator's standing "no".</summary>
         static bool ConfigSaysOff(string key)
@@ -23689,9 +23736,46 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // The store asked for by a flag or the config file was resolved in the arg block; otherwise the default location.
             // Either way the question is the same — is there a store FILE yet — so a typed --store or config `store true`
             // on a library that has a catalog seeds too, instead of refusing until --store-import has been run by hand.
-            string storePath;
-            try { storePath = _storePath ?? global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _); }
+            string storePath, derived;
+            try
+            {
+                derived = global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _);
+                storePath = _storePath ?? derived;
+            }
             catch (Exception ex) { Console.WriteLine($"  Store:      not created ({ex.Message}); this scan runs without it"); return SeedResult.NoStore; }
+
+            // The arg block resolved the store BEFORE the library was discovered — ResolveITunesXml does not run until the scan
+            // sets up — so when nothing NAMED a store its catalog was ProbeCatalogBesideExe's guess. That probe looks for
+            // mbxmoods.json while the library probe looks for the XML, and a stub library holding a stale catalog and no XML
+            // splits the two: the scan then writes one library's catalog against another library's store (etlap, 2026-10-26 —
+            // 72,360 paths only in the catalog, 72,845 only in the store, nothing in common, exit 2). The scan is the first
+            // place that knows the real catalog, so it is where a DERIVED store is re-derived. The test compares against
+            // Resolve's own answer rather than the catalog's directory, which is what keeps --store-dir and a network
+            // library's %LOCALAPPDATA% store correct: both differ from the catalog's folder by design and re-derive to
+            // themselves.
+            if (ShouldRederiveStore(_storeExplicit, _storePath, derived))
+            {
+                Console.WriteLine($"  Store:      {storePath} was resolved before the library was known; using the one beside this scan's catalog instead");
+                storePath = derived;
+                _storePath = derived;
+                ApplyStoreLocation(derived, catalogPath);
+            }
+
+            // Adoption is decided in that same arg block, against that same guessed catalog, so a store sitting beside the REAL
+            // catalog was never adopted: the scan ran store-less and its advisor recommended --store-import with a 196 MB store
+            // in the folder it was writing to (etlap, 11:26). ShouldCreateDefaultStore only CREATES, so an existing store falls
+            // straight through it — adopt here, where the catalog is known. A --chunk shard stays store-less by design.
+            if (_storePath == null && !chunked
+                && ShouldAdoptExistingStore(_noStoreTyped, storeAsked: false, storeVerb: false,
+                                            storeFileExists: File.Exists(derived), ConfigSaysOff("store")))
+            {
+                _storePath = derived;
+                if (ShouldAdoptEdgesWithStore(true, _noEdgesTyped, ConfigSaysOff("edges"))) _stageOpts.Edges = true;
+                ApplyStoreLocation(derived, catalogPath);
+                Console.WriteLine($"  Store:      using the store already at \"{derived}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
+                return SeedResult.StoreInForce;
+            }
+
             if (!ShouldCreateDefaultStore(File.Exists(storePath), _noStoreTyped, ConfigSaysOff("store"), chunked, hasCatalogTarget: true))
                 return SeedResult.NoStore;
 
