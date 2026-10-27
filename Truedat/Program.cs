@@ -3029,7 +3029,6 @@ namespace Truedat
                     {
                         storePath = "";
                         storeAdopted = true;
-                        if (ShouldAdoptEdgesWithStore(true, noEdges, ConfigSaysOff("edges"))) _stageOpts.Edges = true;
                     }
                 }
             }
@@ -14088,10 +14087,12 @@ namespace Truedat
                 {
                     try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath, path); } catch { /* the store block is best-effort */ }
                 }
-                if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
+                // Only when edges are asked for: with them opt-in, telling an operator to spend a full re-analysis on a
+                // capability they have not turned on is the advice that cost etlap its day (operator 2026-10-26).
+                if (storeInfo != null && _stageOpts.Edges && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
                     rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
             }
-            else if (ShouldRecommendStore(storeInForce: false, _noStoreTyped, entries.Count))
+            else if (ShouldRecommendStore(storeInForce: false, _noStoreTyped, entries.Count, storeOptedIn: _storeFromConfig || _storeDirOpt != null))
                 rec.Add("no store yet                            ->  truedat --store-import  (seconds, no audio read; then truedat --refresh adds the edges)");
 
             bool anyRec = rec.Count > 0 || (waveBreakdown != null && waveBreakdown.Count > 0);
@@ -18088,38 +18089,43 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: false),
                     "adopt: no store on disk is nothing to adopt");
 
-                // The default (operator 2026-10-18): a SCAN with no store makes one, so a fresh install
-                // analyses its library once with edges instead of twice. Every way to say no is a no.
-                Assert(ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true),
-                    "default store: a scan with no store makes one");
-                Assert(!ShouldCreateDefaultStore(storeFileExists: true, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true),
+                // Opt-in (operator 2026-10-26: "so for now lets default them off"). A scan makes a store only when something
+                // ASKED for one — a typed --store/--store-dir or config `store true`. Measured cost of the default being on:
+                // +2h04m per full scan and 2.7x the disk (285 MB -> 767 MB on a 72k library), against a benefit nothing has
+                // measured; and the etlap outage came out of a store that existed because it was the default. Every way to
+                // say no is still a no.
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true, storeAsked: false),
+                    "default store: a scan nobody asked a store of does not make one");
+                Assert(ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true, storeAsked: true),
+                    "default store: --store or config store=true makes one");
+                Assert(!ShouldCreateDefaultStore(storeFileExists: true, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: true, storeAsked: true),
                     "default store: a store already on disk is used, never made again");
-                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: true, configStoreOff: false, chunked: false, hasCatalogTarget: true),
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: true, configStoreOff: false, chunked: false, hasCatalogTarget: true, storeAsked: true),
                     "default store: --no-store wins");
-                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: true, chunked: false, hasCatalogTarget: true),
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: true, chunked: false, hasCatalogTarget: true, storeAsked: true),
                     "default store: config store=false is a standing no");
-                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: true, hasCatalogTarget: true),
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: true, hasCatalogTarget: true, storeAsked: true),
                     "default store: a --chunk shard never makes one (shards would each publish from their own store)");
-                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: false),
+                Assert(!ShouldCreateDefaultStore(storeFileExists: false, noStoreTyped: false, configStoreOff: false, chunked: false, hasCatalogTarget: false, storeAsked: true),
                     "default store: a per-file mode with no --moods target has nothing to put in one");
+                Assert(global::Truedat.TruedatConfig.Settings.First(s => s.Key == "store").Default == "false", "default store: the config listing says opt-in");
+                Assert(global::Truedat.TruedatConfig.Settings.First(s => s.Key == "edges").Default == "false", "default edges: the config listing says opt-in");
                 Assert(!ShouldAdoptExistingStore(noStore: true, storeAsked: false, storeVerb: false, storeFileExists: true),
                     "adopt: --no-store still wins over an existing store");
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: true, storeVerb: false, storeFileExists: true),
                     "adopt: an explicit --store needs no adoption (it resolves on its own)");
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: true, storeFileExists: true),
                     "adopt: a store verb resolves its own path, never through adoption");
-                Assert(ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 7641), "advisor: a catalog with no store is told the first store step");
-                Assert(!ShouldRecommendStore(storeInForce: true, noStore: false, catalogEntries: 7641), "advisor: a store in force gets the edges line instead, not this one");
-                Assert(!ShouldRecommendStore(storeInForce: false, noStore: true, catalogEntries: 7641), "advisor: a typed --no-store is not advised against");
-                Assert(!ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 0), "advisor: an empty catalog has nothing to import");
-                Assert(ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false), "adopt: edges come on with an adopted store");
-                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: true), "adopt: --no-edges still wins");
-                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: false, noEdges: false), "adopt: no adopted store means edges stay as they were");
+                Assert(!ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 7641, storeOptedIn: false),
+                    "advisor: an off-by-default capability this instance never asked for is not recommended");
+                Assert(ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 7641, storeOptedIn: true), "advisor: opted in and no store yet is still the first store step");
+                Assert(!ShouldRecommendStore(storeInForce: true, noStore: false, catalogEntries: 7641, storeOptedIn: true), "advisor: a store in force gets the edges line instead, not this one");
+                Assert(!ShouldRecommendStore(storeInForce: false, noStore: true, catalogEntries: 7641, storeOptedIn: true), "advisor: a typed --no-store is not advised against");
+                Assert(!ShouldRecommendStore(storeInForce: false, noStore: false, catalogEntries: 0, storeOptedIn: true), "advisor: an empty catalog has nothing to import");
                 // Codex review 2026-10-20 #7: the config file's `store false` / `edges false` render no argument, so adoption never saw
                 // them and a plain scan used the store with edges over the operator's standing no.
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true, configStoreOff: true),
                     "adopt: config store=false is a standing --no-store, an existing store is left alone");
-                Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false, configEdgesOff: true), "adopt: config edges=false is a standing --no-edges");
                 // etlap, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
                 // ProbeCatalogBesideExe stopped there while ResolveITunesXml fell through to the marker scan and found the live
                 // library. The store was derived from the stub's catalog in the arg block and that value then outranked the
@@ -21079,9 +21085,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     var cl = ConfigListingLines(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), cw);
                     int widest = 0; foreach (var l in cl) widest = Math.Max(widest, l.Length);
                     Assert(widest <= cw, $"config-listing: every line fits {cw} columns (widest {widest})");
-                    string storeHead = "    " + "store".PadRight(17) + " " + (cw >= 78 ? "true".PadRight(10) + " write the store every scan" : "true");
+                    string storeHead = "    " + "store".PadRight(17) + " " + (cw >= 78 ? "false".PadRight(10) + " write the store every scan" : "false");
                     Assert(cl.Contains(storeHead), $"config-listing: store's value sits on the key's own line at {cw} columns ({string.Join(" | ", cl.FindAll(l => l.Contains("store")))})");
-                    Assert(cl.Exists(l => l.StartsWith("    " + "edges".PadRight(17) + " true", StringComparison.Ordinal)), $"config-listing: edges' value sits on the key's own line at {cw} columns");
+                    Assert(cl.Exists(l => l.StartsWith("    " + "edges".PadRight(17) + " false", StringComparison.Ordinal)), $"config-listing: edges' value sits on the key's own line at {cw} columns");
                 }
                 // -v environment check: the extractor reads as its build name and whether it is current; ffmpeg as its version token.
                 Assert(ExtractorBuildLabel(LatestExtractorMd5) == "output-x64.7 (current)", $"env: the current extractor is labelled current ({ExtractorBuildLabel(LatestExtractorMd5)})");
@@ -23656,8 +23662,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Whether the advisor names the store's first step. A catalog with no store was never counted as a gap (the store is
         /// opt-in and nothing creates one unasked, 2026-10-13), so the summary told an operator how to add edges only once they had
         /// already found the store on their own. Advice, never an action; a typed --no-store is the operator saying no.</summary>
-        internal static bool ShouldRecommendStore(bool storeInForce, bool noStore, int catalogEntries)
-            => !storeInForce && !noStore && catalogEntries > 0;
+        /// <para>Opt-in changes what the advisor may say (operator 2026-10-26: "if its defaulting to false — as the default — it
+        /// does not recommend the option to be run"). A capability that is off by default and that this instance has not asked
+        /// for is not a gap, so naming its first step is not advice, it is a sales pitch — and on etlap the store advice was
+        /// actively wrong, naming --store-import for a library the operator did not mean. Advice only once the operator has
+        /// opted in and the store is missing.</para>
+        internal static bool ShouldRecommendStore(bool storeInForce, bool noStore, int catalogEntries, bool storeOptedIn)
+            => storeOptedIn && !storeInForce && !noStore && catalogEntries > 0;
 
         /// <summary>The run's typed --no-store, kept for the advisor (the config key is already folded into the args).</summary>
         static bool _noStoreTyped;
@@ -23675,16 +23686,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         internal static bool ShouldAdoptExistingStore(bool noStore, bool storeAsked, bool storeVerb, bool storeFileExists, bool configStoreOff = false)
             => !noStore && !configStoreOff && !storeAsked && !storeVerb && storeFileExists;
 
-        /// <summary>A scan with no store makes one (operator, 2026-10-18: "make it the default… if there is no store").
-        /// Off by default made a fresh install analyse its library twice: edges can only be folded while the extractor
-        /// is running on the audio, so a library scanned without them needs a full re-analysis to get them later — for
-        /// work that costs about 0.2 s per track the first time. The 2026-10-13 ruling that took the store off was about
-        /// a store that measured ~15x the catalog; that was the main artifact and untyped columns, both gone, and the
-        /// store is about 2x the catalog now. Asked only at a SCAN's entry (library, --file-list/--folder,
-        /// --analyze-file), so no read or maintenance verb can create one. --no-store, config `store false`, a --chunk
-        /// shard and a per-file mode with no --moods catalog all keep it off.</summary>
-        internal static bool ShouldCreateDefaultStore(bool storeFileExists, bool noStoreTyped, bool configStoreOff, bool chunked, bool hasCatalogTarget)
-            => !storeFileExists && !noStoreTyped && !configStoreOff && !chunked && hasCatalogTarget;
+        /// <summary>A scan makes a store only when something ASKED for one (operator, 2026-10-26: "lets stop opting into the
+        /// store… so for now lets default them off"). It was on by default from 2026-10-18 on the argument that edges can only
+        /// be folded while the extractor already has the audio open, so deferring them costs a full re-analysis. What that
+        /// argument never had was a measured benefit: on a 72k library the default cost +2h04m per full scan (13h14m -> 15h18m)
+        /// and 2.7x the disk (285 MB -> 767 MB), while the edge path is still behind a hub switch with no A/B showing it mixes
+        /// better. The deferral asymmetry only argues for paying now if the capability is wanted; unproven, it inverts. The
+        /// etlap outage of the same day came out of a store that existed because it was the default and was then paired with
+        /// another library's catalog. A store that already EXISTS is still adopted and kept current — off by default means
+        /// "do not create one", never "do not use one". Asked only at a SCAN's entry, so no read or maintenance verb can
+        /// create one. --no-store, config `store false`, a --chunk shard and a per-file mode with no --moods catalog are all
+        /// still a no even when asked.</summary>
+        internal static bool ShouldCreateDefaultStore(bool storeFileExists, bool noStoreTyped, bool configStoreOff, bool chunked, bool hasCatalogTarget, bool storeAsked)
+            => storeAsked && !storeFileExists && !noStoreTyped && !configStoreOff && !chunked && hasCatalogTarget;
 
         /// <summary>A store whose location was DERIVED (not named with <c>--store &lt;path&gt;</c>) was derived in the arg block
         /// from a GUESSED catalog, because the library is not discovered until the scan sets up. Re-derive it once the scan's
@@ -23770,13 +23784,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                                             storeFileExists: File.Exists(derived), ConfigSaysOff("store")))
             {
                 _storePath = derived;
-                if (ShouldAdoptEdgesWithStore(true, _noEdgesTyped, ConfigSaysOff("edges"))) _stageOpts.Edges = true;
                 ApplyStoreLocation(derived, catalogPath);
                 Console.WriteLine($"  Store:      using the store already at \"{derived}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 return SeedResult.StoreInForce;
             }
 
-            if (!ShouldCreateDefaultStore(File.Exists(storePath), _noStoreTyped, ConfigSaysOff("store"), chunked, hasCatalogTarget: true))
+            // `storeAsked`: by here the adopt branch has returned, so a non-null _storePath is a typed --store/--store-dir or
+            // config `store true` — the only things that ask for one now that the default is off (operator 2026-10-26).
+            if (!ShouldCreateDefaultStore(File.Exists(storePath), _noStoreTyped, ConfigSaysOff("store"), chunked, hasCatalogTarget: true, storeAsked: _storePath != null || _storeDirOpt != null))
                 return SeedResult.NoStore;
 
             var probe = global::Truedat.Store.SqliteProbe.Probe();
@@ -23840,10 +23855,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             _storePath = storePath;
             ApplyStoreLocation(storePath, catalogPath);
-            // Edges ride with it, softly: an extractor older than .5 skips them with a note instead of refusing the scan. A typed
-            // --edges is already on and stays HARD (it refuses on an old extractor, as asked), so it is left exactly as it is.
-            if (!_stageOpts.Edges && !_noEdgesTyped && !ConfigSaysOff("edges")) { _stageOpts.Edges = true; _edgesFromConfig = true; }
-            Console.WriteLine($"              on by default{(_stageOpts.Edges ? ", with edges" : "")}; --no-store, or truedat --config store false, turns it off");
+            // Edges no longer ride along: they are opt-in too (operator 2026-10-26), and they are the expensive half — +2h04m on a
+            // 72k scan for a mix improvement nothing has measured. --edges, or config `edges true`, asks for them.
+            Console.WriteLine($"              asked for by --store or config store=true{(_stageOpts.Edges ? ", with edges" : "; --edges adds edge rows")}");
             return SeedResult.StoreInForce;
         }
 
@@ -23865,11 +23879,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (storeCatalog != null) _edgesCompanionPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storeCatalog)) ?? ".", global::Truedat.Edges.EdgeCompanion.FileName);
         }
 
-        /// <summary>Edges follow an adopted store: a store built by the documented upgrade holds edge
-        /// rows, and leaving edges off would let those go stale exactly as the store itself would.
-        /// --no-edges is still the one-run way past it.</summary>
-        internal static bool ShouldAdoptEdgesWithStore(bool storeAdopted, bool noEdges, bool configEdgesOff = false)
-            => storeAdopted && !noEdges && !configEdgesOff;   // config `edges false` is the standing --no-edges (codex review #7)
+        // Edges used to follow an adopted or freshly seeded store. Removed 2026-10-26: edges are opt-in on their own now, so the
+        // only things that turn them on are --edges and config `edges true`. An adopted store keeps being written; its edge rows
+        // simply stop gaining new tracks until someone asks.
 
         internal static bool FormatLacksRecordedDuration(string? path)
         {
