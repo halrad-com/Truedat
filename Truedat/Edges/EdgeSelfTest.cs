@@ -123,8 +123,11 @@ namespace Truedat.Edges
             // The CURRENT extractor (.7) with exactly what truedat writes for it: the scan keys + the RAM spool cap (here 256 MiB, so the
             // clip spools), parsed against the full 2-arg output of the same exe.
             var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "output-x64.7", "essentia_streaming_extractor_music.exe"));
-            var clip = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x6", "corpus", "flac16_44k_st_short.flac"));
-            if (exe == null || clip == null) { Console.WriteLine("  SKIP  scan-profile end to end: output-x64.7 exe or spike-x6 corpus clip not found from the test binary"); return; }
+            // Committed fixture (350 KB of tests/edges/fixtures), not the 6.6 GB build spike it was cut
+            // from: the spike is archived off-box, and a test that only ran where the spike happened to
+            // survive is a test that silently stopped running everywhere else.
+            var clip = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("tests", "edges", "fixtures", "clip-44k-stereo-short.flac"));
+            if (exe == null || clip == null) { Console.WriteLine("  NOT RUN  scan-profile end to end: needs the committed .7 exe and tests/edges/fixtures/clip-44k-stereo-short.flac, found upward from the test binary"); return; }
             assert(Program.ScanProfileCapable(exe) && Program.SpoolCapable(exe), "the committed .7 honours the scan profile AND the spool cap — its MD5 is in both sets");
             var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "truedat-scanprofile-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(dir);
@@ -882,7 +885,11 @@ namespace Truedat.Edges
         static void TestFoldReal(Action<bool, string> assert)
         {
             var realDir = FindUpwardDir(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x5", "real"));
-            if (realDir == null) { Console.WriteLine("  SKIP  essentia-build/spike-x5/real not found from the test binary"); return; }
+            // Extractor-regression data: 375 MB of whole-track frames dumps, archived off-box rather than
+            // committed. It is only meaningful when an extractor BUILD changes, so it is absent by default —
+            // and says so, because a quiet SKIP is how a suite keeps reporting green over coverage it no
+            // longer has. Unpack the .5 spike archive beside essentia-build to run it.
+            if (realDir == null) { Console.WriteLine("  NOT RUN  EdgeKey calibration over real frames: needs essentia-build/spike-x5/real (375 MB, in the build-spike archive)"); return; }
             var settings = new EdgeSettings(); int files = 0;
             foreach (var bin in System.IO.Directory.GetFiles(realDir, "*.x5fb.bin"))
             {
@@ -1144,8 +1151,10 @@ namespace Truedat.Edges
                 refused = false; try { EspbFile.Open(WriteTemp(dir, badOff)).Dispose(); } catch (InvalidOperationException) { refused = true; }
                 assert(refused, "a table that does not end exactly at payloadOffset is refused");
 
-                // The build spike's real file, when this checkout has it (found upward from the exe; never an absolute path): a smoke read, not a contract.
-                var real = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x5", "sine_curated.bin"));
+                // A real frames file the .5 build spike produced, kept as a committed fixture (337 KB) so this
+                // reads the same bytes on every checkout rather than only where the spike survives.
+                var real = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("tests", "edges", "fixtures", "frames-x5-curated.bin"));
+                if (real == null) Console.WriteLine("  NOT RUN  ESPB real-file read: tests/edges/fixtures/frames-x5-curated.bin not found from the test binary");
                 if (real != null && System.IO.File.Exists(real))
                     using (var f = EspbFile.Open(real))
                     {
@@ -1156,8 +1165,10 @@ namespace Truedat.Edges
 
                 // CALIBRATION (the C4 gate): over a real track's whole-run HPCP mean, the ported estimator must reproduce the
                 // extractor's own tonal.key_<profile> for every profile the frames file carries. Runs on every full frames
-                // file the build spike left under essentia-build/spike-x5/real (found upward; skipped when absent).
+                // file the build spike left under essentia-build/spike-x5/real — 375 MB, archived off-box, so
+                // absent by default and SAID so rather than skipped quietly.
                 var realDir = FindUpwardDir(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "spike-x5", "real"));
+                if (realDir == null) Console.WriteLine("  NOT RUN  key-estimator calibration over real frames: needs essentia-build/spike-x5/real (375 MB, in the build-spike archive)");
                 if (realDir != null)
                 {
                     int files = 0, agreed = 0, compared = 0; var mismatches = new System.Collections.Generic.List<string>();

@@ -1,3 +1,8 @@
 # Git hooks run under sh. A Windows checkout with autocrlf would give them CRLF line endings,
 # and a carriage return breaks every line of a shell script, so they are always LF.
 .githooks/* text eol=lf
+
+# Test fixtures are compared byte for byte (a frames file's header offsets, an audio clip's
+# decoded samples). Auto-detection gets this right today; stating it means a future autocrlf
+# setting cannot quietly rewrite a fixture and turn it into a confusing red.
+tests/**/fixtures/* binary
