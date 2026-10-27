@@ -16,7 +16,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Fixed
 
-- A store closed while the hub was reading it says when its latest changes are still in the `-wal`.
+- A warning when truedat closes the store while the hub is reading it, so its last changes are still in `truedat.db-wal` and not yet in `truedat.db`; copy both files together.
 
 ## [0.5.5.3-EV4.2] — 2026-10-26
 
