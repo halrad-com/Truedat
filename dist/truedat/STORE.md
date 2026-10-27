@@ -21,22 +21,15 @@ on for one run. Use it only with a hub that reads the store; a hub that reads th
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- The store and edges are **opt-in**. A scan makes a store only when `--store`, `--store-dir` or config
-  `store true` asks for one, and folds edges only under `--edges` or config `edges true`. On a 72,000-track
-  library the pair cost about two hours on a full scan and about 2.7× the disk of the catalog and sidecar
-  alone, and the edge data has no proven mixing benefit yet — so they are bought deliberately. The catch
-  worth knowing: edges can only be folded while the extractor already has the audio open, so adding them
-  later costs a full re-analysis.
-- **A store that already exists is still used.** Off by default means truedat does not create one, not that
-  it ignores one: an existing `truedat.db` is adopted and kept current on every scan. Edges do not ride
-  along — an adopted store keeps gaining descriptions while its edge coverage stands still until `--edges`.
-- When a store is asked for on a library that already has a catalog, that catalog is seeded into it first
-  (an import: no audio read) and the catalog is published from it, so the store never holds only the tracks
-  one run analysed — and nothing is re-analysed: tracks already in the catalog get edges only under an
-  explicit `truedat --refresh`. Only a scan makes a store (never a read or maintenance verb), and never a
-  `--chunk` shard or a per-file mode without `--moods`. `--no-store` / `--no-edges` turn them off for one
-  run. Asking never makes a scan refuse: no SQLite on the machine or a failed seed means a scan without a
-  store and a note; an extractor older than `.5` skips edges with a note.
+- The store is off by default; a scan makes one only when `--store`, `--store-dir` or config `store true` asks, with edges, and then a new library therefore gets its
+  edges in its first and only full analysis. An existing catalog is seeded into the new store first (an
+  import: no audio read) and the catalog is published from it, so the store never holds only the tracks one
+  run analysed — and nothing is re-analysed: tracks already in the catalog get edges only under an explicit
+  `truedat --refresh`. A store that already exists is used. Only a scan makes a store (never a read or
+  maintenance verb), and never a `--chunk` shard or a per-file mode without `--moods`. `--no-store` /
+  `--no-edges` turn it off for one run, config `store false` / `edges false` for an instance. A default
+  never makes a scan refuse: no SQLite on the machine or a failed seed means a scan without a store and a
+  note; an extractor older than `.5` skips edges with a note.
 - Beside the store: `store-result.json`, `store-import-result.json`, `store-info.json`.
 - Not beside the store: the in-flight edge stashes. They are transient — written during a scan, consumed by
   the flush that commits their rows, deleted — so they live in `pending\` under the stage directory and move
