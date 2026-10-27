@@ -217,32 +217,18 @@ is empty for a store built from file-list scans. `--edges` needs extractor build
 this costs on your library — bytes per track, coverage, speed — run `truedat --store-info`; it measures
 the store you have rather than one someone else had.
 
-**Opt-in.** A scan makes a store only when you ask for one — `--store` (bare, for the default location),
-`--store-dir <dir>`, or `truedat --config store true` for an instance. Edges are their own opt-in:
-`--edges` or `truedat --config edges true`. Neither happens on its own.
-
-Know what you are buying before you turn them on. Measured on a 72,000-track library, same build and the
-same worker count, the two together cost **about two hours on a full scan** and **about 2.7× the disk** of
-the catalog and sidecar alone, and the edge data has no proven effect on how tracks mix yet. The thing
-that makes the decision awkward is that it is cheap now and expensive later: edges can only be folded
-while the extractor already has the audio open, so adding them after the fact means analysing the whole
-library again. Turn them on when you want them, and expect one deliberate full pass if you change your
-mind later.
-
-**A store that already exists is still used.** Off by default means truedat does not *create* one, not
-that it ignores one — a library that already has a `truedat.db` keeps it current on every scan, so nothing
-silently stops tracking. Edges do not come along with it: an adopted store keeps gaining descriptions
-while its edge coverage stands still until you pass `--edges`.
-
-When you do ask for a store on a library that already has a catalog, it is **seeded** from that catalog
-first (no audio is read; seconds), so the store never holds only the tracks one run happened to analyse —
+**On by default.** A scan with no store makes one, with edges, so a new library is analysed once and gets
+its edges in that same pass — edges can only be folded while the extractor is reading the audio, so adding
+them later means analysing everything again. A library that already has a catalog is **seeded** from it
+first (no audio is read; seconds), so the store never holds only the tracks one run happened to analyse,
 and nothing is re-analysed: tracks already in the catalog get edges only when you run `truedat --refresh`.
-The scan says what it did on the `Store:` line.
+A store that already exists is simply used. The scan says what it did on the `Store:` line.
 
-`--no-store` / `--no-edges` turn them off for one run even if the config says otherwise. Only a scan ever
-makes a store — read and maintenance commands never do — and a `--chunk` shard and a per-file mode without
-`--moods` never do. Asking never makes a scan refuse: if SQLite is unavailable on the machine or the seed
-fails, the scan runs without a store and says why; an extractor older than `.5` skips edges with a note.
+`--no-store` / `--no-edges` turn it off for one run; `truedat --config store false` (and `edges false`)
+turns it off for an instance. Only a scan ever makes a store — read and maintenance commands never do —
+and a `--chunk` shard and a per-file mode without `--moods` never do. A default never makes a scan refuse:
+if SQLite is unavailable on the machine or the seed fails, the scan runs without a store and says why; an
+extractor older than `.5` skips edges with a note.
 
 **Upgrading an instance:** see [Migration](#migration).
 

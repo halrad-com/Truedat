@@ -92,12 +92,8 @@ namespace Truedat
             // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
             // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.
-            // Both OPT-IN again (operator, 2026-10-26: "lets stop opting into the store… so for now lets default them off").
-            // Measured on a 72k library: the store+edges default cost +2h04m per full scan (13h14m -> 15h18m) and 2.7x the disk
-            // (285 MB -> 767 MB), for a benefit nothing has measured — the edge path is still behind a hub switch with no A/B.
-            // A store that already exists is still adopted and kept current; off means "do not create one", not "do not use one".
             new Setting { Key = "store",           Kind = Kind.Bool, Default = "false", Help = "write the store every scan" },
-            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "false", Help = "fold edge rows into the store" },
+            new Setting { Key = "edges",           Kind = Kind.Bool, Default = "true", Help = "fold edge rows into the store" },
             // store-v3 T05 (operator, 2026-10-15: "opt in for the arrays. just keep the minimal mvp by default"): with edges on, also keep the
             // edge arrays (series, beats, sub-window summaries, MFCC/spectral vectors) in the store. Off = the default row (scalars + HPCP).
             // Sticky per track: a track that already holds arrays keeps them whatever this says; --edge-arrays-drop is the only discard.
