@@ -17,7 +17,18 @@ namespace Truedat.Store
         IntPtr _db;
         readonly string _path;
 
-        SqliteDb(IntPtr db, string path) { _db = db; _path = path; }
+        /// <summary>This process's open connections per store file. A close that leaves another of them open says nothing about
+        /// the -wal: that connection checkpoints when it closes.</summary>
+        static readonly System.Collections.Generic.Dictionary<string, int> s_open =
+            new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        static string Key(string path) { try { return System.IO.Path.GetFullPath(path); } catch { return path; } }
+
+        SqliteDb(IntPtr db, string path)
+        {
+            _db = db; _path = path;
+            lock (s_open) s_open[Key(path)] = (s_open.TryGetValue(Key(path), out var n) ? n : 0) + 1;
+        }
 
         /// <summary>Page size for a store created by this build. SQLite's default is 4096; a track_feature row
         /// is ~2 KB with its 149-column header, so two never fit a 4 KB leaf and every row took a page of its
@@ -103,6 +114,13 @@ namespace Truedat.Store
             return new SqliteTransaction(this);
         }
 
+        /// <summary>What the closing checkpoint achieved: true = the .db holds every committed change and the -wal is empty, false =
+        /// a reader held an older snapshot past the busy wait, so committed pages are still only in the -wal; null = not closed yet.</summary>
+        internal bool? CheckpointedOnClose { get; private set; }
+
+        /// <summary>Test seam: the busy wait the closing checkpoint spends on a reader (5 s in production).</summary>
+        internal void SetBusyTimeout(int ms) => SqliteNative.sqlite3_busy_timeout(_db, ms);
+
         internal int Changes => SqliteNative.sqlite3_changes(_db);
         internal long LastInsertRowId => SqliteNative.sqlite3_last_insert_rowid(_db);
 
@@ -115,8 +133,31 @@ namespace Truedat.Store
             if (_db == IntPtr.Zero) return;
             // Leave the .db self-contained: a store travels to mirror boxes as a file by the same sync
             // that carries the catalog, so no -wal may be left holding pages (S2 C0).
-            try { Exec("PRAGMA wal_checkpoint(TRUNCATE);"); }
-            catch (SqliteException ex) { StoreLog.Debug($"checkpoint on close skipped: {ex.Message}"); }
+            // The checkpoint waits (the busy timeout) for a reader on an older snapshot, then gives up and SAYS so in its result row
+            // (busy, wal frames, frames copied) — it does not throw. The hub reads the store through a read-only connection, which can
+            // never checkpoint, so what this close leaves in the -wal stays until truedat's next run: say so when it is not empty.
+            int others;
+            lock (s_open)
+            {
+                others = s_open.TryGetValue(Key(_path), out var n) ? n - 1 : 0;
+                if (others > 0) s_open[Key(_path)] = others; else s_open.Remove(Key(_path));
+            }
+            bool complete = false, reader = false;
+            try
+            {
+                using var st = Prepare("PRAGMA wal_checkpoint(TRUNCATE);");
+                complete = !st.Step() || (st.GetInt64(0) == 0 && (st.GetInt64(1) <= 0 || st.GetInt64(2) >= st.GetInt64(1)));
+                reader = !complete;
+            }
+            catch (SqliteException ex)
+            {
+                reader = ex.ResultCode == 5 || ex.ResultCode == 6;   // SQLITE_BUSY / SQLITE_LOCKED: another connection; anything else is not a reader
+                if (!reader) StoreLog.Debug($"checkpoint on close failed: {ex.Message}");
+            }
+            CheckpointedOnClose = complete;
+            if (reader && others == 0)
+                StoreLog.Warn($"another program was reading the store as truedat closed it, so its latest changes are still in {_path}-wal. " +
+                              "The store is complete as it stands; to copy it, copy that -wal with it (the next truedat run folds it in).");
             int rc = SqliteNative.sqlite3_close_v2(_db);
             if (rc != SqliteNative.SQLITE_OK) StoreLog.Warn($"close of {_path} returned rc {rc} (unfinalized statements?)");
             _db = IntPtr.Zero;

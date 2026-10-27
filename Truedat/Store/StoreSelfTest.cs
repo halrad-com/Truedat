@@ -18,6 +18,7 @@ namespace Truedat.Store
             Block(assert, "SqliteProbe seam", () => TestProbeSeam(assert));
             Block(assert, "SqliteProbe real", () => TestProbeReal(assert));
             Block(assert, "SqliteDb", () => TestDb(assert));
+            Block(assert, "CloseCheckpoint", () => TestCloseCheckpoint(assert));
             Console.WriteLine("Store self-test (C2: schema v1 + drift)");
             Block(assert, "Schema", () => TestSchema(assert));
             Console.WriteLine("Store self-test (C3a: uuid v7 + canonical paths)");
@@ -3611,6 +3612,81 @@ namespace Truedat.Store
             assert(r.Ok, $"real winsqlite3.dll probe is Ok ({r.Failure}: {r.Message})");
             assert(r.VersionNumber >= SqliteProbe.MinimumVersionNumber, $"real version {r.VersionText} >= {SqliteProbe.MinimumVersionText}");
             assert(r.HasRtree, "RTREE compiled in (true on every Windows build seen: Win10 + Win11)");
+        }
+
+        // ---------------------------------------------------------------- close checkpoint
+        /// <summary>The hub opens the store read-only and a read-only connection can never checkpoint, so whatever truedat's closing
+        /// checkpoint leaves in the -wal stays there until truedat's next run (operator 2026-10-26: "i do find them often when hub is
+        /// not running"). An empty -wal is harmless; one holding pages means a copy of the .db alone is incomplete — so the close must
+        /// know which it left, and say so.</summary>
+        static void TestCloseCheckpoint(Action<bool, string> assert)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "ckpt-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "truedat.db");
+            var logged = new List<string>();
+            var sink = StoreLog.Sink;
+            try
+            {
+                StoreLog.Sink = s => logged.Add(s);
+                using (var w = SqliteDb.Open(path, create: true)) { w.Exec("CREATE TABLE t(x);"); w.Exec("INSERT INTO t VALUES(1);"); }
+
+                // the hub, as it opens the store: a raw READ-ONLY handle, not one of truedat's connections
+                int ro = SqliteNative.sqlite3_open_v2(SqliteNative.Z(path), out var hub, 0x1 /* SQLITE_OPEN_READONLY */, IntPtr.Zero);
+                assert(ro == SqliteNative.SQLITE_OK, $"fixture: the read-only 'hub' handle opened (rc {ro})");
+                void HubExec(string sql) => SqliteNative.sqlite3_exec(hub, SqliteNative.Z(sql), IntPtr.Zero, IntPtr.Zero, out _);
+                long WalBytes() => File.Exists(path + "-wal") ? new FileInfo(path + "-wal").Length : -1;
+                HubExec("SELECT count(*) FROM t;");   // the hub reads at startup; before a first read SQLite has not opened the file at all
+
+                // the hub's usual shape: its connection open, no read in progress -> the checkpoint completes, the -wal is empty
+                var w1 = SqliteDb.Open(path, create: false);
+                w1.Exec("INSERT INTO t VALUES(2);");
+                w1.Dispose();
+                assert(w1.CheckpointedOnClose == true && WalBytes() == 0 && !logged.Any(l => l.Contains("-wal")),
+                    $"close beside an idle reader -> checkpoint complete, -wal empty, no warning (checkpointed {w1.CheckpointedOnClose}, wal {WalBytes()} B)");
+
+                // the hub mid-read as truedat closes: committed pages stay in the -wal, and the close says so, naming the file
+                HubExec("BEGIN; SELECT count(*) FROM t;");
+                var w2 = SqliteDb.Open(path, create: false);
+                w2.SetBusyTimeout(50);
+                w2.Exec("INSERT INTO t VALUES(3);");
+                w2.Dispose();
+                long walBytes = WalBytes();
+                assert(w2.CheckpointedOnClose == false && walBytes > 0 && logged.Count(l => l.Contains(path + "-wal")) == 1,
+                    $"close while another program holds an older snapshot -> incomplete, the -wal holds pages, ONE warning names it (checkpointed {w2.CheckpointedOnClose}, wal {walBytes} B, logged {logged.Count})");
+                HubExec("COMMIT;");
+
+                // truedat's OWN second connection mid-read is not another program: it checkpoints when it closes, so no warning
+                logged.Clear();
+                var mine = SqliteDb.Open(path, create: false);
+                var snap = mine.BeginRead(); mine.ExecScalar("SELECT count(*) FROM t;");
+                var w4 = SqliteDb.Open(path, create: false);
+                w4.SetBusyTimeout(50);
+                w4.Exec("INSERT INTO t VALUES(4);");
+                w4.Dispose();
+                assert(w4.CheckpointedOnClose == false && !logged.Any(l => l.Contains("-wal")),
+                    $"a close beside this process's own open connection -> no warning; that connection folds it in (checkpointed {w4.CheckpointedOnClose}, logged {logged.Count})");
+                snap.Complete(); mine.Dispose();
+                assert(mine.CheckpointedOnClose == true && WalBytes() == 0,
+                    $"...and it did: its close completed the checkpoint, -wal empty (checkpointed {mine.CheckpointedOnClose})");
+                SqliteNative.sqlite3_close_v2(hub);
+
+                // the next run that holds the store alone finishes the job: nothing is lost and no -wal is left
+                using (var w3 = SqliteDb.Open(path, create: false))
+                {
+                    assert(w3.ExecScalar("SELECT count(*) FROM t;") == "4", "every row is there");
+                    w3.Dispose();
+                    assert(w3.CheckpointedOnClose == true && !File.Exists(path + "-wal"), $"the next close alone -> complete, the -wal removed (exists {File.Exists(path + "-wal")})");
+                }
+
+                // a file that is not a database: the checkpoint FAILS, which is not a reader — no "another program" warning
+                logged.Clear();
+                var junk = Path.Combine(dir, "notadb.db");
+                File.WriteAllText(junk, new string('x', 8192));
+                try { SqliteDb.Open(junk, create: false).Dispose(); } catch (SqliteException) { }
+                assert(!logged.Any(l => l.Contains("another program")), $"a failed checkpoint is not reported as a reader ({string.Join(" | ", logged)})");
+            }
+            finally { StoreLog.Sink = sink; try { Directory.Delete(dir, true); } catch { } }
         }
 
         // ---------------------------------------------------------------- db
