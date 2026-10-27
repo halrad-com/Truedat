@@ -10,6 +10,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ## [0.5.5.3-EV4.2.1] — 2026-10-27
 
+### Added
+
+- New measurements for performance optimization.
+
 ### Fixed
 
 - A store closed while the hub was reading it says when its latest changes are still in the `-wal`.
