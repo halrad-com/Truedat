@@ -21,7 +21,7 @@ on for one run. Use it only with a hub that reads the store; a hub that reads th
   goes to a local per-library path under `%LOCALAPPDATA%\truedat\<library-id>\` instead; `--store-dir
   <dir>` (also a config key) relocates that layout. SQLite on SMB is refused unless you name it with an
   explicit `--store <path>`, and then it opens with exclusive locking.
-- The store and edges are on by default. A scan with no store makes one; a new library therefore gets its
+- The store is off by default; a scan makes one only when `--store`, `--store-dir` or config `store true` asks, with edges, and then a new library therefore gets its
   edges in its first and only full analysis. An existing catalog is seeded into the new store first (an
   import: no audio read) and the catalog is published from it, so the store never holds only the tracks one
   run analysed — and nothing is re-analysed: tracks already in the catalog get edges only under an explicit
@@ -93,7 +93,7 @@ makes the migration refuse and roll back, naming the column, rather than round i
 | Verb | Does |
 |---|---|
 | `--store-import` with `--moods <catalog>` | loads the catalog and the ledgers beside it (errors, skipped, review, verify, receipts), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
-| a scan (the store is on by default) | commits every entry it touched — analysed ones as producer `essentia@<build>` with one run row each, cache hits as copy facts — at each checkpoint and at the end, then publishes the catalog, sidecar and companion from the store; failures become failed runs. A stop (second Ctrl+C, console closed, logoff, shutdown) commits and publishes what has completed before the process ends |
+| a scan, with a store in force | commits every entry it touched — analysed ones as producer `essentia@<build>` with one run row each, cache hits as copy facts — at each checkpoint and at the end, then publishes the catalog, sidecar and companion from the store; failures become failed runs. A stop (second Ctrl+C, console closed, logoff, shutdown) commits and publishes what has completed before the process ends |
 | `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
 | `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
 | `--store-info` | bytes per track, analysis speed, failure rate by component, coverage by wave, shared content, key moves, conflicts by kind and edges coverage — plus the **state**: the store's generation, the generation the published catalog carries, whether the files are behind it and why, how many descriptions hold the opt-in edge arrays, and the one command that closes the gap; `store-info.json` beside the store carries the same under `state` |

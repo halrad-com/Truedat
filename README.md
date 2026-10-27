@@ -217,7 +217,7 @@ is empty for a store built from file-list scans. `--edges` needs extractor build
 this costs on your library — bytes per track, coverage, speed — run `truedat --store-info`; it measures
 the store you have rather than one someone else had.
 
-**On by default.** A scan with no store makes one, with edges, so a new library is analysed once and gets
+**Off by default.** A scan makes a store only when asked — `--store`, `--store-dir`, or `truedat --config store true` — and with edges; so a new library is analysed once and gets
 its edges in that same pass — edges can only be folded while the extractor is reading the audio, so adding
 them later means analysing everything again. A library that already has a catalog is **seeded** from it
 first (no audio is read; seconds), so the store never holds only the tracks one run happened to analyse,
