@@ -368,8 +368,13 @@ namespace Truedat.Store
                 // (here: the store holds b and c, the catalog does not), so store-info asks the same question and names the reconciliation.
                 StoreSelfTest.WriteCatalog(catalog, Lib(@"D:\music", ("a.flac", 120, 'a')));
                 var legacy = Collect(store);
-                assert(legacy.FilesState == "legacy-disagree" && legacy.PublishedGeneration == null && !ScanRemedy(legacy.NextCommand) && legacy.NextCommand.Contains("--store-import"),
-                    $"state: a catalog with no origin header that disagrees with the store -> legacy-disagree, and the next command reconciles, not scans ({legacy.FilesState}: {legacy.NextCommand})");
+                // The store holds paths the catalog lacks and nothing is only in the catalog, so an import cannot help: the renames are
+                // the reconciliation. store-info is a READ verb — it writes no ledger — and its next: is one line.
+                assert(legacy.FilesState == "legacy-disagree" && legacy.PublishedGeneration == null && !ScanRemedy(legacy.NextCommand)
+                       && legacy.NextCommand.Contains("ren ") && !legacy.NextCommand.Contains("--store-import")
+                       && !legacy.NextCommand.Contains("\n") && !(legacy.FilesWhy ?? "").Contains("\n")
+                       && !File.Exists(Path.Combine(Path.GetDirectoryName(catalog)!, StoreScan.DisagreeLedgerName)),
+                    $"state: a catalog with no origin header that disagrees with the store -> legacy-disagree, the next command reconciles in one line, no file written ({legacy.FilesState}: {legacy.NextCommand})");
                 StoreSelfTest.WriteCatalog(catalog, Lib(@"D:\music", ("a.flac", 120, 'a'), ("b.flac", 121, 'b'), ("c.flac", 122, 'c')));
                 var legacyAgree = Collect(store);
                 assert(legacyAgree.FilesState == "legacy" && legacyAgree.PublishedGeneration == null && ScanRemedy(legacyAgree.NextCommand),

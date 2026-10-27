@@ -129,8 +129,11 @@ namespace Truedat.Store
                 if (load.Refused)
                 {
                     i.FilesState = "legacy-disagree";
-                    i.FilesWhy = (load.Refusal ?? "").Replace("Error: ", "").Replace(" Nothing was scanned.", "");
-                    i.NextCommand = "none until reconciled — the scan refuses this catalog: " + i.FilesWhy;
+                    // The refusal is a headline plus one line per action; store-info shows them on one line each (state, next).
+                    var lines = (load.Refusal ?? "").Replace("Error: ", "").Replace(" Nothing was scanned.", "")
+                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim().TrimEnd('.')).ToList();
+                    i.FilesWhy = lines.FirstOrDefault() ?? "";
+                    i.NextCommand = "none until reconciled — the scan refuses this catalog: " + string.Join("; ", lines.Skip(1));
                 }
                 else i.FilesWhy = "no store origin (written before the store was authoritative); it agrees with the store";
             }

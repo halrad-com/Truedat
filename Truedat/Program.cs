@@ -4256,7 +4256,7 @@ namespace Truedat
                 if (_storePath != null && !string.IsNullOrEmpty(analyzeFileMoods))
                 {
                     afMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
-                    var afLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, afMoodsTracks);   // T18i
+                    var afLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, afMoodsTracks, writeLedger: true);   // T18i
                     if (afLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, afLoad.Refusal!, 2); return; }
                     if (afLoad.Note != null) Console.Error.WriteLine($"  store: {afLoad.Note}");
                 }
@@ -4919,7 +4919,7 @@ namespace Truedat
                 var flMoodsTracks = new ConcurrentDictionary<string, TrackEntry>(StringComparer.OrdinalIgnoreCase);
                 if (_storePath != null && !string.IsNullOrEmpty(analyzeFileMoods))
                 {
-                    var flLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, flMoodsTracks);   // T18i
+                    var flLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, analyzeFileMoods!, flMoodsTracks, writeLedger: true);   // T18i
                     if (flLoad.Refused) { Environment.ExitCode = RefuseScan(_storePath, flLoad.Refusal!, 2); return; }
                     if (flLoad.Note != null) Console.Error.WriteLine($"  store: {flLoad.Note}");
                 }
@@ -5886,7 +5886,7 @@ namespace Truedat
             if (_storePath != null)
             {
                 // T18i: a store in force makes the scan STORE-AUTHORITATIVE — it loads from the store, after the provenance precondition.
-                var storeLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, moodsPath, allTracks);
+                var storeLoad = global::Truedat.Store.StoreScan.LoadAuthoritative(_storePath, moodsPath, allTracks, writeLedger: true);
                 if (storeLoad.Refused)
                 {
                     Environment.ExitCode = RefuseScan(_storePath, storeLoad.Refusal!, 2);
@@ -11472,7 +11472,7 @@ namespace Truedat
 
             // (1) precondition + the store's entries
             var before = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
-            var load = global::Truedat.Store.StoreScan.LoadAuthoritative(store, catalogPath, before);
+            var load = global::Truedat.Store.StoreScan.LoadAuthoritative(store, catalogPath, before, writeLedger: true);
             if (load.Refused) return Fail(load.Refusal!.Replace("Nothing was scanned.", $"{flag} changed nothing."), 2);
             if (load.Case == "fresh") return Fail($"Error: {flag} with a store in force, but neither the store nor the catalog holds anything: nothing to change.", 1);
 

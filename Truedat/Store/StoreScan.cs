@@ -41,23 +41,30 @@ namespace Truedat.Store
         /// (<see cref="HoldsSameFacts"/>) and left the wrong-remedy half, which this closes.</summary>
         internal static bool ImportCanResolve(int onlyCatalogCount) => onlyCatalogCount > 0;
 
-        /// <summary>Write the disagreeing paths beside the catalog and return the file's NAME for the refusal to cite, or null when
-        /// it could not be written (a refusal must never be masked by its own diagnostics).</summary>
+        static string LedgerPath(string catalogPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(catalogPath))!, DisagreeLedgerName);
+
+        /// <summary>Write the disagreeing paths beside the catalog and return the file's FULL path for the refusal to cite (the
+        /// operator is in the exe's folder, not the catalog's), or null when it could not be written — the refusal then names the
+        /// paths inline, so it is never left with none.</summary>
         static string? WriteDisagreeLedger(string catalogPath, List<string> onlyCatalog, List<string> onlyStore, List<string>? changed)
         {
             try
             {
-                var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath));
-                if (string.IsNullOrEmpty(dir)) return null;
-                var path = Path.Combine(dir!, DisagreeLedgerName);
+                var path = LedgerPath(catalogPath);
                 using var w = new StreamWriter(path, false);
                 w.WriteLine("side,path");
                 foreach (var p in onlyCatalog) w.WriteLine($"only-in-catalog,{Program.CsvEscape(p)}");
                 foreach (var p in onlyStore) w.WriteLine($"only-in-store,{Program.CsvEscape(p)}");
                 if (changed != null) foreach (var p in changed) w.WriteLine($"different-values,{Program.CsvEscape(p)}");
-                return DisagreeLedgerName;
+                return path;
             }
             catch { return null; }
+        }
+
+        /// <summary>The last refusal's ledger, once the two agree again: left behind it would describe a refusal that no longer applies.</summary>
+        static void ClearDisagreeLedger(string catalogPath)
+        {
+            try { var p = LedgerPath(catalogPath); if (File.Exists(p)) File.Delete(p); } catch { }
         }
 
         /// <summary>
@@ -77,8 +84,17 @@ namespace Truedat.Store
         /// store), refuse naming the paths and the remedies; if they agree exactly, proceed.</item>
         /// </list>
         /// The root is the one the catalog's origin names (exactly one matching row, store-intent item 8), else the store's single primary.
+        /// <paramref name="writeLedger"/>: only a SCAN (or a store-backed verb) writes <see cref="DisagreeLedgerName"/> — off by default,
+        /// so a read verb asking the same question (--store-info) writes nothing (operator 2026-10-26: "danger").
         /// </summary>
-        internal static LoadResult LoadAuthoritative(string storePath, string catalogPath, ConcurrentDictionary<string, TrackEntry> target)
+        internal static LoadResult LoadAuthoritative(string storePath, string catalogPath, ConcurrentDictionary<string, TrackEntry> target, bool writeLedger = false)
+        {
+            var r = LoadAuthoritativeCore(storePath, catalogPath, target, writeLedger);
+            if (writeLedger && !r.Refused) ClearDisagreeLedger(catalogPath);
+            return r;
+        }
+
+        static LoadResult LoadAuthoritativeCore(string storePath, string catalogPath, ConcurrentDictionary<string, TrackEntry> target, bool writeLedger)
         {
             var res = new LoadResult();
             bool catalogExists = global::Truedat.CatalogArchive.CatalogFiles(catalogPath).Count > 0;
@@ -154,9 +170,8 @@ namespace Truedat.Store
                 {
                     if (onlyCatalog.Count > 0 || onlyStore.Count > 0)
                         return Refuse(res, "equal-generation-disagree", Disagreement(
-                            $"the catalog and the store are both at generation {res.Generation} but disagree on the root's paths",
-                            catalogPath, storePath, onlyCatalog, onlyStore, null,
-                            "Something changed one without the other."));
+                            $"the catalog and the store are both at generation {res.Generation} but disagree",
+                            catalogPath, storePath, onlyCatalog, onlyStore, null, writeLedger));
                     res.Case = "equal-generation";
                     return Fill(res, storeEntries, target);
                 }
@@ -185,40 +200,51 @@ namespace Truedat.Store
             changed.Sort(StringComparer.OrdinalIgnoreCase);
             if (onlyCatalog.Count > 0 || onlyStore.Count > 0 || changed.Count > 0)
                 return Refuse(res, "no-origin-disagree", Disagreement(
-                    "the catalog and the store disagree", catalogPath, storePath, onlyCatalog, onlyStore, changed,
-                    "The catalog carries no store origin."));
+                    "the catalog and the store disagree", catalogPath, storePath, onlyCatalog, onlyStore, changed, writeLedger));
             res.Case = "no-origin-agree";
             return Fill(res, storeEntries, target);
         }
 
-        /// <summary>A path-set / value disagreement, written so the ACTION is the first thing read and the paths are not printed at
-        /// all. Operator, 2026-10-26, on the message this replaces: "i see pages of spew and what i really need to do is buried in
-        /// it" — and "even what is buried doesn't work", because it named <c>--store-import</c> for a disagreement an import cannot
-        /// resolve. So: the command(s) that terminate the refusal come first, the counts are one sentence, and the paths go to
-        /// <see cref="DisagreeLedgerName"/> beside the catalog like every other ledger truedat writes.</summary>
+        /// <summary>A path-set / value disagreement: the headline with its counts, one line per action that resolves it, and where the
+        /// paths are. Operator 2026-10-26: "less is more if something needs to be done be sure its correct and say how to fix it".
+        /// Every path is FULL — the operator runs truedat from the exe's folder, and a network library's store is in %LOCALAPPDATA%.
+        /// Keeping the catalog means a fresh store, and the store is off by default, so that line says to scan WITH --store; a fresh
+        /// store is seeded from the catalog, which carries no edges. An import is named only when it can change the outcome
+        /// (<see cref="ImportCanResolve"/>); whatever it cannot change, the next scan's refusal names.</summary>
         static string Disagreement(string headline, string catalogPath, string storePath,
-            List<string> onlyCatalog, List<string> onlyStore, List<string>? changed, string why)
+            List<string> onlyCatalog, List<string> onlyStore, List<string>? changed, bool writeLedger)
         {
-            var ledger = WriteDisagreeLedger(catalogPath, onlyCatalog, onlyStore, changed);
-            var catName = Path.GetFileName(catalogPath);
-            var dbName = Path.GetFileName(storePath);
             var nl = Environment.NewLine;
-            bool import = ImportCanResolve(onlyCatalog.Count);
-            var action = import
-                ? $"    truedat --store-import --moods \"{catalogPath}\" --store \"{storePath}\"{nl}" +
-                  $"        adds the {onlyCatalog.Count:N0} path(s) the store is missing; it never removes store entries"
-                : $"    ren \"{catName}\" \"{catName}.bak\"{nl}" +
-                  $"        keeps the STORE's values; the scan republishes the catalog from it{nl}" +
-                  $"    ren \"{dbName}\" \"{dbName}.bak\"{nl}" +
-                  $"        keeps the CATALOG's values; the scan seeds a fresh store from it";
-            return $"{headline}. Nothing was scanned.{nl}{nl}" +
-                   $"  Do {(import ? "this" : "one of these")}, then scan again:{nl}{action}{nl}{nl}" +
-                   (changed == null || changed.Count == 0 ? "  "
-                       : changed.Count == 1 ? "  1 shared entry holds a different value. "
-                       : $"  {changed.Count:N0} shared entries hold different values. ") +
-                   $"{onlyCatalog.Count:N0} paths only in the catalog, {onlyStore.Count:N0} only in the store. {why}" +
-                   (import ? "" : $"{nl}  --store-import cannot resolve a value difference: an import never overwrites a stored measurement.") +
-                   (ledger != null ? $"{nl}{nl}  Detail: {ledger}" : "");
+            int values = changed?.Count ?? 0;
+            var counts = new List<string>();
+            if (values > 0) counts.Add(values == 1 ? "1 value differs" : $"{values:N0} values differ");
+            if (onlyCatalog.Count > 0) counts.Add($"{onlyCatalog.Count:N0} only in the catalog");
+            if (onlyStore.Count > 0) counts.Add($"{onlyStore.Count:N0} only in the store");
+            var cat = Path.GetFullPath(catalogPath);
+            var db = Path.GetFullPath(storePath);
+            var sb = new System.Text.StringBuilder($"{headline} ({string.Join(", ", counts)}). Nothing was scanned.");
+            if (ImportCanResolve(onlyCatalog.Count))
+                sb.Append($"{nl}  Fix: truedat --store-import --moods \"{cat}\" --store \"{db}\", then scan.");
+            else
+            {
+                var parts = global::Truedat.CatalogArchive.CatalogFiles(catalogPath);
+                var renameCatalog = parts.Count > 1
+                    ? $"move {Path.GetFileName(catalogPath)}.1 to .{parts.Count} in {Path.GetDirectoryName(cat)} aside"
+                    : $"ren \"{cat}\" \"{Path.GetFileName(cat)}.bak\"";
+                sb.Append($"{nl}  Keep the store's values:   {renameCatalog}, then scan.");
+                sb.Append($"{nl}  Keep the catalog's values: ren \"{db}\" \"{Path.GetFileName(db)}.bak\", then scan with --store \"{db}\" (edges are not carried over).");
+            }
+            var ledger = writeLedger ? WriteDisagreeLedger(catalogPath, onlyCatalog, onlyStore, changed) : null;
+            if (ledger != null) sb.Append($"{nl}  Detail: {ledger}");
+            else
+            {
+                var named = new List<string>();
+                if (onlyCatalog.Count > 0) named.Add("only in the catalog" + Names(onlyCatalog));
+                if (onlyStore.Count > 0) named.Add("only in the store" + Names(onlyStore));
+                if (values > 0) named.Add("values differ" + Names(changed!));
+                sb.Append($"{nl}  Paths: {string.Join("; ", named)}");
+            }
+            return sb.ToString();
         }
 
         /// <summary>Whether a catalog entry with no store origin and the store's entry for the same path hold the same facts — the
