@@ -1,7 +1,0 @@
-# ONE cut, measured alone: the requested-statistic lists of the scan profile;
-# every x6 switch stays on.
-lowlevel.stats: [mean, stdev]
-tonal.stats: [mean, stdev]
-rhythm.stats: [mean]
-lowlevel.mfccStats: [mean, cov]
-lowlevel.gfccStats: [mean]

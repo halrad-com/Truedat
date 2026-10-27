@@ -1,9 +1,0 @@
-# Verification scratch for the output-x64.5 build; regenerate with the commands
-# in OUTPUT-BUILDS.md. Only the profiles and the checker are tracked.
-*.wav
-*.json
-*.json_frames
-*.bin
-*.txt
-*.log
-real/

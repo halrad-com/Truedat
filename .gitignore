@@ -63,3 +63,11 @@ essentia-build/**/*.log
 # build recipes; only the curated extractor binaries ship, hand-copied into a
 # deploy. Never tracked.
 essentia-build/output-x64/
+# Extractor build spikes — a workspace, not product. The .5 and .6/.7 spikes grew to
+# 7.1 GB in the working tree (whole-track PCM dumps under pcm/, a full build tree per
+# accepted drop under out/) with nothing bounding them, and their text evidence was
+# tracked while the data they prove was not. Archived off-box instead; the fixtures the
+# suite needs are committed under tests/edges/fixtures. The glob covers the NEXT spike,
+# so this cannot grow back into the repo by default.
+essentia-build/spike-*/
+essentia-build/spike-*.zip
