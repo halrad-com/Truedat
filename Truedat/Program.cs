@@ -5713,8 +5713,8 @@ namespace Truedat
             Console.WriteLine($"  App dir:    {baseDir}");
             Console.WriteLine($"  Output dir: {outputDir}");
             // The store is resolved in the arg block and settled at the scan's entry (EnsureDefaultStore), both of which run
-            // BEFORE the log tee is attached — so every line they print reaches the console and not truedat.log. etlap's log
-            // (2026-10-26) therefore carried no store line at all while the run paired one library's catalog with another
+            // BEFORE the log tee is attached — so every line they print reaches the console and not truedat.log. A field report's
+            // log (2026-10-26) therefore carried no store line at all while the run paired one library's catalog with another
             // library's store. Name it here, beside the two paths it has to agree with, where the tee can see it.
             Console.WriteLine($"  Store:      {_storePath ?? "none — this scan writes the catalog only"}");
             Console.WriteLine($"  Essentia:   {essentiaExe ?? "NOT FOUND"}");
@@ -12525,7 +12525,7 @@ namespace Truedat
 
             // Libraries that are not called "Library". Every rung above names the folder, and
             // MusicBee names it after the LIBRARY — "Library" is only the default's name. A
-            // corruption-recovery rebuild called "Remote" (etlap, 2026-08-21..23) sat two rungs
+            // corruption-recovery rebuild called "Remote" (field report, 2026-08-21..23) sat two rungs
             // from the exe with its 106 MB XML in plain sight and discovery reported it missing,
             // which the operator reasonably read as "MusicBee is not writing the XML".
             //
@@ -12591,7 +12591,7 @@ namespace Truedat
         /// used.</summary>
         internal const string LibraryMarkerName = "MusicBeeLibrarySettings.ini";
 
-        /// <summary>The live library database. Absent on a first-run stub (etlap's Library/ held
+        /// <summary>The live library database. Absent on a first-run stub (a field install's Library/ held
         /// only a 4-byte pfidx), which is exactly why its mtime ranks candidates.</summary>
         internal const string LibraryDbName = "MusicBeeLibrary.mbl";
 
@@ -12668,7 +12668,7 @@ namespace Truedat
             // instances, and MB3's catalog was adopted.
             //
             // Stopping at the nearest level that yields anything keeps the instance's own
-            // libraries competing with each other (etlap's Library + Remote + nxtone all sit under
+            // libraries competing with each other (one field install's Library + Remote + a third all sit under
             // one <root>, so freshest-.mbl still picks the live one) while never letting a
             // neighbour's instance enter the comparison at all. It also means the volume root is
             // not reached in any layout where a library exists nearer.
@@ -18260,7 +18260,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(!ShouldAdoptExistingStore(noStore: false, storeAsked: false, storeVerb: false, storeFileExists: true, configStoreOff: true),
                     "adopt: config store=false is a standing --no-store, an existing store is left alone");
                 Assert(!ShouldAdoptEdgesWithStore(storeAdopted: true, noEdges: false, configEdgesOff: true), "adopt: config edges=false is a standing --no-edges");
-                // etlap, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
+                // Field report, 2026-10-26: a stub library two rungs from the exe held a stale catalog and no library XML, so
                 // ProbeCatalogBesideExe stopped there while ResolveITunesXml fell through to the marker scan and found the live
                 // library. The store was derived from the stub's catalog in the arg block and that value then outranked the
                 // scan's real catalog: one library's catalog written against another library's store, 0 paths in common, exit 2.
@@ -21631,7 +21631,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
             }
 
-            // --- libraries that are not called "Library" (etlap, 2026-08-21..23) -----------
+            // --- libraries that are not called "Library" (field report, 2026-08-21..23) ----
             // Every name-based rung misses a library MusicBee named after itself. Real dirs for
             // the same reason as the block above: the bug is about which directories get looked
             // at, so a stubbed filesystem would reproduce the wrong thing.
@@ -21749,13 +21749,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     // Two real libraries -> freshest .mbl wins. This is the multi-library answer:
                     // no prompt, no flag, just live truth. (A caller that knows better passes the
                     // XML positionally and never gets here.)
-                    var nxtone = Path.Combine(root, "nxtone");
-                    Directory.CreateDirectory(nxtone);
+                    var thirdLib = Path.Combine(root, "thirdLib");
+                    Directory.CreateDirectory(thirdLib);
                     ResetNamedLibraryCacheForTest();
-                    File.WriteAllText(Path.Combine(nxtone, LibraryMarkerName), "<Path>ignored</Path>");
-                    var nxDb = Path.Combine(nxtone, LibraryDbName);
+                    File.WriteAllText(Path.Combine(thirdLib, LibraryMarkerName), "<Path>ignored</Path>");
+                    var nxDb = Path.Combine(thirdLib, LibraryDbName);
                     File.WriteAllText(nxDb, "db");
-                    File.WriteAllText(Path.Combine(nxtone, MoodsFileName), "{}");
+                    File.WriteAllText(Path.Combine(thirdLib, MoodsFileName), "{}");
 
                     // Relative to now, never absolute: a hardcoded future date outranks every
                     // real library on the machine forever, which is how a leftover root could
@@ -21764,7 +21764,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.SetLastWriteTimeUtc(Path.Combine(remote, LibraryDbName), t0.AddDays(-3));
                     File.SetLastWriteTimeUtc(nxDb, t0.AddDays(-1));
                     ResetNamedLibraryCacheForTest();
-                    Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(nxtone, MoodsFileName),
+                    Assert(ProbeCatalogBesideExe(toolDir) == Path.Combine(thirdLib, MoodsFileName),
                         "namedlib: with two libraries the freshest MusicBeeLibrary.mbl wins");
 
                     // …and it really is the mtime deciding, not the name order — flip it back.
@@ -21777,7 +21777,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     File.Delete(Path.Combine(remote, LibraryDbName));
                     File.Delete(nxDb);
                     var ordered = new List<string>(NamedLibraryDirs(new List<string> { toolDir, stub, root }));
-                    Assert(ordered.Contains(remote) && ordered.Contains(nxtone),
+                    Assert(ordered.Contains(remote) && ordered.Contains(thirdLib),
                         "namedlib: stubs without a .mbl are still recognised as library folders");
 
                     // Bounded depth: deeper than LibraryScanMaxDepth is not searched, so a
@@ -24020,7 +24020,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // The arg block resolved the store BEFORE the library was discovered — ResolveITunesXml does not run until the scan
             // sets up — so when nothing NAMED a store its catalog was ProbeCatalogBesideExe's guess. That probe looks for
             // mbxmoods.json while the library probe looks for the XML, and a stub library holding a stale catalog and no XML
-            // splits the two: the scan then writes one library's catalog against another library's store (etlap, 2026-10-26 —
+            // splits the two: the scan then writes one library's catalog against another library's store (field report, 2026-10-26 —
             // 72,360 paths only in the catalog, 72,845 only in the store, nothing in common, exit 2). The scan is the first
             // place that knows the real catalog, so it is where a DERIVED store is re-derived. The test compares against
             // Resolve's own answer rather than the catalog's directory, which is what keeps --store-dir and a network
@@ -24036,7 +24036,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // Adoption is decided in that same arg block, against that same guessed catalog, so a store sitting beside the REAL
             // catalog was never adopted: the scan ran store-less and its advisor recommended --store-import with a 196 MB store
-            // in the folder it was writing to (etlap, 11:26). ShouldCreateDefaultStore only CREATES, so an existing store falls
+            // in the folder it was writing to (the same field report, earlier that day). ShouldCreateDefaultStore only CREATES, so an existing store falls
             // straight through it — adopt here, where the catalog is known. A --chunk shard stays store-less by design.
             if (_storePath == null && !chunked
                 && ShouldAdoptExistingStore(_noStoreTyped, storeAsked: false, storeVerb: false,
