@@ -8,6 +8,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.3-EV4.2.1] — 2026-10-27
+
+### Fixed
+
+- A store closed while the hub was reading it says when its latest changes are still in the `-wal`.
+
 ## [0.5.5.3-EV4.2] — 2026-10-26
 
 ### Changed
