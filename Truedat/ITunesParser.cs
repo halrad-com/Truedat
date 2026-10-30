@@ -138,6 +138,72 @@ namespace Truedat
 
     public static class ITunesParser
     {
+        /// <summary>
+        /// Why this file is not an iTunes library XML, or null when it looks like one.
+        ///
+        /// The library path is whatever landed in the positional argument slot, and
+        /// <c>ResolveITunesXml</c> returns an explicit one verbatim — so the only gate used to be
+        /// <c>File.Exists</c>. Field report 2026-10-26: a stray <c>.\truedat.db</c> on a scan's
+        /// command line passed that gate and a 434 MB SQLite store went into the XML reader. Any
+        /// XML document begins with '&lt;' once a BOM and leading whitespace are stepped over, so
+        /// sniffing the first bytes costs nothing and cannot reject a real library.
+        ///
+        /// Names what it found rather than just refusing: "not an iTunes library" sends the
+        /// operator back to the command line, "that is a SQLite database" tells them which
+        /// argument is wrong.
+        /// </summary>
+        public static string? NotALibraryReason(string path)
+        {
+            byte[] head = new byte[512];
+            int n;
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                n = fs.Read(head, 0, head.Length);
+            }
+            catch
+            {
+                // Unreadable, absent, locked: not our story to tell. The caller's File.Exists
+                // gate already has a message for a missing library, and a reader that turns a
+                // transient share hiccup into "that is not a library" would be worse than the
+                // hole this closes.
+                return null;
+            }
+
+            // Named formats first: "that is a SQLite database" points at the wrong ARGUMENT,
+            // where "not an XML document" only says the run failed.
+            if (Begins(head, n, "SQLite format 3\0"))
+                return "it is a SQLite database — truedat's own store is one";
+            if (n >= 4 && head[0] == 0x50 && head[1] == 0x4B && (head[2] == 0x03 || head[2] == 0x05 || head[2] == 0x07))
+                return "it is a zip archive — a catalog backup or pin, perhaps";
+
+            // Step over a byte-order mark and any leading whitespace. 0x00 counts as skippable
+            // so UTF-16 reaches its first real character ('<' is 3C 00 little-endian, 00 3C big).
+            int i = 0;
+            if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) i = 3;
+            else if (n >= 2 && ((head[0] == 0xFF && head[1] == 0xFE) || (head[0] == 0xFE && head[1] == 0xFF))) i = 2;
+            while (i < n && (head[i] == 0x20 || head[i] == 0x09 || head[i] == 0x0A || head[i] == 0x0D || head[i] == 0x00)) i++;
+
+            if (i >= n)
+                return n == 0 ? "it is empty" : "it holds no document";
+
+            // Every XML document opens with '<' once the BOM and whitespace are behind us, so
+            // this can never reject a real library — and it catches the realistic wrong
+            // arguments: the moods catalog ('{'), a CSV, a log, a media file.
+            if (head[i] == (byte)'<') return null;
+
+            if (head[i] == (byte)'{' || head[i] == (byte)'[')
+                return "it is a JSON file — the moods catalog is JSON, the library is not";
+            return "it does not begin with an XML document";
+        }
+
+        static bool Begins(byte[] buf, int n, string ascii)
+        {
+            if (n < ascii.Length) return false;
+            for (int i = 0; i < ascii.Length; i++) if (buf[i] != (byte)ascii[i]) return false;
+            return true;
+        }
+
         public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues)
         {
             // Stream the XML through a sanitizing reader — never loads the full file into memory.

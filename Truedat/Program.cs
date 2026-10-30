@@ -567,6 +567,55 @@ namespace Truedat
                 sb.AppendLine($"    Essentia's time includes the ffmpeg resample on {resampleRuns:N0} hi-res file(s): {(resampleTotalSecs / resampleRuns).ToString("F3", inv)}s avg.");
             return sb.ToString();
         }
+        /// <summary>
+        /// Where a scan's wall clock actually went, as ratios the summary already had the parts
+        /// for but made the operator work out by hand (2026-10-26: every number in a hand-written
+        /// read of a 3-day run came from this block's own inputs plus a calculator).
+        ///
+        /// Facts with their arithmetic shown, never a label. The operator ruled out an "X-bound"
+        /// verdict (2026-10-26) because at cores-2 the CPU is never pegged, so a utilisation
+        /// claim would be fiction — same rule as <see cref="BuildLongPoleReport"/>: state the
+        /// measurement, let the reader conclude.
+        ///
+        /// Three questions it answers that no other line does: were the workers ever idle (if
+        /// occupancy is high, nothing was waiting on the source), how much of each worker-second
+        /// was the extractor itself, and how hard the scan leaned on the source link against what
+        /// that link actually delivered per copy.
+        /// </summary>
+        internal static string BuildTimeBudgetReport(
+            long analyzedTracks, double analyzedThreadSecs, int workers, double wallSecs,
+            double extractorCpuSecs, long stagedFromNetwork, double stagedBytes, double perCopyMbPerSec)
+        {
+            if (analyzedTracks <= 0 || analyzedThreadSecs <= 0 || workers <= 0 || wallSecs <= 0) return "";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new StringBuilder();
+            sb.AppendLine("  Where the time went:");
+
+            // The one number that says whether anything was waiting on the source: thread-time
+            // spread over the workers, against the clock it had to fill.
+            double busy = 100.0 * (analyzedThreadSecs / workers) / wallSecs;
+            double avgPerTrack = analyzedThreadSecs / analyzedTracks;
+            sb.AppendLine($"    Workers busy   {busy.ToString("F1", inv),6}% of the wall clock"
+                        + $"  ({workers} workers, {avgPerTrack.ToString("F1", inv)}s avg)");
+
+            // How much of a worker-second was the extractor itself — the rest is staging,
+            // hashing, the edge fold and the writes.
+            if (extractorCpuSecs > 0)
+                sb.AppendLine($"    Extractor CPU  {(100.0 * extractorCpuSecs / analyzedThreadSecs).ToString("F0", inv),6}% of each worker-second"
+                            + $"  ({(extractorCpuSecs / analyzedTracks).ToString("F1", inv)}s of {avgPerTrack.ToString("F1", inv)}s)");
+
+            // Sustained demand against what the link actually delivered per copy: the headroom
+            // the scan had, in the two numbers that were already measured.
+            if (stagedFromNetwork > 0 && stagedBytes > 0)
+            {
+                double mb = stagedBytes / (1024.0 * 1024.0);
+                sb.AppendLine($"    Source link    {(mb / wallSecs).ToString("F1", inv),6} MB/s sustained"
+                            + (perCopyMbPerSec > 0 ? $" vs {perCopyMbPerSec.ToString("F1", inv)} MB/s per copy" : ""));
+                sb.AppendLine($"                   {(mb / stagedFromNetwork).ToString("F1", inv)} MB/track over {stagedFromNetwork:N0} staged");
+            }
+            return sb.ToString();
+        }
+
         static long _nativeCpuUnavailable;
 
         internal static string BuildAnalysisTimingReport(IEnumerable<AnalysisStageTiming> stages, long cpuUnavailable)
@@ -4056,6 +4105,15 @@ namespace Truedat
                         Console.Error.WriteLine($"  WARNING: exclusion rule ignored — {diag}");
                 }
 
+                // Same gate as the scan path: a file that exists is not yet a library.
+                var pvNotLibrary = ITunesParser.NotALibraryReason(xmlPath);
+                if (pvNotLibrary != null)
+                {
+                    Console.Error.WriteLine($"Error: not an iTunes library: {xmlPath} — {pvNotLibrary}.");
+                    Console.Error.WriteLine("Refusing to preview: the library is the iTunes XML (or the folder holding it); run --paths to see what resolved.");
+                    Environment.ExitCode = 2;
+                    return;
+                }
                 Console.WriteLine($"Loading iTunes library: {xmlPath}");
                 var pvTracks = ITunesParser.Parse(xmlPath, out _);
                 Console.WriteLine($"Found {pvTracks.Count} tracks");
@@ -4542,6 +4600,11 @@ namespace Truedat
                         features.SmfmChannelName = SmfmReader.ChannelName(afSmfmResult.Value.Channel);
                         features.SmfmBpm           = Math.Round(afSmfmResult.Value.Bpm, FieldPrecision.Dp("smfmBpm"));
                     }
+
+                    // Carry forward any block this analysis did not observe (2026-10-26). Only
+                    // reachable with --moods, which is the only case where a prior entry exists.
+                    if (afMoodsTracks != null && afMoodsTracks.TryGetValue(Path.GetFullPath(analyzeFilePath!), out var afPriorEntry))
+                        CarryUnobservedBlocksForward(features, afPriorEntry.Features);
 
                     // FIX 5 — record the mtime that was true when we captured the
                     // bytes we analyzed (snapshot from SourceHandle). Falls back to
@@ -5388,6 +5451,11 @@ namespace Truedat
                             if (flSmfmWasAbsent) { flOkSmfmTag = " +smfm"; Interlocked.Increment(ref flSmfmAdded); }
                         }
 
+                        // Carry forward any block this analysis did not observe (2026-10-26) —
+                        // same rule as the library scan: the entry below replaces the stored one.
+                        flMoodsTracks.TryGetValue(fullPath, out var flPriorEntry);
+                        CarryUnobservedBlocksForward(features, flPriorEntry?.Features);
+
                         // FIX 5 — snapshot from SourceHandle. Falls back to the entry-time
                         // capture if the snapshot threw (DateTime.MinValue).
                         DateTime flLastMod = flStagedSrc!.SourceLastWriteUtc != DateTime.MinValue
@@ -5648,6 +5716,21 @@ namespace Truedat
                 // reviewer-flagged and ruled intended) — the front page points at
                 // --help all for the rest. Do not "fix" this back to PrintHelpAll().
                 PrintHelp();
+                return;
+            }
+
+            // It exists — but is it a library? Any non-flag token becomes the positional library
+            // path and ResolveITunesXml returns an explicit one verbatim, so File.Exists was the
+            // whole gate. Field report 2026-10-26: a stray `.\truedat.db` passed it and a 434 MB
+            // SQLite store went into the XML reader. Refuse here, naming what it actually is, so
+            // the operator is sent to the wrong ARGUMENT rather than to a parser error.
+            var notLibrary = ITunesParser.NotALibraryReason(xmlPath);
+            if (notLibrary != null)
+            {
+                var notLibraryMsg = $"Error: not an iTunes library: {xmlPath} — {notLibrary}. "
+                                  + "The library is the iTunes XML (or the folder holding it); run --paths to see what resolved.";
+                if (libraryScan) Environment.ExitCode = RefuseScan(_storePath, notLibraryMsg, 2);
+                else { Console.Error.WriteLine(notLibraryMsg); Environment.ExitCode = 2; }
                 return;
             }
 
@@ -6848,6 +6931,14 @@ namespace Truedat
                             }
                         }
 
+                        // A block whose producer did not run this time is not a block that is GONE:
+                        // the entry below replaces the stored one wholesale, so without this a
+                        // --refresh with SMFM off (the default) or without ffmpeg silently drops
+                        // what an earlier scan measured. The store already keeps an unobserved
+                        // column; this is the catalog's half of the same rule (2026-10-26).
+                        allTracks.TryGetValue(t.Location, out var msPriorEntry);
+                        CarryUnobservedBlocksForward(feat, msPriorEntry?.Features);
+
                         // FIX 5 — record the mtime captured inside OpenStagedSource right
                         // after File.Copy. Falls back to a fresh stat if the snapshot
                         // failed (kept for the rare case both stats throw).
@@ -7107,6 +7198,29 @@ namespace Truedat
             }
             EmitStagingSummary();
             EmitDirStatSummary();
+            // The ratios the block above has the parts for: worker occupancy, the extractor's
+            // share of a worker-second, and link demand against measured per-copy rate. Printed
+            // last because it reads the same counters those lines did (2026-10-26).
+            if (_classStats.TryGetValue("analyzed", out var budgetClass) && budgetClass[0] > 0)
+            {
+                var budgetCpu = _stageNativeCpu.Snapshot();
+                long budgetNetBytes = Volatile.Read(ref _stageBytesTotal);
+                long bFirst = Volatile.Read(ref _stageFirstStamp), bLast = Volatile.Read(ref _stageLastStamp);
+                double bSpan = (bFirst != 0 && bLast > bFirst) ? (double)(bLast - bFirst) / Stopwatch.Frequency : 0;
+                double bCopy = (double)Volatile.Read(ref _stageCopyTicks) / Stopwatch.Frequency;
+                // Same divisor rule as the Staging line, so the two rates can be compared: the
+                // smaller of the copy span and the summed copy time.
+                double bDiv = bSpan > 0 && bCopy > 0 ? Math.Min(bSpan, bCopy) : Math.Max(bSpan, bCopy);
+                Console.Write(BuildTimeBudgetReport(
+                    analyzedTracks: budgetClass[0],
+                    analyzedThreadSecs: (double)budgetClass[1] / Stopwatch.Frequency,
+                    workers: Math.Max(1, _extractorWorkers),
+                    wallSecs: sw.Elapsed.TotalSeconds,
+                    extractorCpuSecs: budgetCpu.TotalSeconds,
+                    stagedFromNetwork: Volatile.Read(ref _stageNetworkCount),
+                    stagedBytes: budgetNetBytes,
+                    perCopyMbPerSec: bDiv > 0 ? budgetNetBytes / (1024.0 * 1024.0) / bDiv : 0));
+            }
             }
             PrintScanTallies();
             if (_shaReadsRecovered > 0)
@@ -9600,6 +9714,59 @@ namespace Truedat
         {
             if (!typedArgs.Any(a => CanonicalFlag(a) == "smfm")) return configArgs;
             return configArgs.Where(a => CanonicalFlag(a) != "no-smfm").ToArray();
+        }
+
+        /// <summary>
+        /// Carry the blocks this analysis did not observe forward from the entry it replaces.
+        ///
+        /// A re-analysis builds a fresh <see cref="TrackFeatures"/> and the scan then replaces the
+        /// catalog entry wholesale, so every block whose producer did not run this time reads as
+        /// absent and is lost: SMFM when the reader is off (the default since 2026-10-14), bitUsage
+        /// and the HF pair when ffmpeg is missing or <c>--no-bitusage</c> / <c>--no-hf-analysis</c>
+        /// is passed. Field report 2026-10-26: a 3-day <c>--refresh</c> dropped the SMFM block from
+        /// 2,020 entries this way, and <c>--smfm</c>'s own help text promises the opposite
+        /// ("blocks already in the catalog are kept either way").
+        ///
+        /// This is the catalog-side twin of the store's rule — <c>TrackEntryMapper
+        /// .WithStoredContentWhereUnobserved</c>, "not observed this time: never a change, never a
+        /// wipe" — so memory and store now agree by construction, which is also what makes the
+        /// end-of-scan catalog summary (built from the in-memory entries) describe what was
+        /// published.
+        ///
+        /// Not gated on the suppression flags. <c>--no-smfm</c> suppresses every SMFM *read*, and
+        /// carrying a value already in the catalog is not a read; removing data is
+        /// <c>--strip-smfm</c>'s job, typed on purpose. Same for the authenticity blocks:
+        /// <c>--refresh-authenticity</c> is the re-measure request.
+        /// </summary>
+        internal static void CarryUnobservedBlocksForward(TrackFeatures fresh, TrackFeatures? prior)
+        {
+            if (fresh == null || prior == null) return;
+
+            // SMFM moves as ONE block. The scores are what HasSmfm tests and what the writer
+            // gates on, so a channel or bpm carried without them would be the "present but
+            // empty" shape the writer skips — and an empty prior array is not a block either.
+            if ((fresh.SmfmScores == null || fresh.SmfmScores.Length == 0)
+                && prior.SmfmScores != null && prior.SmfmScores.Length > 0)
+            {
+                fresh.SmfmScores      = prior.SmfmScores;
+                fresh.SmfmChannel     = prior.SmfmChannel;
+                fresh.SmfmChannelName = prior.SmfmChannelName;
+                fresh.SmfmBpm         = prior.SmfmBpm;
+            }
+
+            if (fresh.BitUsage == null && prior.BitUsage != null)
+                fresh.BitUsage = prior.BitUsage;
+
+            // The ratio and its method tag are one measurement: the tag is what
+            // --refresh-authenticity compares to decide the value is stale, so a value carried
+            // without it becomes unjudgeable.
+            if (!fresh.HfEnergyRatio.HasValue && prior.HfEnergyRatio.HasValue)
+            {
+                fresh.HfEnergyRatio  = prior.HfEnergyRatio;
+                fresh.HfEnergyMethod = prior.HfEnergyMethod;
+            }
+            if (fresh.HfSpectralStructure == null && prior.HfSpectralStructure != null)
+                fresh.HfSpectralStructure = prior.HfSpectralStructure;
         }
 
         static bool ApplySmfmInPlace(TrackFeatures f, string filePath, int[]? priorScores = null)
@@ -13959,6 +14126,76 @@ namespace Truedat
             return lines;
         }
 
+        /// <summary>Which size line a file beside the catalog belongs on.</summary>
+        internal enum SideFile
+        {
+            /// <summary>Not ours — the operator's own files share this directory.</summary>
+            None,
+            /// <summary>The Reports line: everything truedat writes that no other line claims.</summary>
+            Report,
+            /// <summary>The Backups line: the catalog's own rotated <c>.bak.*.zip</c>.</summary>
+            Backup,
+            /// <summary>Already counted by the Catalog / Sidecar / Edges / Store lines.</summary>
+            AlreadyCounted,
+        }
+
+        /// <summary>
+        /// Classify one filename beside the catalog, so the size block can account for everything
+        /// truedat wrote without a pattern list that goes stale — and it had gone stale twice. The
+        /// first version listed files by name and missed <c>mbxmoods-speech.csv</c>; the second
+        /// matched the globs <c>mbxmoods-*</c>, <c>store-*.json</c>, <c>truedat*.log</c> and so
+        /// missed everything named <c>&lt;catalog&gt;.&lt;something&gt;</c> — the pinned import
+        /// catalogs (<c>.imported.&lt;sha&gt;.zip</c>, 2026-10-25), the retired catalog
+        /// (<c>.retired.&lt;time&gt;.zip</c>) and the store's own migration backups
+        /// (<c>&lt;store&gt;.bak.v2.*</c> / <c>.bak.roots.*</c>). Field report 2026-10-26: 136 MB
+        /// of truedat's own pinned catalogs sat in no bucket and the stated total was 13% short.
+        ///
+        /// Prefix matching in managed code on purpose: a <c>&lt;name&gt;.*</c> glob would be
+        /// matched by Win32 with DOS semantics, where the dot is optional and the pattern also
+        /// matches the bare <c>&lt;name&gt;</c> — double-counting the catalog and the store.
+        /// </summary>
+        internal static SideFile ClassifySideFile(string name, string catalogName, string sidecarName, string? companionName, string? storeName)
+        {
+            if (string.IsNullOrEmpty(name)) return SideFile.None;
+            bool Is(string? other) => !string.IsNullOrEmpty(other) && string.Equals(name, other, StringComparison.OrdinalIgnoreCase);
+            // "<parent>.<something>" — a child of a file we already name, which is how every
+            // one of truedat's uncounted artifacts is named.
+            bool Child(string? parent) => !string.IsNullOrEmpty(parent)
+                && name.Length > parent!.Length + 1
+                && name.StartsWith(parent, StringComparison.OrdinalIgnoreCase)
+                && name[parent.Length] == '.';
+
+            // Counted by their own size lines already.
+            if (Is(catalogName) || Is(sidecarName) || Is(companionName) || Is(storeName)) return SideFile.AlreadyCounted;
+            // The store's WAL pair rides with the store, whose line adds WalBytes.
+            if (Is(storeName + "-wal") || Is(storeName + "-shm")) return SideFile.AlreadyCounted;
+
+            // The catalog's rotated backups have the Backups line; its OTHER children had no
+            // line at all — the pinned imports (<catalog>.imported.<sha>.zip) and the retired
+            // publication (<catalog>.retired.<time>.zip). That was the 2026-10-26 136 MB gap.
+            if (Child(catalogName))
+                return name.StartsWith(catalogName + ".bak.", StringComparison.OrdinalIgnoreCase)
+                       && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                    ? SideFile.Backup
+                    : SideFile.Report;
+
+            // <store>.bak.v2.<stamp> and <store>.bak.roots.<stamp>: the migration and root-fold
+            // backups. On the T14 measurement these were the single largest uncounted item.
+            if (Child(storeName) || Child(sidecarName) || Child(companionName)) return SideFile.Report;
+
+            // The companion's canonical name is ours whether or not edges are on this run: a
+            // leftover from an earlier --edges scan is still a file truedat wrote.
+            if (Is(global::Truedat.Edges.EdgeCompanion.FileName)
+                || Child(global::Truedat.Edges.EdgeCompanion.FileName)) return SideFile.Report;
+
+            // The families named by convention rather than after the catalog.
+            if (name.StartsWith("mbxmoods-", StringComparison.OrdinalIgnoreCase)) return SideFile.Report;
+            if (name.StartsWith("store-", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return SideFile.Report;
+            if (name.StartsWith("truedat", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".log", StringComparison.OrdinalIgnoreCase)) return SideFile.Report;
+
+            return SideFile.None;   // the operator's own files share this directory
+        }
+
         static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null, string? countsNote = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
@@ -14095,9 +14332,15 @@ namespace Truedat
                 //   skipped (mid-scan: short/over-length) -> a rescan skips these too
                 //   stale   (in the work list, no error)  -> --refresh-features (the ONLY
                 //                                            bucket a rescan fixes)
-                int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveSkipped = 0, waveStale = 0;
+                //   measured (analysed OK this run, still lacking) -> nothing to run
+                int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveSkipped = 0, waveStale = 0, waveMeasured = 0;
                 int waveRecorded = 0;
                 var waveLedger = ReviewLedger.Load(ResolveReviewLedgerPath(dir), out _);
+                // What this run analysed and wrote. Empty for a read verb like --stats, so its
+                // answer is unchanged; for a scan it is the set that cannot be "stale".
+                var waveAnalyzedOk = _analyzedOkPaths.IsEmpty
+                    ? null
+                    : (ISet<string>)new HashSet<string>(_analyzedOkPaths, PathComparer.Instance);
                 foreach (var e in entries)
                 {
                     if (e?.Features == null) continue;
@@ -14108,12 +14351,13 @@ namespace Truedat
                     // fall-through that produced the nag: anything not positively identified
                     // was declared re-analyzable and recommended for --refresh forever.
                     if (waveLedger.ShouldSkip(key)) { waveRecorded++; continue; }
-                    switch (ClassifyWaveMissing(key, errs, libraryKeys, scanWorkList, skipped))
+                    switch (ClassifyWaveMissing(key, errs, libraryKeys, scanWorkList, skipped, waveAnalyzedOk))
                     {
                         case WaveMissingBucket.Errored:  waveErrored++;  break;
                         case WaveMissingBucket.Orphan:   waveOrphan++;   break;
                         case WaveMissingBucket.Filtered: waveFiltered++; break;
                         case WaveMissingBucket.Skipped:  waveSkipped++;  break;
+                        case WaveMissingBucket.Measured: waveMeasured++; break;
                         default:                         waveStale++;    break;
                     }
                 }
@@ -14130,6 +14374,11 @@ namespace Truedat
                     waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (exclusion-rule/video/URL/non-audio); the rule-excluded ones retire with truedat --prune-excluded");
                 if (waveSkipped > 0)
                     waveBreakdown.Add($"{waveSkipped,6:N0}  skipped, not analyzable ->  see mbxmoods-skipped.csv (e.g. short files; a refresh will NOT clear these)");
+                // Analysed THIS run and still lacking: the extractor emitted no value for these
+                // fields on these files. Naming a command here would be the nag this ledger
+                // exists to end — a 3-day refresh ended by recommending a refresh (2026-10-26).
+                if (waveMeasured > 0)
+                    waveBreakdown.Add($"{waveMeasured,6:N0}  analysed this scan      ->  nothing to run: the extractor emitted no value for these fields");
                 if (waveStale > 0)
                     waveBreakdown.Add(scanWorkList == null
                         ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
@@ -14302,22 +14551,33 @@ namespace Truedat
                 // mbxmoods-speech.csv on a 72k library and reported a total that was short by a file it had written
                 // itself. Everything truedat writes beside the catalog counts, minus the lines above that already
                 // counted it.
+                // ONE directory listing, classified in managed code by ClassifySideFile — not a
+                // glob list, because the glob list went stale too: it matched mbxmoods-*,
+                // store-*.json and truedat*.log, and so missed every artifact named after the
+                // catalog or the store (the pinned imports, the retired publication, the store's
+                // migration backups). 2026-10-26: 136 MB of truedat's own pinned catalogs sat in
+                // no bucket and the total was 13% short.
                 var reportNames = new List<string>();
-                long repBytes = 0;
+                long repBytes = 0, bakBytes = 0; int bakCount = 0;
                 try
                 {
-                    var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                        { Path.GetFileName(path), Path.GetFileName(Path.ChangeExtension(path, ".mbxs")), compName };
-                    foreach (var pattern in new[] { "mbxmoods-*", "store-*.json", "truedat*.log" })
-                        foreach (var f in Directory.GetFiles(dir, pattern))
+                    var catalogName = Path.GetFileName(path);
+                    var sidecarName = Path.GetFileName(Path.ChangeExtension(path, ".mbxs"));
+                    var storeName = storeInfo != null ? Path.GetFileName(storeInfo.Path) : null;
+                    foreach (var f in Directory.GetFiles(dir))
+                    {
+                        var name = Path.GetFileName(f);
+                        switch (ClassifySideFile(name, catalogName, sidecarName, compName, storeName))
                         {
-                            var name = Path.GetFileName(f);
-                            if (counted.Contains(name)) continue;                                            // catalog, sidecar, companion
-                            if (name.IndexOf(".bak.", StringComparison.OrdinalIgnoreCase) >= 0) continue;    // the Backups line
-                            counted.Add(name);
-                            repBytes += new FileInfo(f).Length;
-                            reportNames.Add(name);
+                            case SideFile.Report:
+                                repBytes += new FileInfo(f).Length;
+                                reportNames.Add(name);
+                                break;
+                            case SideFile.Backup:
+                                bakBytes += new FileInfo(f).Length; bakCount++;
+                                break;
                         }
+                    }
                     reportNames.Sort(StringComparer.OrdinalIgnoreCase);
                 }
                 catch { /* the sibling scan is best-effort */ }
@@ -14329,16 +14589,12 @@ namespace Truedat
                     SizeLine("Reports:", repBytes, names);
                 }
 
-                if (catBytes > 0)
+                if (bakCount > 0)
                 {
-                    var baks = Directory.GetFiles(dir, Path.GetFileName(path) + ".bak.*.zip");
-                    if (baks.Length > 0)
-                    {
-                        long bakBytes = 0; foreach (var b in baks) bakBytes += new FileInfo(b).Length;
-                        double avgBak = (double)bakBytes / baks.Length;
-                        accounted += bakBytes;
-                        SizeLine("Backups:", bakBytes, $"{baks.Length} compressed .zip (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)");
-                    }
+                    double avgBak = (double)bakBytes / bakCount;
+                    accounted += bakBytes;
+                    SizeLine("Backups:", bakBytes, $"{bakCount} compressed .zip"
+                        + (catBytes > 0 ? $" (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)" : ""));
                 }
 
                 if (accounted > 0)
@@ -21928,6 +22184,202 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ClassifyWaveMissing(@"D:\m\stale.flac",   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: in work list, not errored/skipped -> Stale (the only --refresh bucket)");
                 Assert(ClassifyWaveMissing("",                   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: empty key -> Stale (legacy fall-through)");
                 Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac" }) == WaveMissingBucket.Errored, "wave-bucket: errored beats skipped");
+
+                // Field report 2026-10-26: a 3-day --refresh analysed 72,173 tracks, 0 failed,
+                // and its own summary then recommended --refresh for 70 entries it had just
+                // analysed. An entry analysed OK this run cannot be "stale".
+                var okNow = (ISet<string>)new HashSet<string>(PathComparer.Instance) { @"D:\m\stale.flac", @"D:\m\bad.flac", @"D:\m\short.wav" };
+                Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, okNow) == WaveMissingBucket.Measured,
+                    "wave-bucket: analysed OK this run and still lacking -> Measured, NOT Stale (a refresh just ran)");
+                Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, skip, okNow) == WaveMissingBucket.Errored,
+                    "wave-bucket: the error list still beats analysed-this-run");
+                Assert(ClassifyWaveMissing(@"D:\m\short.wav", errs, lib, work, skip, okNow) == WaveMissingBucket.Skipped,
+                    "wave-bucket: a mid-scan skip still beats analysed-this-run");
+                Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, null) == WaveMissingBucket.Stale,
+                    "wave-bucket: with no analysed-this-run set (--stats) the old answer stands");
+                Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, (ISet<string>)new HashSet<string>(PathComparer.Instance)) == WaveMissingBucket.Stale,
+                    "wave-bucket: an empty analysed-this-run set changes nothing");
+            }
+
+            // --- Where the time went: the ratios the summary had the parts for but left as
+            // arithmetic for the operator (2026-10-26 field report). ---------------------------
+            {
+                // Round inputs so each expected figure is obvious by inspection rather than transcribed.
+                var budget = BuildTimeBudgetReport(
+                    analyzedTracks: 100, analyzedThreadSecs: 2000, workers: 4, wallSecs: 500,
+                    extractorCpuSecs: 1600, stagedFromNetwork: 100, stagedBytes: 500.0 * 1024 * 1024, perCopyMbPerSec: 5.0);
+                Assert(budget.Length > 0, "time-budget: a scan that analysed tracks gets the block");
+                Assert(budget.IndexOf("100.0%", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 2000 thread-seconds over 4 workers in 500s wall = 100.0% occupancy (got: {budget})");
+                Assert(budget.IndexOf("80%", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 1600s of extractor CPU in 2000s of thread time = 80% (got: {budget})");
+                Assert(budget.IndexOf("1.0 MB/s", StringComparison.Ordinal) >= 0 && budget.IndexOf("5.0 MB/s", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 500 MB over 500s = 1.0 MB/s sustained, against the measured 5.0 MB/s per copy (got: {budget})");
+                Assert(budget.IndexOf("5.0 MB/track", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 500 MB over 100 staged tracks = 5.0 MB/track (got: {budget})");
+                // The operator's 2026-10-26 ruling: measurements, never an "X-bound" label.
+                Assert(budget.IndexOf("bound", StringComparison.OrdinalIgnoreCase) < 0,
+                    "time-budget: states measurements, never an X-bound verdict");
+
+                // Half-busy workers must read as half-busy: this is the number that says whether
+                // anything was waiting on the source.
+                var halfIdle = BuildTimeBudgetReport(100, 1000, 4, 500, 800, 0, 0, 0);
+                Assert(halfIdle.IndexOf("50.0%", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 1000 thread-seconds over 4 workers in 500s wall = 50.0% occupancy (got: {halfIdle})");
+                Assert(halfIdle.IndexOf("MB/s", StringComparison.Ordinal) < 0,
+                    "time-budget: a scan that staged nothing gets no source-link row");
+
+                Assert(BuildTimeBudgetReport(0, 0, 4, 500, 0, 0, 0, 0).Length == 0,
+                    "time-budget: a fully cached scan analysed nothing, so there is no budget to report");
+                Assert(BuildTimeBudgetReport(100, 2000, 0, 0, 1600, 0, 0, 0).Length == 0,
+                    "time-budget: no workers or no wall clock means no ratio to state");
+            }
+
+            // --- A library path that is not XML is refused, not parsed. Field report 2026-10-26:
+            // a stray `.\truedat.db` landed in the positional library slot, ResolveITunesXml
+            // returned it verbatim, File.Exists passed, and a 434 MB SQLite store went into the
+            // XML reader. Every real XML starts with '<' after a BOM and whitespace. -----------
+            {
+                var sniffDir = Path.Combine(Path.GetTempPath(), "truedat-libsniff-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(sniffDir);
+                try
+                {
+                    string Make(string name, string text, Encoding enc) { var p = Path.Combine(sniffDir, name); File.WriteAllText(p, text, enc); return p; }
+                    string MakeBytes(string name, byte[] bytes) { var p = Path.Combine(sniffDir, name); File.WriteAllBytes(p, bytes); return p; }
+
+                    var realXml = Make("iTunes Music Library.xml", "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict></dict></plist>", new UTF8Encoding(false));
+                    Assert(ITunesParser.NotALibraryReason(realXml) == null, "lib-sniff: a real iTunes library XML passes");
+
+                    // iTunes/MusicBee write a BOM, and leading blank lines are legal XML.
+                    var bomXml = Make("bom.xml", "\r\n   <?xml version=\"1.0\"?><plist/>", new UTF8Encoding(true));
+                    Assert(ITunesParser.NotALibraryReason(bomXml) == null, "lib-sniff: BOM plus leading whitespace still passes");
+
+                    var utf16Xml = Make("utf16.xml", "<?xml version=\"1.0\"?><plist/>", new UnicodeEncoding(false, true));
+                    Assert(ITunesParser.NotALibraryReason(utf16Xml) == null, "lib-sniff: a UTF-16 XML library passes");
+
+                    var sqliteHeader = new byte[128];
+                    Encoding.ASCII.GetBytes("SQLite format 3\0").CopyTo(sqliteHeader, 0);
+                    var store = MakeBytes("truedat.db", sqliteHeader);
+                    var storeReason = ITunesParser.NotALibraryReason(store);
+                    Assert(storeReason != null && storeReason.IndexOf("SQLite", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"lib-sniff: a SQLite store is refused AND named as one (got: {storeReason ?? "null"})");
+
+                    var catalog = Make("mbxmoods.json", "{\"schemaVersion\":1,\"tracks\":{}}", new UTF8Encoding(false));
+                    Assert(ITunesParser.NotALibraryReason(catalog) != null, "lib-sniff: the moods catalog is not a library");
+
+                    var zip = MakeBytes("pinned.zip", new byte[] { 0x50, 0x4B, 0x03, 0x04, 0x14, 0x00 });
+                    Assert(ITunesParser.NotALibraryReason(zip) != null, "lib-sniff: a zip archive is not a library");
+
+                    Assert(ITunesParser.NotALibraryReason(MakeBytes("empty.xml", new byte[0])) != null,
+                        "lib-sniff: an empty file is not a library");
+                    Assert(ITunesParser.NotALibraryReason(MakeBytes("bom-only.xml", new byte[] { 0xEF, 0xBB, 0xBF })) != null,
+                        "lib-sniff: a BOM and nothing else is not a library");
+                    Assert(ITunesParser.NotALibraryReason(Path.Combine(sniffDir, "absent.xml")) == null,
+                        "lib-sniff: an unreadable path is left to the caller's File.Exists gate, not reported as malformed");
+                }
+                finally { try { Directory.Delete(sniffDir, true); } catch { } }
+            }
+
+            // --- A re-analysis must not drop a block it did not observe. Field report 2026-10-26:
+            // a 3-day --refresh with SMFM off (the default) rebuilt every entry and the catalog's
+            // SMFM count fell 2,020 -> 1, while the store kept every one of them by its own
+            // unobserved rule. Same hole for bitUsage / HF when ffmpeg is absent. --------------
+            {
+                var priorFeat = new TrackFeatures
+                {
+                    SmfmScores = new[] { 11, 22, 33 }, SmfmChannel = 9, SmfmChannelName = "slot-9", SmfmBpm = 120.5,
+                    BitUsage = new BitUsageSummary { EffectiveBits = 16 },
+                    HfEnergyRatio = 0.0125, HfEnergyMethod = "managed-fft-radix2-30s-mid-native",
+                    HfSpectralStructure = new HfSpectralStructure(),
+                };
+
+                // SMFM reader off, no ffmpeg: a fresh analysis observed neither block.
+                var reanalysed = new TrackFeatures { Bpm = 128.0, Key = "C" };
+                CarryUnobservedBlocksForward(reanalysed, priorFeat);
+                Assert(reanalysed.SmfmScores != null && reanalysed.SmfmScores.Length == 3 && reanalysed.SmfmScores[1] == 22,
+                    "carry-unobserved: an unobserved SMFM block is carried forward, not dropped");
+                Assert(reanalysed.SmfmChannel == 9 && reanalysed.SmfmChannelName == "slot-9" && reanalysed.SmfmBpm == 120.5,
+                    "carry-unobserved: the whole SMFM block travels together (channel, name, bpm)");
+                Assert(reanalysed.BitUsage != null && reanalysed.BitUsage.EffectiveBits == 16,
+                    "carry-unobserved: an unobserved bitUsage block is carried forward");
+                Assert(reanalysed.HfEnergyRatio == 0.0125 && reanalysed.HfEnergyMethod == "managed-fft-radix2-30s-mid-native" && reanalysed.HfSpectralStructure != null,
+                    "carry-unobserved: hfEnergyRatio travels with its method tag and the structure block");
+                Assert(reanalysed.Bpm == 128.0 && reanalysed.Key == "C",
+                    "carry-unobserved: what the analysis DID measure is untouched");
+
+                // An observed block always wins: this is not a merge of values, it is a backfill of absence.
+                var measured = new TrackFeatures
+                {
+                    SmfmScores = new[] { 7 }, SmfmChannel = 1, SmfmChannelName = "slot-1", SmfmBpm = 90.0,
+                    BitUsage = new BitUsageSummary { EffectiveBits = 24 }, HfEnergyRatio = 0.5, HfEnergyMethod = "fresh",
+                };
+                CarryUnobservedBlocksForward(measured, priorFeat);
+                Assert(measured.SmfmScores!.Length == 1 && measured.SmfmScores[0] == 7 && measured.SmfmChannel == 1 && measured.SmfmBpm == 90.0,
+                    "carry-unobserved: a freshly READ SMFM block is never overwritten by the prior one");
+                Assert(measured.BitUsage!.EffectiveBits == 24 && measured.HfEnergyRatio == 0.5 && measured.HfEnergyMethod == "fresh",
+                    "carry-unobserved: a freshly measured authenticity block is never overwritten");
+
+                // No prior entry (a new track) and an empty prior: nothing to carry, no crash.
+                var brandNew = new TrackFeatures { Bpm = 100 };
+                CarryUnobservedBlocksForward(brandNew, null);
+                CarryUnobservedBlocksForward(brandNew, new TrackFeatures());
+                Assert(brandNew.SmfmScores == null && brandNew.BitUsage == null && brandNew.HfEnergyRatio == null,
+                    "carry-unobserved: a new track with no prior entry gains nothing");
+
+                // An empty score array is not a block: HasSmfm is length-based, so carrying one
+                // forward would re-introduce the "present but empty" shape the writer skips.
+                var emptyPrior = new TrackFeatures { SmfmScores = new int[0], SmfmChannel = 3 };
+                var afterEmpty = new TrackFeatures();
+                CarryUnobservedBlocksForward(afterEmpty, emptyPrior);
+                Assert(afterEmpty.SmfmScores == null && afterEmpty.SmfmChannel == null,
+                    "carry-unobserved: an empty prior SMFM array is not a block and is not carried");
+            }
+
+            // --- The size block must account for every file truedat wrote beside the catalog.
+            // Field report 2026-10-26: two `mbxmoods.json.imported.<sha>.zip` pins (136 MB) matched
+            // no pattern and the stated total was 13% short. -----------------------------------
+            {
+                const string cat = "mbxmoods.json", side = "mbxmoods.mbxs", comp = "mbxedges.v1.json", store = "truedat.db";
+                SideFile Side(string n) => ClassifySideFile(n, cat, side, comp, store);
+
+                Assert(Side(cat) == SideFile.AlreadyCounted, "side-file: the catalog is counted by its own line");
+                Assert(Side(side) == SideFile.AlreadyCounted, "side-file: the sidecar is counted by its own line");
+                Assert(Side(comp) == SideFile.AlreadyCounted, "side-file: the companion is counted by its own line");
+                Assert(Side(store) == SideFile.AlreadyCounted, "side-file: the store is counted by its own line");
+                Assert(Side("truedat.db-wal") == SideFile.AlreadyCounted, "side-file: the store's WAL is counted by the store line");
+                Assert(Side("truedat.db-shm") == SideFile.AlreadyCounted, "side-file: the store's shared-memory file rides with the WAL");
+
+                Assert(Side("mbxmoods-errors.csv") == SideFile.Report, "side-file: the error ledger is a report");
+                Assert(Side("mbxmoods-skipped.csv") == SideFile.Report, "side-file: the skip ledger is a report");
+                Assert(Side("mbxmoods-scan-2026-10-26-1.txt") == SideFile.Report, "side-file: a scan capture is a report");
+                Assert(Side("store-result.json") == SideFile.Report, "side-file: store-result.json is a report");
+                Assert(Side("store-import-result.json") == SideFile.Report, "side-file: store-import-result.json is a report");
+                Assert(Side("truedat.log") == SideFile.Report, "side-file: the audit log is a report");
+
+                Assert(Side("mbxmoods.json.bak.20260823.182708.zip") == SideFile.Backup,
+                    "side-file: the catalog's rotated backup belongs to the Backups line");
+
+                // The three that had no bucket at all.
+                Assert(Side("mbxmoods.json.imported.c9458a2dafbe6763.zip") == SideFile.Report,
+                    "side-file: a pinned import catalog is counted (the 2026-10-26 136 MB gap)");
+                Assert(Side("mbxmoods.json.retired.20261026.120000.zip") == SideFile.Report,
+                    "side-file: a retired catalog is counted");
+                Assert(Side("truedat.db.bak.v2.20261026-120000") == SideFile.Report,
+                    "side-file: a store migration backup is counted");
+                Assert(Side("truedat.db.bak.roots.20261026-120000") == SideFile.Report,
+                    "side-file: a store root-fold backup is counted");
+
+                // The operator's own files in the same folder stay out of truedat's total.
+                Assert(Side("iTunes Music Library.xml") == SideFile.None, "side-file: the library XML is not truedat's");
+                Assert(Side("MusicBeeLibrary.mbl") == SideFile.None, "side-file: the MusicBee library is not truedat's");
+                Assert(Side("NowPlaying.mbp") == SideFile.None, "side-file: unrelated player files are not truedat's");
+                Assert(Side("mbxmoods.json.imported.c9458a2dafbe6763.zip".ToUpperInvariant()) == SideFile.Report,
+                    "side-file: classification is case-insensitive like the filesystem");
+
+                // A chunked scan suffixes its ledgers; a null companion/store must not crash.
+                Assert(Side("mbxmoods-errors.host7.csv") == SideFile.Report, "side-file: a chunk-suffixed ledger is a report");
+                Assert(ClassifySideFile("mbxedges.v1.json", cat, side, null, null) == SideFile.Report,
+                    "side-file: a leftover companion with edges off is still truedat's file, so it still counts");
             }
 
             // --- Root latency profile ------------------------------------------------
@@ -23552,7 +24004,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return result;
         }
 
-        internal enum WaveMissingBucket { Errored, Orphan, Filtered, Skipped, Stale }
+        internal enum WaveMissingBucket { Errored, Orphan, Filtered, Skipped, Measured, Stale }
 
         /// <summary>
         /// Classify a wave-missing catalog entry (has Essentia features, lacks the latest wave
@@ -23567,13 +24019,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Dictionary<string, string> errs,
             ISet<string>? libraryKeys,
             ISet<string>? scanWorkList,
-            HashSet<string> skipped)
+            HashSet<string> skipped,
+            ISet<string>? analyzedOkThisRun = null)
         {
             if (key.Length == 0) return WaveMissingBucket.Stale;
             if (errs.ContainsKey(key)) return WaveMissingBucket.Errored;
             if (libraryKeys != null && !libraryKeys.Contains(key)) return WaveMissingBucket.Orphan;
             if (scanWorkList != null && !scanWorkList.Contains(key)) return WaveMissingBucket.Filtered;
             if (skipped.Contains(key)) return WaveMissingBucket.Skipped;
+            // Analysed and written THIS run, and still lacking the wave fields: the extractor
+            // emitted no value for them on this file, so it is as fresh as truedat can make it
+            // and "-> refresh" is a nag that can never clear. Field report 2026-10-26: a 3-day
+            // --refresh ended by recommending --refresh for 70 entries it had just analysed.
+            // Last before Stale on purpose — every structural bucket above it still wins, so
+            // this only changes the fall-through.
+            if (analyzedOkThisRun != null && analyzedOkThisRun.Contains(key)) return WaveMissingBucket.Measured;
             return WaveMissingBucket.Stale;
         }
 
