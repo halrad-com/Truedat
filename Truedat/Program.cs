@@ -14126,6 +14126,52 @@ namespace Truedat
             return lines;
         }
 
+        /// <summary>
+        /// Why this file is not the moods catalog, or null when it looks like JSON and a parse
+        /// failure therefore means genuinely corrupt.
+        ///
+        /// Field report 2026-10-29: the mood sidecar was handed to the catalog loader, which
+        /// declared a perfectly healthy <c>mbxmoods.mbxs</c> "corrupt", copied 28 MB of it to
+        /// <c>.corrupt.&lt;stamp&gt;</c> and told the operator to <c>del</c> it. A JSON parse
+        /// error means "not JSON", which is not the same fact as "the catalog is damaged", and
+        /// only one of those two deserves a backup and a deletion instruction.
+        ///
+        /// Positive identification only: a truncated or malformed catalog still begins with '{',
+        /// so it keeps the corrupt path it needs.
+        /// </summary>
+        internal static string? NotACatalogReason(string path)
+        {
+            byte[] head = new byte[64];
+            int n;
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                n = fs.Read(head, 0, head.Length);
+            }
+            catch { return null; }   // unreadable: not our story — the caller's own error stands
+
+            bool Begins(string ascii)
+            {
+                if (n < ascii.Length) return false;
+                for (int i = 0; i < ascii.Length; i++) if (head[i] != (byte)ascii[i]) return false;
+                return true;
+            }
+
+            // "MBXS" — the sidecar's own magic (CatalogSidecar.cs:366 writes it, :564 checks it).
+            if (Begins("MBXS")) return "it is the mood sidecar, which the catalog is published with — not the catalog";
+            if (Begins("SQLite format 3\0")) return "it is a SQLite database — truedat's own store is one";
+            if (n >= 4 && head[0] == 0x50 && head[1] == 0x4B && (head[2] == 0x03 || head[2] == 0x05 || head[2] == 0x07))
+                return "it is a zip archive — a catalog backup or pin, perhaps";
+
+            int j = 0;
+            if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) j = 3;
+            while (j < n && (head[j] == 0x20 || head[j] == 0x09 || head[j] == 0x0A || head[j] == 0x0D)) j++;
+            if (j >= n) return n == 0 ? "it is empty" : "it holds no document";
+            if (head[j] == (byte)'<') return "it is an XML document — the iTunes library is XML, the catalog is JSON";
+            if (head[j] == (byte)'{' || head[j] == (byte)'[') return null;   // JSON: a parse failure really is damage
+            return "it does not begin with a JSON document";
+        }
+
         /// <summary>Which size line a file beside the catalog belongs on.</summary>
         internal enum SideFile
         {
@@ -22280,6 +22326,50 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 finally { try { Directory.Delete(sniffDir, true); } catch { } }
             }
 
+            // --- A file that is not the catalog is not a CORRUPT catalog. Field report
+            // 2026-10-29: the mood sidecar was handed to the catalog loader, which branded a
+            // healthy 28 MB mbxmoods.mbxs "corrupt", copied it to .corrupt.<stamp> and told the
+            // operator to delete it. Only a file that really is JSON earns that path. ----------
+            {
+                var catDir = Path.Combine(Path.GetTempPath(), "truedat-catsniff-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(catDir);
+                try
+                {
+                    string MakeB(string name, byte[] bytes) { var p = Path.Combine(catDir, name); File.WriteAllBytes(p, bytes); return p; }
+                    string MakeT(string name, string text) { var p = Path.Combine(catDir, name); File.WriteAllText(p, text, new UTF8Encoding(false)); return p; }
+
+                    // The real sidecar header: magic then its version word.
+                    var sidecar = MakeB("mbxmoods.mbxs", new byte[] { (byte)'M', (byte)'B', (byte)'X', (byte)'S', 3, 0, 0, 0, 0xA8, 0x1A, 1, 0 });
+                    var sidecarReason = NotACatalogReason(sidecar);
+                    Assert(sidecarReason != null && sidecarReason.IndexOf("sidecar", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"catalog-sniff: the mood sidecar is named as the sidecar, not called corrupt (got: {sidecarReason ?? "null"})");
+
+                    var sqliteHead = new byte[64];
+                    Encoding.ASCII.GetBytes("SQLite format 3\0").CopyTo(sqliteHead, 0);
+                    Assert(NotACatalogReason(MakeB("truedat.db", sqliteHead))?.IndexOf("SQLite", StringComparison.OrdinalIgnoreCase) >= 0,
+                        "catalog-sniff: the store is named as a database");
+                    Assert(NotACatalogReason(MakeB("pin.zip", new byte[] { 0x50, 0x4B, 0x03, 0x04, 0, 0 })) != null,
+                        "catalog-sniff: a zip is not the catalog");
+                    Assert(NotACatalogReason(MakeT("lib.xml", "<?xml version=\"1.0\"?><plist/>")) != null,
+                        "catalog-sniff: the iTunes XML is not the catalog");
+
+                    // The cases that MUST keep the corrupt path: real JSON that fails to parse.
+                    Assert(NotACatalogReason(MakeT("truncated.json", "{\"version\":\"1.0\",\"tracks\":{\"a\":{")) == null,
+                        "catalog-sniff: a TRUNCATED catalog is still JSON, so it keeps the corrupt backup path");
+                    Assert(NotACatalogReason(MakeT("whole.json", "{\"tracks\":{}}")) == null,
+                        "catalog-sniff: a healthy catalog is not diverted");
+                    var bomJson = new List<byte> { 0xEF, 0xBB, 0xBF, (byte)'\r', (byte)'\n', (byte)' ' };
+                    bomJson.AddRange(Encoding.ASCII.GetBytes("{\"tracks\":{}}"));
+                    Assert(NotACatalogReason(MakeB("bom.json", bomJson.ToArray())) == null,
+                        "catalog-sniff: a BOM and leading whitespace do not hide the JSON");
+                    Assert(NotACatalogReason(MakeB("empty.json", new byte[0])) != null,
+                        "catalog-sniff: an empty file is not a catalog to back up");
+                    Assert(NotACatalogReason(Path.Combine(catDir, "absent.json")) == null,
+                        "catalog-sniff: an unreadable path leaves the caller's own error standing");
+                }
+                finally { try { Directory.Delete(catDir, true); } catch { } }
+            }
+
             // --- A re-analysis must not drop a block it did not observe. Field report 2026-10-26:
             // a 3-day --refresh with SMFM off (the default) rebuilt every entry and the catalog's
             // SMFM count fell 2,020 -> 1, while the store kept every one of them by its own
@@ -26203,6 +26293,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 catch (JsonException ex)
                 {
+                    // "Not JSON" and "the catalog is damaged" are different facts, and only the
+                    // second earns a 28 MB backup copy and a deletion instruction. Field report
+                    // 2026-10-29: the sidecar reached here and a healthy file was branded corrupt.
+                    var notCatalog = NotACatalogReason(path);
+                    if (notCatalog != null)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine($"ERROR: not the moods catalog: {path} — {notCatalog}.");
+                        Console.WriteLine("Nothing was written or backed up. The catalog is mbxmoods.json; pass that, or --paths to see what resolved.");
+                        Environment.Exit(2);
+                    }
                     var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
                     try { File.Copy(path, bakPath); }
                     catch (Exception bakEx)
