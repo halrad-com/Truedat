@@ -790,6 +790,12 @@ namespace Truedat.Store
                     // Review #5: a replacement has a direction. An arrival from an OLDER build of the same producer is drift
                     // (the newer description stays); a newer or unorderable one replaces, and leaves a resolved trace.
                     bool olderArrival = !sameProducer && ArrivalIsOlder(existing.ProducerKey, existing.ProducerVersion, producerKey, producerVersion);
+                    // NOT gated on !isImport, deliberately (proven 2026-10-31): an import that SUPPLIES a value carries it, and
+                    // "supplied" includes an explicit zero or empty string (the operator's null rule, 2026-10-25 — only absent
+                    // and null never clear). Gating this branch on !isImport was tried and reverted: it made an import's
+                    // explicit 0/"" lose to a stored measurement, which MergeSafetySelfTest.OrdinaryImportAbsentScalars pins
+                    // ("Presence, not those defaults, decides what an ordinary import supplies"). The remeasure and confirm
+                    // branches ARE gated on !isImport because they adopt values the arrival agreed with rather than supplied.
                     if (sameProducer || olderArrival)
                     {
                         foreach (var k in drift)
