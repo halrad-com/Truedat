@@ -7128,7 +7128,7 @@ namespace Truedat
             if (retryRecovered > 0)
                 Console.WriteLine($"  Retried:    {retryRecovered}  (failed the first attempt, analyzed on the retry — in the catalog)");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {cachedCount + analyzed + skipped + dsdSkipped + overLengthSkipped + missingSkipped + failed}");
+            Console.WriteLine($"  Processed:  {ScanProcessedTotal(cachedCount, analyzed, skipped, shortSkipped, dsdSkipped, overLengthSkipped, missingSkipped, failed)}");
             foreach (var line in OutputSummaryLines(allTracks.Count, _publish, moodsPath)) Console.WriteLine(line);
             if (analyzed > 0)
             {
@@ -14105,6 +14105,14 @@ namespace Truedat
             foreach (var line in WrapNote(note, Math.Max(20, ReportWidth - indent.Length)))
                 Console.WriteLine(indent + line);
         }
+
+        /// <summary>Every file the scan reached, in exactly one bucket — the "Processed:" line. Pure so the self-test can hold
+        /// it to the rule, because the summary's whole job is that nothing the run touched goes unaccounted (2026-10-18). Short
+        /// files were printed as their own row and then left OUT of this sum, so a run that skipped one reported one file fewer
+        /// than it reached: a field summary read Analyzed 8321 + Short 1 + Failed 2 and totalled 8323 (2026-10-31).</summary>
+        internal static int ScanProcessedTotal(int cached, int analyzed, int skipped, int shortSkipped,
+                                               int dsdSkipped, int overLengthSkipped, int missingSkipped, int failed)
+            => cached + analyzed + skipped + shortSkipped + dsdSkipped + overLengthSkipped + missingSkipped + failed;
 
         /// <summary>The wrap itself, pure so the self-test can hold it to the width.</summary>
         internal static List<string> WrapNote(string note, int width)
@@ -23293,6 +23301,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 int widest = 0; foreach (var l in wrapped) widest = Math.Max(widest, l.Length);
                 Assert(widest <= 72, $"report-note: no wrapped line exceeds the width (widest {widest} of 72)");
                 Assert(string.Join(" ", wrapped) == longNote, "report-note: wrapping preserves the text word for word");
+                // Every bucket the summary prints contributes exactly once to "Processed:". Distinct powers of ten so a dropped
+                // term fails by name and says WHICH one — short files were the dropped term in the field (2026-10-31).
+                Assert(ScanProcessedTotal(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000) == 11111111,
+                    $"processed total: every outcome bucket counts exactly once (got {ScanProcessedTotal(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000)}, expected 11111111)");
+                Assert(ScanProcessedTotal(0, 8321, 0, 1, 0, 0, 0, 2) == 8324,
+                    $"processed total: the field summary's own run reconciles (got {ScanProcessedTotal(0, 8321, 0, 1, 0, 0, 0, 2)}, expected 8324 — it printed 8323)");
                 Assert(WrapNote("short note", 72).Count == 1, "report-note: a note that fits stays on one line");
                 Assert(WrapNote("", 72).Count == 0, "report-note: an empty note prints nothing");
                 // A path is one word and longer than the width: breaking it would make it uncopyable, which
