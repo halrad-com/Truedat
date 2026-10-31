@@ -32,10 +32,12 @@ namespace Truedat.Store
         /// printing the paths. Same convention as mbxmoods-skipped.csv / mbxmoods-errors.csv.</summary>
         internal const string DisagreeLedgerName = "mbxmoods-store-disagree.csv";
 
-        /// <summary>Whether <c>--store-import</c> can change the outcome of a disagreement. It can only ADD what the store is
-        /// missing — it never overwrites a stored measurement (both value-adopting paths in <see cref="ImportCommand"/> are gated
-        /// on <c>!isImport</c>: an import is a seed, not a measurement, so it carries no authority over one). So when nothing is
-        /// only in the catalog, an import provably cannot move anything and must NOT be named as the remedy. Naming it anyway is a
+        /// <summary>Whether <c>--store-import</c> can change the outcome of a disagreement. The question this answers is about
+        /// the PATH SET, not value authority: an import ADDS what the store is missing, so a disagreement moves only when the
+        /// catalog holds a path the store does not. It does also carry the values the catalog supplies — but resolving a
+        /// value-only disagreement that way means overwriting the store with the catalog, which is the wrong direction and not a
+        /// remedy to name. So when nothing is only in the catalog, an import cannot usefully move anything
+        /// and must NOT be named as the remedy. Naming it anyway is a
         /// closed loop: the operator runs it, it succeeds, the same refusal comes back. Field-reported 2026-10-26 after a
         /// 72,447-track library spent three scans in it; the 2026-10-18 pass fixed the false-positive half of this refusal
         /// (<see cref="HoldsSameFacts"/>) and left the wrong-remedy half, which this closes.</summary>
