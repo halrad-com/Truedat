@@ -10,6 +10,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ## [0.5.5.3-EV4.3] — 2026-10-30
 
+### Added
+
+- Enhanced scan summary block.
+
 ### Changed
 
 - Improved error handling.
