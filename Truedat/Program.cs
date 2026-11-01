@@ -6127,7 +6127,7 @@ namespace Truedat
                             && (e.Features.AverageLoudness == null || e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))
                             waveMissing++;
                     if (waveMissing > 0)
-                        Console.WriteLine($"  {waveMissing:N0} entries lack the latest features — run: truedat --refresh");
+                        Console.WriteLine($"  {CountOf(waveMissing, "entry", "entries")} without the latest features — run: truedat --refresh");
                 }
             }
             int flacRekeyed = 0;       // tier 2.5: FLAC transition rescue (pre-flac-frames sha + tag rewrite; props-gated re-key)
@@ -7108,34 +7108,34 @@ namespace Truedat
             Console.WriteLine();
             void PrintScanTallies()
             {
-            Console.WriteLine($"  Cached:     {cachedCount}");
+            Console.WriteLine($"  Cached:     {cachedCount:N0}");
             if (cachedByHeadPath > 0)
-                Console.WriteLine($"  Head-quick: {cachedByHeadPath}  (of {cachedCount} cached: tags-only via audioHead64kMd5)");
+                Console.WriteLine($"  Head-quick: {cachedByHeadPath:N0}  (of {cachedCount:N0} cached: tags-only via audioHead64kMd5)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
-                Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross}  (of {cachedCount} cached: {cachedByShaPath} same-path tag-edits, {cachedByShaCross} cross-path)");
+                Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross:N0}  (of {cachedCount:N0} cached: {cachedByShaPath:N0} same-path tag-edits, {cachedByShaCross:N0} cross-path)");
                 if (Volatile.Read(ref _movedKeptUnreachable) > 0)   // F3: an offline volume is not a deletion; those old paths stay until it answers
-                    Console.WriteLine($"              {_movedKeptUnreachable} old path(s) kept, not retired: their volume did not answer ({_movedUnreachableRoot})");
+                    Console.WriteLine($"              {_movedKeptUnreachable:N0} old path(s) kept, not retired: their volume did not answer ({_movedUnreachableRoot})");
             if (shaBackfilled > 0)
-                Console.WriteLine($"  SHA backfill: {shaBackfilled}  (legacy cache hits gained audioStreamSha256)");
+                Console.WriteLine($"  SHA backfill: {shaBackfilled:N0}  (legacy cache hits gained audioStreamSha256)");
             if (flacRekeyed > 0)
-                Console.WriteLine($"  FLAC re-key: {flacRekeyed}  (pre-transition hash + tag rewrite; audio props verified, no re-analysis)");
+                Console.WriteLine($"  FLAC re-key: {flacRekeyed:N0}  (pre-transition hash + tag rewrite; audio props verified, no re-analysis)");
             if (smfmAdded > 0)
-                Console.WriteLine($"  SMFM added: {smfmAdded}  (tracks that gained Sony 12-TONE data this scan)");
-            Console.WriteLine($"  Analyzed:   {analyzed}");
-            Console.WriteLine($"  Skipped:    {skipped}  (errors from previous run)");
+                Console.WriteLine($"  SMFM added: {smfmAdded:N0}  (tracks that gained Sony 12-TONE data this scan)");
+            Console.WriteLine($"  Analyzed:   {analyzed:N0}");
+            Console.WriteLine($"  Skipped:    {skipped:N0}  (errors from previous run)");
             if (dsdSkipped > 0)
-                Console.WriteLine($"  Skipped (structural): {dsdSkipped}  (DSD / video / playlist — see mbxmoods-skipped.csv)");
+                Console.WriteLine($"  Skipped (structural): {dsdSkipped:N0}  (DSD / video / playlist — see mbxmoods-skipped.csv)");
             if (overLengthSkipped > 0)
-                Console.WriteLine($"  Over-length: {overLengthSkipped}  (exceeds --max-duration ceiling — see mbxmoods-skipped.csv)");
+                Console.WriteLine($"  Over-length: {overLengthSkipped:N0}  (exceeds --max-duration ceiling — see mbxmoods-skipped.csv)");
             if (shortSkipped > 0)
-                Console.WriteLine($"  Short files: {shortSkipped}  (under {ShortFileMaxSecs}s — see mbxmoods-skipped.csv; --enableshortfiles to include)");
+                Console.WriteLine($"  Short files: {shortSkipped:N0}  (under {ShortFileMaxSecs}s — see mbxmoods-skipped.csv; --enableshortfiles to include)");
             if (missingSkipped > 0)
-                Console.WriteLine($"  Missing:    {missingSkipped}  (file not found — see mbxmoods-skipped.csv)");
-            Console.WriteLine($"  Failed:     {failed}{(timedOut > 0 ? $"  ({timedOut} timed out)" : "")}");
+                Console.WriteLine($"  Missing:    {missingSkipped:N0}  (file not found — see mbxmoods-skipped.csv)");
+            Console.WriteLine($"  Failed:     {failed:N0}{(timedOut > 0 ? $"  ({timedOut:N0} timed out)" : "")}");
             if (retryRecovered > 0)
-                Console.WriteLine($"  Retried:    {retryRecovered}  (failed the first attempt, analyzed on the retry — in the catalog)");
+                Console.WriteLine($"  Retried:    {retryRecovered:N0}  (failed the first attempt, analyzed on the retry — in the catalog)");
             Console.WriteLine($"  --------    -----");
-            Console.WriteLine($"  Processed:  {ScanProcessedTotal(cachedCount, analyzed, skipped, shortSkipped, dsdSkipped, overLengthSkipped, missingSkipped, failed)}");
+            Console.WriteLine($"  Processed:  {ScanProcessedTotal(cachedCount, analyzed, skipped, shortSkipped, dsdSkipped, overLengthSkipped, missingSkipped, failed):N0}");
             foreach (var line in OutputSummaryLines(allTracks.Count, _publish, moodsPath)) Console.WriteLine(line);
             if (analyzed > 0)
             {
@@ -7182,7 +7182,7 @@ namespace Truedat
                     if (n == 0) continue;
                     var avgSecs = (double)kv.Value[1] / Stopwatch.Frequency / n;
                     var avgTag = avgSecs >= 1 ? $"{avgSecs:F1}s" : $"{avgSecs * 1000:F0}ms";
-                    Console.WriteLine($"    {kv.Key,-14} {avgTag,8} avg  ({n} track{(n == 1 ? "" : "s")})");
+                    Console.WriteLine($"    {kv.Key,-14} {avgTag,8} avg  ({n:N0} track{(n == 1 ? "" : "s")})");
                 }
             }
             PrintAnalysisTimings();
@@ -12144,16 +12144,36 @@ namespace Truedat
 
         /// <summary>The scan summary's "Output:" line, from what the scan's publications did (<paramref name="p"/>) rather than the
         /// in-memory count. Null = no store in force: the scan wrote the catalog itself, and the in-memory count IS the file.</summary>
+        /// <summary>A size-block figure, 7 wide, in MB. Anything above zero but under 0.1 MB reads "&lt;0.1" — a few KB of reports
+        /// printed as "0.0 MB" looked like an empty line item.</summary>
+        internal static string SizeMbText(long bytes)
+        {
+            double mb = bytes / (1024.0 * 1024.0);
+            return bytes > 0 && mb < 0.05 ? $"{"<0.1",7}" : $"{mb,7:F1}";
+        }
+
+        /// <summary>A count with its noun: thousands separators, singular for exactly one ("1 track", "8,000 tracks").</summary>
+        internal static string CountOf(long n, string one, string? many = null)
+            => $"{n:N0} {(n == 1 ? one : many ?? one + "s")}";
+
+        /// <summary>The Reports line's detail: how many files the line stands for, then the first three names.</summary>
+        internal static string ReportsDetail(List<string> names)
+        {
+            string list = string.Join(", ", names.GetRange(0, Math.Min(3, names.Count)));
+            if (names.Count > 3) list += $" +{names.Count - 3} more";
+            return $"{names.Count:N0} file{(names.Count == 1 ? "" : "s")}: {list}";
+        }
+
         internal static List<string> OutputSummaryLines(int inMemory, PublishState? p, string catalogPath)
         {
-            if (p == null) return new List<string> { $"  Output:     {inMemory} tracks in moods file" };
+            if (p == null) return new List<string> { $"  Output:     {CountOf(inMemory, "track")} in moods file" };
             if (p.Ok && p.Off) return new List<string> { "  Output:     the store only (publication off: config publish false / --no-publish)" };
-            if (p.Ok) return new List<string> { $"  Output:     {p.Entries} tracks published to the moods file (generation {p.Generation})" };
+            if (p.Ok) return new List<string> { $"  Output:     {CountOf(p.Entries, "track")} published to the moods file (generation {p.Generation})" };
             const string pad = "              ";
             var lines = new List<string> { $"  Output:     NOT PUBLISHED — {Path.GetFileName(catalogPath)} was not written from the store" };
             int w = Math.Max(20, ReportWidth - pad.Length);
             foreach (var l in WrapNote(p.Error ?? "the publication failed", w)) lines.Add(pad + l);
-            foreach (var l in WrapNote($"the store holds the {inMemory} tracks; {p.Succeeded} of {p.Succeeded + p.Failed} publications this run wrote the files", w))
+            foreach (var l in WrapNote($"the store holds the {inMemory:N0} tracks; {p.Succeeded} of {p.Succeeded + p.Failed} publications this run wrote the files", w))
                 lines.Add(pad + l);
             return lines;
         }
@@ -13530,10 +13550,10 @@ namespace Truedat
                  direct = _dirStats.Direct, failed = _dirStats.DirFailures;
             if (served + direct == 0) return;
             if (DirStatCache.Disabled)
-                Console.WriteLine($"  Metadata:   {direct} direct stat(s) (--no-dir-batch)");
+                Console.WriteLine($"  Metadata:   {direct:N0} direct stat{(direct == 1 ? "" : "s")} (--no-dir-batch)");
             else
-                Console.WriteLine($"  Metadata:   {enumerated} dir(s) enumerated served {served} stat(s); {direct} direct" +
-                    (failed > 0 ? $" ({failed} dir(s) could not be listed, stat'd per file)" : ""));
+                Console.WriteLine($"  Metadata:   {enumerated:N0} folder listing{(enumerated == 1 ? "" : "s")} served {served:N0} stat{(served == 1 ? "" : "s")}; {direct:N0} direct" +
+                    (failed > 0 ? $" ({failed:N0} folder{(failed == 1 ? "" : "s")} could not be listed, stat'd per file)" : ""));
         }
 
         static void EmitStagingSummary()
@@ -14336,7 +14356,7 @@ namespace Truedat
 
             var s = ComputeCatalogStats(entries, exclusions);
             Header($"Catalog summary: {path}");
-            Console.WriteLine($"  {total:N0} tracks total");
+            Console.WriteLine($"  {CountOf(total, "track")} total");
             Console.WriteLine();
             Console.WriteLine(Cov("Essentia analysis", s.EssentiaAnalyzed));
             Console.WriteLine(Cov("audioStreamSha256", s.AudioStreamSha256) + "   (primary identity)");
@@ -14533,7 +14553,7 @@ namespace Truedat
                 Console.WriteLine("  Recommended:");
                 if (waveBreakdown != null && waveBreakdown.Count > 0)
                 {
-                    Console.WriteLine($"    {s.MissingWave:N0} entries lack the latest features:");
+                    Console.WriteLine($"    {CountOf(s.MissingWave, "entry", "entries")} without the latest features:");
                     foreach (var w in waveBreakdown) ReportEntry(w, "      ");
                 }
                 foreach (var r in rec) ReportEntry(r, "    ");
@@ -14548,7 +14568,7 @@ namespace Truedat
                 var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
                 void SizeLine(string label, long bytes, string detail)
                 {
-                    string head = $"  {label,-10}{bytes / (1024.0 * 1024.0),7:F1} MB  ";
+                    string head = $"  {label,-10}{SizeMbText(bytes)} MB  ";
                     if (head.Length + detail.Length <= ReportWidth) Console.WriteLine(head + detail);
                     else { Console.WriteLine(head.TrimEnd()); ReportNote(detail); }
                 }
@@ -14670,9 +14690,7 @@ namespace Truedat
                 if (reportNames.Count > 0)
                 {
                     accounted += repBytes;
-                    string names = string.Join(", ", reportNames.GetRange(0, Math.Min(3, reportNames.Count)));
-                    if (reportNames.Count > 3) names += $" +{reportNames.Count - 3} more";
-                    SizeLine("Reports:", repBytes, names);
+                    SizeLine("Reports:", repBytes, ReportsDetail(reportNames));
                 }
 
                 if (bakCount > 0)
@@ -23439,14 +23457,28 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 try
                 {
                     SetReportWidthForTest(78);
-                    var noStore = OutputSummaryLines(3439, null, @"C:\lib\mbxmoods.json");
-                    Assert(noStore.Count == 1 && noStore[0] == "  Output:     3439 tracks in moods file", $"output: without a store the scan wrote the file itself ({noStore[0]})");
-                    var ok = OutputSummaryLines(3439, new PublishState { Ok = true, Entries = 3439, Generation = 11, Succeeded = 19 }, @"C:\lib\mbxmoods.json");
-                    Assert(ok.Count == 1 && ok[0] == "  Output:     3439 tracks published to the moods file (generation 11)", $"output: a published scan names what it published ({ok[0]})");
-                    var refused = OutputSummaryLines(3439, new PublishState { Ok = false, Entries = 154, Generation = 2, Succeeded = 1, Failed = 9,
+                    // The size block's numbers: a few KB of reports is not "0.0 MB", and a truncated name list says how
+                    // many files it stands for (2026-10-31).
+                    Assert(SizeMbText(20 * 1024) == "   <0.1" && SizeMbText(0) == "    0.0" && SizeMbText(3 * 1024 * 1024 / 2) == "    1.5",
+                        $"size-text: under 0.1 MB reads <0.1, never 0.0; MB otherwise, 7 wide ('{SizeMbText(20 * 1024)}' '{SizeMbText(0)}' '{SizeMbText(3 * 1024 * 1024 / 2)}')");
+                    var sixNames = new List<string> { "a.csv", "b.log", "c.txt", "d.txt", "e.txt", "f.txt" };
+                    Assert(ReportsDetail(sixNames) == "6 files: a.csv, b.log, c.txt +3 more",
+                        $"reports-detail: the count of files leads, the list is the first three ('{ReportsDetail(sixNames)}')");
+                    Assert(ReportsDetail(new List<string> { "a.csv" }) == "1 file: a.csv",
+                        $"reports-detail: one file reads singular ('{ReportsDetail(new List<string> { "a.csv" })}')");
+                    Assert(CountOf(1, "track") == "1 track" && CountOf(8000, "track") == "8,000 tracks" && CountOf(0, "entry", "entries") == "0 entries"
+                           && CountOf(1, "entry", "entries") == "1 entry",
+                        $"count-of: thousands separators and the right noun ('{CountOf(1, "track")}' '{CountOf(8000, "track")}' '{CountOf(1, "entry", "entries")}')");
+                    Assert(OutputSummaryLines(1, null, @"C:\lib\mbxmoods.json")[0] == "  Output:     1 track in moods file",
+                        $"output: one track reads singular ({OutputSummaryLines(1, null, @"C:\lib\mbxmoods.json")[0]})");
+                    var noStore = OutputSummaryLines(3000, null, @"C:\lib\mbxmoods.json");
+                    Assert(noStore.Count == 1 && noStore[0] == "  Output:     3,000 tracks in moods file", $"output: without a store the scan wrote the file itself ({noStore[0]})");
+                    var ok = OutputSummaryLines(3000, new PublishState { Ok = true, Entries = 3000, Generation = 11, Succeeded = 19 }, @"C:\lib\mbxmoods.json");
+                    Assert(ok.Count == 1 && ok[0] == "  Output:     3,000 tracks published to the moods file (generation 11)", $"output: a published scan names what it published ({ok[0]})");
+                    var refused = OutputSummaryLines(3000, new PublishState { Ok = false, Entries = 154, Generation = 2, Succeeded = 1, Failed = 9,
                         Error = @"The store has 2 primary roots; pass --export-root to pick one: C:\test\TEST_FILES\anchors, C:\test\TEST_FILES." }, @"C:\lib\mbxmoods.json");
                     string all = string.Join("\n", refused);
-                    Assert(refused[0].Contains("NOT PUBLISHED") && refused[0].Contains("mbxmoods.json") && !all.Contains("3439 tracks in moods file"),
+                    Assert(refused[0].Contains("NOT PUBLISHED") && refused[0].Contains("mbxmoods.json") && !all.Contains("3,000 tracks in moods file"),
                         $"output: a refused publication says the file was not written, never the in-memory count as the file's ({refused[0]})");
                     Assert(all.Contains("2 primary roots") && all.Contains("1 of 10 publications"), $"output: the reason and the run's publication record are shown ({all})");
                     int widest = 0; foreach (var l in refused) widest = Math.Max(widest, l.Length);
