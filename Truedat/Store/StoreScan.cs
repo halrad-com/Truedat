@@ -39,7 +39,7 @@ namespace Truedat.Store
         /// remedy to name. So when nothing is only in the catalog, an import cannot usefully move anything
         /// and must NOT be named as the remedy. Naming it anyway is a
         /// closed loop: the operator runs it, it succeeds, the same refusal comes back. Field-reported 2026-10-26 after a
-        /// 72,447-track library spent three scans in it; the 2026-10-18 pass fixed the false-positive half of this refusal
+        /// library spent three scans in it; the 2026-10-18 pass fixed the false-positive half of this refusal
         /// (<see cref="HoldsSameFacts"/>) and left the wrong-remedy half, which this closes.</summary>
         internal static bool ImportCanResolve(int onlyCatalogCount) => onlyCatalogCount > 0;
 

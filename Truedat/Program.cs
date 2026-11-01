@@ -4604,7 +4604,7 @@ namespace Truedat
                     // Carry forward any block this analysis did not observe (2026-10-26). Only
                     // reachable with --moods, which is the only case where a prior entry exists.
                     if (afMoodsTracks != null && afMoodsTracks.TryGetValue(Path.GetFullPath(analyzeFilePath!), out var afPriorEntry))
-                        CarryUnobservedBlocksForward(features, afPriorEntry.Features);
+                        CarryUnobservedBlocksForward(features, PriorFeaturesForCarry(afPriorEntry, afAudioStreamSha256, afAudioStreamSha256Source));
 
                     // FIX 5 — record the mtime that was true when we captured the
                     // bytes we analyzed (snapshot from SourceHandle). Falls back to
@@ -4677,6 +4677,7 @@ namespace Truedat
                     bool afHasRecord = afLedgerErr == null && afLedger.Find(analyzeFilePath!) != null;
                     if (afHasRecord) _runLedger = afLedger;
                     ClearReviewRecord(analyzeFilePath!);
+                    NoteFreshAnalysis(Path.GetFullPath(analyzeFilePath!));
                     if (afHasRecord) FlushRunLedger(afLedgerPath);
                     PruneErrorsCsv(Path.Combine(afMoodsDir, "mbxmoods-errors.csv"));
                     if (_publish != null && !_publish.Ok) foreach (var line in OutputSummaryLines(afMoodsTracks.Count, _publish, analyzeFileMoods!)) Console.WriteLine(line);
@@ -5454,7 +5455,7 @@ namespace Truedat
                         // Carry forward any block this analysis did not observe (2026-10-26) —
                         // same rule as the library scan: the entry below replaces the stored one.
                         flMoodsTracks.TryGetValue(fullPath, out var flPriorEntry);
-                        CarryUnobservedBlocksForward(features, flPriorEntry?.Features);
+                        CarryUnobservedBlocksForward(features, PriorFeaturesForCarry(flPriorEntry, audioStreamSha256, audioStreamSha256Source));
 
                         // FIX 5 — snapshot from SourceHandle. Falls back to the entry-time
                         // capture if the snapshot threw (DateTime.MinValue).
@@ -5479,6 +5480,7 @@ namespace Truedat
                             flMoodsTracks[flKey] = trackEntry;
                             if (_storePath != null) RecordPerFileScanEntry(flKey, trackEntry, flStagedSrc?.Path);   // S2 C3/C-A
                             ClearReviewRecord(filePath);
+                            NoteFreshAnalysis(flKey);
                         }
 
                         Interlocked.Increment(ref flProcessed);
@@ -5721,7 +5723,7 @@ namespace Truedat
 
             // It exists — but is it a library? Any non-flag token becomes the positional library
             // path and ResolveITunesXml returns an explicit one verbatim, so File.Exists was the
-            // whole gate. Field report 2026-10-26: a stray `.\truedat.db` passed it and a 434 MB
+            // whole gate. Field report 2026-10-26: a stray `.\truedat.db` passed it and a
             // SQLite store went into the XML reader. Refuse here, naming what it actually is, so
             // the operator is sent to the wrong ARGUMENT rather than to a parser error.
             var notLibrary = ITunesParser.NotALibraryReason(xmlPath);
@@ -6937,7 +6939,7 @@ namespace Truedat
                         // what an earlier scan measured. The store already keeps an unobserved
                         // column; this is the catalog's half of the same rule (2026-10-26).
                         allTracks.TryGetValue(t.Location, out var msPriorEntry);
-                        CarryUnobservedBlocksForward(feat, msPriorEntry?.Features);
+                        CarryUnobservedBlocksForward(feat, PriorFeaturesForCarry(msPriorEntry, audioStreamSha256, audioStreamSha256Source));
 
                         // FIX 5 — record the mtime captured inside OpenStagedSource right
                         // after File.Copy. Falls back to a fresh stat if the snapshot
@@ -6947,6 +6949,7 @@ namespace Truedat
                             try { lastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
 
                         ClearReviewRecord(t.Location);
+                        NoteFreshAnalysis(t.Location);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
@@ -9724,7 +9727,7 @@ namespace Truedat
         /// absent and is lost: SMFM when the reader is off (the default since 2026-10-14), bitUsage
         /// and the HF pair when ffmpeg is missing or <c>--no-bitusage</c> / <c>--no-hf-analysis</c>
         /// is passed. Field report 2026-10-26: a 3-day <c>--refresh</c> dropped the SMFM block from
-        /// 2,020 entries this way, and <c>--smfm</c>'s own help text promises the opposite
+        /// nearly every entry that had one this way, and <c>--smfm</c>'s own help text promises the opposite
         /// ("blocks already in the catalog are kept either way").
         ///
         /// This is the catalog-side twin of the store's rule — <c>TrackEntryMapper
@@ -9767,6 +9770,24 @@ namespace Truedat
             }
             if (fresh.HfSpectralStructure == null && prior.HfSpectralStructure != null)
                 fresh.HfSpectralStructure = prior.HfSpectralStructure;
+        }
+
+        /// <summary>The prior entry's features, as the carry source — or null when the prior entry provably describes OTHER
+        /// audio. The catalog is keyed by path, so a file replaced at the same path finds the old file's entry; carrying its
+        /// SMFM / bitUsage / HF onto the new audio would publish them, and write them into the store, as a measurement of
+        /// content they were never measured on (pre-tag review 2026-10-31, finding 3). The store's own rule is keyed by
+        /// content (one description per entity), so this is what makes the catalog half agree with it.
+        ///
+        /// "Provably" means both hashes are present, under the same scheme, and differ. A missing hash or a scheme change
+        /// (a legacy whole-file FLAC hash beside a frame-anchored one) cannot prove the audio changed, so the carry stands —
+        /// refusing it there would drop a measured block from every legacy entry on its next re-analysis.</summary>
+        internal static TrackFeatures? PriorFeaturesForCarry(TrackEntry? prior, string? freshSha, string? freshShaSource)
+        {
+            if (prior == null) return null;
+            bool provenOther = !string.IsNullOrEmpty(freshSha) && !string.IsNullOrEmpty(prior.AudioStreamSha256)
+                               && string.Equals(freshShaSource ?? "", prior.AudioStreamSha256Source ?? "", StringComparison.Ordinal)   // null and "" both mean the invariant scheme
+                               && !string.Equals(freshSha, prior.AudioStreamSha256, StringComparison.OrdinalIgnoreCase);
+            return provenOther ? null : prior.Features;
         }
 
         static bool ApplySmfmInPlace(TrackFeatures f, string filePath, int[]? priorScores = null)
@@ -14109,7 +14130,7 @@ namespace Truedat
         /// <summary>Every file the scan reached, in exactly one bucket — the "Processed:" line. Pure so the self-test can hold
         /// it to the rule, because the summary's whole job is that nothing the run touched goes unaccounted (2026-10-18). Short
         /// files were printed as their own row and then left OUT of this sum, so a run that skipped one reported one file fewer
-        /// than it reached: a field summary read Analyzed 8321 + Short 1 + Failed 2 and totalled 8323 (2026-10-31).</summary>
+        /// than it reached: a field summary added analyzed, short and failed and came out one short of their sum (2026-10-31).</summary>
         internal static int ScanProcessedTotal(int cached, int analyzed, int skipped, int shortSkipped,
                                                int dsdSkipped, int overLengthSkipped, int missingSkipped, int failed)
             => cached + analyzed + skipped + shortSkipped + dsdSkipped + overLengthSkipped + missingSkipped + failed;
@@ -14139,7 +14160,7 @@ namespace Truedat
         /// failure therefore means genuinely corrupt.
         ///
         /// Field report 2026-10-29: the mood sidecar was handed to the catalog loader, which
-        /// declared a perfectly healthy <c>mbxmoods.mbxs</c> "corrupt", copied 28 MB of it to
+        /// declared a perfectly healthy <c>mbxmoods.mbxs</c> "corrupt", copied it whole to
         /// <c>.corrupt.&lt;stamp&gt;</c> and told the operator to <c>del</c> it. A JSON parse
         /// error means "not JSON", which is not the same fact as "the catalog is damaged", and
         /// only one of those two deserves a backup and a deletion instruction.
@@ -14201,8 +14222,8 @@ namespace Truedat
         /// missed everything named <c>&lt;catalog&gt;.&lt;something&gt;</c> — the pinned import
         /// catalogs (<c>.imported.&lt;sha&gt;.zip</c>, 2026-10-25), the retired catalog
         /// (<c>.retired.&lt;time&gt;.zip</c>) and the store's own migration backups
-        /// (<c>&lt;store&gt;.bak.v2.*</c> / <c>.bak.roots.*</c>). Field report 2026-10-26: 136 MB
-        /// of truedat's own pinned catalogs sat in no bucket and the stated total was 13% short.
+        /// (<c>&lt;store&gt;.bak.v2.*</c> / <c>.bak.roots.*</c>). Field report 2026-10-26:
+        /// truedat's own pinned catalogs sat in no bucket and the stated total came up short.
         ///
         /// Prefix matching in managed code on purpose: a <c>&lt;name&gt;.*</c> glob would be
         /// matched by Win32 with DOS semantics, where the dot is optional and the pattern also
@@ -14226,7 +14247,7 @@ namespace Truedat
 
             // The catalog's rotated backups have the Backups line; its OTHER children had no
             // line at all — the pinned imports (<catalog>.imported.<sha>.zip) and the retired
-            // publication (<catalog>.retired.<time>.zip). That was the 2026-10-26 136 MB gap.
+            // publication (<catalog>.retired.<time>.zip). That was the 2026-10-26 gap.
             if (Child(catalogName))
                 return name.StartsWith(catalogName + ".bak.", StringComparison.OrdinalIgnoreCase)
                        && name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
@@ -14386,15 +14407,13 @@ namespace Truedat
                 //   skipped (mid-scan: short/over-length) -> a rescan skips these too
                 //   stale   (in the work list, no error)  -> --refresh-features (the ONLY
                 //                                            bucket a rescan fixes)
-                //   measured (analysed OK this run, still lacking) -> nothing to run
+                //   measured (analyzed OK this run, still lacking) -> nothing to run
                 int waveErrored = 0, waveOrphan = 0, waveFiltered = 0, waveSkipped = 0, waveStale = 0, waveMeasured = 0;
                 int waveRecorded = 0;
                 var waveLedger = ReviewLedger.Load(ResolveReviewLedgerPath(dir), out _);
-                // What this run analysed and wrote. Empty for a read verb like --stats, so its
+                // What this run analyzed and wrote. Empty for a read verb like --stats, so its
                 // answer is unchanged; for a scan it is the set that cannot be "stale".
-                var waveAnalyzedOk = _analyzedOkPaths.IsEmpty
-                    ? null
-                    : (ISet<string>)new HashSet<string>(_analyzedOkPaths, PathComparer.Instance);
+                var waveAnalyzedOk = MeasuredThisRun();
                 foreach (var e in entries)
                 {
                     if (e?.Features == null) continue;
@@ -14428,11 +14447,11 @@ namespace Truedat
                     waveBreakdown.Add($"{waveFiltered,6:N0}  excluded from scanning  ->  a rescan skips these (exclusion-rule/video/URL/non-audio); the rule-excluded ones retire with truedat --prune-excluded");
                 if (waveSkipped > 0)
                     waveBreakdown.Add($"{waveSkipped,6:N0}  skipped, not analyzable ->  see mbxmoods-skipped.csv (e.g. short files; a refresh will NOT clear these)");
-                // Analysed THIS run and still lacking: the extractor emitted no value for these
+                // Analyzed THIS run and still lacking: the extractor emitted no value for these
                 // fields on these files. Naming a command here would be the nag this ledger
                 // exists to end — a 3-day refresh ended by recommending a refresh (2026-10-26).
                 if (waveMeasured > 0)
-                    waveBreakdown.Add($"{waveMeasured,6:N0}  analysed this scan      ->  nothing to run: the extractor emitted no value for these fields");
+                    waveBreakdown.Add($"{waveMeasured,6:N0}  analyzed this scan      ->  nothing to run: the extractor emitted no value for these fields");
                 if (waveStale > 0)
                     waveBreakdown.Add(scanWorkList == null
                         ? $"{waveStale,6:N0}  lack the latest features ->  truedat --refresh  (from --stats this can't split out orphaned/excluded entries a rescan won't clear — run from the library dir for the exact breakdown)"
@@ -14609,8 +14628,8 @@ namespace Truedat
                 // glob list, because the glob list went stale too: it matched mbxmoods-*,
                 // store-*.json and truedat*.log, and so missed every artifact named after the
                 // catalog or the store (the pinned imports, the retired publication, the store's
-                // migration backups). 2026-10-26: 136 MB of truedat's own pinned catalogs sat in
-                // no bucket and the total was 13% short.
+                // migration backups). 2026-10-26: truedat's own pinned catalogs sat in
+                // no bucket and the total came up short.
                 var reportNames = new List<string>();
                 long repBytes = 0, bakBytes = 0; int bakCount = 0;
                 try
@@ -22239,20 +22258,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ClassifyWaveMissing("",                   errs, lib, work, skip) == WaveMissingBucket.Stale,    "wave-bucket: empty key -> Stale (legacy fall-through)");
                 Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, new HashSet<string>(PathComparer.Instance) { @"D:\m\bad.flac" }) == WaveMissingBucket.Errored, "wave-bucket: errored beats skipped");
 
-                // Field report 2026-10-26: a 3-day --refresh analysed 72,173 tracks, 0 failed,
-                // and its own summary then recommended --refresh for 70 entries it had just
-                // analysed. An entry analysed OK this run cannot be "stale".
+                // Field report 2026-10-26: a 3-day --refresh analyzed the whole library, 0 failed,
+                // and its own summary then recommended --refresh for entries it had just
+                // analyzed. An entry analyzed OK this run cannot be "stale".
                 var okNow = (ISet<string>)new HashSet<string>(PathComparer.Instance) { @"D:\m\stale.flac", @"D:\m\bad.flac", @"D:\m\short.wav" };
                 Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, okNow) == WaveMissingBucket.Measured,
-                    "wave-bucket: analysed OK this run and still lacking -> Measured, NOT Stale (a refresh just ran)");
+                    "wave-bucket: analyzed OK this run and still lacking -> Measured, NOT Stale (a refresh just ran)");
+
+                // Pre-tag review 2026-10-31, finding 1: the "measured" set is what a FRESH analysis wrote. Every cache tier also
+                // clears a review record, and a cached entry lacking the latest fields is stale — --refresh fills it.
+                const string cacheProbe = @"Z:\selftest\wave-cache-hit-probe.flac", freshProbe = @"Z:\selftest\wave-fresh-probe.flac";
+                ClearReviewRecord(cacheProbe);
+                ClearReviewRecord(freshProbe); NoteFreshAnalysis(freshProbe);
+                var measuredNow = MeasuredThisRun();
+                Assert(measuredNow != null && !measuredNow.Contains(cacheProbe),
+                    "wave-bucket: a cache hit (record cleared, nothing measured) is NOT in the measured set, so it stays Stale");
+                Assert(measuredNow != null && measuredNow.Contains(freshProbe),
+                    "wave-bucket: a fresh analysis is in the measured set");
+                _measuredThisRun.TryRemove(freshProbe, out _);
                 Assert(ClassifyWaveMissing(@"D:\m\bad.flac", errs, lib, work, skip, okNow) == WaveMissingBucket.Errored,
-                    "wave-bucket: the error list still beats analysed-this-run");
+                    "wave-bucket: the error list still beats analyzed-this-run");
                 Assert(ClassifyWaveMissing(@"D:\m\short.wav", errs, lib, work, skip, okNow) == WaveMissingBucket.Skipped,
-                    "wave-bucket: a mid-scan skip still beats analysed-this-run");
+                    "wave-bucket: a mid-scan skip still beats analyzed-this-run");
                 Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, null) == WaveMissingBucket.Stale,
-                    "wave-bucket: with no analysed-this-run set (--stats) the old answer stands");
+                    "wave-bucket: with no analyzed-this-run set (--stats) the old answer stands");
                 Assert(ClassifyWaveMissing(@"D:\m\stale.flac", errs, lib, work, skip, (ISet<string>)new HashSet<string>(PathComparer.Instance)) == WaveMissingBucket.Stale,
-                    "wave-bucket: an empty analysed-this-run set changes nothing");
+                    "wave-bucket: an empty analyzed-this-run set changes nothing");
             }
 
             // --- Where the time went: the ratios the summary had the parts for but left as
@@ -22262,7 +22293,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var budget = BuildTimeBudgetReport(
                     analyzedTracks: 100, analyzedThreadSecs: 2000, workers: 4, wallSecs: 500,
                     extractorCpuSecs: 1600, stagedFromNetwork: 100, stagedBytes: 500.0 * 1024 * 1024, perCopyMbPerSec: 5.0);
-                Assert(budget.Length > 0, "time-budget: a scan that analysed tracks gets the block");
+                Assert(budget.Length > 0, "time-budget: a scan that analyzed tracks gets the block");
                 Assert(budget.IndexOf("100.0%", StringComparison.Ordinal) >= 0,
                     $"time-budget: 2000 thread-seconds over 4 workers in 500s wall = 100.0% occupancy (got: {budget})");
                 Assert(budget.IndexOf("80%", StringComparison.Ordinal) >= 0,
@@ -22284,14 +22315,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "time-budget: a scan that staged nothing gets no source-link row");
 
                 Assert(BuildTimeBudgetReport(0, 0, 4, 500, 0, 0, 0, 0).Length == 0,
-                    "time-budget: a fully cached scan analysed nothing, so there is no budget to report");
+                    "time-budget: a fully cached scan analyzed nothing, so there is no budget to report");
                 Assert(BuildTimeBudgetReport(100, 2000, 0, 0, 1600, 0, 0, 0).Length == 0,
                     "time-budget: no workers or no wall clock means no ratio to state");
             }
 
             // --- A library path that is not XML is refused, not parsed. Field report 2026-10-26:
             // a stray `.\truedat.db` landed in the positional library slot, ResolveITunesXml
-            // returned it verbatim, File.Exists passed, and a 434 MB SQLite store went into the
+            // returned it verbatim, File.Exists passed, and a SQLite store went into the
             // XML reader. Every real XML starts with '<' after a BOM and whitespace. -----------
             {
                 var sniffDir = Path.Combine(Path.GetTempPath(), "truedat-libsniff-" + Guid.NewGuid().ToString("N"));
@@ -22336,7 +22367,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- A file that is not the catalog is not a CORRUPT catalog. Field report
             // 2026-10-29: the mood sidecar was handed to the catalog loader, which branded a
-            // healthy 28 MB mbxmoods.mbxs "corrupt", copied it to .corrupt.<stamp> and told the
+            // healthy mbxmoods.mbxs "corrupt", copied it to .corrupt.<stamp> and told the
             // operator to delete it. Only a file that really is JSON earns that path. ----------
             {
                 var catDir = Path.Combine(Path.GetTempPath(), "truedat-catsniff-" + Guid.NewGuid().ToString("N"));
@@ -22380,7 +22411,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // --- A re-analysis must not drop a block it did not observe. Field report 2026-10-26:
             // a 3-day --refresh with SMFM off (the default) rebuilt every entry and the catalog's
-            // SMFM count fell 2,020 -> 1, while the store kept every one of them by its own
+            // SMFM count fell to one, while the store kept every one of them by its own
             // unobserved rule. Same hole for bitUsage / HF when ffmpeg is absent. --------------
             {
                 var priorFeat = new TrackFeatures
@@ -22431,11 +22462,29 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 CarryUnobservedBlocksForward(afterEmpty, emptyPrior);
                 Assert(afterEmpty.SmfmScores == null && afterEmpty.SmfmChannel == null,
                     "carry-unobserved: an empty prior SMFM array is not a block and is not carried");
+
+                // Finding 3 (pre-tag review 2026-10-31): the catalog is keyed by path, so a file REPLACED at the same path finds
+                // the old file's entry. Its blocks were measured on other audio and must not be carried onto the new one.
+                var priorEntry = new TrackEntry { Features = priorFeat, AudioStreamSha256 = "aaaa", AudioStreamSha256Source = null };
+                Assert(PriorFeaturesForCarry(priorEntry, "bbbb", null) == null,
+                    "carry-unobserved: a prior entry for DIFFERENT audio (same scheme, hashes differ) is not a carry source");
+                Assert(ReferenceEquals(PriorFeaturesForCarry(priorEntry, "aaaa", null), priorFeat),
+                    "carry-unobserved: the same audio (hashes equal) carries");
+                Assert(ReferenceEquals(PriorFeaturesForCarry(priorEntry, null, null), priorFeat),
+                    "carry-unobserved: no fresh hash cannot prove the audio changed, so the carry stands");
+                Assert(ReferenceEquals(PriorFeaturesForCarry(new TrackEntry { Features = priorFeat }, "bbbb", null), priorFeat),
+                    "carry-unobserved: a legacy prior entry without a hash cannot prove the audio changed, so the carry stands");
+                Assert(ReferenceEquals(PriorFeaturesForCarry(new TrackEntry { Features = priorFeat, AudioStreamSha256 = "aaaa", AudioStreamSha256Source = "whole-file" }, "bbbb", "flac-frames"), priorFeat),
+                    "carry-unobserved: a hash scheme change (whole-file vs flac-frames) cannot prove the audio changed, so the carry stands");
+                Assert(PriorFeaturesForCarry(null, "bbbb", null) == null,
+                    "carry-unobserved: no prior entry, nothing to carry");
+                Assert(PriorFeaturesForCarry(priorEntry, "bbbb", "") == null,
+                    "carry-unobserved: an empty scheme label and a null one are the same (invariant) scheme, so differing hashes still refuse");
             }
 
             // --- The size block must account for every file truedat wrote beside the catalog.
-            // Field report 2026-10-26: two `mbxmoods.json.imported.<sha>.zip` pins (136 MB) matched
-            // no pattern and the stated total was 13% short. -----------------------------------
+            // Field report 2026-10-26: two `mbxmoods.json.imported.<sha>.zip` pins matched
+            // no pattern and the stated total came up short. -----------------------------------
             {
                 const string cat = "mbxmoods.json", side = "mbxmoods.mbxs", comp = "mbxedges.v1.json", store = "truedat.db";
                 SideFile Side(string n) => ClassifySideFile(n, cat, side, comp, store);
@@ -22459,7 +22508,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
                 // The three that had no bucket at all.
                 Assert(Side("mbxmoods.json.imported.c9458a2dafbe6763.zip") == SideFile.Report,
-                    "side-file: a pinned import catalog is counted (the 2026-10-26 136 MB gap)");
+                    "side-file: a pinned import catalog is counted (the 2026-10-26 gap)");
                 Assert(Side("mbxmoods.json.retired.20261026.120000.zip") == SideFile.Report,
                     "side-file: a retired catalog is counted");
                 Assert(Side("truedat.db.bak.v2.20261026-120000") == SideFile.Report,
@@ -23305,8 +23354,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // term fails by name and says WHICH one — short files were the dropped term in the field (2026-10-31).
                 Assert(ScanProcessedTotal(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000) == 11111111,
                     $"processed total: every outcome bucket counts exactly once (got {ScanProcessedTotal(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000)}, expected 11111111)");
-                Assert(ScanProcessedTotal(0, 8321, 0, 1, 0, 0, 0, 2) == 8324,
-                    $"processed total: the field summary's own run reconciles (got {ScanProcessedTotal(0, 8321, 0, 1, 0, 0, 0, 2)}, expected 8324 — it printed 8323)");
+                Assert(ScanProcessedTotal(0, 1000, 0, 1, 0, 0, 0, 2) == 1003,
+                    $"processed total: analyzed + one short file + failed reconciles, the field shape (got {ScanProcessedTotal(0, 1000, 0, 1, 0, 0, 0, 2)}, expected 1003 — the old sum gave 1002)");
                 Assert(WrapNote("short note", 72).Count == 1, "report-note: a note that fits stays on one line");
                 Assert(WrapNote("", 72).Count == 0, "report-note: an empty note prints nothing");
                 // A path is one word and longer than the width: breaking it would make it uncopyable, which
@@ -24131,10 +24180,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (libraryKeys != null && !libraryKeys.Contains(key)) return WaveMissingBucket.Orphan;
             if (scanWorkList != null && !scanWorkList.Contains(key)) return WaveMissingBucket.Filtered;
             if (skipped.Contains(key)) return WaveMissingBucket.Skipped;
-            // Analysed and written THIS run, and still lacking the wave fields: the extractor
+            // Analyzed and written THIS run, and still lacking the wave fields: the extractor
             // emitted no value for them on this file, so it is as fresh as truedat can make it
             // and "-> refresh" is a nag that can never clear. Field report 2026-10-26: a 3-day
-            // --refresh ended by recommending --refresh for 70 entries it had just analysed.
+            // --refresh ended by recommending --refresh for entries it had just analyzed.
             // Last before Stale on purpose — every structural bucket above it still wins, so
             // this only changes the fall-through.
             if (analyzedOkThisRun != null && analyzedOkThisRun.Contains(key)) return WaveMissingBucket.Measured;
@@ -24948,6 +24997,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Every path analyzed and written this run — the set whose old error rows
         /// are no longer current. Read once, at end of run, by <see cref="PruneErrorsCsv"/>.</summary>
         static readonly ConcurrentBag<string> _analyzedOkPaths = new ConcurrentBag<string>();
+
+        /// <summary>Paths a fresh analysis measured and wrote this run — NOT cache hits. Kept apart from
+        /// <see cref="_analyzedOkPaths"/>, which every cache tier also fills (a cache hit is a successful outcome for the
+        /// error ledger, so it clears records there). The wave summary's "measured this scan" bucket means the extractor
+        /// ran on the file and the fields are still absent; a cached entry lacking the latest fields is STALE, and folding
+        /// it into "measured" told the operator "nothing to run" where --refresh would have filled it (pre-tag review
+        /// 2026-10-31, finding 1).</summary>
+        static readonly ConcurrentDictionary<string, byte> _measuredThisRun = new ConcurrentDictionary<string, byte>(PathComparer.Instance);
+        internal static void NoteFreshAnalysis(string filePath)
+        {
+            if (!string.IsNullOrEmpty(filePath)) _measuredThisRun[filePath] = 0;
+        }
+        /// <summary>The set the wave summary's "measured" bucket reads; null when nothing was analyzed (a read verb).</summary>
+        internal static ISet<string>? MeasuredThisRun()
+            => _measuredThisRun.IsEmpty ? null : (ISet<string>)new HashSet<string>(_measuredThisRun.Keys, PathComparer.Instance);
 
         /// <summary>Drop <c>mbxmoods-errors.csv</c> rows for files analyzed successfully this
         /// run. The CSV is append-only and was only ever cleared wholesale by
@@ -26308,7 +26372,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 catch (JsonException ex)
                 {
                     // "Not JSON" and "the catalog is damaged" are different facts, and only the
-                    // second earns a 28 MB backup copy and a deletion instruction. Field report
+                    // second earns a full backup copy and a deletion instruction. Field report
                     // 2026-10-29: the sidecar reached here and a healthy file was branded corrupt.
                     var notCatalog = NotACatalogReason(path);
                     if (notCatalog != null)

@@ -144,7 +144,7 @@ namespace Truedat
         /// The library path is whatever landed in the positional argument slot, and
         /// <c>ResolveITunesXml</c> returns an explicit one verbatim — so the only gate used to be
         /// <c>File.Exists</c>. Field report 2026-10-26: a stray <c>.\truedat.db</c> on a scan's
-        /// command line passed that gate and a 434 MB SQLite store went into the XML reader. Any
+        /// command line passed that gate and a SQLite store went into the XML reader. Any
         /// XML document begins with '&lt;' once a BOM and leading whitespace are stepped over, so
         /// sniffing the first bytes costs nothing and cannot reject a real library.
         ///
