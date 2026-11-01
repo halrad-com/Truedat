@@ -580,11 +580,12 @@ namespace Truedat
         /// Three questions it answers that no other line does: were the workers ever idle (if
         /// occupancy is high, nothing was waiting on the source), how much of each worker-second
         /// was the extractor itself, and how hard the scan leaned on the source link against what
-        /// that link actually delivered per copy.
+        /// that link delivered while copies were running.
         /// </summary>
         internal static string BuildTimeBudgetReport(
             long analyzedTracks, double analyzedThreadSecs, int workers, double wallSecs,
-            double extractorCpuSecs, long stagedFromNetwork, double stagedBytes, double perCopyMbPerSec)
+            double extractorCpuSecs, long stagedFromNetwork, double stagedBytes, double copyWindowMbPerSec,
+            double workerThreadSecs = 0)
         {
             if (analyzedTracks <= 0 || analyzedThreadSecs <= 0 || workers <= 0 || wallSecs <= 0) return "";
             var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -593,7 +594,9 @@ namespace Truedat
 
             // The one number that says whether anything was waiting on the source: thread-time
             // spread over the workers, against the clock it had to fill.
-            double busy = 100.0 * (analyzedThreadSecs / workers) / wallSecs;
+            // Every outcome occupies a worker — cached hits, failures and skips too — so the numerator is all of them;
+            // counting only the analyzed class read a fully busy pool as idle (pre-tag review 2026-10-31, finding 6).
+            double busy = 100.0 * (Math.Max(workerThreadSecs, analyzedThreadSecs) / workers) / wallSecs;
             double avgPerTrack = analyzedThreadSecs / analyzedTracks;
             sb.AppendLine($"    Workers busy   {busy.ToString("F1", inv),6}% of the wall clock"
                         + $"  ({workers} workers, {avgPerTrack.ToString("F1", inv)}s avg)");
@@ -604,13 +607,14 @@ namespace Truedat
                 sb.AppendLine($"    Extractor CPU  {(100.0 * extractorCpuSecs / analyzedThreadSecs).ToString("F0", inv),6}% of each worker-second"
                             + $"  ({(extractorCpuSecs / analyzedTracks).ToString("F1", inv)}s of {avgPerTrack.ToString("F1", inv)}s)");
 
-            // Sustained demand against what the link actually delivered per copy: the headroom
-            // the scan had, in the two numbers that were already measured.
+            // Sustained demand against what the link delivered while copies were running: the headroom the scan had,
+            // in two numbers that were already measured. The second is bytes over the copy window — an aggregate across
+            // parallel copies, not a per-copy rate (pre-tag review 2026-10-31, finding 5).
             if (stagedFromNetwork > 0 && stagedBytes > 0)
             {
                 double mb = stagedBytes / (1024.0 * 1024.0);
                 sb.AppendLine($"    Source link    {(mb / wallSecs).ToString("F1", inv),6} MB/s sustained"
-                            + (perCopyMbPerSec > 0 ? $" vs {perCopyMbPerSec.ToString("F1", inv)} MB/s per copy" : ""));
+                            + (copyWindowMbPerSec > 0 ? $" vs {copyWindowMbPerSec.ToString("F1", inv)} MB/s while copying" : ""));
                 sb.AppendLine($"                   {(mb / stagedFromNetwork).ToString("F1", inv)} MB/track over {stagedFromNetwork:N0} staged");
             }
             return sb.ToString();
@@ -7202,7 +7206,7 @@ namespace Truedat
             EmitStagingSummary();
             EmitDirStatSummary();
             // The ratios the block above has the parts for: worker occupancy, the extractor's
-            // share of a worker-second, and link demand against measured per-copy rate. Printed
+            // share of a worker-second, and link demand against the measured copy-window rate. Printed
             // last because it reads the same counters those lines did (2026-10-26).
             if (_classStats.TryGetValue("analyzed", out var budgetClass) && budgetClass[0] > 0)
             {
@@ -7222,7 +7226,8 @@ namespace Truedat
                     extractorCpuSecs: budgetCpu.TotalSeconds,
                     stagedFromNetwork: Volatile.Read(ref _stageNetworkCount),
                     stagedBytes: budgetNetBytes,
-                    perCopyMbPerSec: bDiv > 0 ? budgetNetBytes / (1024.0 * 1024.0) / bDiv : 0));
+                    copyWindowMbPerSec: bDiv > 0 ? budgetNetBytes / (1024.0 * 1024.0) / bDiv : 0,
+                    workerThreadSecs: (double)_classStats.Values.Sum(v => Interlocked.Read(ref v[1])) / Stopwatch.Frequency));
             }
             }
             PrintScanTallies();
@@ -14156,7 +14161,7 @@ namespace Truedat
         }
 
         /// <summary>
-        /// Why this file is not the moods catalog, or null when it looks like JSON and a parse
+        /// Why this file cannot be read as the moods catalog, or null when it looks like JSON and a parse
         /// failure therefore means genuinely corrupt.
         ///
         /// Field report 2026-10-29: the mood sidecar was handed to the catalog loader, which
@@ -14191,6 +14196,14 @@ namespace Truedat
             if (Begins("SQLite format 3\0")) return "it is a SQLite database — truedat's own store is one";
             if (n >= 4 && head[0] == 0x50 && head[1] == 0x4B && (head[2] == 0x03 || head[2] == 0x05 || head[2] == 0x07))
                 return "it is a zip archive — a catalog backup or pin, perhaps";
+
+            // UTF-16, with or without a BOM: the loader reads UTF-8 only, so this is the catalog in an encoding it cannot
+            // read — never "corrupt" (BOM-less UTF-16LE begins with '{' and used to take the backup-and-delete path).
+            // Without a BOM, a JSON document's first characters are ASCII, so every other byte is zero.
+            bool utf16 = (n >= 2 && ((head[0] == 0xFF && head[1] == 0xFE) || (head[0] == 0xFE && head[1] == 0xFF)))
+                         || (n >= 4 && ((head[0] != 0 && head[1] == 0 && head[2] != 0 && head[3] == 0)
+                                     || (head[0] == 0 && head[1] != 0 && head[2] == 0 && head[3] != 0)));
+            if (utf16) return "it is UTF-16 text and the catalog is read as UTF-8 — re-save it as UTF-8, nothing else needs to change";
 
             int j = 0;
             if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) j = 3;
@@ -22292,19 +22305,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // Round inputs so each expected figure is obvious by inspection rather than transcribed.
                 var budget = BuildTimeBudgetReport(
                     analyzedTracks: 100, analyzedThreadSecs: 2000, workers: 4, wallSecs: 500,
-                    extractorCpuSecs: 1600, stagedFromNetwork: 100, stagedBytes: 500.0 * 1024 * 1024, perCopyMbPerSec: 5.0);
+                    extractorCpuSecs: 1600, stagedFromNetwork: 100, stagedBytes: 500.0 * 1024 * 1024, copyWindowMbPerSec: 5.0);
                 Assert(budget.Length > 0, "time-budget: a scan that analyzed tracks gets the block");
                 Assert(budget.IndexOf("100.0%", StringComparison.Ordinal) >= 0,
                     $"time-budget: 2000 thread-seconds over 4 workers in 500s wall = 100.0% occupancy (got: {budget})");
                 Assert(budget.IndexOf("80%", StringComparison.Ordinal) >= 0,
                     $"time-budget: 1600s of extractor CPU in 2000s of thread time = 80% (got: {budget})");
                 Assert(budget.IndexOf("1.0 MB/s", StringComparison.Ordinal) >= 0 && budget.IndexOf("5.0 MB/s", StringComparison.Ordinal) >= 0,
-                    $"time-budget: 500 MB over 500s = 1.0 MB/s sustained, against the measured 5.0 MB/s per copy (got: {budget})");
+                    $"time-budget: 500 MB over 500s = 1.0 MB/s sustained, against the measured 5.0 MB/s while copying (got: {budget})");
                 Assert(budget.IndexOf("5.0 MB/track", StringComparison.Ordinal) >= 0,
                     $"time-budget: 500 MB over 100 staged tracks = 5.0 MB/track (got: {budget})");
                 // The operator's 2026-10-26 ruling: measurements, never an "X-bound" label.
                 Assert(budget.IndexOf("bound", StringComparison.OrdinalIgnoreCase) < 0,
                     "time-budget: states measurements, never an X-bound verdict");
+
+                // Pre-tag review 2026-10-31, finding 6: occupancy counts EVERY outcome the workers spent time on, not only
+                // the analyzed class. Cached hits, failures and skips also occupy a worker; leaving them out read a fully
+                // busy pool as half idle.
+                var mixed = BuildTimeBudgetReport(100, 1000, 4, 500, 800, 0, 0, 0, workerThreadSecs: 2000);
+                Assert(mixed.IndexOf("100.0%", StringComparison.Ordinal) >= 0,
+                    $"time-budget: 1000s analyzing + 1000s on other outcomes over 4 workers in 500s = 100.0% busy (got: {mixed})");
+                Assert(mixed.IndexOf("10.0s avg", StringComparison.Ordinal) >= 0,
+                    $"time-budget: the per-track average stays the ANALYZED average, 1000s / 100 (got: {mixed})");
+                // Finding 5: the comparison rate is the link's rate while copies were running (bytes over the copy
+                // window), an aggregate across parallel copies — never a per-copy rate.
+                Assert(budget.IndexOf("while copying", StringComparison.Ordinal) >= 0 && budget.IndexOf("per copy", StringComparison.Ordinal) < 0,
+                    $"time-budget: the copy-window rate is labeled as the link's rate while copying, not per copy (got: {budget})");
 
                 // Half-busy workers must read as half-busy: this is the number that says whether
                 // anything was waiting on the source.
@@ -22391,6 +22417,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "catalog-sniff: a zip is not the catalog");
                     Assert(NotACatalogReason(MakeT("lib.xml", "<?xml version=\"1.0\"?><plist/>")) != null,
                         "catalog-sniff: the iTunes XML is not the catalog");
+
+                    // Pre-tag review 2026-10-31, finding 8: the loader reads UTF-8 only. A catalog re-saved as UTF-16 is the
+                    // catalog in an encoding truedat cannot read — not "not the catalog", and above all not "corrupt" (a
+                    // BOM-less UTF-16LE file begins with '{', so it used to take the backup-and-delete path).
+                    const string u16Doc = "{\"tracks\":{}}";
+                    var u16le = new List<byte> { 0xFF, 0xFE }; u16le.AddRange(Encoding.Unicode.GetBytes(u16Doc));
+                    var u16be = new List<byte> { 0xFE, 0xFF }; u16be.AddRange(Encoding.BigEndianUnicode.GetBytes(u16Doc));
+                    foreach (var (name, bytes) in new[] { ("u16le-bom.json", u16le.ToArray()), ("u16be-bom.json", u16be.ToArray()),
+                                                         ("u16le-nobom.json", Encoding.Unicode.GetBytes(u16Doc)),
+                                                         ("u16be-nobom.json", Encoding.BigEndianUnicode.GetBytes(u16Doc)) })
+                    {
+                        var u16Reason = NotACatalogReason(MakeB(name, bytes));
+                        Assert(u16Reason != null && u16Reason.IndexOf("UTF-16", StringComparison.Ordinal) >= 0,
+                            $"catalog-sniff: a UTF-16 catalog ({name}) is named as UTF-16, never sent down the corrupt path (got: {u16Reason ?? "null"})");
+                    }
 
                     // The cases that MUST keep the corrupt path: real JSON that fails to parse.
                     Assert(NotACatalogReason(MakeT("truncated.json", "{\"version\":\"1.0\",\"tracks\":{\"a\":{")) == null,
@@ -26378,8 +26419,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     if (notCatalog != null)
                     {
                         Console.WriteLine();
-                        Console.WriteLine($"ERROR: not the moods catalog: {path} — {notCatalog}.");
-                        Console.WriteLine("Nothing was written or backed up. The catalog is mbxmoods.json; pass that, or --paths to see what resolved.");
+                        Console.WriteLine($"ERROR: cannot read this as the moods catalog: {path} — {notCatalog}.");
+                        Console.WriteLine("Nothing was written or backed up. If this is not the catalog, pass mbxmoods.json instead; --paths shows what resolved.");
                         Environment.Exit(2);
                     }
                     var bakPath = path + $".corrupt.{DateTime.Now:yyyyMMdd.HHmmss}";
