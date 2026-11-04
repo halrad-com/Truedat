@@ -43,7 +43,55 @@ Open work only. Shipped items live in `CHANGELOG.md`.
 
 3. **v3 `.mbxs` fixture for restfulbee** (chore, small). Generate a small synthetic v3
    sidecar (178 B records) + matching mini-catalog so the hub-side v3 reader lands against a
-   known-good file. Their lane after that: sidecar-only boot.
+   known-good file. Their lane after that: sidecar-only boot. Delivery is unconfirmed as of
+   2026-11-03; the existing writer and round-trip self-tests do not establish that this
+   consumer fixture was delivered. Check that before duplicating the work.
+
+## Newer open work — priority not assigned
+
+Recorded through 2026-11-03. These items do not change the next-sprint queue above or grant
+implementation approval.
+
+- **Automatic iTunes XML discovery and library selection** (requested 2026-11-01).
+  Standalone discovery only checks the executable's parent, executable directory, and
+  working directory; it can stay pinned to an old library or find nothing from a neutral
+  install. Assess MusicBee library discovery, active versus remembered selection, and
+  libraries without an export yet. Keep the XML as the membership source and output beside
+  the chosen XML; folder scanning was rejected as a substitute. Report the selected XML and
+  resolution step through `--paths`. **Assessment and proposed design requested; no code
+  until approved.** Sharing the resolver with the hub is a cross-repo contract decision
+  requiring coordination with restfulbee.
+- **Explicit clearing of stored observations** (2026-10-31 review; **design ruling
+  required**). Distinguish "producer did not run" from "producer ran and found no applicable
+  value or block" in both the catalog and store. The current null-preservation rule can
+  retain old HF/bitUsage values after a not-applicable measurement, or SMFM after its reader
+  observes that the block is gone. The authenticity case can repeat analysis when
+  `--refresh-authenticity` is requested. An explicit observed-absence signal needs a decision;
+  changing only the catalog would let the store publish the old value again. Preserve the
+  existing rule that absent/null arrivals do not clear values until that decision is made.
+- **Mood ground truth and valence fitting** (2026-10-31 proposal). Use stored features for
+  already-labeled tracks, evaluate a refit, and expand annotation toward the proposed
+  approximately 900-track target. Pipeline-diversity corpus work is a separate proposal;
+  more audio alone does not supply mood labels. **Proposed route, not implementation or
+  download approval.** Acceptance criteria and training-data licensing remain decisions
+  before acquiring additional data.
+- **Absolute valence scale and map opening view — restfulbee's lane** (2026-11-03).
+  Design agreed and written as a handoff: fixed-zero valence without boundary clamping,
+  comparable across libraries, plus whole-map versus fit-to-library opening views. Zoom
+  changes the view, never the score. **Not built in the handoff record; receipt and
+  implementation status unverified.** Scale units and zero anchoring belong to the retrain;
+  the opening-view default remains the operator's call. This is hub-side work, not a new
+  Truedat implementation task.
+- **Track DNA — compact whole-track descriptor timeline** (2026-10-31 idea capture).
+  Extend the existing packed edge-descriptor approach across the track. **Not a go; no
+  implementation or producer-version bump authorized.** If approved, first measure binary
+  whole-track frame output time and memory. Descriptor set, pooling rate, compression, and
+  runtime versus training capture remain undecided. Any eventual capture stays opt-in,
+  sticky per track, and removable only through explicit discard with `--dry-run`.
+- **Extractor access violation on a decodable MP3** (recorded 2026-10-26). ffmpeg decodes
+  the file, while the extractor exits with `0xC0000005` after decoding warnings. Candidate
+  for a later extractor drop; current-build reproduction and closure remain unverified.
+  Keep the crash visible rather than hiding it behind a bad-file exclusion.
 
 ## Extractor build detection (parked 2026-07-30)
 
@@ -261,36 +309,17 @@ with high disk ⇒ IO-bound. Observability only, hence low.
 
 ## Diagnostics: name the subject, measure the cost
 
-Motivated by a measured case: a `--fixup` over a wireless link spent **13m 9s of a
-13m 46s run** in the existence sweep — 72,144 `File.Exists` calls at ~10.9 ms each — and
-nothing in the output said so. The same catalog sweeps in ~10s on local disk. Meanwhile the
-run log was 11 MB, essentially all of it per-track `--audit` verdict tracing.
-
-Shipped: per-root latency profile at the fixup root check (`SampleStatLatencyMs`,
-`MedianMs`, `SweepConcurrencyFor`). Everything below is not.
-
-### Parallel metadata sweep, sized from measured latency
-
-The sweep is serial while the rest of the scan runs at parallelism 6. Metadata calls carry
-~0 bytes, so throughput is `concurrency / latency` and the link cannot saturate — the
-opposite regime to reading audio, where one sequential stream beats N parallel ones and
-staging already does the right thing. Predicted 13m 9s -> ~1m 39s at concurrency 8.
-
-Take the concurrency from the measured p50, not a constant: the correct value differs by
-an order of magnitude between local disk and a wireless share. Cap it — SMB credits and a
-modest NAS CPU flatten the curve early, and the same share is usually streaming audio to
-the player while this runs.
+Remaining scope after the implemented latency-sized parallel existence sweep, separate
+`--audit-verdicts` tracing, and unified review ledger were removed from the work list.
+Existing phase timing and scan summaries cover part of the instrumentation goal; identify
+the remaining gaps before expanding it.
 
 ### Per-operation instrumentation
 
-Every operation that can fail or be slow records its **subject** (which file), its
-**duration**, and its **outcome**. Failure attribution then falls out for free rather than
-being a separate feature: a failure is an operation whose cost ended in an error.
-
-### Demote per-track verdict tracing
-
-`--audit` currently emits the full per-signal vote trace for every track including the
-overwhelming majority that decide `no`. It buries everything else. Give it its own switch.
+Extend the existing instrumentation so operations that can fail or be slow consistently
+record their **subject** (which file), **duration**, and **outcome**. Failure attribution
+then follows from the operation record: a failure is an operation whose cost ended in an
+error.
 
 ### Storage profile with a stored baseline
 
@@ -299,15 +328,12 @@ which side of the sequential-vs-parallel line a phase sits on, without the opera
 to know the transport. A fixed-sample benchmark writes a baseline; later runs diff against
 it, so comparing two environments is a measurement rather than two anecdotes.
 
-### Advisor must not recommend commands that cannot clear the count
+### Scan-summary advice — production verification pending
 
-`--stats` cascades: it recommends `--retry-errors`, which **deletes the error ledger**, so
-the same entries reclassify as merely stale and are then recommended for `--refresh`, which
-cannot help them either. The ledger has to survive the retry, and a count that no command
-can act on should be reported as a fact, not as pending work.
-
-### One review file for everything the catalog does not hold
-
-Failures, policy skips and exclusions in one file with reasons, replacing the separate
-errors/skipped CSVs. Nothing is retried implicitly; retry is explicit and updates records
-rather than erasing them.
+The remaining check is the 2026-10-25 production case where the scan summary prescribed
+`--refresh` for feature/edge gaps that `--stats` classified as errored or short, and a
+refresh analyzed nothing. Later code reports review-ledger entries separately and fixes
+fresh-analysis versus cache-hit accounting, but that exact production case has not been
+rechecked. Verify it against the current build before treating it as a remaining code
+defect or closing it. Counts that no command can act on must remain facts, not prescribed
+work.
