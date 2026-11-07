@@ -12,7 +12,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
-- Scan summary shows the resample cost, its estimated saving, and extractor time by sample rate.
+- More detail about cost/savings for down-sampling files.
 
 ### Changed
 
