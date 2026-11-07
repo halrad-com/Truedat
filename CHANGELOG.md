@@ -12,7 +12,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Added
 
-- More detail about cost/savings for down-sampling files.
+- More detail about cost/savings for scanning downsampled files.
 
 ### Changed
 
