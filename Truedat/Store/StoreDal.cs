@@ -662,7 +662,8 @@ namespace Truedat.Store
                 var lm = st.GetString(2);
                 var lastModified = lm == null ? default
                     : DateTime.ParseExact(lm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
-                list.Add((st.GetInt64(0), st.GetString(1)!, TrackEntryMapper.FromRow(st, 3, lastModified)));
+                var display = st.GetString(1)!;
+                list.Add((st.GetInt64(0), display, WithPath(TrackEntryMapper.FromRow(st, 3, lastModified), display)));
             }
             return list;
         }
@@ -692,8 +693,17 @@ namespace Truedat.Store
                 var lm = st.GetString(1);
                 var lastModified = lm == null ? default
                     : DateTime.ParseExact(lm, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
-                yield return (display, TrackEntryMapper.FromRow(st, 2, lastModified));
+                yield return (display, WithPath(TrackEntryMapper.FromRow(st, 2, lastModified), display));
             }
+        }
+
+        /// <summary>A store-read entry carries its path the way a catalog-parsed one does: the catalog parser sets FilePath from the
+        /// entry's key, the store never did, so a scan the store fed listed the tracks it did not visit with a blank path and
+        /// anything keyed on it misread them (field check, 2026-11-06). The writer never emits FilePath — no catalog byte moves.</summary>
+        static TrackEntry WithPath(TrackEntry e, string display)
+        {
+            if (e.Features != null) e.Features.FilePath = display;
+            return e;
         }
 
         // ---------------------------------------------------------------- runs, checks, work items

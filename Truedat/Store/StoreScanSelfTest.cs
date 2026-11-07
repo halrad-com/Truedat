@@ -347,6 +347,11 @@ namespace Truedat.Store
                 var own = os.Dal.ReadEntries(writerRoot).ToDictionary(x => x.DisplayPath, x => x.Entry, PathComparer.Instance);
                 assert(own.Count == 2 && own.ContainsKey(a) && own.ContainsKey(c) && own.Values.All(e => e.LastModified == updatedTime && e.Features.SmfmBpm == 130),
                     $"{label}: only the writer's copies update and its retired path disappears, including beneath the foreign nested root");
+                // An entry read back from the store carries its path, as one parsed from the catalog does (the parser sets it from
+                // the key): without it a scan the store fed listed unvisited tracks with a blank path, and anything keyed on the
+                // path — the wave-missing classifier, the edges split — misread them (field check, 2026-11-06). Never written out.
+                assert(own.All(kv => kv.Value.Features.FilePath == kv.Key),
+                    $"{label}: a store-read entry's FilePath is its catalog key ({string.Join(", ", own.Select(kv => (kv.Value.Features.FilePath ?? "(null)") + " vs " + kv.Key))})");
                 var other = os.Dal.ReadEntries(new[] { foreignRoot, foreignNested }).ToList();
                 assert(other.Count == 3 && other.Any(e => e.DisplayPath == b) && other.All(e => e.Entry.LastModified == originalTime && e.Entry.Features.SmfmBpm == 90),
                     $"{label}: the foreign machine's base and nested mirror copies remain present with their original facts");

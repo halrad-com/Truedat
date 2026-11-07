@@ -289,16 +289,40 @@ namespace Truedat.Store
             var dir = Path.GetDirectoryName(Path.GetFullPath(storePath));
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return 0;
             var prefix = Path.GetFileName(storePath) + ".bak.";
-            var keep = protect == null ? null : Path.GetFullPath(protect);
+            // Fail-safe (operator 2026-11-06), the catalog backups' rule: keep the newest N AND the newest N at least half the
+            // largest, so small store backups never push the full ones out; a file that is not a SQLite database is never deleted
+            // and never counted.
+            var backups = Directory.GetFiles(dir!)
+                .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(f => (Path: f, Bytes: StoreBackupBytes(f)))
+                .Where(b => b.Bytes.HasValue)
+                .OrderByDescending(b => File.GetLastWriteTimeUtc(b.Path))
+                .ThenByDescending(b => Path.GetFileName(b.Path), StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (backups.Count <= keepN) return 0;
+            long largest = backups.Max(b => b.Bytes!.Value);
+            var keep = new HashSet<string>(backups.Take(keepN).Select(b => Path.GetFullPath(b.Path)), StringComparer.OrdinalIgnoreCase);
+            foreach (var b in backups.Where(b => b.Bytes!.Value * 2 >= largest).Take(keepN)) keep.Add(Path.GetFullPath(b.Path));
+            if (protect != null) keep.Add(Path.GetFullPath(protect));
             int deleted = 0;
-            foreach (var old in Directory.GetFiles(dir!)
-                         .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                         .OrderByDescending(f => File.GetLastWriteTimeUtc(f))
-                         .ThenByDescending(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
-                         .Skip(keepN)
-                         .Where(f => keep == null || !string.Equals(Path.GetFullPath(f), keep, StringComparison.OrdinalIgnoreCase)))
-                try { File.Delete(old); deleted++; } catch { }
+            foreach (var old in backups.Where(b => !keep.Contains(Path.GetFullPath(b.Path))))
+                try { File.Delete(old.Path); deleted++; } catch { }
             return deleted;
+        }
+
+        /// <summary>A store backup's size for rotation; null when the file is not a SQLite database (wrong header, or too short).</summary>
+        static long? StoreBackupBytes(string path)
+        {
+            try
+            {
+                var len = new FileInfo(path).Length;
+                if (len < 512) return null;
+                var head = new byte[16];
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    if (fs.Read(head, 0, 16) != 16) return null;
+                return System.Text.Encoding.ASCII.GetString(head) == "SQLite format 3\0" ? len : (long?)null;
+            }
+            catch { return null; }
         }
 
         /// <summary>store-v3 T10: every live entry of another store, display path → entry, across EVERY root — a shard

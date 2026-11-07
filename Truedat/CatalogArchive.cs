@@ -25,6 +25,15 @@ namespace Truedat
     /// </summary>
     internal static class CatalogArchive
     {
+        /// <summary>A backup was not written because its source is not a whole catalog. Nothing was changed.</summary>
+        internal sealed class BackupRefusedException : IOException
+        {
+            internal BackupRefusedException(string message) : base(message) { }
+        }
+
+        /// <summary>Test seam: runs on the finished temp zip before it is read back. Null in production.</summary>
+        internal static Action<string>? TamperBeforeVerifyForTest;
+
         internal const string CatalogEntryName = "mbxmoods.json";
         internal const string ExcludeEntryName = "mbxmoods-exclude.json";
         internal const string ManifestEntryName = "manifest.json";
@@ -82,23 +91,133 @@ namespace Truedat
 
         /// <summary>The multi-file form: each (path, entry name) pair becomes one entry, staged and swapped the same way. A split
         /// catalog (mbxmoods.json.1, .2, …) is pinned as one zip holding every part under its own file name.</summary>
-        internal static string WriteZipBackup(IReadOnlyList<(string Path, string EntryName)> files, string bakPath)
+        /// <remarks>Fail-safe (operator 2026-11-06: "make sure a backup is never overwritten with a corrupted file. like its clobbered
+        /// with a zero or 2k file"), three guards, in order: every JSON entry must be a WHOLE document (non-empty, opens with '{',
+        /// closes with '}' — a zeroed, emptied or truncated catalog is refused with <see cref="BackupRefusedException"/>, and since
+        /// every verb backs up before it rewrites, the verb stops with nothing changed); the zip is read back and each entry's bytes
+        /// compared by SHA-256 with what was read from the source, so a short write never becomes a backup; and the finished file is
+        /// MOVED into place, which fails when the name exists — a backup is never written over. A failure removes the temp.</remarks>
+        internal static string WriteZipBackup(IReadOnlyList<(string Path, string EntryName)> files, string bakPath, bool requireWholeDocuments = true)
         {
+            if (File.Exists(bakPath)) throw new IOException($"backup not written: {bakPath} already exists (a backup is never written over)");
+            if (requireWholeDocuments)   // false only for the .damaged copy a --restore keeps of the catalog it replaces
+                foreach (var f in files)
+                    if (IsJsonEntry(f.EntryName)) RequireWholeDocument(f.Path);
             var tmp = bakPath + ".tmp";
             try { File.Delete(tmp); } catch { }
-            using (var zfs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-            using (var zip = new ZipArchive(zfs, ZipArchiveMode.Create))
+            var expected = new List<(string Entry, long Length, string Sha)>();
+            try
             {
-                foreach (var f in files)
+                using (var zfs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+                using (var zip = new ZipArchive(zfs, ZipArchiveMode.Create))
                 {
-                    var entry = zip.CreateEntry(f.EntryName, CompressionLevel.Optimal);
-                    using var es = entry.Open();
-                    using var src = new FileStream(f.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-                    src.CopyTo(es);
+                    foreach (var f in files)
+                    {
+                        var entry = zip.CreateEntry(f.EntryName, CompressionLevel.Optimal);
+                        using var es = entry.Open();
+                        using var src = new FileStream(f.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+                        using var sha = SHA256.Create();
+                        var buf = new byte[65536];
+                        long len = 0; int n;
+                        while ((n = src.Read(buf, 0, buf.Length)) > 0) { sha.TransformBlock(buf, 0, n, null, 0); es.Write(buf, 0, n); len += n; }
+                        sha.TransformFinalBlock(buf, 0, 0);
+                        expected.Add((f.EntryName, len, Hex(sha.Hash!)));
+                    }
+                }
+                TamperBeforeVerifyForTest?.Invoke(tmp);
+                VerifyZip(tmp, expected);
+                File.Move(tmp, bakPath);   // not Replace: a name that appeared meanwhile fails here instead of being written over
+            }
+            catch
+            {
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
+            return bakPath;
+        }
+
+        /// <summary>The catalog and its parts (<c>&lt;name&gt;.json</c>, <c>&lt;name&gt;.json.N</c> — each part is its own document) and
+        /// the edges companion are JSON; the sidecar is not, and is not checked.</summary>
+        static bool IsJsonEntry(string entryName)
+            => entryName.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || TryPartName(entryName, out _, out _);
+
+        /// <summary>Refuses a file that is not a whole JSON document: empty (or only whitespace / zeros), not opening with '{', or not
+        /// closing with '}' — a zeroed file, a truncated write, a 2 KB stub where a catalog was. Reads the first and last 4 KB only.
+        /// A BOM and NUL bytes are skipped, so UTF-16 is judged by its characters.</summary>
+        internal static void RequireWholeDocument(string path)
+        {
+            long length = new FileInfo(path).Length;
+            if (length == 0) throw new BackupRefusedException($"backup refused: {path} is empty (0 bytes) — a damaged catalog is never backed up; nothing was changed");
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var head = new byte[(int)Math.Min(4096, length)];
+            ReadFully(fs, head);
+            var tail = new byte[(int)Math.Min(4096, length)];
+            fs.Position = length - tail.Length;
+            ReadFully(fs, tail);
+            static bool Skip(byte b) => b == 0 || b == 0xEF || b == 0xBB || b == 0xBF || b == 0xFE || b == 0xFF || b == (byte)' ' || b == (byte)'\t' || b == (byte)'\r' || b == (byte)'\n';
+            int first = -1, last = -1;
+            for (int i = 0; i < head.Length; i++) if (!Skip(head[i])) { first = head[i]; break; }
+            for (int i = tail.Length - 1; i >= 0; i--) if (!Skip(tail[i])) { last = tail[i]; break; }
+            if (first < 0 || last < 0)
+                throw new BackupRefusedException($"backup refused: {path} holds no document ({length:N0} bytes of whitespace or zeros) — a damaged catalog is never backed up; nothing was changed");
+            if (first != '{' || last != '}')
+                throw new BackupRefusedException($"backup refused: {path} is not a whole document ({length:N0} bytes; {(first != '{' ? "does not open with {" : "ends mid-document")}) — a damaged catalog is never backed up; nothing was changed");
+        }
+
+        static void ReadFully(Stream s, byte[] buf)
+        {
+            int off = 0, n;
+            while (off < buf.Length && (n = s.Read(buf, off, buf.Length - off)) > 0) off += n;
+        }
+
+        /// <summary>The finished zip, read back: every entry present, the right length, the same SHA-256 as the source bytes.</summary>
+        static void VerifyZip(string zipPath, List<(string Entry, long Length, string Sha)> expected)
+        {
+            using var zfs = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var zip = new ZipArchive(zfs, ZipArchiveMode.Read);
+            foreach (var x in expected)
+            {
+                var entry = zip.GetEntry(x.Entry) ?? throw new IOException($"backup not written: {x.Entry} is missing from the archive on read-back");
+                using var es = entry.Open();
+                using var sha = SHA256.Create();
+                var buf = new byte[65536];
+                long len = 0; int n;
+                while ((n = es.Read(buf, 0, buf.Length)) > 0) { sha.TransformBlock(buf, 0, n, null, 0); len += n; }
+                sha.TransformFinalBlock(buf, 0, 0);
+                if (len != x.Length || Hex(sha.Hash!) != x.Sha)
+                    throw new IOException($"backup not written: {x.Entry} did not read back as written ({len:N0} of {x.Length:N0} bytes, hash {(Hex(sha.Hash!) == x.Sha ? "equal" : "different")})");
+            }
+        }
+
+        /// <summary>The catalog bytes a backup holds, for rotation: a zip's entries summed (from its directory — nothing decompressed),
+        /// a gzip's recorded size, a plain file's length. Null when the file cannot be read as a backup.</summary>
+        static long? BackupCatalogBytes(string path)
+        {
+            try
+            {
+                switch (SniffFile(path))
+                {
+                    case CatalogFormat.Zip:
+                        using (var zip = ZipFile.OpenRead(path))
+                        {
+                            if (zip.Entries.Count == 0) return null;
+                            return zip.Entries.Sum(e => e.Length);
+                        }
+                    case CatalogFormat.Gzip:
+                        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        {
+                            if (fs.Length < 18) return null;
+                            fs.Position = fs.Length - 4;
+                            var b = new byte[4];
+                            ReadFully(fs, b);
+                            return BitConverter.ToUInt32(b, 0);
+                        }
+                    default:
+                        RequireWholeDocument(path);   // a plain backup from an older build counts only when it is a whole document
+                        return new FileInfo(path).Length;
                 }
             }
-            Program.AtomicReplace(tmp, bakPath);
-            return bakPath;
+            catch { return null; }
         }
 
         /// <summary>The files a catalog path means on disk: the single file when it exists, otherwise the numbered parts
@@ -169,8 +288,16 @@ namespace Truedat
             if (string.IsNullOrEmpty(sha256)) return null;
             var files = CatalogFiles(catalogPath);
             if (files.Count == 0) return null;
-            var pin = $"{catalogPath}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}.zip";
-            if (File.Exists(pin)) return pin;
+            var stem = $"{catalogPath}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}";
+            var pin = stem + ".zip";
+            // An existing pin is trusted only if it holds this catalog's bytes (fail-safe, operator 2026-11-06): a damaged file at the
+            // name used to be returned as the pin forever. A damaged one is left where it is and a good pin is written beside it.
+            long sourceBytes = files.Sum(f => new FileInfo(f).Length);
+            for (int n = 2; File.Exists(pin); n++)
+            {
+                if (BackupCatalogBytes(pin) == sourceBytes) return pin;
+                pin = $"{stem}-{n}.zip";
+            }
             if (files.Count == 1) WriteZipBackup(files[0], pin);
             else WriteZipBackup(files.Select(f => (f, Path.GetFileName(f))).ToList(), pin);
             return pin;
@@ -191,19 +318,43 @@ namespace Truedat
             // "mbxmoods.json.bak." — the trailing dot excludes the transient
             // "mbxmoods.json.bak" and the live "mbxmoods.json".
             var prefix = Path.GetFileName(catalogPath) + ".bak.";
+            // Fail-safe (operator 2026-11-06): a run of tiny or emptied catalogs must not rotate the real ones out — with keep 2 that
+            // took two bad runs. So rotation keeps the newest N AND the newest N whose catalog is at least half the largest one held:
+            // a bounded 2N, and the full backups survive any number of small ones. A backup it cannot read is never deleted and never
+            // counted, so it cannot use up the quota either.
             var backups = Directory.GetFiles(dir!)
                 .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                // Timestamp is yyyyMMdd.HHmmss — fixed width, so ordinal-descending on the
-                // filename is newest-first.
-                .OrderByDescending(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+                .Select(f => (Path: f, Key: StampKey(Path.GetFileName(f).Substring(prefix.Length)), Bytes: BackupCatalogBytes(f)))
+                .Where(b => b.Bytes.HasValue)
+                .OrderByDescending(b => b.Key.Stamp, StringComparer.Ordinal).ThenByDescending(b => b.Key.N)
                 .ToList();
+            if (backups.Count <= keepN) return 0;
+            long largest = backups.Max(b => b.Bytes!.Value);
+            var keep = new HashSet<string>(backups.Take(keepN).Select(b => b.Path), StringComparer.OrdinalIgnoreCase);
+            foreach (var b in backups.Where(b => b.Bytes!.Value * 2 >= largest).Take(keepN)) keep.Add(b.Path);
 
             int deleted = 0;
-            foreach (var old in backups.Skip(keepN))
+            foreach (var old in backups.Where(b => !keep.Contains(b.Path)))
             {
-                try { File.Delete(old); deleted++; } catch { }
+                try { File.Delete(old.Path); deleted++; } catch { }
             }
             return deleted;
+        }
+
+        /// <summary>Age from a backup's name (after ".bak."): the fixed-width yyyyMMdd.HHmmss stamp, then the "-N" a second backup in
+        /// the same second carries (a name sort put ".zip" after "-2", so the newer of the two looked older).</summary>
+        static (string Stamp, int N) StampKey(string rest)
+        {
+            if (rest.Length < 15) return (rest, 0);
+            var stamp = rest.Substring(0, 15);
+            int n = 0;
+            if (rest.Length > 16 && rest[15] == '-')
+            {
+                int end = 16;
+                while (end < rest.Length && char.IsDigit(rest[end])) end++;
+                int.TryParse(rest.Substring(16, end - 16), out n);
+            }
+            return (stamp, n);
         }
 
         /// <summary>Decompress/copy the catalog JSON out of an archive (zip/gz/plain)

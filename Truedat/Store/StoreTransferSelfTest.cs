@@ -148,7 +148,10 @@ namespace Truedat.Store
                 // Codex review 2026-10-20 #4: rotation sorted by NAME, and a migration backup (truedat.db.bak.v2.<stamp>) sorts above every
                 // dated restore backup, so --keep-backups 1 deleted the undo snapshot the same restore had just made.
                 var migrationBackup = store + ".bak.v2.20261016.120000";
-                File.WriteAllText(migrationBackup, "an older migration backup");
+                // A real database file: rotation never deletes a file that is not one (fail-safe 2026-11-06), and this case is about
+                // the NAME sorting above the newer backup, not about junk.
+                File.Copy(store, migrationBackup);
+                File.SetLastWriteTimeUtc(migrationBackup, new DateTime(2026, 10, 16, 12, 0, 0, DateTimeKind.Utc));
                 StoreTransfer.RestoreResult third;
                 using (StoreLog.Quiet()) third = StoreTransfer.RestoreStore(archive, store, keepBackups: 1);
                 assert(third.BackupPath != null && File.Exists(third.BackupPath),

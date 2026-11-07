@@ -82,7 +82,7 @@ namespace Truedat
             new Setting { Key = "audit",           Kind = Kind.Bool, Default = "false", Help = "per-track diagnostics to stderr" },
             new Setting { Key = "parallel",        Kind = Kind.Int,  Min = 1, Max = 1024,    Default = "cores-2", Help = "worker count" },
             new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Default = "none", Help = "CPU % cap for subprocesses" },
-            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Default = "5", Help = "catalog backups kept (0 = all)" },
+            new Setting { Key = "keep-backups",    Kind = Kind.Int,  Min = 0, Max = 10000,   Default = "2", Help = "catalog backups and scan summaries kept (0 = all)" },
             new Setting { Key = "long-track-mins", Kind = Kind.Int,  Min = 1, Max = 10000,   Default = "30", Help = "minutes that count as a long track" },
             new Setting { Key = "max-duration",    Kind = Kind.Int,  Min = 0, Max = 1000000, Default = "48000", Help = "skip tracks longer than this (s)" },
             new Setting { Key = "stage-dir",       Kind = Kind.Text, Default = "%TEMP%\\.truedat-stage", Help = "where staged copies go" },
@@ -105,7 +105,9 @@ namespace Truedat
             new Setting { Key = "fixup-after-scan",Kind = Kind.Bool, Default = "false", Help = "run --fixup after a full scan" },
             // Operator 2026-10-23: the end-of-scan summary is what gets saved and compared; saving it by hand was a copy, a notepad
             // and a file name every run. Beside the catalog as mbxmoods-scan-<start date>-<n>.txt (Program.ScanSummaryFileName).
-            new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the scan summary to a file" },
+            // How many are kept is keep-backups, not a key of its own (operator 2026-11-06: "it could be tied to the number of
+            // backups kept" ... "it already has a setting scan-summary") — this one stays the on/off (Program.ScanSummariesToPrune).
+            new Setting { Key = "scan-summary",    Kind = Kind.Bool, Default = "true", Help = "save the scan summary to a file (keep-backups = how many are kept)" },
             // Operator 2026-10-25: "there should be a size split setting" ... "lets use the current split 1.9". The catalog (scan writer and store
             // publication alike) rolls into numbered parts past this size. Max stays under the load ceiling (Program.CatalogLoadMaxBytes).
             // Operator 2026-10-25: a store-only install. With a store in force, false writes the store only — no catalog, sidecar or

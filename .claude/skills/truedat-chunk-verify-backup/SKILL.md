@@ -88,8 +88,14 @@ so **zero new dependencies** (only a framework `<Reference Include="System.IO.Co
   nothing seeks into. Do not compress the live file here.
 - **Backups (automatic).** The four mutating modes (`--fixup`, `--remap`, `--merge-moods`,
   `--migrate`) call `BackupCatalogCompressed` instead of `File.Copy`: it writes
-  `mbxmoods.json.bak.<ts>.zip` and rotates to keep the newest `--keep-backups N` (default 5,
-  **rotation never truncation** — `0` keeps all; same ruling as `mbxmoods-skipped.csv`).
+  `mbxmoods.json.bak.<ts>.zip` and rotates to keep the newest `--keep-backups N` (default 2 since
+  2026-11-06, **rotation never truncation** — `0` keeps all; same ruling as `mbxmoods-skipped.csv`).
+  Fail-safe (operator 2026-11-06, "never overwritten with a corrupted file ... a zero or 2k file"): `WriteZipBackup` refuses
+  a JSON entry that is not a whole document (`BackupRefusedException`, the verb stops before rewriting), reads the zip back
+  and compares SHA-256 per entry, and moves into place without overwrite; rotation keeps the newest N **plus** the newest N
+  at least half the largest backup's catalog bytes, and never deletes or counts a backup it cannot read; `--restore` keeps
+  a damaged catalog it replaces as `.damaged.<ts>.zip`; an import pin is trusted only if it holds the source's bytes.
+  The same count also rotates the saved scan summaries.
   Rotation matches `<name>.bak.` (trailing dot), so it never touches the transient
   `SaveResults` `.bak` swap file or the live catalog.
 - **`--snapshot [path]`** (read-only over the live catalog) streams the catalog into

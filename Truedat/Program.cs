@@ -625,10 +625,12 @@ namespace Truedat
         internal static string BuildAnalysisTimingReport(IEnumerable<AnalysisStageTiming> stages, long cpuUnavailable)
         {
             var rows = new StringBuilder();
+            bool shaRow = false;
             foreach (var stage in stages)
             {
                 var sample = stage.Snapshot();
                 if (sample.Count == 0) continue;
+                if (stage.Name == "audio sha256") shaRow = true;
                 string mean = (sample.TotalSeconds / sample.Count).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
                 string max = sample.MaxSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
                 rows.AppendLine($"    {stage.Name,-22} {mean,9}s avg {max,9}s max  ({sample.Count} {stage.Unit})");
@@ -639,7 +641,10 @@ namespace Truedat
             return "  Analysis stages (cumulative completed samples):" + Environment.NewLine
                 + rows.ToString()
                 + "    Rows overlap; retries add attempts. Do not sum these averages." + Environment.NewLine
-                + "    after Essentia = remaining companion work / worker wake-up." + Environment.NewLine;
+                + "    after Essentia = remaining companion work / worker wake-up." + Environment.NewLine
+                // A staged copy is hashed while it copies and never reaches the sha task, so "(6 tasks)" beside thousands analysed
+                // read as six hashed tracks (field report, 2026-11-01).
+                + (shaRow ? "    audio sha256 = only tracks not hashed during their staging copy." + Environment.NewLine : "");
         }
 
         static void PrintAnalysisTimings()
@@ -882,7 +887,10 @@ namespace Truedat
             Console.WriteLine("                      use it to read a catalog, then --compact to put it back.");
             Console.WriteLine("  --keep-backups N    Keep the newest N timestamped catalog backups after --fixup / --remap /");
             Console.WriteLine("                      --merge-moods / --migrate (rotation, never truncation; 0 = keep all,");
-            Console.WriteLine("                      default 5). Backups are compressed .zip (~8-10x smaller than a plain copy).");
+            Console.WriteLine("                      default 2). Backups are compressed .zip; the scan summary's");
+            Console.WriteLine("                      Backups line shows how much smaller than a plain copy.");
+            Console.WriteLine("                      Also how many saved scan summaries are kept (see the config key");
+            Console.WriteLine("                      scan-summary); one you rename is never rotated out.");
             Console.WriteLine("  --split-mb N        Catalog part size in MB (16-1900, default 1900 = 1.9 GB): past it the catalog is");
             Console.WriteLine("                      written as mbxmoods.json.1, .2, ... instead of one file."); 
             Console.WriteLine();
@@ -1623,8 +1631,8 @@ namespace Truedat
 
         // --keep-backups N: how many timestamped catalog backups to keep after a
         // mutating mode (--fixup / --remap / --merge-moods / --migrate) writes one.
-        // Rotation, never truncation — 0 keeps everything. Default 5.
-        internal static int _keepBackups = 5;
+        // Rotation, never truncation — 0 keeps everything. Default 2 (operator 2026-11-06).
+        internal static int _keepBackups = 2;
 
         static bool _losersM3u = false;
         static string? _losersM3uPath = null;
@@ -6524,6 +6532,9 @@ namespace Truedat
                                     Console.WriteLine("  Remaining tracks are NOT recorded as missing — re-run once it is back.");
                                     cts.Cancel();
                                 }
+                                // Its own row: it is not a failure (nothing counts it as one, nothing ledgers it), and under the
+                                // "failed" default it inflated that row — 14 "failed" beside a headline of 6 (field report, 2026-11-01).
+                                trackClass = "source lost";
                                 return;
                             }
                             var reason = t.Location.Length >= 260
@@ -7057,6 +7068,22 @@ namespace Truedat
             finalSaveSw.Stop();   // the WHOLE final-write phase: catalog, store flush, sidecar, companion
             NoteFinalOutcomeForStop(checkpointFailure, finalWrites);
             ScanStop.EndFinal();
+            // Operator 2026-10-23: the summary from here to the Output lines is SAVED beside the catalog (config `scan-summary`, default
+            // true) — teed, so the file is exactly what the console shows. A failure to open it costs a note, never the summary.
+            // Started HERE, above the outcome banners, not below them: below, a stopped or source-lost run's saved summary began at
+            // "Command:" and read as a completed scan — the operator had to remember the network had dropped (field report, 2026-11-01).
+            TeeWriter? summaryTee = null; string? summaryFile = null; var summaryPrevOut = Console.Out;
+            if (!ConfigSaysOff("scan-summary"))
+            {
+                try
+                {
+                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    summaryFile = Path.Combine(summaryDir, ScanSummaryFileName(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), startTime));
+                    summaryTee = new TeeWriter(summaryPrevOut, summaryFile);
+                    Console.SetOut(summaryTee);
+                }
+                catch (Exception ex) { summaryTee = null; summaryFile = null; Console.Error.WriteLine($"  note: the scan summary is not being saved ({ex.Message})"); }
+            }
             if (!finalOwned) Console.WriteLine("  stop: the completed work was saved by the stop; the final writes stand down");
             // Stamped after the writes, not at sw.Stop(). It used to be taken before them, so a run that
             // spent four seconds writing the catalog, the store and the companion printed "Elapsed 1.8s"
@@ -7081,20 +7108,6 @@ namespace Truedat
                 Console.WriteLine("  Tracks after the drop were NOT recorded as missing. Re-run once it is back.");
                 global::Truedat.Store.StoreResult.NoteScanOutcome(global::Truedat.Store.StoreResult.OutcomeInterrupted, "the library went away mid-scan; work up to that point was saved: " + scanSourceLostDetail);
                 Environment.ExitCode = 3;
-            }
-            // Operator 2026-10-23: the summary from here to the Output lines is SAVED beside the catalog (config `scan-summary`, default
-            // true) — teed, so the file is exactly what the console shows. A failure to open it costs a note, never the summary.
-            TeeWriter? summaryTee = null; string? summaryFile = null; var summaryPrevOut = Console.Out;
-            if (!ConfigSaysOff("scan-summary"))
-            {
-                try
-                {
-                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
-                    summaryFile = Path.Combine(summaryDir, ScanSummaryFileName(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), startTime));
-                    summaryTee = new TeeWriter(summaryPrevOut, summaryFile);
-                    Console.SetOut(summaryTee);
-                }
-                catch (Exception ex) { summaryTee = null; summaryFile = null; Console.Error.WriteLine($"  note: the scan summary is not being saved ({ex.Message})"); }
             }
             foreach (var line in ThisCommand()) Console.WriteLine(line);   // what this run was, where the operator reads after it
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
@@ -7140,7 +7153,7 @@ namespace Truedat
             if (analyzed > 0)
             {
                 var avgAnalyze = StopwatchTicksToTimeSpan(_analyzeTicksTotal / analyzed);
-                Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only)");
+                Console.WriteLine($"  Avg/track:  {avgAnalyze.TotalSeconds:F1}s (analysis only, staging copy not included)");
             }
             // Average analyzed track LENGTH next to the average analysis time and the MB/s.
             // Those three are the same story from different angles, and length is the one
@@ -7175,7 +7188,7 @@ namespace Truedat
             if (!_classStats.IsEmpty)
             {
                 Console.WriteLine();
-                Console.WriteLine("  Per-track cost by outcome (thread-time avg):");
+                Console.WriteLine("  Per-track cost by outcome (thread-time avg, staging copy included):");
                 foreach (var kv in _classStats.OrderByDescending(k => k.Value[1]))
                 {
                     var n = kv.Value[0];
@@ -7295,6 +7308,20 @@ namespace Truedat
             {
                 Console.SetOut(summaryPrevOut); summaryTee.Dispose();
                 Console.WriteLine($"Summary:    {summaryFile}");
+                // Rotation happens AFTER the file is closed, so this run's summary is one of the kept ones and the
+                // rotation note is not inside the file it describes. Same shape as the catalog backups' Rotated: line.
+                try
+                {
+                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(summaryFile!))!;
+                    var stale = ScanSummariesToPrune(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), _keepBackups);
+                    int removed = 0;
+                    foreach (var name in stale)
+                    {
+                        try { File.Delete(Path.Combine(summaryDir, name)); removed++; } catch { }   // a file held open is next run's problem, not this run's failure
+                    }
+                    if (removed > 0) Console.WriteLine($"Rotated:    removed {removed} old scan summary(s), keeping the newest {_keepBackups} (--keep-backups).");
+                }
+                catch { }
             }
             tee?.Dispose();
 
@@ -10985,10 +11012,30 @@ namespace Truedat
         /// DEFLATE-compresses ~8-10x, so accumulating plain copies was the footprint
         /// pain this closes. Backups are self-describing on read (sniffed), so a plain
         /// copy from an older build still restores.</summary>
-        static string BackupCatalogCompressed(string catalogPath)
+        /// <remarks>Fail-safe (operator 2026-11-06): a damaged catalog is never backed up (CatalogArchive.WriteZipBackup
+        /// refuses it, so the verb stops before it rewrites anything), the name is unique to the second and then "-2", "-3" (two
+        /// backups in one second used to land on one name), and rotation never lets small backups push out full ones. The one
+        /// exception is <paramref name="keepDamaged"/> — a --restore replacing a catalog that may BE the damaged one: refusing would
+        /// block the recovery, so the damaged file is kept aside as <c>.damaged.&lt;time&gt;.zip</c>, a name rotation never matches
+        /// or counts.</remarks>
+        static string BackupCatalogCompressed(string catalogPath, bool keepDamaged = false)
         {
             var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+            if (keepDamaged)
+            {
+                try { CatalogArchive.RequireWholeDocument(catalogPath); }
+                catch (CatalogArchive.BackupRefusedException ex)
+                {
+                    var dmg = $"{catalogPath}.damaged.{timestamp}.zip";
+                    for (int n = 2; File.Exists(dmg); n++) dmg = $"{catalogPath}.damaged.{timestamp}-{n}.zip";
+                    CatalogArchive.WriteZipBackup(new[] { (catalogPath, CatalogArchive.CatalogEntryName) }, dmg, requireWholeDocuments: false);
+                    Console.WriteLine($"Damaged: the catalog being replaced is not a whole document; kept aside as {dmg}, not counted as a backup");
+                    if (_audit) Console.Error.WriteLine($"  [audit] {ex.Message}");
+                    return dmg;
+                }
+            }
             var bakPath = $"{catalogPath}.bak.{timestamp}.zip";
+            for (int n = 2; File.Exists(bakPath); n++) bakPath = $"{catalogPath}.bak.{timestamp}-{n}.zip";
             CatalogArchive.WriteZipBackup(catalogPath, bakPath);
             var removed = CatalogArchive.RotateBackups(catalogPath, _keepBackups);
             if (removed > 0)
@@ -11271,8 +11318,9 @@ namespace Truedat
             // restore is itself reversible.
             if (File.Exists(destCatalog))
             {
-                var bak = BackupCatalogCompressed(destCatalog);
-                Console.WriteLine($"Backup: {bak}");
+                // keepDamaged: the catalog a restore replaces may BE the damaged one — kept aside, never a refusal that blocks the recovery
+                var bak = BackupCatalogCompressed(destCatalog, keepDamaged: true);
+                if (!bak.Contains(".damaged.")) Console.WriteLine($"Backup: {bak}");
             }
 
             try { Program.AtomicReplace(tmp, destCatalog); }
@@ -12119,6 +12167,145 @@ namespace Truedat
                 if (int.TryParse(middle, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) && n > max) max = n;
             }
             return $"{prefix}{max + 1}.txt";
+        }
+
+        /// <summary>The summary row a source sample rate lands in (operator 2026-11-06: "add the per-rate split to the summary").
+        /// Above 44.1 kHz the row also says whether the extractor got a 44.1 kHz copy (resampled) or the original (raw — no
+        /// ffmpeg, a failed conversion, or more than two channels), because that is the comparison the split exists for.</summary>
+        internal static string RateBucket(int sampleRate, bool resampled)
+        {
+            string label;
+            if (sampleRate <= 0) return "rate unknown";
+            if (sampleRate < 44100) return "under 44.1 kHz";
+            if (sampleRate == 44100) return "44.1 kHz";
+            if (sampleRate == 48000) label = "48 kHz";
+            else if (sampleRate == 88200 || sampleRate == 96000) label = "88.2/96 kHz";
+            else if (sampleRate == 176400 || sampleRate == 192000) label = "176.4/192 kHz";
+            else if (sampleRate > 192000) label = "over 192 kHz";
+            else label = "other hi-res";
+            return label + (resampled ? ", resampled" : ", raw");
+        }
+
+        /// <summary>The conversions' total cost, under the "Resampled:" line (operator 2026-11-06: "do you summarize the cost of the
+        /// resampling"). Every ffmpeg run counts — a failed one still cost its track that time. Null when none ran.</summary>
+        /// <summary>The store's edge gap split by whether a --refresh of the scanned library can reach it (field report, 2026-11-01:
+        /// "146,368 tracks lack edge rows -> truedat --refresh" on a catalog far larger than its library — a refresh walks the
+        /// library, so a gap outside it would be recommended forever). Per CONTENT, like the store counts it: a hash is in the
+        /// library when any catalog path holding it is, so a duplicate outside does not move it out. A hash the store lacks but the
+        /// catalog never names is not counted.</summary>
+        internal static (int InLibrary, int Outside) SplitEdgeGap(IEnumerable<(string Key, string? Sha)> entries, ISet<string> lacking, ISet<string> libraryKeys)
+        {
+            var inLib = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, sha) in entries)
+            {
+                if (string.IsNullOrEmpty(sha) || !lacking.Contains(sha!)) continue;
+                named.Add(sha!);
+                if (!string.IsNullOrEmpty(key) && libraryKeys.Contains(key)) inLib.Add(sha!);
+            }
+            return (inLib.Count, named.Count - inLib.Count);
+        }
+
+        /// <summary>The recommendation lines for <see cref="SplitEdgeGap"/>: --refresh only for what it reaches.</summary>
+        internal static List<string> EdgeGapRecommendations(int inLibrary, int outside)
+        {
+            var lines = new List<string>();
+            if (inLibrary > 0)
+                lines.Add($"{inLibrary:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
+            if (outside > 0)
+                lines.Add($"{outside:N0} lack edges, not in this library  ->  a --refresh here cannot reach them");
+            return lines;
+        }
+
+        internal static string? ResampleCostLine(long runs, double totalSecs)
+        {
+            if (runs <= 0) return null;
+            return $"              cost: {FormatTimeSpan(TimeSpan.FromSeconds(totalSecs))} of worker time, {totalSecs / runs:F2} s a conversion ({runs:N0} run{(runs == 1 ? "" : "s")})";
+        }
+
+        /// <summary>Did converting first speed the hi-res analyses up or slow them down, and by how much (operator 2026-11-06: "an
+        /// easy way to normalize and measure ... its just bits"). The original never reaches the extractor, so its cost is an
+        /// ESTIMATE: the measured extractor CPU on the 44.1 kHz copy scaled by the sample ratio (the extractor decodes to float,
+        /// so its work follows samples, not file bytes — a FLAC's size is its compression and the copy is a 32-bit WAV). The net
+        /// charges the conversion against it. Linear in samples is conservative where the extractor's own resampler is the
+        /// cost rather than the sample count (48 kHz). Empty when nothing was resampled.</summary>
+        internal static List<string> ResampleSavingLines(double actualCpuSecs, double estNativeCpuSecs, double convertSecs, double sampleRatio)
+        {
+            var lines = new List<string>();
+            double spent = actualCpuSecs + convertSecs;
+            if (actualCpuSecs <= 0 || estNativeCpuSecs <= 0 || spent <= 0) return lines;
+            double net = estNativeCpuSecs - spent, ratio = estNativeCpuSecs / spent;
+            var amount = FormatTimeSpan(TimeSpan.FromSeconds(Math.Abs(net)));
+            lines.Add(net >= 0
+                ? $"              saved: ~{amount} net, {ratio:F2}x faster than at the source rate"
+                : $"              lost: ~{amount} net, {ratio:F2}x - slower than at the source rate");
+            lines.Add($"              (estimated from sample count: {sampleRatio:F2}x fewer samples analysed)");
+            return lines;
+        }
+
+        /// <summary>Row order for <see cref="RateBucket"/>: low rate to high, an unknown rate last.</summary>
+        internal static int RateBucketOrder(int sampleRate)
+        {
+            if (sampleRate <= 0) return 900;
+            if (sampleRate < 44100) return 100;
+            if (sampleRate == 44100) return 200;
+            if (sampleRate == 48000) return 300;
+            if (sampleRate == 88200 || sampleRate == 96000) return 500;
+            if (sampleRate == 176400 || sampleRate == 192000) return 600;
+            if (sampleRate > 192000) return 700;
+            return 400;   // other hi-res: between 48 and 88.2/96 is where most of them sit (64k, 50k)
+        }
+
+        /// <summary>The "By rate:" block: extractor CPU per minute of decoded audio for each source rate, so 44.1 kHz and the
+        /// resampled hi-res rows can be read side by side (what resample-once saves was not readable off one average over every
+        /// rate). Per audio-minute, not per track, because track lengths differ by rate. Resample cost is shown only on rows where
+        /// a conversion ran. Nothing when fewer than two rates were analysed — one row compares nothing.</summary>
+        internal static List<string> RateSplitLines(IEnumerable<(int Order, string Label, long Count, double CpuSecs, double AudioSecs, double ResampleSecs)> cells)
+        {
+            var rows = cells.Where(c => c.Count > 0).OrderBy(c => c.Order).ThenBy(c => c.Label, StringComparer.Ordinal).ToList();
+            var lines = new List<string>();
+            if (rows.Count < 2) return lines;
+            lines.Add("  By rate:    extractor CPU per minute of audio (analyzed tracks)");
+            foreach (var c in rows)
+            {
+                var line = $"    {c.Label,-24}{c.Count,9:N0}   ";
+                line += c.AudioSecs > 0 ? $"{c.CpuSecs / (c.AudioSecs / 60.0):F2} s/min" : "n/a (no decoded length)";
+                if (c.ResampleSecs > 0) line += $"  + {c.ResampleSecs / c.Count:F2} s resample/track";
+                lines.Add(line);
+            }
+            return lines;
+        }
+
+        /// <summary>Which saved scan summaries to delete so only the newest <paramref name="keep"/> remain, oldest first. Nothing
+        /// pruned them, so every scan ever run left one behind (operator 2026-11-06: "its never cleaned up, each one is unique...
+        /// it could be tied to the number of backups kept"), and <c>scan-summary</c> only says whether to write one. So retention
+        /// rides the knob that already means "how many of these do I keep": <see cref="_keepBackups"/>, 0 = keep all, same as the
+        /// catalog backups. Age comes from the NAME (day, then the day's number — 9 before 10, which a lexical sort gets wrong),
+        /// never from the file's mtime, which a copy or a sync reorders. A name that is not exactly
+        /// <c>mbxmoods-scan-&lt;yyyy-MM-dd&gt;-&lt;n&gt;.txt</c> is not a candidate and does not fill the quota, so a summary the
+        /// operator renamed to keep ("...-1-GOOD.txt") survives every rotation.</summary>
+        internal static List<string> ScanSummariesToPrune(IEnumerable<string> existingNames, int keep)
+        {
+            var pruned = new List<string>();
+            if (keep <= 0) return pruned;
+            const string prefix = "mbxmoods-scan-";
+            var found = new List<KeyValuePair<Tuple<DateTime, int>, string>>();
+            foreach (var name in existingNames)
+            {
+                if (name == null) continue;
+                if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) continue;
+                var middle = name.Substring(prefix.Length, name.Length - prefix.Length - 4);
+                var dash = middle.LastIndexOf('-');
+                if (dash <= 0 || dash == middle.Length - 1) continue;
+                if (!DateTime.TryParseExact(middle.Substring(0, dash), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out var day)) continue;
+                if (!int.TryParse(middle.Substring(dash + 1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n)) continue;
+                found.Add(new KeyValuePair<Tuple<DateTime, int>, string>(Tuple.Create(day, n), name));
+            }
+            if (found.Count <= keep) return pruned;
+            found.Sort((a, b) => a.Key.Item1 != b.Key.Item1 ? a.Key.Item1.CompareTo(b.Key.Item1) : a.Key.Item2.CompareTo(b.Key.Item2));
+            for (int i = 0; i < found.Count - keep; i++) pruned.Add(found[i].Value);
+            return pruned;
         }
 
         /// <summary>The end-of-scan "Workers:" line — the count every run, with where it came from. It rode the "+ config:" line only
@@ -13567,6 +13754,8 @@ namespace Truedat
             int resampledOnce = Volatile.Read(ref _preResampledCount);
             if (resampledOnce > 0)
                 Console.WriteLine($"  Resampled:  {resampledOnce} hi-res file(s) converted to 44.1 kHz once before analysis");
+            foreach (var line in ResampleSummaryLines()) Console.WriteLine(line);
+            foreach (var line in RateSplitSummaryLines()) Console.WriteLine(line);
             int success = Volatile.Read(ref _stageSuccessCount);
             int network = Volatile.Read(ref _stageNetworkCount);
             long first = Volatile.Read(ref _stageFirstStamp);
@@ -13611,7 +13800,7 @@ namespace Truedat
             {
                 double mbTotal = networkBytes / (1024.0 * 1024.0);
                 string vol = mbTotal >= 1024 ? $"{mbTotal / 1024.0:F1} GB" : $"{mbTotal:F0} MB";
-                lines.Add($"{pad}{vol} pulled over the source link @ {mbTotal / secs:F1} MB/s");
+                lines.Add($"{pad}{vol} pulled over the source link @ {mbTotal / secs:F1} MB/s while copying");
             }
             return lines;
         }
@@ -14541,7 +14730,26 @@ namespace Truedat
                     try { storeInfo = global::Truedat.Store.StoreInfoCommand.Collect(_storePath, path); } catch { /* the store block is best-effort */ }
                 }
                 if (storeInfo != null && storeInfo.Tracks - storeInfo.EdgeTracks > 0)
-                    rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
+                {
+                    // A scan knows its library, so it can say which part of the gap a --refresh here reaches (SplitEdgeGap); --stats
+                    // has no library, keeps the one line, and the split is best-effort — any failure falls back to that line.
+                    List<string>? split = null;
+                    if (libraryKeys != null)
+                    {
+                        try
+                        {
+                            HashSet<string> lackingEdges;
+                            using (global::Truedat.Store.StoreLog.Quiet())
+                            using (var os = global::Truedat.Store.OpenStore.Open(_storePath, create: false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                                lackingEdges = os.Dal.ContentKeysLackingEdges(global::Truedat.Edges.EdgeStore.ProducerKey, _edgeSettings.ProducerVersion, includeFailed: true);
+                            var g = SplitEdgeGap(entries.Where(e => e != null).Select(e => (e!.Features?.FilePath ?? "", e.AudioStreamSha256)), lackingEdges, libraryKeys);
+                            split = EdgeGapRecommendations(g.InLibrary, g.Outside);
+                        }
+                        catch { split = null; }
+                    }
+                    if (split != null) rec.AddRange(split);
+                    else rec.Add($"{storeInfo.Tracks - storeInfo.EdgeTracks:N0} tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)");
+                }
             }
             else if (ShouldRecommendStore(storeInForce: false, _noStoreTyped, entries.Count))
                 rec.Add("no store yet                            ->  truedat --store-import  (seconds, no audio read; then truedat --refresh adds the edges)");
@@ -17498,13 +17706,22 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
 
                 // --- rotation keeps newest N, spares the transient .bak and the live file ---
+                // Real backups (a catalog of n tracks, zipped the way a verb zips one): rotation now reads what it would delete.
+                string CatalogOf(int n) => "{\"version\":\"1.0\",\"trackCount\":" + n + ",\"tracks\":{" + string.Join(",", Enumerable.Range(0, n).Select(i => $"\"D:\\\\m\\\\t{i:D5}.flac\":{{\"bpm\":{100 + i % 50},\"artist\":\"Artist {i}\"}}")) + "}}";
+                void MakeBak(string live, string stamp, int n)
+                {
+                    var src = Path.Combine(Path.GetDirectoryName(live)!, $"src-{stamp}.json");
+                    File.WriteAllText(src, CatalogOf(n));
+                    CatalogArchive.WriteZipBackup(src, $"{live}.bak.{stamp}.zip");
+                    File.Delete(src);
+                }
                 var rotDir = Path.Combine(caDir, "rot");
                 Directory.CreateDirectory(rotDir);
                 var rotLive = Path.Combine(rotDir, "mbxmoods.json");
                 File.WriteAllText(rotLive, "{}");
                 File.WriteAllText(rotLive + ".bak", "transient");                       // SaveResults swap backup, no timestamp
                 foreach (var ts in new[] { "20260101.000000", "20260102.000000", "20260103.000000", "20260104.000000" })
-                    File.WriteAllText($"{rotLive}.bak.{ts}.zip", "x");
+                    MakeBak(rotLive, ts, 3);
                 var deleted = CatalogArchive.RotateBackups(rotLive, 2);
                 Assert(deleted == 2, $"rotate: keep-2 of 4 deletes 2 (got {deleted})");
                 Assert(File.Exists($"{rotLive}.bak.20260104.000000.zip") && File.Exists($"{rotLive}.bak.20260103.000000.zip"), "rotate: newest two survive");
@@ -17512,6 +17729,129 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(File.Exists(rotLive + ".bak"), "rotate: transient .bak (no timestamp) is never rotated");
                 Assert(File.Exists(rotLive), "rotate: the live catalog is never rotated");
                 Assert(CatalogArchive.RotateBackups(rotLive, 0) == 0 && File.Exists($"{rotLive}.bak.20260104.000000.zip"), "rotate: keepN<=0 keeps everything (never truncate)");
+
+                // --- a backup is never a damaged catalog, never unchecked, never written over (operator 2026-11-06: "make sure a
+                // backup is never overwritten with a corrupted file. like its clobbered with a zero or 2k file") ---
+                var fsDir = Path.Combine(caDir, "failsafe");
+                Directory.CreateDirectory(fsDir);
+                bool Refused(Action a) { try { a(); return false; } catch (CatalogArchive.BackupRefusedException) { return true; } }
+                var zeroSrc = Path.Combine(fsDir, "zero.json");
+                File.WriteAllBytes(zeroSrc, new byte[0]);
+                var zeroBak = zeroSrc + ".bak.20260901.000000.zip";
+                Assert(Refused(() => CatalogArchive.WriteZipBackup(zeroSrc, zeroBak)) && !File.Exists(zeroBak) && !File.Exists(zeroBak + ".tmp"),
+                    "backup fail-safe: a 0-byte catalog is refused, and neither a backup nor its temp is left");
+                var cutSrc = Path.Combine(fsDir, "cut.json");
+                var full = CatalogOf(40);
+                File.WriteAllText(cutSrc, full.Substring(0, full.Length / 2));
+                var cutBak = cutSrc + ".bak.20260901.000000.zip";
+                Assert(Refused(() => CatalogArchive.WriteZipBackup(cutSrc, cutBak)) && !File.Exists(cutBak),
+                    "backup fail-safe: a truncated catalog (ends mid-document) is refused");
+                var wsSrc = Path.Combine(fsDir, "ws.json");
+                File.WriteAllText(wsSrc, "   \r\n  ");
+                Assert(Refused(() => CatalogArchive.WriteZipBackup(wsSrc, wsSrc + ".bak.20260901.000000.zip")), "backup fail-safe: a whitespace-only catalog is refused");
+                var goodSrc = Path.Combine(fsDir, "good.json");
+                File.WriteAllText(goodSrc, CatalogOf(40));
+                var goodBak = goodSrc + ".bak.20260901.000000.zip";
+                CatalogArchive.WriteZipBackup(goodSrc, goodBak);
+                var goodSha = Hex(System.Security.Cryptography.SHA256.Create().ComputeHash(File.ReadAllBytes(goodBak)));
+                File.WriteAllText(goodSrc, CatalogOf(2));
+                bool overwrote = true;
+                try { CatalogArchive.WriteZipBackup(goodSrc, goodBak); } catch (IOException) { overwrote = false; }
+                Assert(!overwrote && Hex(System.Security.Cryptography.SHA256.Create().ComputeHash(File.ReadAllBytes(goodBak))) == goodSha,
+                    "backup fail-safe: an existing backup is never written over — the call fails and the file's bytes are unchanged");
+                var tamperBak = goodSrc + ".bak.20260902.000000.zip";
+                CatalogArchive.TamperBeforeVerifyForTest = p => { using var t = new FileStream(p, FileMode.Open, FileAccess.ReadWrite); t.SetLength(t.Length / 2); };
+                bool tamperThrew = false;
+                try { CatalogArchive.WriteZipBackup(goodSrc, tamperBak); } catch (IOException) { tamperThrew = true; } catch (InvalidDataException) { tamperThrew = true; }
+                finally { CatalogArchive.TamperBeforeVerifyForTest = null; }
+                Assert(tamperThrew && !File.Exists(tamperBak) && !File.Exists(tamperBak + ".tmp"),
+                    "backup fail-safe: a backup that does not read back exactly is never put in place (and its temp is removed)");
+
+                // Rotation: three full backups then three tiny ones (a clobbered library backed up three times). Keep 2 keeps the two
+                // newest AND the two newest at least half the largest — the tiny ones never push the full ones out.
+                var clobDir = Path.Combine(caDir, "clobber");
+                Directory.CreateDirectory(clobDir);
+                var clobLive = Path.Combine(clobDir, "mbxmoods.json");
+                File.WriteAllText(clobLive, "{}");
+                foreach (var ts in new[] { "20260101.000000", "20260102.000000", "20260103.000000" }) MakeBak(clobLive, ts, 200);
+                foreach (var ts in new[] { "20260104.000000", "20260105.000000", "20260106.000000" }) MakeBak(clobLive, ts, 0);
+                var clobDeleted = CatalogArchive.RotateBackups(clobLive, 2);
+                string[] Left(string dir) => Directory.GetFiles(dir, "*.bak.*.zip").Select(Path.GetFileName).Select(n => n!.Substring("mbxmoods.json.bak.".Length, 15)).OrderBy(s => s).ToArray();
+                Assert(clobDeleted == 2 && string.Join(",", Left(clobDir)) == "20260102.000000,20260103.000000,20260105.000000,20260106.000000",
+                    $"rotate fail-safe: tiny backups never rotate the full ones out — newest 2 plus newest 2 full kept ({clobDeleted} deleted; left {string.Join(",", Left(clobDir))})");
+                // A backup rotation cannot read is never deleted and never counted toward the quota.
+                var junkDir = Path.Combine(caDir, "junk");
+                Directory.CreateDirectory(junkDir);
+                var junkLive = Path.Combine(junkDir, "mbxmoods.json");
+                File.WriteAllText(junkLive, "{}");
+                File.WriteAllText($"{junkLive}.bak.20250101.000000.zip", "x");
+                foreach (var ts in new[] { "20260101.000000", "20260102.000000", "20260103.000000" }) MakeBak(junkLive, ts, 5);
+                var junkDeleted = CatalogArchive.RotateBackups(junkLive, 1);
+                Assert(junkDeleted == 2 && File.Exists($"{junkLive}.bak.20250101.000000.zip") && File.Exists($"{junkLive}.bak.20260103.000000.zip"),
+                    $"rotate fail-safe: an unreadable backup is kept and not counted; the readable ones rotate ({junkDeleted} deleted)");
+                // Two backups in one second: the second gets -2 and is the NEWER one (a name sort put ".zip" after "-2").
+                var secDir = Path.Combine(caDir, "second");
+                Directory.CreateDirectory(secDir);
+                var secLive = Path.Combine(secDir, "mbxmoods.json");
+                File.WriteAllText(secLive, "{}");
+                foreach (var ts in new[] { "20251231.235959", "20260101.000000" }) MakeBak(secLive, ts, 5);
+                MakeBak(secLive, "20260101.000000-2", 5);
+                CatalogArchive.RotateBackups(secLive, 1);
+                Assert(File.Exists($"{secLive}.bak.20260101.000000-2.zip") && !File.Exists($"{secLive}.bak.20260101.000000.zip"),
+                    "rotate: within one second the -2 backup is the newer and survives keep 1");
+                // The verb's backup never collides with one made the same second.
+                var uniqDir = Path.Combine(caDir, "unique");
+                Directory.CreateDirectory(uniqDir);
+                var uniqLive = Path.Combine(uniqDir, "mbxmoods.json");
+                File.WriteAllText(uniqLive, CatalogOf(4));
+                var keepWas = _keepBackups;
+                _keepBackups = 0;
+                var u1 = BackupCatalogCompressed(uniqLive);
+                var u2 = BackupCatalogCompressed(uniqLive);
+                _keepBackups = keepWas;
+                Assert(u1 != u2 && File.Exists(u1) && File.Exists(u2), $"backup: two backups in quick succession are two files ({Path.GetFileName(u1)}, {Path.GetFileName(u2)})");
+                // A restore replaces a catalog that may be the damaged one: it is kept aside as .damaged, never refused, never a .bak.
+                var dmgDir = Path.Combine(caDir, "damaged");
+                Directory.CreateDirectory(dmgDir);
+                var dmgLive = Path.Combine(dmgDir, "mbxmoods.json");
+                File.WriteAllBytes(dmgLive, new byte[2048]);
+                Assert(Refused(() => BackupCatalogCompressed(dmgLive)), "backup: a verb refuses to back up a damaged catalog");
+                var dmgKept = BackupCatalogCompressed(dmgLive, keepDamaged: true);
+                Assert(dmgKept.Contains(".damaged.") && File.Exists(dmgKept) && Directory.GetFiles(dmgDir, "*.bak.*").Length == 0,
+                    $"backup: a restore keeps the damaged catalog aside as .damaged, out of rotation ({Path.GetFileName(dmgKept)})");
+                // An import pin is trusted only if it reads back as this catalog; a damaged one is left alone and a good pin made beside it.
+                var pinDir = Path.Combine(caDir, "pin");
+                Directory.CreateDirectory(pinDir);
+                var pinLive = Path.Combine(pinDir, "mbxmoods.json");
+                File.WriteAllText(pinLive, CatalogOf(6));
+                var pinSha = new string('a', 64);
+                var badPin = $"{pinLive}.imported.{pinSha.Substring(0, 16)}.zip";
+                File.WriteAllText(badPin, "x");
+                var newPin = CatalogArchive.PinImported(pinLive, pinSha);
+                byte[] pinBack;
+                using (var ms = new MemoryStream()) { if (newPin != null && newPin != badPin) CatalogArchive.ExtractCatalogTo(newPin, ms); pinBack = ms.ToArray(); }
+                // Store backups rotate under the same count and the same rule: small ones never push the full ones out, and a file
+                // that is not a SQLite database is never deleted or counted.
+                var sbDir = Path.Combine(caDir, "storebak");
+                Directory.CreateDirectory(sbDir);
+                var sbStore = Path.Combine(sbDir, "truedat.db");
+                void FakeDb(string path, int bytes, DateTime when)
+                {
+                    var b = new byte[bytes];
+                    Encoding.ASCII.GetBytes("SQLite format 3\0").CopyTo(b, 0);
+                    File.WriteAllBytes(path, b);
+                    File.SetLastWriteTimeUtc(path, when);
+                }
+                for (int d = 1; d <= 3; d++) FakeDb($"{sbStore}.bak.2026010{d}.000000.db", 65536, new DateTime(2026, 1, d, 0, 0, 0, DateTimeKind.Utc));
+                for (int d = 4; d <= 6; d++) FakeDb($"{sbStore}.bak.2026010{d}.000000.db", 4096, new DateTime(2026, 1, d, 0, 0, 0, DateTimeKind.Utc));
+                File.WriteAllText($"{sbStore}.bak.20250101.000000.db", "x");
+                File.SetLastWriteTimeUtc($"{sbStore}.bak.20250101.000000.db", new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+                var sbDeleted = global::Truedat.Store.StoreTransfer.RotateStoreBackups(sbStore, 2);
+                var sbLeft = Directory.GetFiles(sbDir, "truedat.db.bak.*").Select(p => Path.GetFileName(p)!.Substring("truedat.db.bak.".Length, 8)).OrderBy(s => s).ToArray();
+                Assert(sbDeleted == 2 && string.Join(",", sbLeft) == "20250101,20260102,20260103,20260105,20260106",
+                    $"store rotate fail-safe: small store backups never rotate the full ones out; a non-database file is kept ({sbDeleted} deleted; left {string.Join(",", sbLeft)})");
+                Assert(newPin != null && newPin != badPin && File.ReadAllText(badPin) == "x" && pinBack.SequenceEqual(File.ReadAllBytes(pinLive)),
+                    $"pin: a damaged existing pin is not trusted; a good one is written beside it and the damaged file is left as it was ({Path.GetFileName(newPin ?? "(null)")})");
 
                 // --- streaming trackCount from a prefix window ---
                 Assert(CatalogArchive.TryReadTrackCountFromPrefix(catalogBytes, catalogBytes.Length) == 3, "trackCount: reads top-level trackCount");
@@ -21445,6 +21785,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "analysis-timing: report shows mean, maximum, and the measured population");
                 Assert(report.Contains("CPU time unavailable for 3 process attempts"),
                     "analysis-timing: unavailable CPU reads remain explicit, never samples of zero CPU");
+                // "audio sha256 (6 tasks)" beside 3,168 analysed read as six hashed tracks: a staged copy is hashed while it copies and
+                // never reaches that task (field report, 2026-11-01). The footnote rides the row, and only the row.
+                var shaStage = new AnalysisStageTiming("audio sha256", "tasks");
+                shaStage.RecordSeconds(0.004);
+                Assert(BuildAnalysisTimingReport(new[] { stage, shaStage }, 0).Contains("    audio sha256 = only tracks not hashed during their staging copy."),
+                    $"analysis-timing: the sha row says what it counts ({BuildAnalysisTimingReport(new[] { stage, shaStage }, 0).Replace(Environment.NewLine, " | ")})");
+                Assert(!report.Contains("audio sha256 ="), "analysis-timing: no sha row, no sha footnote");
             }
 
             // --- Long pole: which concurrent fan-out task each track actually waited on (2026-10-26) ---
@@ -23490,10 +23837,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(local.Count == 1 && local[0] == "  Staging:    10 local copies for non-ASCII file names (no network source)",
                     $"staging: local non-ASCII copies are not network staging and report no link rate ({string.Join(" | ", local)})");
                 var net = StagingSummaryLines(network: 10, local: 0, fallback: 0, lockRetries: 0, networkBytes: 433L * 1024 * 1024, spanSecs: 400, copySecs: 4.33);
-                Assert(net.Count == 2 && net[0] == "  Staging:    10 staged from the network (one local copy per track)" && net[1].Trim() == "433 MB pulled over the source link @ 100.0 MB/s",
+                Assert(net.Count == 2 && net[0] == "  Staging:    10 staged from the network (one local copy per track)" && net[1].Trim() == "433 MB pulled over the source link @ 100.0 MB/s while copying",
                     $"staging: sparse network copies are rated over their copy time, not the idle span between them ({string.Join(" | ", net)})");
                 var busy = StagingSummaryLines(network: 40, local: 0, fallback: 0, lockRetries: 0, networkBytes: 400L * 1024 * 1024, spanSecs: 10, copySecs: 80);
-                Assert(busy[1].Trim() == "400 MB pulled over the source link @ 40.0 MB/s", $"staging: concurrent copies share the link — rated over the span ({string.Join(" | ", busy)})");
+                // "while copying": the Throughput line rates the same bytes over the whole scan, and the two side by side read as a
+                // disagreement (field report, 2026-11-01: 37.6 vs 38.1 MB/s for one 144.9 GB).
+                Assert(busy[1].Trim() == "400 MB pulled over the source link @ 40.0 MB/s while copying",$"staging: concurrent copies share the link — rated over the span ({string.Join(" | ", busy)})");
                 var mixed = StagingSummaryLines(network: 5, local: 1, fallback: 1, lockRetries: 0, networkBytes: 50L * 1024 * 1024, spanSecs: 5, copySecs: 5);
                 Assert(mixed[0].StartsWith("  Staging:    5 staged from the network, 1 direct-fallback", StringComparison.Ordinal) && mixed[1].Trim() == "1 local copy for non-ASCII file names"
                        && mixed.Count(l => l.Contains("source link slow")) == 1,
@@ -23533,6 +23882,82 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"scan summary file: the next number after the day's highest; other days, other reports and malformed names ignored ({ScanSummaryFileName(new[] { "mbxmoods-scan-2026-10-23-1.txt", "mbxmoods-scan-2026-10-23-3.txt", "mbxmoods-scan-2026-10-22-7.txt", "mbxmoods-errors.csv", "mbxmoods-scan-2026-10-23-x.txt" }, day)})");
                 Assert(ScanSummaryFileName(new[] { "MBXMOODS-SCAN-2026-10-23-2.TXT" }, day) == "mbxmoods-scan-2026-10-23-3.txt",
                     $"scan summary file: existing names match case-insensitively ({ScanSummaryFileName(new[] { "MBXMOODS-SCAN-2026-10-23-2.TXT" }, day)})");
+                // Nothing pruned them, so every scan ever run left a file behind (operator 2026-11-06: "its never cleaned up, each one
+                // is unique... it could be tied to the number of backups kept"). Same knob as the catalog backups: --keep-backups.
+                var manySummaries = new[] {
+                    "mbxmoods-scan-2026-10-23-9.txt", "mbxmoods-scan-2026-10-23-10.txt", "mbxmoods-scan-2026-10-22-1.txt",
+                    "mbxmoods-scan-2026-10-24-1.txt", "mbxmoods-errors.csv", "mbxmoods-scan-2026-10-23-x.txt",
+                    "mbxmoods-scan-2026-10-26-1-GOOD.txt", "mbxmoods-scan-notaday-1.txt" };
+                Assert(string.Join(",", ScanSummariesToPrune(manySummaries, 2)) == "mbxmoods-scan-2026-10-22-1.txt,mbxmoods-scan-2026-10-23-9.txt",
+                    $"scan summary rotation: the oldest go first, by day then by the day's number — 9 before 10, not lexically ({string.Join(",", ScanSummariesToPrune(manySummaries, 2))})");
+                Assert(ScanSummariesToPrune(manySummaries, 4).Count == 0,
+                    $"scan summary rotation: four kept, four present, nothing to remove ({ScanSummariesToPrune(manySummaries, 4).Count})");
+                Assert(ScanSummariesToPrune(manySummaries, 0).Count == 0,
+                    $"scan summary rotation: 0 keeps everything, same as --keep-backups ({ScanSummariesToPrune(manySummaries, 0).Count})");
+                Assert(ScanSummariesToPrune(manySummaries, 1).Count == 3,
+                    $"scan summary rotation: a renamed or malformed name is never a candidate and never fills the quota ({string.Join(",", ScanSummariesToPrune(manySummaries, 1))})");
+                // Per-rate split (operator 2026-11-06: "add the per-rate split to the summary"): what resample-once saves on hi-res
+                // could not be read off a summary, because extractor time was one average over every rate.
+                Assert(RateBucket(44100, false) == "44.1 kHz" && RateBucket(48000, true) == "48 kHz, resampled" && RateBucket(96000, true) == "88.2/96 kHz, resampled"
+                    && RateBucket(88200, false) == "88.2/96 kHz, raw" && RateBucket(192000, true) == "176.4/192 kHz, resampled" && RateBucket(22050, false) == "under 44.1 kHz"
+                    && RateBucket(0, false) == "rate unknown" && RateBucket(384000, true) == "over 192 kHz, resampled" && RateBucket(64000, true) == "other hi-res, resampled",
+                    $"rate split: buckets ({RateBucket(44100, false)} | {RateBucket(48000, true)} | {RateBucket(88200, false)} | {RateBucket(22050, false)} | {RateBucket(0, false)} | {RateBucket(64000, true)})");
+                Assert(RateBucketOrder(22050) < RateBucketOrder(44100) && RateBucketOrder(44100) < RateBucketOrder(48000) && RateBucketOrder(48000) < RateBucketOrder(96000)
+                    && RateBucketOrder(96000) < RateBucketOrder(192000) && RateBucketOrder(192000) < RateBucketOrder(384000) && RateBucketOrder(384000) < RateBucketOrder(0),
+                    "rate split: rows read low rate to high, unknown last");
+                // ...and the conversion's total cost (operator 2026-11-06: "do you summarize the cost of the resampling"): every ffmpeg
+                // run counts, a failed one too — it still cost the track that time.
+                Assert(ResampleCostLine(921, 648.4) == "              cost: 10m48s of worker time, 0.70 s a conversion (921 runs)",
+                    $"resample cost: total worker time and the average per run ({ResampleCostLine(921, 648.4)})");
+                Assert(ResampleCostLine(1, 0.123) == "              cost: 0.1s of worker time, 0.12 s a conversion (1 run)",
+                    $"resample cost: one run, singular, sub-second total ({ResampleCostLine(1, 0.123)})");
+                Assert(ResampleCostLine(0, 0) == null, "resample cost: no ffmpeg run, no line");
+                // The saving, normalised by samples (operator 2026-11-06: "an easy way to normalize and measure did the downsample
+                // conversion speed up or slow down by how much" ... "its just bits"). The original never reaches the extractor, so its
+                // cost is estimated as the measured cost scaled by the sample ratio; the net counts the conversion against it.
+                var rsSaved = ResampleSavingLines(3000, 9000, 600, 3.0);
+                Assert(rsSaved.Count == 2 && rsSaved[0] == "              saved: ~1h30m net, 2.50x faster than at the source rate"
+                    && rsSaved[1] == "              (estimated from sample count: 3.00x fewer samples analysed)",
+                    $"resample saving: net time, speed ratio, and the basis ({string.Join(" | ", rsSaved)})");
+                var rsLost = ResampleSavingLines(1000, 1090, 300, 1.09);
+                Assert(rsLost.Count == 2 && rsLost[0] == "              lost: ~3m30s net, 0.84x - slower than at the source rate",
+                    $"resample saving: a conversion that costs more than it saves says so ({string.Join(" | ", rsLost)})");
+                Assert(ResampleSavingLines(0, 0, 0, 0).Count == 0, "resample saving: nothing resampled, no lines");
+                Assert(rsSaved.Concat(rsLost).All(l => l.Length <= 78), "resample saving: fits a 78-column report");
+                // The edges recommendation, split by whether a --refresh of THIS library can reach the track (field report,
+                // 2026-11-01: "146,368 tracks lack edge rows -> truedat --refresh" on a catalog far larger than the library it scanned —
+                // a refresh walks the library, so entries outside it would be recommended forever). Counted per content (a duplicate
+                // path is one description), and a hash the store lacks but the catalog never names is not counted at all.
+                var gapEntries = new (string Key, string? Sha)[] { (@"D:\a.flac", "s1"), (@"D:\b.flac", "s2"), (@"D:\c.flac", "s3"), (@"D:\b2.flac", "s2"), (@"D:\d.flac", null) };
+                var gapLacking = new HashSet<string>(new[] { "s1", "s2", "s3", "s9" }, StringComparer.OrdinalIgnoreCase);
+                var gapLibrary = new HashSet<string>(new[] { @"D:\a.flac", @"d:\B.FLAC" }, PathComparer.Instance);
+                var gap = SplitEdgeGap(gapEntries, gapLacking, gapLibrary);
+                Assert(gap.InLibrary == 2 && gap.Outside == 1,
+                    $"edge gap: in the library by content (a copy outside it does not move it out), outside = the rest the catalog names ({gap.InLibrary} in, {gap.Outside} out)");
+                var gapBoth = EdgeGapRecommendations(2, 1);
+                Assert(gapBoth.Count == 2 && gapBoth[0] == "2 tracks lack edge rows            ->  truedat --refresh  (one scan; Ctrl+C and re-run resumes)"
+                    && gapBoth[1] == "1 lack edges, not in this library  ->  a --refresh here cannot reach them",
+                    $"edge gap: the refresh line counts only what a refresh reaches; the rest is named apart ({string.Join(" | ", gapBoth)})");
+                Assert(EdgeGapRecommendations(0, 7).Count == 1 && EdgeGapRecommendations(0, 7)[0].StartsWith("7 lack edges, not in this library", StringComparison.Ordinal),
+                    $"edge gap: nothing in the library to refresh, no refresh line ({string.Join(" | ", EdgeGapRecommendations(0, 7))})");
+                Assert(EdgeGapRecommendations(0, 0).Count == 0, "edge gap: no gap, no line");
+                var oneCell = new[] { (RateBucketOrder(44100), "44.1 kHz", 10L, 25.0, 600.0, 0.0) };
+                Assert(RateSplitLines(oneCell).Count == 0, $"rate split: one rate is nothing to compare, so no block ({RateSplitLines(oneCell).Count} lines)");
+                var cells = new[] {
+                    // lengths differ by row (2 min vs 1.5 min a track) so per-track and per-minute cannot agree by accident
+                    (RateBucketOrder(96000), "88.2/96 kHz, resampled", 450L, 2322.0, 54000.0, 360.0),
+                    (RateBucketOrder(44100), "44.1 kHz", 2247L, 8594.775, 202230.0, 0.0),
+                    (RateBucketOrder(0), "rate unknown", 3L, 9.0, 0.0, 0.0) };
+                var split = RateSplitLines(cells);
+                var splitText = string.Join(" | ", split);
+                Assert(split.Count == 4 && split[0] == "  By rate:    extractor CPU per minute of audio (analyzed tracks)"
+                    && split[1] == "    44.1 kHz                    2,247   2.55 s/min"
+                    && split[2] == "    88.2/96 kHz, resampled        450   2.58 s/min  + 0.80 s resample/track"
+                    && split[3] == "    rate unknown                    3   n/a (no decoded length)",
+                    $"rate split: header, rows by rate, CPU per audio-minute, resample cost only where it ran ({splitText})");
+                Assert(split.All(l => l.Length <= 78), $"rate split: fits a 78-column report ({split.Max(l => l.Length)})");
+                Assert(string.Join(",", ScanSummariesToPrune(new[] { "MBXMOODS-SCAN-2026-10-23-1.TXT", "mbxmoods-scan-2026-10-23-2.txt" }, 1)) == "MBXMOODS-SCAN-2026-10-23-1.TXT",
+                    $"scan summary rotation: an upper-case name is a candidate, and comes back spelled as it sits on disk ({string.Join(",", ScanSummariesToPrune(new[] { "MBXMOODS-SCAN-2026-10-23-1.TXT", "mbxmoods-scan-2026-10-23-2.txt" }, 1))})");
                 // ...and the worker count, every run: it rode the "+ config:" line only when set, so a default run showed none ("i thought we did").
                 Assert(WorkersSummaryLine(20, new[] { "truedat.exe", "--refresh" }, new string[0]) == "Workers:    20 (default: cores-2)",
                     $"workers: the default count says it is the default ({WorkersSummaryLine(20, new[] { "truedat.exe", "--refresh" }, new string[0])})");
@@ -26910,14 +27335,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // can measure it as inconsequential the faster speed is a win"). The authenticity checks and the
             // identity hash still read the ORIGINAL file, which is why this sits here and not in staging.
             string? resampled = null;
-            if (TryReadRateAndChannels(audioPath, out int srcRate, out int srcChannels)
-                && ShouldPreResample(srcRate, srcChannels, _ffmpegPath.Value != null))
+            _tsResampleSecs = 0;
+            bool rateKnown = TryReadRateAndChannels(audioPath, out int srcRate, out int srcChannels);
+            if (rateKnown && ShouldPreResample(srcRate, srcChannels, _ffmpegPath.Value != null))
                 resampled = ResampleTo44k(audioPath, srcRate, shown);
             try
             {
+            _tsNativeCpuSecs = 0;
             var result = resampled != null
                 ? AnalyzeWithEssentiaCore(essentiaExe, resampled, new FileInfo(resampled).Length, ct)
                 : AnalyzeWithEssentiaCore(essentiaExe, audioPath, fileSizeBytes, ct);
+            if (result.Features != null && !double.IsNaN(_tsNativeCpuSecs))   // NaN: the CPU read failed, a 0 would pull the row down
+                RecordRateSplit(rateKnown ? srcRate : 0, resampled != null, _tsNativeCpuSecs, result.Features.AnalyzedLengthSec, _tsResampleSecs);
             if (resampled != null && result.Features != null)
                 global::Truedat.Store.ScanSink.Rekey(resampled, audioPath);   // the stash follows the source the scan records
 
@@ -27012,6 +27441,59 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Count of files converted once before analysis this run (the end-of-scan summary line).</summary>
         static int _preResampledCount;
 
+        // The per-rate split ("By rate:" in the summary). The extractor's CPU and the conversion's time are read on the worker
+        // thread that made them — AnalyzeWithEssentia and the calls under it are synchronous on one worker — and recorded once per
+        // track against the SOURCE rate, for the track's first extractor run only: a downmix or transcode retry would put a
+        // different file's cost in the row.
+        [ThreadStatic] static double _tsNativeCpuSecs;
+        [ThreadStatic] static double _tsResampleSecs;
+        static readonly object _rateSplitGate = new object();
+        static readonly Dictionary<string, (int Order, long Count, double CpuSecs, double AudioSecs, double ResampleSecs)> _rateSplit =
+            new Dictionary<string, (int, long, double, double, double)>(StringComparer.Ordinal);
+
+        static void RecordRateSplit(int sourceRate, bool resampled, double cpuSecs, double? audioSecs, double resampleSecs)
+        {
+            var label = RateBucket(sourceRate, resampled);
+            lock (_rateSplitGate)
+            {
+                _rateSplit.TryGetValue(label, out var c);
+                _rateSplit[label] = (RateBucketOrder(sourceRate), c.Count + 1, c.CpuSecs + cpuSecs,
+                    c.AudioSecs + (audioSecs.HasValue && audioSecs.Value > 0 ? audioSecs.Value : 0), c.ResampleSecs + resampleSecs);
+                if (resampled && sourceRate > 44100)
+                {
+                    double scale = sourceRate / 44100.0;
+                    _rsActualCpu += cpuSecs;
+                    _rsEstNativeCpu += cpuSecs * scale;
+                    _rsConvert += resampleSecs;
+                    if (audioSecs.HasValue && audioSecs.Value > 0) { _rsSourceSamples += audioSecs.Value * sourceRate; _rsAnalysedSamples += audioSecs.Value * 44100.0; }
+                }
+            }
+        }
+
+        // Resampled tracks only, under _rateSplitGate: the measured extractor CPU, its estimate at the source rate, the conversions,
+        // and the samples before and after (the ratio the estimate rests on).
+        static double _rsActualCpu, _rsEstNativeCpu, _rsConvert, _rsSourceSamples, _rsAnalysedSamples;
+
+        static List<string> ResampleSummaryLines()
+        {
+            var lines = new List<string>();
+            var rs = _stageResample.Snapshot();
+            var cost = ResampleCostLine(rs.Count, rs.TotalSeconds);
+            if (cost != null) lines.Add(cost);
+            lock (_rateSplitGate)
+            {
+                double ratio = _rsAnalysedSamples > 0 ? _rsSourceSamples / _rsAnalysedSamples : (_rsActualCpu > 0 ? _rsEstNativeCpu / _rsActualCpu : 0);
+                lines.AddRange(ResampleSavingLines(_rsActualCpu, _rsEstNativeCpu, _rsConvert, ratio));
+            }
+            return lines;
+        }
+
+        static List<string> RateSplitSummaryLines()
+        {
+            lock (_rateSplitGate)
+                return RateSplitLines(_rateSplit.Select(kv => (kv.Value.Order, kv.Key, kv.Value.Count, kv.Value.CpuSecs, kv.Value.AudioSecs, kv.Value.ResampleSecs)).ToList());
+        }
+
         /// <summary>One ffmpeg pass: source -> 44.1 kHz, same channels, 32-bit float WAV in the stage dir (16-bit would
         /// itself move the low-level features). soxr, not ffmpeg's default resampler: the default flipped a weak tempo
         /// 3:2 in the spike and soxr did not. Null on any failure, and the caller analyses the original.</summary>
@@ -27069,7 +27551,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 // Every run ffmpeg actually made, success or failure: a failed or timed-out resample still cost the track that time,
                 // inside the Essentia task (AnalyzeWithEssentia calls this before the extractor starts).
-                if (ran) _stageResample.RecordTicks(sw.ElapsedTicks);
+                if (ran) { _stageResample.RecordTicks(sw.ElapsedTicks); _tsResampleSecs = (double)sw.ElapsedTicks / Stopwatch.Frequency; }
             }
             return null;
         }
@@ -27210,9 +27692,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 try
                 {
                     proc.Refresh();   // discard the watchdog's cached process information before the final CPU read
-                    _stageNativeCpu.RecordSeconds(proc.TotalProcessorTime.TotalSeconds);
+                    var nativeCpu = proc.TotalProcessorTime.TotalSeconds;
+                    _stageNativeCpu.RecordSeconds(nativeCpu);
+                    _tsNativeCpuSecs += nativeCpu;   // the per-rate split reads this on the same worker
                 }
-                catch { Interlocked.Increment(ref _nativeCpuUnavailable); } // diagnostics must never fail a track
+                catch { Interlocked.Increment(ref _nativeCpuUnavailable); _tsNativeCpuSecs = double.NaN; } // diagnostics must never fail a track; NaN keeps this track out of the per-rate split
 
                 // The process has exited, so BOTH pipes are at EOF and these reads can only be
                 // waiting on the thread pool — at 32 workers that wait reached the old 5 s cap in
