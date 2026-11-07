@@ -71,3 +71,7 @@ essentia-build/output-x64/
 # so this cannot grow back into the repo by default.
 essentia-build/spike-*/
 essentia-build/spike-*.zip
+
+# Release packages and store run records stay out of the repo.
+dist/*.bin
+/store-result.json
