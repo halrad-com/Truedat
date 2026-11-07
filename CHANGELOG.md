@@ -8,6 +8,18 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 
 
+## [0.5.5.4-DV1] — 2026-11-07
+
+### Added
+
+- Scan summary shows the resample cost, its estimated saving, and extractor time by sample rate.
+
+### Changed
+
+- The backup setting (`keep-backups`) also limits the number of saved scan summaries kept, and defaults to 2.
+- Backups are never made from a damaged catalog or written over, and small backups no longer rotate out the full ones.
+- A scan that loses its library says so in the saved summary.
+
 ## [0.5.5.3-EV4.3] — 2026-10-30
 
 ### Added
