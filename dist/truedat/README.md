@@ -73,10 +73,15 @@ Walks an existing `mbxmoods.json` and either reports drift (read-only) or repair
 ### Backups & snapshots (`--snapshot`, `--restore`, `--keep-backups`)
 
 The mutating modes (`--fixup`, `--remap`, `--merge-moods`, `--migrate`) drop a timestamped
-backup before they rewrite the catalog. Those backups are now **compressed ZIPs**
-(`mbxmoods.json.bak.<ts>.zip`) — `mbxmoods.json` is repetitive text and shrinks ~8–10×, so
-keeping several is cheap — and they **rotate**: `--keep-backups N` keeps the newest N
-(default 5, `0` keeps everything; rotation never silently truncates).
+backup before they rewrite the catalog. Those backups are **compressed ZIPs**
+(`mbxmoods.json.bak.<ts>.zip`), and they **rotate**: `--keep-backups N` keeps the newest N
+(default 2, `0` keeps everything; rotation never silently truncates). A backup is never
+written over, is read back and checked before it counts, and is never made from a damaged
+(empty or truncated) catalog — the verb stops instead, with nothing changed. A run of small
+backups never rotates the full ones out: rotation also keeps the newest N that are at least
+half the size of the largest. `--restore` keeps a damaged catalog it replaces as
+`mbxmoods.json.damaged.<ts>.zip`, outside the rotation. The same count keeps the saved scan
+summaries (`mbxmoods-scan-<date>-<n>.txt`).
 
 `--snapshot [path]` is a deliberate, read-only capture: it bundles the current catalog, a
 manifest (track count + content SHA-256 for verification), and the `mbxmoods-exclude.json`
@@ -450,8 +455,8 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           fall back to the current directory.
   --keep-backups N        How many timestamped catalog backups to keep after --fixup / --remap
                           / --merge-moods / --migrate (rotation, never truncation; 0 = keep
-                          all; default 5). Backups are compressed .zip — mbxmoods.json is
-                          repetitive text and shrinks ~8-10x, so keeping several costs little.
+                          all; default 2). Backups are compressed .zip. Also how many saved
+                          scan summaries are kept.
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
