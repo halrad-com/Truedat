@@ -642,8 +642,8 @@ namespace Truedat
                 + rows.ToString()
                 + "    Rows overlap; retries add attempts. Do not sum these averages." + Environment.NewLine
                 + "    after Essentia = remaining companion work / worker wake-up." + Environment.NewLine
-                // A staged copy is hashed while it copies and never reaches the sha task, so "(6 tasks)" beside thousands analysed
-                // read as six hashed tracks (field report, 2026-11-01).
+                // A staged copy is hashed while it copies and never reaches the sha task, so a small task count beside thousands
+                // analysed read as only that many hashed tracks.
                 + (shaRow ? "    audio sha256 = only tracks not hashed during their staging copy." + Environment.NewLine : "");
         }
 
@@ -6533,7 +6533,7 @@ namespace Truedat
                                     cts.Cancel();
                                 }
                                 // Its own row: it is not a failure (nothing counts it as one, nothing ledgers it), and under the
-                                // "failed" default it inflated that row — 14 "failed" beside a headline of 6 (field report, 2026-11-01).
+                                // "failed" default it inflated that row past the headline Failed count.
                                 trackClass = "source lost";
                                 return;
                             }
@@ -7071,7 +7071,7 @@ namespace Truedat
             // Operator 2026-10-23: the summary from here to the Output lines is SAVED beside the catalog (config `scan-summary`, default
             // true) — teed, so the file is exactly what the console shows. A failure to open it costs a note, never the summary.
             // Started HERE, above the outcome banners, not below them: below, a stopped or source-lost run's saved summary began at
-            // "Command:" and read as a completed scan — the operator had to remember the network had dropped (field report, 2026-11-01).
+            // "Command:" and read as a completed scan.
             TeeWriter? summaryTee = null; string? summaryFile = null; var summaryPrevOut = Console.Out;
             if (!ConfigSaysOff("scan-summary"))
             {
@@ -12188,9 +12188,8 @@ namespace Truedat
 
         /// <summary>The conversions' total cost, under the "Resampled:" line (operator 2026-11-06: "do you summarize the cost of the
         /// resampling"). Every ffmpeg run counts — a failed one still cost its track that time. Null when none ran.</summary>
-        /// <summary>The store's edge gap split by whether a --refresh of the scanned library can reach it (field report, 2026-11-01:
-        /// "146,368 tracks lack edge rows -> truedat --refresh" on a catalog far larger than its library — a refresh walks the
-        /// library, so a gap outside it would be recommended forever). Per CONTENT, like the store counts it: a hash is in the
+        /// <summary>The store's edge gap split by whether a --refresh of the scanned library can reach it: a refresh walks the
+        /// library, so a gap in catalog entries outside it would be recommended forever. Per CONTENT, like the store counts it: a hash is in the
         /// library when any catalog path holding it is, so a duplicate outside does not move it out. A hash the store lacks but the
         /// catalog never names is not counted.</summary>
         internal static (int InLibrary, int Outside) SplitEdgeGap(IEnumerable<(string Key, string? Sha)> entries, ISet<string> lacking, ISet<string> libraryKeys)
@@ -21785,8 +21784,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "analysis-timing: report shows mean, maximum, and the measured population");
                 Assert(report.Contains("CPU time unavailable for 3 process attempts"),
                     "analysis-timing: unavailable CPU reads remain explicit, never samples of zero CPU");
-                // "audio sha256 (6 tasks)" beside 3,168 analysed read as six hashed tracks: a staged copy is hashed while it copies and
-                // never reaches that task (field report, 2026-11-01). The footnote rides the row, and only the row.
+                // A small "audio sha256" task count beside thousands analysed read as only that many hashed tracks: a staged copy is
+                // hashed while it copies and never reaches that task. The footnote rides the row, and only the row.
                 var shaStage = new AnalysisStageTiming("audio sha256", "tasks");
                 shaStage.RecordSeconds(0.004);
                 Assert(BuildAnalysisTimingReport(new[] { stage, shaStage }, 0).Contains("    audio sha256 = only tracks not hashed during their staging copy."),
@@ -23841,7 +23840,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"staging: sparse network copies are rated over their copy time, not the idle span between them ({string.Join(" | ", net)})");
                 var busy = StagingSummaryLines(network: 40, local: 0, fallback: 0, lockRetries: 0, networkBytes: 400L * 1024 * 1024, spanSecs: 10, copySecs: 80);
                 // "while copying": the Throughput line rates the same bytes over the whole scan, and the two side by side read as a
-                // disagreement (field report, 2026-11-01: 37.6 vs 38.1 MB/s for one 144.9 GB).
+                // disagreement.
                 Assert(busy[1].Trim() == "400 MB pulled over the source link @ 40.0 MB/s while copying",$"staging: concurrent copies share the link — rated over the span ({string.Join(" | ", busy)})");
                 var mixed = StagingSummaryLines(network: 5, local: 1, fallback: 1, lockRetries: 0, networkBytes: 50L * 1024 * 1024, spanSecs: 5, copySecs: 5);
                 Assert(mixed[0].StartsWith("  Staging:    5 staged from the network, 1 direct-fallback", StringComparison.Ordinal) && mixed[1].Trim() == "1 local copy for non-ASCII file names"
@@ -23907,8 +23906,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     "rate split: rows read low rate to high, unknown last");
                 // ...and the conversion's total cost (operator 2026-11-06: "do you summarize the cost of the resampling"): every ffmpeg
                 // run counts, a failed one too — it still cost the track that time.
-                Assert(ResampleCostLine(921, 648.4) == "              cost: 10m48s of worker time, 0.70 s a conversion (921 runs)",
-                    $"resample cost: total worker time and the average per run ({ResampleCostLine(921, 648.4)})");
+                Assert(ResampleCostLine(900, 630.0) == "              cost: 10m30s of worker time, 0.70 s a conversion (900 runs)",
+                    $"resample cost: total worker time and the average per run ({ResampleCostLine(900, 630.0)})");
                 Assert(ResampleCostLine(1, 0.123) == "              cost: 0.1s of worker time, 0.12 s a conversion (1 run)",
                     $"resample cost: one run, singular, sub-second total ({ResampleCostLine(1, 0.123)})");
                 Assert(ResampleCostLine(0, 0) == null, "resample cost: no ffmpeg run, no line");
@@ -23924,9 +23923,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     $"resample saving: a conversion that costs more than it saves says so ({string.Join(" | ", rsLost)})");
                 Assert(ResampleSavingLines(0, 0, 0, 0).Count == 0, "resample saving: nothing resampled, no lines");
                 Assert(rsSaved.Concat(rsLost).All(l => l.Length <= 78), "resample saving: fits a 78-column report");
-                // The edges recommendation, split by whether a --refresh of THIS library can reach the track (field report,
-                // 2026-11-01: "146,368 tracks lack edge rows -> truedat --refresh" on a catalog far larger than the library it scanned —
-                // a refresh walks the library, so entries outside it would be recommended forever). Counted per content (a duplicate
+                // The edges recommendation, split by whether a --refresh of THIS library can reach the track: a refresh walks the
+                // library, so entries outside it would be recommended forever. Counted per content (a duplicate
                 // path is one description), and a hash the store lacks but the catalog never names is not counted at all.
                 var gapEntries = new (string Key, string? Sha)[] { (@"D:\a.flac", "s1"), (@"D:\b.flac", "s2"), (@"D:\c.flac", "s3"), (@"D:\b2.flac", "s2"), (@"D:\d.flac", null) };
                 var gapLacking = new HashSet<string>(new[] { "s1", "s2", "s3", "s9" }, StringComparer.OrdinalIgnoreCase);

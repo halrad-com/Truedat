@@ -349,7 +349,7 @@ namespace Truedat.Store
                     $"{label}: only the writer's copies update and its retired path disappears, including beneath the foreign nested root");
                 // An entry read back from the store carries its path, as one parsed from the catalog does (the parser sets it from
                 // the key): without it a scan the store fed listed unvisited tracks with a blank path, and anything keyed on the
-                // path — the wave-missing classifier, the edges split — misread them (field check, 2026-11-06). Never written out.
+                // path — the wave-missing classifier, the edges split — misread them. Never written out.
                 assert(own.All(kv => kv.Value.Features.FilePath == kv.Key),
                     $"{label}: a store-read entry's FilePath is its catalog key ({string.Join(", ", own.Select(kv => (kv.Value.Features.FilePath ?? "(null)") + " vs " + kv.Key))})");
                 var other = os.Dal.ReadEntries(new[] { foreignRoot, foreignNested }).ToList();
