@@ -1032,6 +1032,10 @@ namespace Truedat
             Console.WriteLine("                      Per-entry equality of store vs catalog at the store's precision; exit 1 on any difference.");
             Console.WriteLine("  --store-info        Measurements (bytes/track, speed, coverage, conflicts, edges) and state");
             Console.WriteLine("                      (generation, whether the published files are behind it, the command that closes it).");
+            Console.WriteLine("  --store-summary     Read-only. A short block you can paste in public: how often the three key profiles");
+            Console.WriteLine("                      agree per region, how the start/whole/end keys compare, whether the edge key or the");
+            Console.WriteLine("                      whole-track key better predicts the chroma at a join, and how this library's raw");
+            Console.WriteLine("                      measurements sit against the range the mood model was fitted on. Names no path or track.");
             Console.WriteLine("  --store-vacuum [--page-size N]");
             Console.WriteLine("                      Repack the store; --page-size sets the page size (default 16384).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
@@ -1112,7 +1116,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
-            "store-export", "export-root", "store-roundtrip", "store-info", "store-vacuum", "page-size", "store-dir",
+            "store-export", "export-root", "store-roundtrip", "store-info", "store-summary", "store-vacuum", "page-size", "store-dir",
             // v2 S2: the edges producer rides on a scan; opt-in, store-only output. --edges-export writes the companion file; --budget caps a library scan.
             // --no-store / --no-edges are the one-run overrides of the config keys `store` / `edges`.
             "edges", "budget", "edges-export", "no-store", "no-edges",
@@ -2721,6 +2725,7 @@ namespace Truedat
             string? storeExportRoot = null;      // --export-root <path>: which root to export when the store has several
             string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
             bool storeInfoMode = false;           // --store-info: measurements (bytes/track, RTF, coverage, dupes, key moves)
+            bool storeSummaryMode = false;        // --store-summary: read-only, paste-sized — key agreement, edges at a join, feature range
             bool storeVacuumMode = false;         // --store-vacuum: repack the store (page size tuning; 4 KB pages held one ~2 KB row each)
             string? storePageSizeText = null;     // --page-size N: page size for --store-vacuum (default SqliteDb.DefaultPageSize)
             // v2 S2 (C7): the companion export; --budget caps the library scan.
@@ -2888,6 +2893,7 @@ namespace Truedat
                 else if (canonical == "export-root" && i + 1 < args.Length) storeExportRoot = args[++i];
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
                 else if (canonical == "store-info") storeInfoMode = true;
+                else if (canonical == "store-summary") storeSummaryMode = true;
                 else if (canonical == "store-vacuum") storeVacuumMode = true;
                 else if (canonical == "budget" && i + 1 < args.Length) workBudgetText = args[++i];
                 else if (canonical == "edges-export") { edgesExportMode = true; edgesExportPath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : null; }
@@ -3137,7 +3143,7 @@ namespace Truedat
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
-            bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeVacuumMode || edgesExportMode;
+            bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeSummaryMode || storeVacuumMode || edgesExportMode;
             // Store and edges are ON by default (operator 2026-10-18), but this block only RESOLVES a store the command line or the
             // config file asked for, or adopts one that exists. Making one when there is none happens at each scan's entry
             // (EnsureDefaultStore), so no read or maintenance verb that passes through here can create a store.
@@ -3645,6 +3651,18 @@ namespace Truedat
             if (storeInfoMode)
             {
                 Environment.ExitCode = global::Truedat.Store.StoreInfoCommand.Run(storePath, auditLog, _storeCatalogPath);
+                return;
+            }
+            if (storeSummaryMode)
+            {
+                if (storePath == null)
+                {
+                    Console.Error.WriteLine("Error: --store-summary reads a store, and this library has none.");
+                    Console.Error.WriteLine("Hint: name one with --store <path>, or seed one from an existing catalog with truedat --store-import.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                Environment.ExitCode = global::Truedat.Store.StoreSummaryCommand.Run(storePath);
                 return;
             }
             if (storeVacuumMode)
@@ -16898,6 +16916,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.GenerationSelfTest.Run(Assert);    // T07 generation per committed visible mutation (architect-2, keeper 099)
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
             global::Truedat.Store.StoreTransferSelfTest.Run(Assert); // T09 snapshot/restore, T10 store merge source, T12 state (architect-2)
+            global::Truedat.Store.StoreSummarySelfTest.Run(Assert);  // --store-summary: the hub's two mirrored rules + this report's arithmetic
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry

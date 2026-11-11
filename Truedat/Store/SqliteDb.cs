@@ -24,6 +24,11 @@ namespace Truedat.Store
 
         static string Key(string path) { try { return System.IO.Path.GetFullPath(path); } catch { return path; } }
 
+        /// <summary>Set for a <see cref="OpenReadOnly"/> connection. A read-only connection cannot checkpoint — the
+        /// attempt is a write — so <see cref="Dispose"/> must not try, and must not report the failure as a reader
+        /// holding the store: there is nothing of ours to flush.</summary>
+        bool _readOnly;
+
         SqliteDb(IntPtr db, string path)
         {
             _db = db; _path = path;
@@ -64,6 +69,39 @@ namespace Truedat.Store
                     StoreLog.Warn($"{path}: WAL journal mode was refused; running with journal_mode={mode} (slower, still safe)");
                 db.Exec("PRAGMA foreign_keys=ON;");
                 StoreLog.Debug($"opened {path} (create={create}, wal, fk on" + (empty ? $", new file at page_size {pageSize ?? DefaultPageSize}" : "") + ")");
+                return db;
+            }
+            catch { db.Dispose(); throw; }
+        }
+
+        /// <summary>A connection that cannot change the database, for read-only reports (<c>--store-summary</c>).
+        /// Opened SQLITE_OPEN_READONLY with <c>query_only</c> on, so a bug in a report cannot alter a user's library:
+        /// the guarantee is the connection's, not the caller's discipline. None of <see cref="Open"/>'s setup pragmas
+        /// run — page size, WAL and foreign keys are all properties of a file being written.
+        ///
+        /// <para>What that does NOT mean is "touches nothing on disk". Opening a database whose header says WAL makes
+        /// SQLite create the usual <c>-shm</c> (and an empty <c>-wal</c>) beside it if they are absent, because the WAL
+        /// index is how a reader finds the committed pages; every reader does this, the hub included, and the empty
+        /// <c>-wal</c> is harmless. The database file itself is byte-identical across such a run — measured.</para>
+        ///
+        /// <para>Where the directory is not writable and no <c>-shm</c> exists, the read fails outright (SQLite answers
+        /// SQLITE_READONLY_CANTINIT, because recovering a WAL would be a write). That is reported as itself rather than
+        /// retried read-write — the caller tells the user to run it when nothing holds the store.</para></summary>
+        internal static SqliteDb OpenReadOnly(string path)
+        {
+            int rc = SqliteNative.sqlite3_open_v2(SqliteNative.Z(path), out var handle, SqliteNative.SQLITE_OPEN_READONLY, IntPtr.Zero);
+            if (rc != SqliteNative.SQLITE_OK)
+            {
+                var msg = handle != IntPtr.Zero ? SqliteNative.Utf8(SqliteNative.sqlite3_errmsg(handle)) : null;
+                if (handle != IntPtr.Zero) SqliteNative.sqlite3_close_v2(handle);
+                throw new SqliteException(rc, $"cannot open {path} read-only: {msg ?? ("sqlite rc " + rc)}");
+            }
+            var db = new SqliteDb(handle, path) { _readOnly = true };
+            try
+            {
+                SqliteNative.sqlite3_busy_timeout(handle, 5000);
+                db.Exec("PRAGMA query_only=ON;");
+                StoreLog.Debug($"opened {path} read-only (query_only)");
                 return db;
             }
             catch { db.Dispose(); throw; }
@@ -143,6 +181,14 @@ namespace Truedat.Store
                 if (others > 0) s_open[Key(_path)] = others; else s_open.Remove(Key(_path));
             }
             bool complete = false, reader = false;
+            if (_readOnly)
+            {
+                // Nothing of ours to flush, and the checkpoint itself would be a write this connection cannot make.
+                int rcRo = SqliteNative.sqlite3_close_v2(_db);
+                if (rcRo != SqliteNative.SQLITE_OK) StoreLog.Warn($"close of {_path} returned rc {rcRo} (unfinalized statements?)");
+                _db = IntPtr.Zero;
+                return;
+            }
             try
             {
                 using var st = Prepare("PRAGMA wal_checkpoint(TRUNCATE);");

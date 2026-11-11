@@ -12,7 +12,7 @@ namespace Truedat.Store
         internal const string Lib = "winsqlite3.dll";
 
         internal const int SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101;
-        internal const int SQLITE_OPEN_READWRITE = 0x2, SQLITE_OPEN_CREATE = 0x4;
+        internal const int SQLITE_OPEN_READONLY = 0x1, SQLITE_OPEN_READWRITE = 0x2, SQLITE_OPEN_CREATE = 0x4;
         internal const int SQLITE_INTEGER = 1, SQLITE_FLOAT = 2, SQLITE_TEXT = 3, SQLITE_BLOB = 4, SQLITE_NULL = 5;
         internal static readonly IntPtr SQLITE_TRANSIENT = new IntPtr(-1);
 

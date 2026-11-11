@@ -1,0 +1,590 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+
+namespace Truedat.Store
+{
+    /// <summary>One track as the summary needs it: the whole-track key and its votes, the two edge windows' keys, and
+    /// the three chroma vectors (already unit-scaled, so a distance is one dot product).</summary>
+    internal sealed class SummaryTrack
+    {
+        public string? WholeCode;                         // Camelot from the FLAT key/mode — what the hub acts on
+        public string? HeadCode, TailCode;                // the edge rows' own codes (EDMA, see EdgeKey.Vote)
+        public int FlatAgree, FlatPresent;                // votes agreeing with the flat pair (the hub's count)
+        public int EdmaAgree, EdmaPresent;                // votes agreeing with the EDMA vote (equal terms with an edge)
+        public int HeadAgree, HeadPresent, TailAgree, TailPresent;
+        public string Provenance = "missing";             // which rung supplied the flat pair
+        public double[]? W12, H36, T36;                   // whole-track hpcp12, head window HPCP36, tail window HPCP36
+    }
+
+    /// <summary>Read-only summary of a truedat store, short enough to paste into a forum post
+    /// (<c>--store-summary</c>). Four questions, in the order they inform a decision:
+    ///
+    /// <list type="number">
+    /// <item>how often the three key profiles agree, per region, and which rung supplied the whole-track key;</item>
+    /// <item>how often the start, whole and end keys agree with each other under the hub's compatibility rule;</item>
+    /// <item>whether the edge key or the whole-track key better predicts the chroma actually present at a join;</item>
+    /// <item>how this library's raw feature spread sits against the range the shipped mood model was fitted on.</item>
+    /// </list>
+    ///
+    /// <para>It opens the store through <see cref="SqliteDb.OpenReadOnly"/>, so whatever it does it cannot change a
+    /// byte of the database (proven by hashing one either side of a run); opening a WAL store still creates the
+    /// <c>-shm</c> sidecar every reader needs, which is not a change to the store. It prints no path, host name or
+    /// track name INSIDE the block it tells the user to copy: the whole point is that the output can be pasted in
+    /// public. Anything it cannot compute it names as not computed rather than printing a zero.</para></summary>
+    internal static class StoreSummaryCommand
+    {
+        /// <summary>Ordered pairs sampled for the join comparison. 200k is well inside a second over pre-unit-scaled
+        /// vectors and makes the third decimal of a separation figure stable across runs.</summary>
+        internal const int PairSamples = 200000;
+
+        /// <summary>A fixed seed, so two people posting the same store post the same numbers and a difference between
+        /// two posts is a difference between two libraries.</summary>
+        internal const int Seed = 20261110;
+
+        internal sealed class Feat
+        {
+            public readonly string Name; public readonly double Mean, Std;
+            public Feat(string name, double mean, double std) { Name = name; Mean = mean; Std = std; }
+        }
+
+        /// <summary>The fitted scale of the shipped mood model's served head — its own statement of the range it was
+        /// trained against, which is the reference part 4 compares a library to. Copied from
+        /// <c>MBXH/Core/Resources/mood-model.json</c> <c>scaler.mean</c> / <c>scaler.std</c> and tagged with that
+        /// model's version, because the file is EMBEDDED in mb_MBXHub.dll and a user's box has no loose copy to read.
+        /// A refit on the hub side moves these numbers; <see cref="ModelTag"/> is what makes that visible rather than
+        /// silent, and an override file beside the hub's data wins when one exists.
+        ///
+        /// <para>Generated from the model, never typed: see docs/plans/2026-11-10-store-summary-script-plan.md.</para></summary>
+        internal const string ModelTag = "mood-model v3, trained 2026-10-21";
+
+        internal static readonly Feat[] ModelScale =
+        {
+            new Feat("spectralCentroid", 1349.6592695881102, 489.4554968998788),
+            new Feat("spectralFlux", 0.07289093431618528, 0.018938641092391063),
+            new Feat("spectralFlatness", 0.0, 1.0),
+            new Feat("danceability", 1.1333183569936944, 0.18946539921640737),
+            new Feat("dissonance", 0.4526261249772268, 0.02631216938391245),
+            new Feat("pitchSalience", 0.5430618874111857, 0.05280757557362471),
+            new Feat("chordsChangesRate", 0.06411937161035258, 0.026556377729223757),
+            new Feat("spectralSkewness", 1.9050803957565543, 0.8576058446086032),
+            new Feat("spectralEntropy", 7.299587929705494, 0.4981125591184689),
+            new Feat("spectralComplexity", 16.72171910254056, 6.669273500561508),
+            new Feat("hpcpCrest", 14.039764704233638, 2.077187753013806),
+            new Feat("hpcpEntropy", 1.9515971537480306, 0.2909574997562452),
+            new Feat("hfc", 20.18034250318821, 13.641659240685518),
+            new Feat("beatsLoudness", 0.03764676205557998, 0.020040125494239322),
+            new Feat("chordsStrength", 0.5206294799388985, 0.041091182942454306),
+            new Feat("bpm", 124.4045671763093, 25.072797714203887),
+            new Feat("loudness", -13.709401039842051, 4.114130265217799),
+            new Feat("onsetRate", 3.4222484129097333, 0.9167083216378258),
+            new Feat("zeroCrossingRate", 0.06180719389828691, 0.02459803498939629),
+            new Feat("spectralRms", 0.004402936123996226, 0.0009933132882444988),
+            new Feat("dynamicRange", 6.653648415712528, 3.903491636708428),
+        };
+
+        /// <summary>A feature whose fitted scale is degenerate carries no reference to compare against: with mean 0 and
+        /// std 1 the "sigma" of a library's value is just the value. Named so the output can say which and why rather
+        /// than print a column of nonsense. (spectralFlatness, mood-model v3 — reported to the hub lane 2026-11-10.)</summary>
+        internal static bool HasUsableScale(Feat f) => f.Std > 0 && !(f.Mean == 0.0 && f.Std == 1.0);
+
+        internal static int Run(string storePath)
+        {
+            if (!File.Exists(storePath))
+            {
+                // The usual case for a reader: the store is off by default, so this library simply has none yet. The
+                // resolver has already GUESSED a location by then, so this branch — not the "storePath == null" one —
+                // is where a user without a store actually lands, and it is where the remedy has to be.
+                Console.Error.WriteLine($"Error: no store at {storePath}");
+                Console.Error.WriteLine("  This library has no store yet. Seed one from the existing catalog with");
+                Console.Error.WriteLine("  truedat --store-import, then run a scan with --store --edges to fold the");
+                Console.Error.WriteLine("  edge windows this summary reports on. Name a different one with --store <path>.");
+                return 1;
+            }
+            // A WAL store with no shared-memory file cannot be read by a read-only connection at all, because
+            // recovering the WAL would be a write. Say that, with the remedy, rather than opening read-write.
+            SqliteDb db;
+            try { db = SqliteDb.OpenReadOnly(storePath); }
+            catch (SqliteException ex)
+            {
+                Console.Error.WriteLine("Error: the store could not be opened read-only.");
+                Console.Error.WriteLine("  " + ex.Message);
+                Console.Error.WriteLine("  If a -wal file sits beside it, run this when nothing else holds the store, or after a truedat run has closed it.");
+                return 1;
+            }
+
+            using (db)
+            {
+                var lines = new List<string>();
+                try { Build(db, lines); }
+                catch (SqliteException ex)
+                {
+                    // One sentence, and the remedy that matches the actual failure: a locked store and a store this
+                    // report cannot read are different problems and used to print the same (wrong) hint.
+                    Console.Error.WriteLine("Error: the store could not be read.");
+                    Console.Error.WriteLine("  " + FirstLine(ex.Message));
+                    if (ex.ResultCode == 5 || ex.ResultCode == 6)
+                        Console.Error.WriteLine("  Something else is holding it; run this when no scan or hub is writing.");
+                    else
+                        Console.Error.WriteLine("  Run truedat once with the store on, which migrates it on open (taking a backup first), then try again.");
+                    return 1;
+                }
+                // The store's path is already on the console from the resolver; it must never reach the block, which
+                // is the part that gets pasted somewhere public.
+                Console.WriteLine();
+                Console.WriteLine("--- copy from here -------------------------------------------------------");
+                foreach (var l in lines) Console.WriteLine(l);
+                Console.WriteLine("--- to here --------------------------------------------------------------");
+                Console.WriteLine();
+                Console.WriteLine("Nothing between those markers names a path, a machine or a track; it is safe to post.");
+                return 0;
+            }
+        }
+
+        static void Build(SqliteDb db, List<string> o)
+        {
+            int schema = SchemaMigrator.ReadVersion(db);   // the schema_version table, not PRAGMA user_version (which truedat never sets)
+
+            // What this report can read depends on the schema, and it CANNOT migrate: a migration is a write, and this
+            // connection is read-only on purpose. So name the shortfall and the remedy rather than letting a query
+            // fail with "no such table" and a page of SQL.
+            //   v2  track_content / track_copy (the per-media split) — keys and the feature range
+            //   v4  the typed edge table with its per-window key and hpcp — everything about edges
+            if (schema < 2)
+            {
+                o.Add("truedat store summary  " + VersionInfo.Display);
+                o.Add($"schema v{schema}");
+                Note(o, "not computed: this store predates the per-media split, so it holds none of the columns this " +
+                        "report reads. Run truedat once with the store on and it migrates on open (it takes a backup " +
+                        "first), then run this again.", "");
+                return;
+            }
+            var edgeVersion = Meta(db, "edges.selectedVersion");
+            long contentRows = Count(db, "SELECT COUNT(*) FROM track_content");
+
+            // The edges line must describe the ROWS, not just the store_meta key: that key survives after the rows are
+            // gone, and after a producer bump it names a version this store may hold nothing at. Both cases print as
+            // "edges@v3" otherwise, which reads as coverage the store does not have.
+            bool hasEdgeTable = schema >= 4;
+            long edgeAtVersion = hasEdgeTable ? Count(db, "SELECT COUNT(*) FROM edge WHERE producer_version = (SELECT value FROM store_meta WHERE key = 'edges.selectedVersion')") : 0;
+            long edgeAnyVersion = hasEdgeTable ? Count(db, "SELECT COUNT(*) FROM edge") : 0;
+            string edges =
+                !hasEdgeTable ? $"not readable at schema v{schema} (the typed edge table arrived at v4)" :
+                string.IsNullOrEmpty(edgeVersion) ? "none selected" :
+                edgeAnyVersion == 0 ? edgeVersion + " selected, but the store holds no edge rows" :
+                edgeAtVersion == 0 ? edgeVersion + $" selected, which this store holds none of ({edgeAnyVersion} rows at other versions — a scan with --edges refolds them)" :
+                edgeVersion;
+
+            o.Add("truedat store summary  " + VersionInfo.Display);
+            o.Add($"schema v{schema}   tracks {contentRows}   edges {edges}");
+
+            var tracks = LoadTracks(db, edgeVersion, hasEdgeTable, out int wholeKeyRows, out int edgeRows, out int chromaRows);
+            o.Add($"whole key {wholeKeyRows}   both window KEYS {edgeRows}   all three CHROMA vectors {chromaRows}");
+            if (!hasEdgeTable)
+                Note(o, "Everything about edges below is 'not computed': this store is at schema v" + schema +
+                        " and the typed edge table arrived at v4. Run truedat once with the store on to migrate it " +
+                        "on open (it takes a backup first), then run this again.", "");
+            // Those two differ on purpose: a window always folds a chroma vector, but its key is EDMA's answer and
+            // EDMA declines a window it cannot decide (EdgeKey.Vote, strength under 0.4). The gap is that decline rate.
+            int chromaNoKey = tracks.Count(t => t.H36 != null && t.T36 != null && (t.HeadCode == null || t.TailCode == null));
+            if (chromaNoKey > 0)
+                Note(o, $"{chromaNoKey} tracks carry both window chroma vectors but no decidable key in at least one window.", "");
+            o.Add("");
+
+            KeyAgreement(tracks, wholeKeyRows, o);
+            RegionalCompatibility(tracks, o);
+            JoinSeparation(tracks, o);
+            FeatureSpread(db, contentRows, o);
+
+            Note(o, "Limits: chroma distance is shared notes, not what a listener hears. The edge key is measured " +
+                    "from the same audio as the yardstick, so its lead is an upper bound. Pairs are random, not a " +
+                    "picker's own joins.", "");
+        }
+
+        // ---------------------------------------------------------------- part 1
+
+        internal static void KeyAgreement(List<SummaryTrack> tracks, int wholeKeyRows, List<string> o)
+        {
+            o.Add("KEYS — how often the three profiles agree");
+            if (wholeKeyRows == 0) { o.Add("  not computed: no track carries a whole-track key"); o.Add(""); return; }
+
+            // Two counts of the same thing against two references, because they answer different questions and on a
+            // fallback row they differ: the flat pair is what the hub's trust term acts on, the EDMA vote is what an
+            // edge row reports, so only the second compares with the edge columns on equal terms.
+            o.Add("  whole, vs the key in use: " + Buckets(tracks.Select(t => (t.FlatAgree, t.FlatPresent))));
+            o.Add("  whole, vs the EDMA vote:  " + Buckets(tracks.Select(t => (t.EdmaAgree, t.EdmaPresent))));
+
+            var head = tracks.Where(t => t.HeadPresent > 0).Select(t => (t.HeadAgree, t.HeadPresent)).ToList();
+            var tail = tracks.Where(t => t.TailPresent > 0).Select(t => (t.TailAgree, t.TailPresent)).ToList();
+            o.Add("  start window:             " + (head.Count > 0 ? Buckets(head) : "not computed: no start-window key"));
+            o.Add("  end window:               " + (tail.Count > 0 ? Buckets(tail) : "not computed: no end-window key"));
+            o.Add("  (the key in use is what the hub scores; the rest are EDMA's answer)");
+
+            // The asymmetry that makes the two whole-track rows comparable only once it is stated. The two rows are
+            // IDENTICAL whenever every row's key came off the EDMA rung, so claim a difference only when there is one.
+            var prov = tracks.GroupBy(t => t.Provenance).OrderByDescending(g => g.Count()).ToList();
+            int fallback = tracks.Count(t => t.Provenance != "edma" && t.Provenance != "missing");
+            Note(o, "An edge key IS EDMA's answer, so its agreement is never 0 of n. A whole-track key can fall back to "
+                    + (fallback > 0
+                        ? $"another estimator, and {fallback} here did — on those rows 0 of 3 is possible, which is why the two rows above differ."
+                        : "another estimator, and then 0 of 3 is possible — no row here did, so the two rows above are the same."));
+            o.Add("  the key in use came from: " + string.Join(", ", prov.Select(g => $"{g.Key} {g.Count()}")));
+            o.Add("");
+        }
+
+        static string Buckets(IEnumerable<(int Agree, int Present)> rows)
+        {
+            var l = rows.ToList();
+            if (l.Count == 0) return "not computed: no rows";
+            int n = l.Count;
+            int three = l.Count(x => x.Present == 3 && x.Agree == 3);
+            int two = l.Count(x => x.Present == 3 && x.Agree == 2);
+            int one = l.Count(x => x.Present == 3 && x.Agree == 1);
+            int zero = l.Count(x => x.Present == 3 && x.Agree == 0);
+            int partial = l.Count(x => x.Present != 3);
+            var s = $"3 of 3 {Pct(three, n)}  2 of 3 {Pct(two, n)}  1 of 3 {Pct(one, n)}";
+            if (zero > 0) s += $"  0 of 3 {Pct(zero, n)}";
+            if (partial > 0) s += $"  fewer than 3 carried {Pct(partial, n)}";
+            return s + $"  (n={n})";
+        }
+
+        // ---------------------------------------------------------------- part 2
+
+        internal static void RegionalCompatibility(List<SummaryTrack> tracks, List<string> o)
+        {
+            o.Add("KEYS — start, whole and end against each other (hub compatibility rule)");
+            var complete = tracks.Where(t => t.WholeCode != null && t.HeadCode != null && t.TailCode != null).ToList();
+            if (complete.Count == 0) { o.Add("  not computed: no track carries all three keys"); o.Add(""); return; }
+
+            int same = complete.Count(t => t.HeadCode == t.WholeCode && t.WholeCode == t.TailCode);
+            o.Add($"  all three the same Camelot code: {Pct(same, complete.Count)}  (n={complete.Count})");
+
+            Pair(o, "start vs whole", complete.Select(t => StoreSummary.CamelotDistance(t.HeadCode, t.WholeCode)));
+            Pair(o, "whole vs end  ", complete.Select(t => StoreSummary.CamelotDistance(t.WholeCode, t.TailCode)));
+            Pair(o, "start vs end  ", complete.Select(t => StoreSummary.CamelotDistance(t.HeadCode, t.TailCode)));
+
+            var worst = complete.Select(t => Math.Max(StoreSummary.CamelotDistance(t.HeadCode, t.WholeCode),
+                                            Math.Max(StoreSummary.CamelotDistance(t.WholeCode, t.TailCode),
+                                                     StoreSummary.CamelotDistance(t.HeadCode, t.TailCode))));
+            Pair(o, "worst of three", worst);
+            o.Add("");
+        }
+
+        static void Pair(List<string> o, string label, IEnumerable<double> distances)
+        {
+            var l = distances.ToList();
+            o.Add($"  {label}: compatible {Pct(l.Count(d => d == 0.0), l.Count)}  near {Pct(l.Count(d => d == 0.5), l.Count)}  clash {Pct(l.Count(d => d == 1.0), l.Count)}");
+        }
+
+        // ---------------------------------------------------------------- part 3
+
+        static void JoinSeparation(List<SummaryTrack> tracks, List<string> o)
+        {
+            o.Add("EDGES — at a join: which verdict tracks the audio, and does chroma beat both");
+            var usable = tracks.Where(t => t.W12 != null && t.H36 != null && t.T36 != null
+                                        && t.WholeCode != null && t.HeadCode != null && t.TailCode != null).ToList();
+            if (usable.Count < 2)
+            {
+                Note(o, "not computed: fewer than two tracks carry a whole key, both window keys and all three chroma " +
+                        "vectors. Window chroma needs a scan with --edges; the whole-track vector needs hpcp12.");
+                o.Add("");
+                return;
+            }
+
+            var rnd = new Random(Seed);
+            var joinByEdge = new Dictionary<double, List<double>> { [0.0] = new List<double>(), [0.5] = new List<double>(), [1.0] = new List<double>() };
+            var joinByWhole = new Dictionary<double, List<double>> { [0.0] = new List<double>(), [0.5] = new List<double>(), [1.0] = new List<double>() };
+            var join = new List<double>(PairSamples);
+            var wholeChroma = new List<double>(PairSamples);
+
+            for (int i = 0; i < PairSamples; i++)
+            {
+                int ia = rnd.Next(usable.Count), ib = rnd.Next(usable.Count);
+                if (ia == ib) continue;
+                var a = usable[ia]; var b = usable[ib];
+                double d = StoreSummary.CosineDistance(a.T36!, b.H36!);     // A's end against B's start: the join
+                join.Add(d);
+                wholeChroma.Add(StoreSummary.CosineDistance(a.W12!, b.W12!));
+                joinByEdge[StoreSummary.CamelotDistance(a.TailCode, b.HeadCode)].Add(d);
+                joinByWhole[StoreSummary.CamelotDistance(a.WholeCode, b.WholeCode)].Add(d);
+            }
+
+            o.Add($"  join chroma distance over {join.Count} random ordered pairs: mean {F(StoreSummary.Mean(join), 4)}");
+            o.Add("  mean join distance    compatible        near            clash          sep");
+            Verdict(o, "edge keys ", joinByEdge);
+            Verdict(o, "whole keys", joinByWhole);
+            Note(o, "sep 0.50 = the verdict says nothing about the chroma at the join; 1.00 = perfect.");
+
+            // The number the default-on decision actually turns on: a key rule and a chroma rule, same data, same
+            // yardstick. If chroma alone leads, what edge capture buys is the window chroma, not the window key.
+            GapClosed(usable, rnd, o);
+            Note(o, "That row is the share of the gap between a random next track and the best one available that " +
+                    "each rule closes: 0.00 is no better than random, 1.00 always picks the best.");
+            o.Add("");
+        }
+
+        static void Verdict(List<string> o, string label, Dictionary<double, List<double>> byClass)
+        {
+            var c = byClass[0.0]; var n = byClass[0.5]; var x = byClass[1.0];
+            var auc = StoreSummary.Auc(c, x);
+            o.Add($"  {label}  {Cell(c),-17} {Cell(n),-15} {Cell(x),-15}" +
+                  (double.IsNaN(auc) ? "not computed" : "   " + F(auc, 3)));
+        }
+
+        static string Cell(List<double> xs) => $"{F(StoreSummary.Mean(xs), 4)} ({xs.Count})";
+
+        /// <summary>How much of the gap between a random next track and the best available next track — measured on the
+        /// join's own window chroma — each rule closes. 0 = no better than random, 1 = always picks the best.</summary>
+        static void GapClosed(List<SummaryTrack> usable, Random rnd, List<string> o)
+        {
+            const int Trials = 4000, Pool = 8;
+            double randomSum = 0, bestSum = 0, keySum = 0, edgeSum = 0, chromaSum = 0; int n = 0;
+            for (int t = 0; t < Trials; t++)
+            {
+                var from = usable[rnd.Next(usable.Count)];
+                var pool = new List<SummaryTrack>(Pool);
+                for (int i = 0; i < Pool; i++) { var c = usable[rnd.Next(usable.Count)]; if (c != from) pool.Add(c); }
+                if (pool.Count < 2) continue;
+                var cost = pool.Select(c => StoreSummary.CosineDistance(from.T36!, c.H36!)).ToList();
+                randomSum += cost.Average();
+                bestSum += cost.Min();
+                keySum += cost[ArgMin(pool.Select(c => StoreSummary.CamelotDistance(from.WholeCode, c.WholeCode)).ToList())];
+                edgeSum += cost[ArgMin(pool.Select(c => StoreSummary.CamelotDistance(from.TailCode, c.HeadCode)).ToList())];
+                chromaSum += cost[ArgMin(pool.Select(c => StoreSummary.CosineDistance(from.W12!, c.W12!)).ToList())];
+                n++;
+            }
+            if (n == 0) { o.Add("  pick rules: not computed (no trial had two candidates)"); return; }
+            double rand = randomSum / n, best = bestSum / n, span = rand - best;
+            if (span <= 0) { o.Add("  pick rules: not computed (every candidate scored the same)"); return; }
+            o.Add($"  pick rule, {n} trials, pool {Pool}: whole key {F((rand - keySum / n) / span, 2)} " +
+                  $"edge key {F((rand - edgeSum / n) / span, 2)} chroma {F((rand - chromaSum / n) / span, 2)}");
+        }
+
+        static int ArgMin(List<double> xs)
+        {
+            int bi = 0; double b = xs[0];
+            for (int i = 1; i < xs.Count; i++) if (xs[i] < b) { b = xs[i]; bi = i; }
+            return bi;
+        }
+
+        // ---------------------------------------------------------------- part 4
+
+        static void FeatureSpread(SqliteDb db, long contentRows, List<string> o)
+        {
+            o.Add("RANGE — this library's raw measurements vs the model's fitted range");
+            if (contentRows == 0)
+            {
+                // One honest sentence beats 21 "not stored here" lines that blame the schema for an empty store.
+                o.Add("  not computed: the store holds no tracks");
+                o.Add("");
+                return;
+            }
+            Note(o, $"reference: {ModelTag}. Raw stored values, not the scaled valence/arousal, which clamp at the ends and would hide exactly this.");
+            o.Add("  feature              p5         p50        p95        p50 sigma  p95 sigma");
+
+            var absent = new List<string>();
+            var noScale = new List<string>();
+            foreach (var f in ModelScale)
+            {
+                var vals = ReadFeature(db, f.Name);
+                if (vals.Count == 0) { absent.Add(f.Name); continue; }
+                if (!HasUsableScale(f)) { noScale.Add(f.Name); continue; }
+                vals.Sort();
+                double p5 = StoreSummary.Percentile(vals, 5), p50 = StoreSummary.Percentile(vals, 50), p95 = StoreSummary.Percentile(vals, 95);
+                o.Add($"  {f.Name,-20} {G(p5),-10} {G(p50),-10} {G(p95),-10} {Sig((p50 - f.Mean) / f.Std),-10} {Sig((p95 - f.Mean) / f.Std)}");
+            }
+            if (absent.Count > 0)
+                o.Add("  no value stored in this library: " + string.Join(", ", absent));
+            if (noScale.Count > 0)
+                Note(o, "no fitted range to compare against, the model's scale for it being mean 0 / std 1: " + string.Join(", ", noScale));
+            Note(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p95 past about 2 sigma " +
+                    "means this library's top end sits outside most of what the model was trained on. Mean and sigma " +
+                    "are not a min and a max, so this bounds the comparison rather than proving a value was never seen.");
+            o.Add("");
+        }
+
+        static List<double> ReadFeature(SqliteDb db, string name)
+        {
+            var vals = new List<double>();
+            long scale; int dp;
+            try { scale = FieldPrecision.Scale(name); dp = FieldPrecision.Dp(name); }
+            catch (InvalidOperationException) { return vals; }      // not a field this build knows
+            try
+            {
+                using var st = db.Prepare($"SELECT \"{name}\" FROM track_content WHERE \"{name}\" IS NOT NULL");
+                while (st.Step()) vals.Add(Math.Round((double)st.GetInt64(0) / scale, dp));
+            }
+            catch (SqliteException) { return new List<double>(); }  // not a column in this store's schema
+            return vals;
+        }
+
+        // ---------------------------------------------------------------- loading
+
+        static List<SummaryTrack> LoadTracks(SqliteDb db, string edgeVersion, bool hasEdgeTable,
+                                             out int wholeKeyRows, out int edgeRows, out int chromaRows)
+        {
+            var list = new List<SummaryTrack>();
+            wholeKeyRows = edgeRows = chromaRows = 0;
+
+            // A store older than schema v4 has no edge table to join at all; read the whole-track half so the key
+            // agreement and the feature range still answer, instead of failing the whole report on a missing table.
+            if (!hasEdgeTable) return LoadTracksWholeOnly(db, ref wholeKeyRows);
+
+            // LEFT JOIN, so a store with no edges still answers part 1 and part 4 instead of refusing.
+            var sql = @"SELECT t.""key"", t.mode,
+                               t.keyVotes_krumhansl_key, t.keyVotes_krumhansl_scale, t.keyVotes_krumhansl_strength,
+                               t.keyVotes_temperley_key, t.keyVotes_temperley_scale, t.keyVotes_temperley_strength,
+                               t.keyVotes_edma_key, t.keyVotes_edma_scale, t.keyVotes_edma_strength,
+                               t.chordsKey, t.chordsScale, t.hpcp12,
+                               h.key_code, h.key_agreement, h.key_votes, h.hpcp,
+                               e.key_code, e.key_agreement, e.key_votes, e.hpcp
+                        FROM track_content t
+                        LEFT JOIN edge h ON h.content_hash = t.audioStreamSha256 AND h.kind = 'head'
+                             AND h.status IN ('ok','short-context') AND h.producer_version = ?
+                        LEFT JOIN edge e ON e.content_hash = t.audioStreamSha256 AND e.kind = 'tail'
+                             AND e.status IN ('ok','short-context') AND e.producer_version = ?";
+
+            using var st = db.Prepare(sql);
+            st.Bind(1, edgeVersion).Bind(2, edgeVersion);
+            while (st.Step())
+            {
+                var t = new SummaryTrack();
+                string? flatKey = st.GetString(0), flatMode = st.GetString(1);
+                var votes = new List<(string?, string?, bool)>
+                {
+                    (st.GetString(2), st.GetString(3), !st.IsNull(4) && !Empty(st.GetString(2))),
+                    (st.GetString(5), st.GetString(6), !st.IsNull(7) && !Empty(st.GetString(5))),
+                    (st.GetString(8), st.GetString(9), !st.IsNull(10) && !Empty(st.GetString(8))),
+                };
+                t.WholeCode = StoreSummary.CamelotOf(flatKey, flatMode);
+                if (t.WholeCode != null) wholeKeyRows++;
+
+                var flat = StoreSummary.AgreementWith(flatKey, flatMode, votes);
+                t.FlatAgree = flat.Agreeing; t.FlatPresent = flat.Present;
+                var edma = StoreSummary.AgreementWith(st.GetString(8), st.GetString(9), votes);
+                t.EdmaAgree = edma.Agreeing; t.EdmaPresent = edma.Present;
+                t.Provenance = StoreSummary.KeyProvenance(flatKey, flatMode, st.GetString(8), st.GetString(9),
+                                                          st.GetString(2), st.GetString(3), st.GetString(11), st.GetString(12));
+
+                t.W12 = StoreSummary.Unit(DecodeInt32(st.GetBlob(13)));
+                t.HeadCode = Blank(st.GetString(14)); t.HeadAgree = (int)st.GetInt64(15); t.HeadPresent = (int)st.GetInt64(16);
+                t.H36 = StoreSummary.Unit(DecodeFloat32(st.GetBlob(17)));
+                t.TailCode = Blank(st.GetString(18)); t.TailAgree = (int)st.GetInt64(19); t.TailPresent = (int)st.GetInt64(20);
+                t.T36 = StoreSummary.Unit(DecodeFloat32(st.GetBlob(21)));
+
+                if (t.HeadCode != null && t.TailCode != null) edgeRows++;
+                if (t.W12 != null && t.H36 != null && t.T36 != null) chromaRows++;
+                list.Add(t);
+            }
+            return list;
+        }
+
+        /// <summary>The whole-track half only, for a store below schema v4 (no edge table).</summary>
+        static List<SummaryTrack> LoadTracksWholeOnly(SqliteDb db, ref int wholeKeyRows)
+        {
+            var list = new List<SummaryTrack>();
+            using var st = db.Prepare(@"SELECT t.""key"", t.mode,
+                                               t.keyVotes_krumhansl_key, t.keyVotes_krumhansl_scale, t.keyVotes_krumhansl_strength,
+                                               t.keyVotes_temperley_key, t.keyVotes_temperley_scale, t.keyVotes_temperley_strength,
+                                               t.keyVotes_edma_key, t.keyVotes_edma_scale, t.keyVotes_edma_strength,
+                                               t.chordsKey, t.chordsScale, t.hpcp12
+                                        FROM track_content t");
+            while (st.Step())
+            {
+                var t = new SummaryTrack();
+                string? flatKey = st.GetString(0), flatMode = st.GetString(1);
+                var votes = new List<(string?, string?, bool)>
+                {
+                    (st.GetString(2), st.GetString(3), !st.IsNull(4) && !Empty(st.GetString(2))),
+                    (st.GetString(5), st.GetString(6), !st.IsNull(7) && !Empty(st.GetString(5))),
+                    (st.GetString(8), st.GetString(9), !st.IsNull(10) && !Empty(st.GetString(8))),
+                };
+                t.WholeCode = StoreSummary.CamelotOf(flatKey, flatMode);
+                if (t.WholeCode != null) wholeKeyRows++;
+                var flat = StoreSummary.AgreementWith(flatKey, flatMode, votes);
+                t.FlatAgree = flat.Agreeing; t.FlatPresent = flat.Present;
+                var edma = StoreSummary.AgreementWith(st.GetString(8), st.GetString(9), votes);
+                t.EdmaAgree = edma.Agreeing; t.EdmaPresent = edma.Present;
+                t.Provenance = StoreSummary.KeyProvenance(flatKey, flatMode, st.GetString(8), st.GetString(9),
+                                                          st.GetString(2), st.GetString(3), st.GetString(11), st.GetString(12));
+                t.W12 = StoreSummary.Unit(DecodeInt32(st.GetBlob(13)));
+                list.Add(t);
+            }
+            return list;
+        }
+
+        static bool Empty(string? s) => string.IsNullOrWhiteSpace(s);
+        static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+        /// <summary>The edge's HPCP: 36 float32 little-endian (v4.sql). Any other length is not this vector.</summary>
+        internal static double[]? DecodeFloat32(byte[]? b)
+        {
+            if (b == null || b.Length == 0 || b.Length % 4 != 0) return null;
+            var o = new double[b.Length / 4];
+            for (int i = 0; i < o.Length; i++) o[i] = BitConverter.ToSingle(b, i * 4);
+            return o;
+        }
+
+        /// <summary>hpcp12: int32 scaled by FieldPrecision. The scale is uniform across the bins, so a unit-scaled
+        /// vector is identical whether or not it is unscaled first — the cosine does not care.</summary>
+        internal static double[]? DecodeInt32(byte[]? b)
+        {
+            if (b == null || b.Length == 0 || b.Length % 4 != 0) return null;
+            var o = new double[b.Length / 4];
+            for (int i = 0; i < o.Length; i++) o[i] = BitConverter.ToInt32(b, i * 4);
+            return o;
+        }
+
+        static string Meta(SqliteDb db, string key)
+        {
+            try
+            {
+                using var st = db.Prepare("SELECT value FROM store_meta WHERE key = ?");
+                st.Bind(1, key);
+                return st.Step() ? (st.GetString(0) ?? "") : "";
+            }
+            catch (SqliteException) { return ""; }
+        }
+
+        static long Count(SqliteDb db, string sql)
+        {
+            try { using var st = db.Prepare(sql); return st.Step() ? st.GetInt64(0) : 0; }
+            catch (SqliteException) { return 0; }
+        }
+
+        /// <summary>Block width. Deliberately FIXED rather than <c>Program.ReportWidth</c>, which follows the console:
+        /// two people posting the same store should post the same block, and a width that varies with a window makes
+        /// two posts differently wrapped and harder to read side by side.</summary>
+        internal const int BlockWidth = 78;
+
+        /// <summary>A sentence wrapped to the block width, through the writer the scan summary already uses so there
+        /// is one wrapping rule in the exe rather than two.</summary>
+        static void Note(List<string> o, string text, string indent = "  ")
+        {
+            foreach (var l in Program.WrapNote(text, BlockWidth - indent.Length)) o.Add(indent + l);
+        }
+
+        /// <summary>A SQLite message without the statement it quotes: the SQL is noise to the person running this.</summary>
+        static string FirstLine(string msg)
+        {
+            int b = msg.IndexOf(" [", StringComparison.Ordinal);
+            var s = b > 0 ? msg.Substring(0, b) : msg;
+            int nl = s.IndexOfAny(new[] { '\r', '\n' });
+            return nl > 0 ? s.Substring(0, nl) : s;
+        }
+
+        static string Pct(int k, int n) => n == 0 ? "n/a" : $"{100.0 * k / n:0.0}%";
+        static string F(double v, int dp) => double.IsNaN(v) ? "n/a" : v.ToString("F" + dp.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        static string Sig(double v) => double.IsNaN(v) || double.IsInfinity(v) ? "n/a" : (v >= 0 ? "+" : "") + v.ToString("F1", CultureInfo.InvariantCulture);
+
+        static string G(double v)
+        {
+            if (double.IsNaN(v)) return "n/a";
+            double a = Math.Abs(v);
+            if (a != 0 && (a < 0.001 || a >= 100000)) return v.ToString("G3", CultureInfo.InvariantCulture);
+            return v.ToString(a >= 100 ? "F1" : a >= 1 ? "F3" : "F5", CultureInfo.InvariantCulture);
+        }
+    }
+}
