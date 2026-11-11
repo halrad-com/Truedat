@@ -282,7 +282,9 @@ namespace Truedat.Store
 
         static void JoinSeparation(List<SummaryTrack> tracks, List<string> o)
         {
-            o.Add("EDGES — at a join: which verdict tracks the audio, and does chroma win");
+            // Not headed "EDGES": the rows below compare key verdicts AND a whole-track rule that needs no edge
+            // capture at all, so naming the section after edges invited reading the last row as a verdict on them.
+            o.Add("AT A JOIN — which key verdict tracks the audio, and how sound compares");
             var usable = tracks.Where(t => t.W12 != null && t.H36 != null && t.T36 != null
                                         && t.WholeCode != null && t.HeadCode != null && t.TailCode != null).ToList();
             if (usable.Count < 2)
@@ -335,11 +337,16 @@ namespace Truedat.Store
                     "two rows count every key; the 'trusted' rows keep only pairs where both keys carry trust above " +
                     "zero, which is the only case the hub acts on at all.");
 
-            // The number the default-on decision actually turns on: a key rule and a chroma rule, same data, same
-            // yardstick. If chroma alone leads, what edge capture buys is the window chroma, not the window key.
+            // Two RULES compared on one yardstick: pick the next track by key, or by the whole-track chroma vector.
+            // It says nothing about what edge capture is worth, and the earlier framing of it as the number the
+            // edges decision turns on was wrong (operator, 2026-11-10, relayed by restfulbee:architect): a join also
+            // carries tempo, brightness, tension and loudness, and none of those is in this row. The question it
+            // does answer is how joining by sound compares with joining by key — better, different, or worse.
             GapClosed(usable, rnd, o);
             Note(o, "That row is the share of the gap between a random next track and the best one available that " +
-                    "each rule closes: 0.00 is no better than random, 1.00 always picks the best.");
+                    "each rule closes: 0.00 is no better than random, 1.00 always picks the best. It compares two " +
+                    "ways of choosing a next track; it is not a verdict on edge capture, which also carries tempo, " +
+                    "brightness, tension and loudness that this row does not look at.");
             o.Add("");
 
             ChromaReadings(usable, join, wholeChroma, wholeSameKey, wholeDiffKey, o);
