@@ -213,15 +213,14 @@ namespace Truedat.Store
             // Two counts of the same thing against two references, because they answer different questions and on a
             // fallback row they differ: the flat pair is what the hub's trust term acts on, the EDMA vote is what an
             // edge row reports, so only the second compares with the edge columns on equal terms.
-            o.Add("  whole, vs the key in use: " + Buckets(tracks.Select(t => (t.FlatAgree, t.FlatPresent))));
+            o.Add("  whole, vs the stored key: " + Buckets(tracks.Select(t => (t.FlatAgree, t.FlatPresent))));
             o.Add("  whole, vs the EDMA vote:  " + Buckets(tracks.Select(t => (t.EdmaAgree, t.EdmaPresent))));
 
             var head = tracks.Where(t => t.HeadPresent > 0).Select(t => (t.HeadAgree, t.HeadPresent)).ToList();
             var tail = tracks.Where(t => t.TailPresent > 0).Select(t => (t.TailAgree, t.TailPresent)).ToList();
             o.Add("  start window:             " + (head.Count > 0 ? Buckets(head) : "not computed: no start-window key"));
             o.Add("  end window:               " + (tail.Count > 0 ? Buckets(tail) : "not computed: no end-window key"));
-            Note(o, "with edge transitions off, the hub's default, it scores the whole-track key in use; with them on it scores the window keys at a join. The rest are EDMA's answer.");
-            Note(o, "trust, as the hub reads these: full at 3 of 3, half at 2 of 3, none at 1 of 3 or 0 of 3.");
+            Note(o, "Agreement decides how much say a key gets in AutoQ: full at 3 of 3, half at 2 of 3, none below. Row 1 counts against the key AutoQ reads for a whole track; rows 2-4 count against EDMA, so only those three compare with each other. With edge transitions on it is the two window keys that meet at a join.");
 
             // The asymmetry that makes the two whole-track rows comparable only once it is stated. The two rows are
             // IDENTICAL whenever every row's key came off the EDMA rung, so claim a difference only when there is one.
@@ -231,7 +230,7 @@ namespace Truedat.Store
                     + (fallback > 0
                         ? $"another estimator, and {fallback} here did — on those rows 0 of 3 is possible, which is why the two rows above differ."
                         : "another estimator, and then 0 of 3 is possible — no row here did, so the two rows above are the same."));
-            o.Add("  the key in use came from: " + string.Join(", ", prov.Select(g => $"{g.Key} {g.Count()}")));
+            o.Add("  the stored key came from: " + string.Join(", ", prov.Select(g => $"{g.Key} {g.Count()}")));
             o.Add("");
         }
 
@@ -302,6 +301,11 @@ namespace Truedat.Store
             // rows above do — therefore measures something the hub never acts on, which is why both are printed.
             var trustedByEdge = Classes(); var trustedByWhole = Classes();
             var join = new List<double>(PairSamples);
+            // Three more chroma readings, from the same pairs, each answering a question the rows above raise but
+            // cannot settle on their own: what the distances mean on a scale, whether the measurement is working at
+            // all in this library, and why a whole-track vector competes with a window key.
+            var wholeChroma = new List<double>(PairSamples);
+            var wholeSameKey = new List<double>(); var wholeDiffKey = new List<double>();
 
             for (int i = 0; i < PairSamples; i++)
             {
@@ -314,6 +318,9 @@ namespace Truedat.Store
                 double dw = StoreSummary.CamelotDistance(a.WholeCode, b.WholeCode);
                 joinByEdge[de].Add(d);
                 joinByWhole[dw].Add(d);
+                double dwc = StoreSummary.CosineDistance(a.W12!, b.W12!);
+                wholeChroma.Add(dwc);
+                (a.WholeCode == b.WholeCode ? wholeSameKey : wholeDiffKey).Add(dwc);
                 if (Trusted(a.TailAgree, a.TailPresent) && Trusted(b.HeadAgree, b.HeadPresent)) trustedByEdge[de].Add(d);
                 if (Trusted(a.FlatAgree, a.FlatPresent) && Trusted(b.FlatAgree, b.FlatPresent)) trustedByWhole[dw].Add(d);
             }
@@ -333,6 +340,42 @@ namespace Truedat.Store
             GapClosed(usable, rnd, o);
             Note(o, "That row is the share of the gap between a random next track and the best one available that " +
                     "each rule closes: 0.00 is no better than random, 1.00 always picks the best.");
+            o.Add("");
+
+            ChromaReadings(usable, join, wholeChroma, wholeSameKey, wholeDiffKey, o);
+        }
+
+        /// <summary>The three chroma readings that make the join numbers above readable, and no others.
+        ///
+        /// <para>A scale: a track's own start window against its own end window. Without it nobody can tell whether
+        /// "compatible 0.24 against clash 0.34" is a wide gap or a rounding error, because the unit is arbitrary.</para>
+        ///
+        /// <para>A self-check: whole-track chroma for pairs that share a Camelot code against pairs that do not. Two
+        /// independent measurements of this exist (labs 0.082 / 0.152, the hub lane 0.083 / 0.157), so a posted figure
+        /// far from those says the store or the reader is wrong and the rest of the post should be discarded. That
+        /// matters more here than usual, since the point of the block is collecting other people's numbers.</para>
+        ///
+        /// <para>A reason: how well whole-track chroma distance tracks the distance actually at the join. It is the
+        /// answer to "why does a whole-track vector beat a window key", and it needs no edge capture to compute.</para>
+        ///
+        /// <para>Deliberately NOT here: head-against-head or tail-against-tail (no join is ever made of those, so the
+        /// number informs nothing), window-against-whole-track for the same track (an edge-quality question, not one
+        /// of the two decisions this block feeds, and already measured elsewhere), and anything per chroma bin (no
+        /// consumer reads a bin).</para></summary>
+        static void ChromaReadings(List<SummaryTrack> usable, List<double> join, List<double> wholeChroma,
+                                   List<double> sameKey, List<double> diffKey, List<string> o)
+        {
+            o.Add("CHROMA — a scale for those distances, and a check that the measure works");
+            var own = usable.Select(t => StoreSummary.CosineDistance(t.H36!, t.T36!)).ToList();
+            o.Add($"  a track's own start vs its own end:  {F(StoreSummary.Mean(own), 4)}  (n={own.Count})");
+            o.Add($"  whole-track, pairs sharing a key:    {F(StoreSummary.Mean(sameKey), 4)}  (n={sameKey.Count})");
+            o.Add($"  whole-track, pairs on another key:   {F(StoreSummary.Mean(diffKey), 4)}  (n={diffKey.Count})");
+            o.Add($"  whole-track distance vs join distance: r = {F(StoreSummary.Pearson(wholeChroma, join), 2)}");
+            Note(o, "The first line is the yardstick: two ends of one track are this far apart, so a join closer than " +
+                    "that is as close as music gets to itself. The middle two are a self-check. Other measurements of " +
+                    "them sit near 0.08 and 0.15, so a figure far from that means this store or this reader is wrong " +
+                    "and the rest of this block should not be trusted. The last says how much of what happens at a " +
+                    "join is already visible in the whole-track vector, which needs no edge capture.");
             o.Add("");
         }
 

@@ -227,6 +227,19 @@ namespace Truedat.Store
             assert(Near(StoreSummary.Percentile(new double[] { 0, 10 }, 50), 5.0), "Percentile: p50 interpolates between neighbours");
             assert(Near(StoreSummary.Percentile(new double[] { 7 }, 50), 7.0), "Percentile: a one-value sample is its own percentile");
             assert(double.IsNaN(StoreSummary.Percentile(new double[0], 50)), "Percentile: an empty sample is NaN");
+
+            assert(Near(StoreSummary.Pearson(new double[] { 1, 2, 3, 4 }, new double[] { 2, 4, 6, 8 }), 1.0, 1e-12),
+                   "Pearson: a perfect positive relationship is 1.0");
+            assert(Near(StoreSummary.Pearson(new double[] { 1, 2, 3, 4 }, new double[] { 8, 6, 4, 2 }), -1.0, 1e-12),
+                   "Pearson: a perfect inverse relationship is -1.0");
+            assert(Near(StoreSummary.Pearson(new double[] { 1, 2, 3, 4 }, new double[] { 1, 4, 2, 3 }), 0.4, 1e-12),
+                   "Pearson: a partial relationship is between (0.4 for this sample)");
+            assert(double.IsNaN(StoreSummary.Pearson(new double[] { 5, 5, 5 }, new double[] { 1, 2, 3 })),
+                   "Pearson: a constant side has no spread to correlate (NaN, never 0)");
+            assert(double.IsNaN(StoreSummary.Pearson(new double[] { 1, 2 }, new double[] { 1, 2, 3 })),
+                   "Pearson: mismatched lengths are NaN");
+            assert(double.IsNaN(StoreSummary.Pearson(new double[0], new double[0])),
+                   "Pearson: an empty sample is NaN");
         }
 
         // ---------------------------------------------------------------- the report
@@ -252,7 +265,7 @@ namespace Truedat.Store
             StoreSummaryCommand.KeyAgreement(sameRung, sameRung.Count, o);
             var text = string.Join("\n", o);
 
-            assert(o.Any(l => l.Contains("vs the key in use") && l.Contains("3 of 3 50.0%") && l.Contains("2 of 3 25.0%") && l.Contains("1 of 3 25.0%")),
+            assert(o.Any(l => l.Contains("vs the stored key") && l.Contains("3 of 3 50.0%") && l.Contains("2 of 3 25.0%") && l.Contains("1 of 3 25.0%")),
                    "Report: the whole-track buckets are counted as percentages of the rows (2/4, 1/4, 1/4)");
             assert(text.Contains("no row here did, so the two rows above are the same"),
                    "Report: with every key on the EDMA rung the report says the two whole-track rows are the same");
@@ -260,8 +273,8 @@ namespace Truedat.Store
                    "Report: it does NOT claim a difference between the two whole-track rows when there is none");
             assert(text.Contains("never 0 of n"),
                    "Report: it states the asymmetry that an edge key's agreement is never 0 of n");
-            assert(o.Any(l => l.Contains("the key in use came from: edma 4")),
-                   "Report: it counts which rung supplied the key in use");
+            assert(o.Any(l => l.Contains("the stored key came from: edma 4")),
+                   "Report: it counts which rung supplied the stored key");
 
             // One track on a fallback rung: now the sentence must flip, because the two counts really can differ.
             var mixed = new List<SummaryTrack>(sameRung) { T("7B", "7B", "7B", 0, 3, "chords") };
@@ -271,8 +284,8 @@ namespace Truedat.Store
             assert(text2.Contains("and 1 here did"), "Report: a fallback-rung row is counted and named");
             assert(text2.Contains("which is why the two rows above differ"),
                    "Report: with a fallback row present it says the two whole-track rows differ");
-            assert(o2.Any(l => l.Contains("vs the key in use") && l.Contains("0 of 3 20.0%")),
-                   "Report: 0 of 3 appears for the fallback row counted against the key in use");
+            assert(o2.Any(l => l.Contains("vs the stored key") && l.Contains("0 of 3 20.0%")),
+                   "Report: 0 of 3 appears for the fallback row counted against the stored key");
             assert(o2.Any(l => l.Contains("vs the EDMA vote") && !l.Contains("0 of 3")),
                    "Report: the same row is not 0 of 3 when counted against EDMA — that is the whole point of printing both");
 

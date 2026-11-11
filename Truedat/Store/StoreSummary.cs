@@ -226,6 +226,21 @@ namespace Truedat.Store
             return sorted[lo] + frac * (sorted[lo + 1] - sorted[lo]);
         }
 
+        /// <summary>Pearson correlation. NaN when either side is constant (no spread to correlate) or they differ in
+        /// length — a library where every pair scores the same has no relationship to report, not a relationship of 0.</summary>
+        internal static double Pearson(IReadOnlyList<double> xs, IReadOnlyList<double> ys)
+        {
+            if (xs.Count == 0 || xs.Count != ys.Count) return double.NaN;
+            double mx = Mean(xs), my = Mean(ys), sxy = 0, sxx = 0, syy = 0;
+            for (int i = 0; i < xs.Count; i++)
+            {
+                double dx = xs[i] - mx, dy = ys[i] - my;
+                sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+            }
+            if (sxx <= 0 || syy <= 0) return double.NaN;
+            return sxy / Math.Sqrt(sxx * syy);
+        }
+
         internal static double Mean(IReadOnlyList<double> xs)
         {
             if (xs.Count == 0) return double.NaN;
