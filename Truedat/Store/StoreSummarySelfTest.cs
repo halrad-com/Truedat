@@ -164,6 +164,14 @@ namespace Truedat.Store
             var none = StoreSummary.AgreementWith("", "", votes);
             assert(none.Agreeing == 0 && none.Present == 3,
                    $"Agreement: an absent reference agrees with nothing (got {none.Agreeing} of {none.Present})");
+
+            // The hub's gate on whether a key has any say at all (PfsOrderer.TrustedKeyDistance drops the comparison
+            // when HarmonicTrust is 0 on either side). The 'trusted' verdict rows keep only pairs that pass it, so the
+            // report separates what the hub acts on from what it ignores.
+            assert(StoreSummary.HarmonicTrust(3, 3) > 0 && StoreSummary.HarmonicTrust(2, 3) > 0 && StoreSummary.HarmonicTrust(1, 1) > 0,
+                   "Trusted gate: 3 of 3, 2 of 3 and 1 of 1 all carry trust the hub acts on");
+            assert(!(StoreSummary.HarmonicTrust(1, 3) > 0) && !(StoreSummary.HarmonicTrust(1, 2) > 0) && !(StoreSummary.HarmonicTrust(0, 3) > 0),
+                   "Trusted gate: 1 of 3, 1 of 2 and 0 of 3 carry no trust, so the hub has no opinion on that pair");
         }
 
         // ---------------------------------------------------------------- vectors and statistics

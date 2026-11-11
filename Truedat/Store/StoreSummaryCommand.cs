@@ -58,7 +58,7 @@ namespace Truedat.Store
         /// silent, and an override file beside the hub's data wins when one exists.
         ///
         /// <para>Generated from the model, never typed: see docs/plans/2026-11-10-store-summary-script-plan.md.</para></summary>
-        internal const string ModelTag = "mood-model v3, trained 2026-10-21";
+        internal const string ModelTag = "the hub's default mood model, v3, trained 2026-10-21";
 
         internal static readonly Feat[] ModelScale =
         {
@@ -220,7 +220,8 @@ namespace Truedat.Store
             var tail = tracks.Where(t => t.TailPresent > 0).Select(t => (t.TailAgree, t.TailPresent)).ToList();
             o.Add("  start window:             " + (head.Count > 0 ? Buckets(head) : "not computed: no start-window key"));
             o.Add("  end window:               " + (tail.Count > 0 ? Buckets(tail) : "not computed: no end-window key"));
-            o.Add("  (the key in use is what the hub scores; the rest are EDMA's answer)");
+            Note(o, "with edge transitions off, the hub's default, it scores the whole-track key in use; with them on it scores the window keys at a join. The rest are EDMA's answer.");
+            Note(o, "trust, as the hub reads these: full at 3 of 3, half at 2 of 3, none at 1 of 3 or 0 of 3.");
 
             // The asymmetry that makes the two whole-track rows comparable only once it is stated. The two rows are
             // IDENTICAL whenever every row's key came off the EDMA rung, so claim a difference only when there is one.
@@ -282,7 +283,7 @@ namespace Truedat.Store
 
         static void JoinSeparation(List<SummaryTrack> tracks, List<string> o)
         {
-            o.Add("EDGES — at a join: which verdict tracks the audio, and does chroma beat both");
+            o.Add("EDGES — at a join: which verdict tracks the audio, and does chroma win");
             var usable = tracks.Where(t => t.W12 != null && t.H36 != null && t.T36 != null
                                         && t.WholeCode != null && t.HeadCode != null && t.TailCode != null).ToList();
             if (usable.Count < 2)
@@ -294,10 +295,13 @@ namespace Truedat.Store
             }
 
             var rnd = new Random(Seed);
-            var joinByEdge = new Dictionary<double, List<double>> { [0.0] = new List<double>(), [0.5] = new List<double>(), [1.0] = new List<double>() };
-            var joinByWhole = new Dictionary<double, List<double>> { [0.0] = new List<double>(), [0.5] = new List<double>(), [1.0] = new List<double>() };
+            var joinByEdge = Classes(); var joinByWhole = Classes();
+            // The same two splits over only the pairs the HUB would have an opinion on. A key the scorer does not
+            // trust has no say: PfsOrderer.TrustedKeyDistance returns null when EITHER side's HarmonicTrust is 0, so a
+            // 1-of-3 or 1-of-2 key reads as "no opinion", not as compatible or a clash. Counting every key — as the
+            // rows above do — therefore measures something the hub never acts on, which is why both are printed.
+            var trustedByEdge = Classes(); var trustedByWhole = Classes();
             var join = new List<double>(PairSamples);
-            var wholeChroma = new List<double>(PairSamples);
 
             for (int i = 0; i < PairSamples; i++)
             {
@@ -306,16 +310,23 @@ namespace Truedat.Store
                 var a = usable[ia]; var b = usable[ib];
                 double d = StoreSummary.CosineDistance(a.T36!, b.H36!);     // A's end against B's start: the join
                 join.Add(d);
-                wholeChroma.Add(StoreSummary.CosineDistance(a.W12!, b.W12!));
-                joinByEdge[StoreSummary.CamelotDistance(a.TailCode, b.HeadCode)].Add(d);
-                joinByWhole[StoreSummary.CamelotDistance(a.WholeCode, b.WholeCode)].Add(d);
+                double de = StoreSummary.CamelotDistance(a.TailCode, b.HeadCode);
+                double dw = StoreSummary.CamelotDistance(a.WholeCode, b.WholeCode);
+                joinByEdge[de].Add(d);
+                joinByWhole[dw].Add(d);
+                if (Trusted(a.TailAgree, a.TailPresent) && Trusted(b.HeadAgree, b.HeadPresent)) trustedByEdge[de].Add(d);
+                if (Trusted(a.FlatAgree, a.FlatPresent) && Trusted(b.FlatAgree, b.FlatPresent)) trustedByWhole[dw].Add(d);
             }
 
             o.Add($"  join chroma distance over {join.Count} random ordered pairs: mean {F(StoreSummary.Mean(join), 4)}");
-            o.Add("  mean join distance    compatible        near            clash          sep");
-            Verdict(o, "edge keys ", joinByEdge);
+            o.Add("  mean join distance compatible        near            clash           sep");
+            Verdict(o, "edge keys", joinByEdge);
             Verdict(o, "whole keys", joinByWhole);
-            Note(o, "sep 0.50 = the verdict says nothing about the chroma at the join; 1.00 = perfect.");
+            Verdict(o, "edge trusted", trustedByEdge);
+            Verdict(o, "whole trusted", trustedByWhole);
+            Note(o, "sep 0.50 = the verdict says nothing about the chroma at the join; 1.00 = perfect. The first " +
+                    "two rows count every key; the 'trusted' rows keep only pairs where both keys carry trust above " +
+                    "zero, which is the only case the hub acts on at all.");
 
             // The number the default-on decision actually turns on: a key rule and a chroma rule, same data, same
             // yardstick. If chroma alone leads, what edge capture buys is the window chroma, not the window key.
@@ -329,11 +340,18 @@ namespace Truedat.Store
         {
             var c = byClass[0.0]; var n = byClass[0.5]; var x = byClass[1.0];
             var auc = StoreSummary.Auc(c, x);
-            o.Add($"  {label}  {Cell(c),-17} {Cell(n),-15} {Cell(x),-15}" +
+            o.Add($"  {label,-14} {Cell(c),-17} {Cell(n),-15} {Cell(x),-15}" +
                   (double.IsNaN(auc) ? "not computed" : "   " + F(auc, 3)));
         }
 
         static string Cell(List<double> xs) => $"{F(StoreSummary.Mean(xs), 4)} ({xs.Count})";
+
+        static Dictionary<double, List<double>> Classes() =>
+            new Dictionary<double, List<double>> { [0.0] = new List<double>(), [0.5] = new List<double>(), [1.0] = new List<double>() };
+
+        /// <summary>Whether the hub would let this key have a say at all: PfsOrderer.TrustedKeyDistance drops the
+        /// comparison when HarmonicTrust is 0 on either side.</summary>
+        static bool Trusted(int agreeing, int present) => StoreSummary.HarmonicTrust(agreeing, present) > 0;
 
         /// <summary>How much of the gap between a random next track and the best available next track — measured on the
         /// join's own window chroma — each rule closes. 0 = no better than random, 1 = always picks the best.</summary>
@@ -358,8 +376,9 @@ namespace Truedat.Store
             if (n == 0) { o.Add("  pick rules: not computed (no trial had two candidates)"); return; }
             double rand = randomSum / n, best = bestSum / n, span = rand - best;
             if (span <= 0) { o.Add("  pick rules: not computed (every candidate scored the same)"); return; }
-            o.Add($"  pick rule, {n} trials, pool {Pool}: whole key {F((rand - keySum / n) / span, 2)} " +
-                  $"edge key {F((rand - edgeSum / n) / span, 2)} chroma {F((rand - chromaSum / n) / span, 2)}");
+            o.Add($"  pick rule, {n} trials, pool {Pool}: whole key {F((rand - keySum / n) / span, 2)}, " +
+                  $"edge key {F((rand - edgeSum / n) / span, 2)},");
+            o.Add($"  whole-track chroma {F((rand - chromaSum / n) / span, 2)}");
         }
 
         static int ArgMin(List<double> xs)
@@ -381,7 +400,9 @@ namespace Truedat.Store
                 o.Add("");
                 return;
             }
-            Note(o, $"reference: {ModelTag}. Raw stored values, not the scaled valence/arousal, which clamp at the ends and would hide exactly this.");
+            Note(o, $"reference: {ModelTag}. A hub set to another model (autoQ.model, or a mood-model json in its " +
+                    "data folder) was fitted on a different range, and these sigmas are not its. Raw stored values, " +
+                    "not the scaled valence/arousal, which clamp at the ends and would hide exactly this.");
             o.Add("  feature              p5         p50        p95        p50 sigma  p95 sigma");
 
             var absent = new List<string>();
