@@ -27,6 +27,121 @@ namespace Truedat.Store
             try { TestModelScale(assert); } catch (Exception ex) { assert(false, $"StoreSummary.ModelScale: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Store-summary self-test (--store-summary-min: the sentences go, every row stays)");
             try { TestMinimalMode(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Minimal: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Store-summary self-test (both modes end to end over real stores, incl. the shapes that compute nothing)");
+            try { TestModesEndToEnd(assert); } catch (Exception ex) { assert(false, $"StoreSummary.EndToEnd: threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Both modes driven through the real entry point against real stores on disk. This pins two things
+        /// the unit tests above cannot reach:
+        ///
+        /// <para>The WIRING. <see cref="StoreSummaryCommand.Run"/> is what turns the flag into the field, and the
+        /// tests above set the field themselves, so a Run that ignored its argument passed the whole suite (mutation
+        /// check, 2026-11-12: <c>Explanations = true</c> in Run left min printing the full block and nothing went
+        /// red). Driving Run is the only thing that catches it.</para>
+        ///
+        /// <para>The shapes that COMPUTE NOTHING — a store too old to read, one with no typed edge table, one with no
+        /// tracks. Those are the stores most likely to be posted by someone asking why their block is empty, and in
+        /// min the reason is the only thing left, so it has to survive the strip. They were verified by hand on
+        /// copies of a real store and nothing held them.</para></summary>
+        static void TestModesEndToEnd(Action<bool, string> assert)
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "truedat-summin-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(dir);
+            bool saved = StoreSummaryCommand.Explanations;
+            try
+            {
+                // (a) a store too old to read at all: schema v1 predates the per-media split.
+                var v1 = System.IO.Path.Combine(dir, "v1.db");
+                using (var db = SqliteDb.Open(v1, true, exclusiveLocking: false)) SchemaMigrator.Apply(db, "selftest-min-v1", targetVersion: 1);
+                Shape(assert, v1, "schema v1", "predates the per-media split", shorterThanFull: false);
+
+                // (b) readable, but no typed edge table: everything about edges is a shortfall, not a zero.
+                var v3 = System.IO.Path.Combine(dir, "v3.db");
+                using (var db = SqliteDb.Open(v3, true, exclusiveLocking: false)) SchemaMigrator.Apply(db, "selftest-min-v3", targetVersion: 3);
+                Shape(assert, v3, "schema v3", "the typed edge table arrived at v4", shorterThanFull: true);
+
+                // (c) current schema, no tracks: the range section must say that rather than print blank rows.
+                var v4 = System.IO.Path.Combine(dir, "v4.db");
+                using (var db = SqliteDb.Open(v4, true, exclusiveLocking: false)) SchemaMigrator.Apply(db, "selftest-min-v4", targetVersion: 4);
+                Shape(assert, v4, "empty store", "the store holds no tracks", shorterThanFull: true);
+
+                // (d) current schema with a row, no edges: the range table has data, so the subset check runs over
+                //     real rows and the reference line has to survive beside them.
+                var withRow = System.IO.Path.Combine(dir, "row.db");
+                var e = new TrackEntry
+                {
+                    Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120, Loudness = -12.1 },
+                    LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('h', 64),
+                };
+                using (StoreLog.Quiet())
+                    ImportCommand.ExecuteEntries(withRow, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = e },
+                        @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                var minLines = Shape(assert, withRow, "one track", "reference: " + StoreSummaryCommand.ModelTag, shorterThanFull: true);
+                assert(minLines.Any(l => l.TrimStart().StartsWith("bpm", StringComparison.Ordinal) && l.Contains("120")),
+                       "End to end: the range table's rows are printed in min — the strip takes sentences, not data");
+            }
+            finally
+            {
+                StoreSummaryCommand.Explanations = saved;   // Run leaves the field where the last call put it
+                try { System.IO.Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        /// <summary>Runs one store both ways and asserts the properties that define the mode: it exits 0, every line
+        /// min prints is one the full block also prints, the line saying what the store holds survives, and the block
+        /// still fits its width. Returns min's lines.</summary>
+        static List<string> Shape(Action<bool, string> assert, string storePath, string what, string stateLine, bool shorterThanFull)
+        {
+            var full = RunBlock(storePath, explanations: true, out int fullExit);
+            var min = RunBlock(storePath, explanations: false, out int minExit);
+
+            assert(fullExit == 0 && minExit == 0, $"End to end ({what}): both modes exit 0 (full {fullExit}, min {minExit})");
+
+            var fullSet = new HashSet<string>(full);
+            var extra = min.Where(l => !fullSet.Contains(l)).ToList();
+            assert(extra.Count == 0, $"End to end ({what}): every line min prints appears verbatim in the full block"
+                                     + (extra.Count > 0 ? $" (extra: \"{extra[0]}\")" : ""));
+
+            assert(min.Any(l => l.Contains(stateLine)),
+                   $"End to end ({what}): the line that says what the store holds survives the strip — \"{stateLine}\"");
+
+            // The whole point of the mode. A shape whose output is nothing BUT state lines has nothing to drop, and
+            // says so by passing shorterThanFull: false rather than by quietly not being checked.
+            if (shorterThanFull)
+                assert(min.Count < full.Count, $"End to end ({what}): min is shorter than full ({min.Count} vs {full.Count} lines)");
+            else
+                assert(min.Count == full.Count, $"End to end ({what}): nothing to drop, so the two are identical ({min.Count} vs {full.Count} lines)");
+
+            // The width is the reason the block is wrapped at all: several of these posted one under another only
+            // line up if every line fits. Two shipped lines did not, and composed their overflow from store state
+            // (a shortfall sentence in the header, a long list of absent features), so only a real store shows it.
+            var wide = full.Concat(min).Where(l => l.Length > StoreSummaryCommand.BlockWidth).ToList();
+            assert(wide.Count == 0, $"End to end ({what}): every line fits the {StoreSummaryCommand.BlockWidth}-column block"
+                                    + (wide.Count > 0 ? $" ({wide.Count} over, first {wide[0].Length}: \"{wide[0]}\")" : ""));
+
+            return min;
+        }
+
+        /// <summary>The real entry point with the console captured, returning the lines BETWEEN the copy markers —
+        /// the part a user actually pastes.</summary>
+        static List<string> RunBlock(string storePath, bool explanations, out int exit)
+        {
+            var sw = new System.IO.StringWriter();
+            var savedOut = Console.Out; var savedErr = Console.Error;
+            Console.SetOut(sw); Console.SetError(System.IO.TextWriter.Null);
+            try { using (StoreLog.Quiet()) exit = StoreSummaryCommand.Run(storePath, explanations); }
+            finally { Console.SetOut(savedOut); Console.SetError(savedErr); }
+
+            var all = sw.ToString().Replace("\r\n", "\n").Split('\n');
+            var block = new List<string>();
+            bool inside = false;
+            foreach (var l in all)
+            {
+                if (l.StartsWith("--- copy from here", StringComparison.Ordinal)) { inside = true; continue; }
+                if (l.StartsWith("--- to here", StringComparison.Ordinal)) break;
+                if (inside) block.Add(l);
+            }
+            return block;
         }
 
         /// <summary><c>--store-summary-min</c> drops the sentences that explain what a row means, and nothing else.

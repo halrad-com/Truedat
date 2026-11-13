@@ -178,8 +178,13 @@ namespace Truedat.Store
                 edgeAtVersion == 0 ? edgeVersion + $" selected, which this store holds none of ({edgeAnyVersion} rows at other versions — a scan with --edges refolds them)" :
                 edgeVersion;
 
+            // The version token fits beside the counts; any of the shortfall descriptions above is a sentence and gets
+            // its own wrapped line. Inline, one of them ran the header to 90 characters — past the block width, which
+            // exists so that several posted blocks line up beside each other.
+            bool edgesInline = edges.IndexOf(' ') < 0;
             o.Add("truedat store summary  " + VersionInfo.Display);
-            o.Add($"schema v{schema}   tracks {contentRows}   edges {edges}");
+            o.Add($"schema v{schema}   tracks {contentRows}" + (edgesInline ? $"   edges {edges}" : ""));
+            if (!edgesInline) Note(o, "edges: " + edges, "");
 
             var tracks = LoadTracks(db, edgeVersion, hasEdgeTable, out int wholeKeyRows, out int edgeRows, out int chromaRows);
             o.Add($"whole key {wholeKeyRows}   both window KEYS {edgeRows}   all three CHROMA vectors {chromaRows}");
@@ -478,7 +483,9 @@ namespace Truedat.Store
                 o.Add($"  {f.Name,-20} {G(p5),-10} {G(p50),-10} {G(p95),-10} {Sig((p50 - f.Mean) / f.Std),-10} {Sig((p95 - f.Mean) / f.Std)}");
             }
             if (absent.Count > 0)
-                o.Add("  no value stored in this library: " + string.Join(", ", absent));
+                // Wrapped, like the noScale list below it: a sparse store names enough features here to run the line
+                // to 160 characters, and this is state a reader needs, so it cannot just be dropped either.
+                Note(o, "no value stored in this library: " + string.Join(", ", absent));
             if (noScale.Count > 0)
                 Note(o, "no fitted range to compare against, the model's scale for it being mean 0 / std 1: " + string.Join(", ", noScale));
             Explain(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p95 past about 2 sigma " +
