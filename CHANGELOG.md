@@ -6,7 +6,11 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV2.1] — 2026-11-12
 
+### Added
+
+- --store-summary and --store-summary-min provide tuning detail from your store.
 
 ## [0.5.5.4-DV1] — 2026-11-07
 
