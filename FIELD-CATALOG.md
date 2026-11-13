@@ -61,7 +61,7 @@ high level — what MBXHub uses it for.
 
 | Field | Extractor source | Type | MBXHub use |
 |---|---|---|---|
-| `hpcp12[12]` | `tonal.hpcp.mean` folded 36→12, unit-max | num[] | harmonic-texture matching (chroma) |
+| `hpcp12[12]` | `tonal.hpcp.mean` folded 36→12 (the three bins nearest each semitone), unit-max. Index 0 is A at the track's own estimated tuning; the cells ascend by semitone (A, A#, B … G#). Entries analyzed before 2026-11-13 grouped the bins one position off, which put a quarter of each note into the cell below; analyzing the track again corrects it | num[] | harmonic-texture matching (chroma) |
 | `dynamicComplexity` | `lowlevel.dynamic_complexity` | num | dynamics feature; re-scan wave marker |
 | `thpcp12[12]` | `tonal.thpcp` folded 36→12, unit-max | num[] | harmonic-texture (transposition-invariant chroma: rotated so the STRONGEST pitch class is at index 0 — often the tonic, not always; it is not key-transposed) |
 | `beatsIntervalMean/Stdev/Min/Max` | diffs of `rhythm.beats_position` (s) | num | beat-regularity feature |

@@ -22287,8 +22287,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             Assert(!ShouldKeepAwake(0, true, false), "keep-awake: all-off stays off");
 
             // --- hpcp12 fold (v0.5.4.7 harmonic-texture term) -----------
-            // 36-bin extractor HPCP -> 12 semitones: sum each 3-bin triplet,
-            // normalize to unit max, round 4dp; absence -> null, never all-zero.
+            // 36-bin extractor HPCP -> 12 semitones: sum the three bins nearest each
+            // semitone, normalize to unit max, round 4dp; absence -> null, never all-zero.
             {
                 var h36 = new double[36];
                 var triSums = new[] { 2.0, 4, 6, 8, 10, 12, 10, 8, 6, 4, 2, 1 }; // peak 12 at semitone 5
@@ -22296,11 +22296,24 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var folded = FoldHpcp36To12(h36);
                 var expect = new[] { 0.1667, 0.3333, 0.5, 0.6667, 0.8333, 1.0, 0.8333, 0.6667, 0.5, 0.3333, 0.1667, 0.0833 };
                 Assert(folded != null && folded.Length == 12, "hpcp12: folds 36 bins to 12 semitones");
-                Assert(folded != null && folded.SequenceEqual(expect), "hpcp12: sum-triplets, unit-max normalized, 4dp");
-                var h36b = new double[36];
-                h36b[0] = 1; h36b[1] = 2; h36b[2] = 3; // triplet 0 sums to 6 = its peak
-                var foldedB = FoldHpcp36To12(h36b);
-                Assert(foldedB != null && foldedB[0] == 1.0 && foldedB[1] == 0.0, "hpcp12: sums all three bins of a triplet");
+                Assert(folded != null && folded.SequenceEqual(expect), "hpcp12: one sum per semitone, unit-max normalized, 4dp");
+                // The extractor CENTERS bin 3t on semitone t (essentia hpcp.cpp: bin = log2(f / reference) * size), and its
+                // one-semitone cosine window spreads a note that is exactly on pitch over bins 3t-1, 3t, 3t+1 at 0.5 / 1 / 0.5.
+                // So a semitone's cell is those three bins. Grouping 3t..3t+2 instead wrote a quarter of every note into the
+                // cell one semitone below (measured with pure tones through the extractor, 2026-11-13).
+                var noteA = new double[36];
+                noteA[35] = 0.5; noteA[0] = 1.0; noteA[1] = 0.5;   // a note on the reference pitch: its window wraps below bin 0
+                var foldedA = FoldHpcp36To12(noteA);
+                Assert(foldedA != null && foldedA[0] == 1.0, "hpcp12: a note on the reference pitch lands in cell 0");
+                Assert(foldedA != null && foldedA.Skip(1).All(v => v == 0.0), "hpcp12: a note on pitch lights one cell, none of it in the cell below");
+                var noteC = new double[36];
+                noteC[8] = 0.5; noteC[9] = 1.0; noteC[10] = 0.5;   // three semitones above the reference
+                var foldedC = FoldHpcp36To12(noteC);
+                Assert(foldedC != null && foldedC[3] == 1.0 && foldedC.Where((v, i) => i != 3).All(v => v == 0.0), "hpcp12: a note three semitones up lands in cell 3 only");
+                var flat = new double[36];
+                flat[2] = 1.0;                                     // a third of a semitone below semitone 1: nearer 1 than 0
+                var foldedFlat = FoldHpcp36To12(flat);
+                Assert(foldedFlat != null && foldedFlat[1] == 1.0 && foldedFlat[0] == 0.0, "hpcp12: a bin belongs to the semitone it is nearest");
                 Assert(FoldHpcp36To12(null) == null, "hpcp12: null input -> null");
                 Assert(FoldHpcp36To12(new double[35]) == null, "hpcp12: non-36-length -> null");
                 Assert(FoldHpcp36To12(new double[36]) == null, "hpcp12: all-zero chroma -> null");
@@ -28090,8 +28103,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         }
 
         /// <summary>Fold the extractor's 36-bin HPCP chroma (tonal.hpcp.mean) into
-        /// a 12-semitone vector: sum each consecutive 3-bin triplet, normalize so the
-        /// peak semitone = 1.0, round to 4 dp. Returns null when the input is missing,
+        /// a 12-semitone vector: sum the three bins nearest each semitone, normalize so the
+        /// peak semitone = 1.0, round to 4 dp. Cell 0 is the extractor's reference note (A, at
+        /// the track's own estimated tuning) and the cells ascend by semitone. The extractor
+        /// centers bin 3t on semitone t, so a semitone's bins are 3t-1, 3t, 3t+1 (wrapping):
+        /// grouping 3t..3t+2 put a quarter of every on-pitch note into the cell below, which
+        /// is what this did until 2026-11-13. Entries analyzed before then hold that older
+        /// grouping until they are analyzed again. Returns null when the input is missing,
         /// not 36-long, or carries no chroma energy (all-zero) — absence must read as
         /// null, never a fake all-zero similarity vector. Consumed by MBXHub AutoQ's
         /// harmonic-texture continuity term (cross-track chroma cosine).</summary>
@@ -28100,7 +28118,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (hpcp36 == null || hpcp36.Length != 36) return null;
             var folded = new double[12];
             for (int t = 0; t < 12; t++)
-                folded[t] = hpcp36[3 * t] + hpcp36[3 * t + 1] + hpcp36[3 * t + 2];
+                folded[t] = hpcp36[(3 * t + 35) % 36] + hpcp36[3 * t] + hpcp36[3 * t + 1];
             var max = folded.Max();
             if (max <= 0) return null;   // silent / no-chroma track: null, not a fake all-zero vector
             for (int i = 0; i < 12; i++)
