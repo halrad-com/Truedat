@@ -1036,6 +1036,8 @@ namespace Truedat
             Console.WriteLine("                      agree per region, how the start/whole/end keys compare, whether the edge key or the");
             Console.WriteLine("                      whole-track key better predicts the chroma at a join, and how this library's raw");
             Console.WriteLine("                      measurements sit against the range the mood model was fitted on. Names no path or track.");
+            Console.WriteLine("  --store-summary-min The same block with the sentences that explain each row left out — for reading");
+            Console.WriteLine("                      several libraries' blocks side by side. Every row and number is unchanged.");
             Console.WriteLine("  --store-vacuum [--page-size N]");
             Console.WriteLine("                      Repack the store; --page-size sets the page size (default 16384).");
             Console.WriteLine("  --file-md5          Maintain whole-file fileMd5 (default off: never written — nothing");
@@ -1093,7 +1095,7 @@ namespace Truedat
         /// guard that checks --help all against this list. When adding a flag to
         /// the parse chain, add it here — the drift test fails by name if the
         /// help mentions a flag this list lacks.</summary>
-        static readonly string[] KnownFlags = new[]
+        internal static readonly string[] KnownFlags = new[]
         {
             "?", "h", "help", "fixup", "remap", "verify", "stats", "stats-detail",
             "list-review", "list-speech", "list-missing-smfm", "list-smfm", "list-formats", "strip-smfm", "prune-excluded", "prune-entry", "verify-coverage", "backfill", "backfill-level",
@@ -1116,7 +1118,7 @@ namespace Truedat
             // v2 store (S1): the store path is explicit, never guessed (a default beside a mirror
             // catalog would put SQLite on SMB).
             "store", "store-import", "library-root", "root-role", "machine-adopt",
-            "store-export", "export-root", "store-roundtrip", "store-info", "store-summary", "store-vacuum", "page-size", "store-dir",
+            "store-export", "export-root", "store-roundtrip", "store-info", "store-summary", "store-summary-min", "store-vacuum", "page-size", "store-dir",
             // v2 S2: the edges producer rides on a scan; opt-in, store-only output. --edges-export writes the companion file; --budget caps a library scan.
             // --no-store / --no-edges are the one-run overrides of the config keys `store` / `edges`.
             "edges", "budget", "edges-export", "no-store", "no-edges",
@@ -2726,6 +2728,7 @@ namespace Truedat
             string? storeRoundtripCatalog = null; // --store-roundtrip <catalog>: per-entry byte-equality of store vs catalog
             bool storeInfoMode = false;           // --store-info: measurements (bytes/track, RTF, coverage, dupes, key moves)
             bool storeSummaryMode = false;        // --store-summary: read-only, paste-sized — key agreement, edges at a join, feature range
+            bool storeSummaryMinimal = false;     // --store-summary-min: the same rows without the sentences that explain them
             bool storeVacuumMode = false;         // --store-vacuum: repack the store (page size tuning; 4 KB pages held one ~2 KB row each)
             string? storePageSizeText = null;     // --page-size N: page size for --store-vacuum (default SqliteDb.DefaultPageSize)
             // v2 S2 (C7): the companion export; --budget caps the library scan.
@@ -2894,6 +2897,7 @@ namespace Truedat
                 else if (canonical == "store-roundtrip" && i + 1 < args.Length) storeRoundtripCatalog = args[++i];
                 else if (canonical == "store-info") storeInfoMode = true;
                 else if (canonical == "store-summary") storeSummaryMode = true;
+                else if (canonical == "store-summary-min") { storeSummaryMode = true; storeSummaryMinimal = true; }
                 else if (canonical == "store-vacuum") storeVacuumMode = true;
                 else if (canonical == "budget" && i + 1 < args.Length) workBudgetText = args[++i];
                 else if (canonical == "edges-export") { edgesExportMode = true; edgesExportPath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : null; }
@@ -3662,7 +3666,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
-                Environment.ExitCode = global::Truedat.Store.StoreSummaryCommand.Run(storePath);
+                Environment.ExitCode = global::Truedat.Store.StoreSummaryCommand.Run(storePath, !storeSummaryMinimal);
                 return;
             }
             if (storeVacuumMode)

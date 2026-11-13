@@ -90,8 +90,9 @@ namespace Truedat.Store
         /// than print a column of nonsense. (spectralFlatness, mood-model v3 — reported to the hub lane 2026-11-10.)</summary>
         internal static bool HasUsableScale(Feat f) => f.Std > 0 && !(f.Mean == 0.0 && f.Std == 1.0);
 
-        internal static int Run(string storePath)
+        internal static int Run(string storePath, bool explanations = true)
         {
+            Explanations = explanations;
             if (!File.Exists(storePath))
             {
                 // The usual case for a reader: the store is off by default, so this library simply has none yet. The
@@ -190,7 +191,7 @@ namespace Truedat.Store
             // EDMA declines a window it cannot decide (EdgeKey.Vote, strength under 0.4). The gap is that decline rate.
             int chromaNoKey = tracks.Count(t => t.H36 != null && t.T36 != null && (t.HeadCode == null || t.TailCode == null));
             if (chromaNoKey > 0)
-                Note(o, $"{chromaNoKey} tracks carry both window chroma vectors but no decidable key in at least one window.", "");
+                o.Add(CoverageGapLine(chromaNoKey));
             o.Add("");
 
             KeyAgreement(tracks, wholeKeyRows, o);
@@ -198,10 +199,17 @@ namespace Truedat.Store
             JoinSeparation(tracks, o);
             FeatureSpread(db, contentRows, o);
 
-            Note(o, "Limits: chroma distance is shared notes, not what a listener hears. The edge key is measured " +
+            Explain(o, "Limits: chroma distance is shared notes, not what a listener hears. The edge key is measured " +
                     "from the same audio as the yardstick, so its lead is an upper bound. Pairs are random, not a " +
                     "picker's own joins.", "");
         }
+
+        /// <summary>The decline rate, as a row rather than a sentence: it sits beside the coverage counts it qualifies,
+        /// and it is the same line in both modes, so <c>--store-summary-min</c> stays a strict subset of the full
+        /// block. A window always folds a chroma vector, but its key is EDMA's answer and EDMA declines a window it
+        /// cannot decide (EdgeKey.Vote, strength under 0.4) — this is that gap.</summary>
+        internal static string CoverageGapLine(int tracks) =>
+            $"window chroma, no decidable key in one or both windows: {tracks}";
 
         // ---------------------------------------------------------------- part 1
 
@@ -220,13 +228,13 @@ namespace Truedat.Store
             var tail = tracks.Where(t => t.TailPresent > 0).Select(t => (t.TailAgree, t.TailPresent)).ToList();
             o.Add("  start window:             " + (head.Count > 0 ? Buckets(head) : "not computed: no start-window key"));
             o.Add("  end window:               " + (tail.Count > 0 ? Buckets(tail) : "not computed: no end-window key"));
-            Note(o, "Agreement decides how much say a key gets in AutoQ: full at 3 of 3, half at 2 of 3, none below. Row 1 counts against the key AutoQ reads for a whole track; rows 2-4 count against EDMA, so only those three compare with each other. With edge transitions on it is the two window keys that meet at a join.");
+            Explain(o, "Agreement decides how much say a key gets in AutoQ: full at 3 of 3, half at 2 of 3, none below. Row 1 counts against the key AutoQ reads for a whole track; rows 2-4 count against EDMA, so only those three compare with each other. With edge transitions on it is the two window keys that meet at a join.");
 
             // The asymmetry that makes the two whole-track rows comparable only once it is stated. The two rows are
             // IDENTICAL whenever every row's key came off the EDMA rung, so claim a difference only when there is one.
             var prov = tracks.GroupBy(t => t.Provenance).OrderByDescending(g => g.Count()).ToList();
             int fallback = tracks.Count(t => t.Provenance != "edma" && t.Provenance != "missing");
-            Note(o, "An edge key IS EDMA's answer, so its agreement is never 0 of n. A whole-track key can fall back to "
+            Explain(o, "An edge key IS EDMA's answer, so its agreement is never 0 of n. A whole-track key can fall back to "
                     + (fallback > 0
                         ? $"another estimator, and {fallback} here did — on those rows 0 of 3 is possible, which is why the two rows above differ."
                         : "another estimator, and then 0 of 3 is possible — no row here did, so the two rows above are the same."));
@@ -333,7 +341,7 @@ namespace Truedat.Store
             Verdict(o, "whole keys", joinByWhole);
             Verdict(o, "edge trusted", trustedByEdge);
             Verdict(o, "whole trusted", trustedByWhole);
-            Note(o, "sep 0.50 = the verdict says nothing about the chroma at the join; 1.00 = perfect. The first " +
+            Explain(o, "sep 0.50 = the verdict says nothing about the chroma at the join; 1.00 = perfect. The first " +
                     "two rows count every key; the 'trusted' rows keep only pairs where both keys carry trust above " +
                     "zero, which is the only case the hub acts on at all.");
 
@@ -343,7 +351,7 @@ namespace Truedat.Store
             // carries tempo, brightness, tension and loudness, and none of those is in this row. The question it
             // does answer is how joining by sound compares with joining by key — better, different, or worse.
             GapClosed(usable, rnd, o);
-            Note(o, "That row is the share of the gap between a random next track and the best one available that " +
+            Explain(o, "That row is the share of the gap between a random next track and the best one available that " +
                     "each rule closes: 0.00 is no better than random, 1.00 always picks the best. It compares two " +
                     "ways of choosing a next track; it is not a verdict on edge capture, which also carries tempo, " +
                     "brightness, tension and loudness that this row does not look at.");
@@ -378,7 +386,7 @@ namespace Truedat.Store
             o.Add($"  whole-track, pairs sharing a key:    {F(StoreSummary.Mean(sameKey), 4)}  (n={sameKey.Count})");
             o.Add($"  whole-track, pairs on another key:   {F(StoreSummary.Mean(diffKey), 4)}  (n={diffKey.Count})");
             o.Add($"  whole-track distance vs join distance: r = {F(StoreSummary.Pearson(wholeChroma, join), 2)}");
-            Note(o, "The first line is the yardstick: two ends of one track are this far apart, so a join closer than " +
+            Explain(o, "The first line is the yardstick: two ends of one track are this far apart, so a join closer than " +
                     "that is as close as music gets to itself. The middle two are a self-check. Other measurements of " +
                     "them sit near 0.08 and 0.15, so a figure far from that means this store or this reader is wrong " +
                     "and the rest of this block should not be trusted. The last says how much of what happens at a " +
@@ -450,9 +458,12 @@ namespace Truedat.Store
                 o.Add("");
                 return;
             }
-            Note(o, $"reference: {ModelTag}. A hub set to another model (autoQ.model, or a mood-model json in its " +
-                    "data folder) was fitted on a different range, and these sigmas are not its. Raw stored values, " +
-                    "not the scaled valence/arousal, which clamp at the ends and would hide exactly this.");
+            // The reference is provenance, not explanation: without the model and date these sigmas cannot be
+            // compared with anyone else's, so it survives --store-summary-min. The caveat about it does not.
+            Note(o, $"reference: {ModelTag}");
+            Explain(o, "A hub set to another model (autoQ.model, or a mood-model json in its data folder) was fitted " +
+                    "on a different range, and these sigmas are not its. Raw stored values, not the scaled " +
+                    "valence/arousal, which clamp at the ends and would hide exactly this.");
             o.Add("  feature              p5         p50        p95        p50 sigma  p95 sigma");
 
             var absent = new List<string>();
@@ -470,7 +481,7 @@ namespace Truedat.Store
                 o.Add("  no value stored in this library: " + string.Join(", ", absent));
             if (noScale.Count > 0)
                 Note(o, "no fitted range to compare against, the model's scale for it being mean 0 / std 1: " + string.Join(", ", noScale));
-            Note(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p95 past about 2 sigma " +
+            Explain(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p95 past about 2 sigma " +
                     "means this library's top end sits outside most of what the model was trained on. Mean and sigma " +
                     "are not a min and a max, so this bounds the comparison rather than proving a value was never seen.");
             o.Add("");
@@ -631,10 +642,26 @@ namespace Truedat.Store
         internal const int BlockWidth = 78;
 
         /// <summary>A sentence wrapped to the block width, through the writer the scan summary already uses so there
-        /// is one wrapping rule in the exe rather than two.</summary>
+        /// is one wrapping rule in the exe rather than two.
+        ///
+        /// <para>Note is for what the store HOLDS — a count, a shortfall, what the numbers are measured against. It
+        /// survives <c>--store-summary-min</c>, because nobody can read a missing section or a sigma without it.
+        /// Prose that explains what a number MEANS goes through <see cref="Explain"/>.</para></summary>
         static void Note(List<string> o, string text, string indent = "  ")
         {
             foreach (var l in Program.WrapNote(text, BlockWidth - indent.Length)) o.Add(indent + l);
+        }
+
+        /// <summary>Set false by <c>--store-summary-min</c>. Every row stays; only the sentences explaining what a
+        /// row means are dropped — someone reading many blocks from different libraries already knows.</summary>
+        internal static bool Explanations = true;
+
+        /// <summary>A sentence that explains what a row MEANS. Dropped by <c>--store-summary-min</c>; everything it
+        /// writes is prose, so dropping it can never cost a number.</summary>
+        static void Explain(List<string> o, string text, string indent = "  ")
+        {
+            if (!Explanations) return;
+            Note(o, text, indent);
         }
 
         /// <summary>A SQLite message without the statement it quotes: the SQL is noise to the person running this.</summary>

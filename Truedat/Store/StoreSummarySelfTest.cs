@@ -25,6 +25,82 @@ namespace Truedat.Store
             Console.WriteLine("Store-summary self-test (the report: buckets, the fallback sentence, paste safety)");
             try { TestReportSections(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Report: threw {ex.GetType().Name}: {ex.Message}"); }
             try { TestModelScale(assert); } catch (Exception ex) { assert(false, $"StoreSummary.ModelScale: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Store-summary self-test (--store-summary-min: the sentences go, every row stays)");
+            try { TestMinimalMode(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Minimal: threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary><c>--store-summary-min</c> drops the sentences that explain what a row means, and nothing else.
+        /// The load-bearing assertion is the SUBSET one: every line min prints appears verbatim in the full block, so
+        /// the mode can never quietly change a number — only leave prose out.</summary>
+        static void TestMinimalMode(Action<bool, string> assert)
+        {
+            // A fallback rung present, so the explanation under the key rows has a number in its own sentence: that
+            // is exactly the case where dropping prose might have cost something, and the row below must carry it.
+            var tracks = new List<SummaryTrack>
+            {
+                T("8B", "8B", "8B", 3, 3, "edma"), T("8B", "9B", "8B", 3, 3, "edma"),
+                T("5A", "5A", "12A", 2, 2, "edma"), T("7B", "7B", "7B", 0, 3, "chords"),
+            };
+
+            var full = new List<string>();
+            StoreSummaryCommand.KeyAgreement(tracks, tracks.Count, full);
+
+            var min = new List<string>();
+            bool saved = StoreSummaryCommand.Explanations;
+            try
+            {
+                StoreSummaryCommand.Explanations = false;
+                StoreSummaryCommand.KeyAgreement(tracks, tracks.Count, min);
+            }
+            finally { StoreSummaryCommand.Explanations = saved; }
+
+            var minText = string.Join("\n", min);
+
+            // The rows, every one of them, unchanged.
+            assert(min.Any(l => l.Contains("vs the stored key") && l.Contains("3 of 3 50.0%") && l.Contains("0 of 3 25.0%")),
+                   "Minimal: the whole-track buckets are printed with the same numbers as the full block");
+            assert(min.Any(l => l.Contains("vs the EDMA vote")), "Minimal: the second whole-track row stays");
+            assert(min.Any(l => l.Contains("start window")), "Minimal: the start-window row stays");
+            assert(min.Any(l => l.Contains("end window")), "Minimal: the end-window row stays");
+            assert(min.Any(l => l.Contains("the stored key came from: edma 3, chords 1")),
+                   "Minimal: the provenance row stays — it carries as data what the dropped sentence said in prose");
+
+            // The sentences, gone.
+            assert(!minText.Contains("Agreement decides how much say"),
+                   "Minimal: the agreement legend is dropped");
+            assert(!minText.Contains("never 0 of n") && !minText.Contains("and 1 here did"),
+                   "Minimal: the sentence explaining the two whole-track rows is dropped");
+
+            // Nothing invented and nothing altered: min is a subset of full, line for line.
+            var fullSet = new HashSet<string>(full);
+            var extra = min.Where(l => !fullSet.Contains(l)).ToList();
+            assert(extra.Count == 0,
+                   "Minimal: every line is one the full block also prints" + (extra.Count > 0 ? " (extra: \"" + extra[0] + "\")" : ""));
+            assert(min.Count < full.Count, $"Minimal: the block is shorter than the full one ({min.Count} vs {full.Count} lines)");
+
+            // A shortfall is state, not explanation: a section that computed nothing must still say so in min, or the
+            // reader sees a bare heading and cannot tell an empty store from a broken one.
+            var shortfall = new List<string>();
+            saved = StoreSummaryCommand.Explanations;
+            try
+            {
+                StoreSummaryCommand.Explanations = false;
+                StoreSummaryCommand.KeyAgreement(new List<SummaryTrack>(), 0, shortfall);
+            }
+            finally { StoreSummaryCommand.Explanations = saved; }
+            assert(shortfall.Any(l => l.Contains("not computed")),
+                   "Minimal: a section that computed nothing still says why");
+
+            // The coverage gap is a row in BOTH modes — a sentence there wrapped to two lines and read as prose at
+            // the top of a min block, and the number is the whole of what it says.
+            var gap = StoreSummaryCommand.CoverageGapLine(640);
+            assert(gap.Contains("640") && gap.Length <= StoreSummaryCommand.BlockWidth && !gap.EndsWith("."),
+                   $"Minimal: the coverage gap is one row carrying its count, not a sentence — \"{gap}\"");
+
+            // The flag the mode rides on, and the default: a bare --store-summary still explains itself.
+            assert(StoreSummaryCommand.Explanations, "Minimal: explanations are on unless the min flag asks otherwise");
+            assert(Program.KnownFlags.Contains("store-summary-min"),
+                   "Minimal: --store-summary-min is a known flag");
         }
 
         static bool Near(double a, double b, double tol = 1e-9) => Math.Abs(a - b) <= tol;
