@@ -2857,6 +2857,17 @@ namespace Truedat
             int chunkIndex = 0; // 0 = chunking disabled
             int chunkTotal = 0;
 
+            // Say what is missing BEFORE anything is parsed. A flag that needs a value and did not get
+            // one used to fall through its own arm and be dropped in silence, so the run went on to do
+            // something else entirely — `--analyze-file` with no path scanned the whole library.
+            if (!TryValidateArgValues(args, _argsFromConfig.Length, out var argValueError))
+            {
+                Console.Error.WriteLine(argValueError);
+                Console.Error.WriteLine("Nothing was read and nothing was written.");
+                Environment.ExitCode = 2;
+                return;
+            }
+
             for (int i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
@@ -2886,7 +2897,7 @@ namespace Truedat
                 else if (canonical == "remap" && i + 1 < args.Length) remapPrefix = args[++i];
                 else if (canonical == "verify") verifyMode = true;
                 else if (canonical == "stats") statsMode = true;
-                else if (canonical == "store") storePath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : "";
+                else if (canonical == "store") storePath = ArgValueFollows(args, i, _argsFromConfig.Length) ? args[++i] : "";
                 else if (canonical == "store-dir" && i + 1 < args.Length) storeDir = args[++i];
                 else if (canonical == "store-import") storeImportMode = true;
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
@@ -2900,7 +2911,7 @@ namespace Truedat
                 else if (canonical == "store-summary-min") { storeSummaryMode = true; storeSummaryMinimal = true; }
                 else if (canonical == "store-vacuum") storeVacuumMode = true;
                 else if (canonical == "budget" && i + 1 < args.Length) workBudgetText = args[++i];
-                else if (canonical == "edges-export") { edgesExportMode = true; edgesExportPath = (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal)) ? args[++i] : null; }
+                else if (canonical == "edges-export") { edgesExportMode = true; edgesExportPath = ArgValueFollows(args, i, _argsFromConfig.Length) ? args[++i] : null; }
                 else if (canonical == "page-size" && i + 1 < args.Length) storePageSizeText = args[++i];
                 else if (canonical == "paths") pathsMode = true;
                 // --json is the short spelling for --paths; it means the same thing as
@@ -3178,6 +3189,20 @@ namespace Truedat
                 bool storeExplicit = !string.IsNullOrEmpty(storePath);
                 _storeExplicit = storeExplicit;
                 storePath = global::Truedat.Store.StoreLocation.Resolve(storeExplicit ? storePath : null, storeDir, storeCatalog!, out var storeWhy);
+                // A path of the wrong KIND is refused here, before anything tries to open it, and the
+                // file is named for what it actually is. Field report 2026-11-12: this is where the
+                // iTunes library XML went through as a store and crashed on PRAGMA page_count.
+                var notStore = NotAStoreReason(storePath);
+                if (notStore != null)
+                {
+                    Console.Error.WriteLine($"Error: {storePath} is not a truedat store — {notStore}.");
+                    Console.Error.WriteLine(storeExplicit
+                        ? "Hint: --store takes the store database itself. Leave it off and truedat uses the one beside the catalog."
+                        : "Hint: move that file aside, or name the store with --store <path>.");
+                    Console.Error.WriteLine("Nothing was read and nothing was written.");
+                    Environment.ExitCode = 2;
+                    return;
+                }
                 // A config default on an instance that has not scanned yet: the read verbs have no store to answer from, so they
                 // answer from the catalog exactly as without the key (a scan creates the store; a verb never does).
                 if (_storeFromConfig && !storeVerb && !File.Exists(storePath) && (statsMode || duplicatesMode))
@@ -14444,6 +14469,142 @@ namespace Truedat
             return "it does not begin with a JSON document";
         }
 
+        /// <summary>Up to 64 bytes of a file, for a kind sniff. False when it cannot be read at all,
+        /// which is never this sniff's story — the caller's own "not found" error stands.</summary>
+        static bool TryReadHead(string path, out byte[] head, out int n)
+        {
+            head = new byte[64];
+            n = 0;
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                n = fs.Read(head, 0, head.Length);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Why this path is not a truedat store, in words an operator can act on — or null
+        /// when it IS one, does not exist yet (a scan creates it), or is zero bytes (SQLite's own
+        /// idea of a legal empty database, which is how a store begins life).
+        ///
+        /// The mirror of <see cref="NotACatalogReason"/>, and for the same reason. Field report
+        /// 2026-11-12: a config-injected <c>--store</c> consumed the typed library path, truedat
+        /// opened <c>iTunes Music Library.xml</c> as SQLite and died unhandled on
+        /// "file is not a database [PRAGMA page_count;]" (exit 0xE0434352). The three files that
+        /// actually sit beside a store — the catalog, the sidecar, the library XML — are each named
+        /// explicitly, because handing one of them over is the mistake that happens.</summary>
+        internal static string? NotAStoreReason(string path)
+        {
+            if (!TryReadHead(path, out var head, out int n)) return null;
+            if (n == 0) return null;
+
+            bool Begins(string ascii)
+            {
+                if (n < ascii.Length) return false;
+                for (int k = 0; k < ascii.Length; k++) if (head[k] != (byte)ascii[k]) return false;
+                return true;
+            }
+
+            if (Begins("SQLite format 3\0")) return null;   // it is a store
+            if (Begins("MBXS")) return "it is the mood sidecar, which the catalog is published with";
+            if (n >= 4 && head[0] == 0x50 && head[1] == 0x4B && (head[2] == 0x03 || head[2] == 0x05 || head[2] == 0x07))
+                return "it is a zip archive — a catalog backup, pin or snapshot, perhaps";
+
+            // Text, in whatever encoding: skip a BOM, then whitespace, then the NULs UTF-16 pads
+            // ASCII with, so a UTF-16 library or catalog is still named for what it is.
+            int j = 0;
+            if (n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF) j = 3;
+            else if (n >= 2 && ((head[0] == 0xFF && head[1] == 0xFE) || (head[0] == 0xFE && head[1] == 0xFF))) j = 2;
+            while (j < n && (head[j] == 0x20 || head[j] == 0x09 || head[j] == 0x0A || head[j] == 0x0D || head[j] == 0x00)) j++;
+            if (j >= n) return "it holds no document";
+            if (head[j] == (byte)'<') return "it is an XML document — the iTunes library is XML, a store is a SQLite database";
+            if (head[j] == (byte)'{' || head[j] == (byte)'[') return "it is a JSON document — the catalog is JSON, a store is a SQLite database";
+            return "it does not begin with the SQLite file header";
+        }
+
+        /// <summary>Whether <c>args[i + 1]</c> is this flag's value. Three conditions, and the third is
+        /// the one that was missing: a value must come from the same origin segment as its flag.
+        /// Config settings are built into args and PREPENDED (see the call in Main), so a config
+        /// <c>store: true</c> leaves a bare trailing <c>--store</c> sitting directly in front of the
+        /// operator's first typed token — which it then ate. A flag the operator never typed must
+        /// never consume something the operator did type.</summary>
+        internal static bool ArgValueFollows(string[] args, int i, int configCount)
+            => i + 1 < args.Length
+               // A bare "-" is stdin (`--file-list -`, the autoscan plugin's form): a value, not a flag.
+               && (args[i + 1] == "-" || !args[i + 1].StartsWith("-", StringComparison.Ordinal))
+               && !(i < configCount && i + 1 >= configCount);
+
+        /// <summary>Every flag that takes a value, and what it needs. Derived from the parse arms
+        /// themselves, each of which reads <c>canonical == "x" &amp;&amp; i + 1 &lt; args.Length</c>
+        /// (plus <c>-p</c>/<c>--parallel</c>, which take theirs with a bare <c>i++</c>).
+        ///
+        /// <c>store</c> and <c>edges-export</c> are deliberately ABSENT: their value is optional, and
+        /// absence means "the default location", not a mistake.</summary>
+        static readonly Dictionary<string, string> ValueTakingFlags = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["album-ratio"] = "a number",         ["analyze-file"] = "a path",
+            ["apply-exclusions"] = "a path",      ["backfill-level"] = "a level",
+            ["bit-depth"] = "a number",           ["budget"] = "a time budget, like 2h",
+            ["catalog"] = "a path",               ["chunk"] = "M/N",
+            ["compression-level"] = "a number",   ["convert-codecs"] = "a codec list",
+            ["convert-dir"] = "a path",           ["count"] = "a number",
+            ["cpu-limit"] = "a number",           ["exclude-playlist"] = "a path",
+            ["exclusions"] = "a path",            ["export-root"] = "a path",
+            ["file-list"] = "a path",             ["folder"] = "a path",
+            ["keep-backups"] = "a number",        ["level"] = "a level",
+            ["library-root"] = "a path",          ["long-track-mins"] = "a number",
+            ["max-duration"] = "a number",        ["merge-output"] = "a path",
+            ["merge-source"] = "a path",          ["moods"] = "a path",
+            ["output"] = "a path",                ["p"] = "a number",
+            ["page-size"] = "a number",           ["parallel"] = "a number",
+            ["prune-entry"] = "a path",           ["remap"] = "old=new",
+            ["restore"] = "a path",               ["root-role"] = "a role",
+            ["sample-rate"] = "a number",         ["seed"] = "a value",
+            ["seed-catalog"] = "a path",          ["seed-target"] = "a path",
+            ["split-mb"] = "a number",            ["stage-dir"] = "a path",
+            ["stats-detail"] = "a value",         ["store-dir"] = "a path",
+            ["store-export"] = "a path",          ["store-roundtrip"] = "a path",
+            ["synth-moods"] = "a path",           ["synth-output"] = "a path",
+            ["transcode"] = "a path",             ["transcode-out"] = "a path",
+        };
+
+        /// <summary>Flag-shaped, by the same test the parse loop applies.</summary>
+        static bool LooksLikeFlag(string arg) => arg != null && arg.Length > 1 && (arg[0] == '-' || arg[0] == '/');
+
+        /// <summary>False, saying what is missing or what turned up instead, when a flag that needs a
+        /// value did not get one. Runs BEFORE the parse loop, so nothing is half-set when it stops.
+        ///
+        /// Every value-taking arm is written <c>canonical == "x" &amp;&amp; i + 1 &lt; args.Length</c>, so a
+        /// missing value used to fall through the whole <c>else if</c> chain and the flag was dropped
+        /// without a word: <c>truedat --analyze-file</c> ran a FULL LIBRARY SCAN, and
+        /// <c>truedat --restore</c> scanned instead of restoring. None of them checked that what
+        /// followed was not itself a flag either, so <c>--moods --store</c> took "--store" as the
+        /// catalog path.</summary>
+        internal static bool TryValidateArgValues(string[] args, int configCount, out string? error)
+        {
+            error = null;
+            if (args == null) return true;
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (!LooksLikeFlag(args[i])) continue;
+                if (!ValueTakingFlags.TryGetValue(CanonicalFlag(args[i]), out var what)) continue;
+                if (ArgValueFollows(args, i, configCount)) { i++; continue; }   // value taken; skip over it
+                error = MissingValueMessage(args[i], what, args, i);
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>What is missing, or what was unexpected — never a guess, and never silence. A
+        /// required value that did not arrive used to make the whole <c>else if</c> arm fall through,
+        /// so the flag was dropped without a word: <c>truedat --analyze-file</c> with no path ran a
+        /// full library scan.</summary>
+        internal static string MissingValueMessage(string flag, string what, string[] args, int i)
+            => i + 1 >= args.Length
+                ? $"Error: {flag} needs {what}, and nothing followed it."
+                : $"Error: {flag} needs {what}, but what followed it was {args[i + 1]}.";
+
         /// <summary>Which size line a file beside the catalog belongs on.</summary>
         internal enum SideFile
         {
@@ -22835,6 +22996,115 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                         "catalog-sniff: an unreadable path leaves the caller's own error standing");
                 }
                 finally { try { Directory.Delete(catDir, true); } catch { } }
+            }
+
+            // --- A path of the wrong KIND is refused, saying what it actually is — never parsed and
+            // crashed. Field report 2026-11-12: a config-injected --store ate the typed library path,
+            // truedat opened "iTunes Music Library.xml" as SQLite and died with an unhandled
+            // "file is not a database [PRAGMA page_count;]" (exit 0xE0434352). ------------------
+            {
+                var stDir = Path.Combine(Path.GetTempPath(), "truedat-storesniff-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(stDir);
+                try
+                {
+                    string MakeB(string name, byte[] bytes) { var p = Path.Combine(stDir, name); File.WriteAllBytes(p, bytes); return p; }
+                    string MakeT(string name, string text) { var p = Path.Combine(stDir, name); File.WriteAllText(p, text, new UTF8Encoding(false)); return p; }
+
+                    var realStore = new byte[64];
+                    Encoding.ASCII.GetBytes("SQLite format 3\0").CopyTo(realStore, 0);
+                    Assert(NotAStoreReason(MakeB("truedat.db", realStore)) == null,
+                        "store-sniff: a SQLite file is the store, and is not diverted");
+                    Assert(NotAStoreReason(MakeB("new.db", new byte[0])) == null,
+                        "store-sniff: a zero-byte file is a legal empty database, which is how a store is created");
+                    Assert(NotAStoreReason(Path.Combine(stDir, "absent.db")) == null,
+                        "store-sniff: a store that does not exist yet is not an error — it gets created");
+
+                    // The field-report case, exactly: the iTunes library handed in as the store.
+                    var xmlReason = NotAStoreReason(MakeT("iTunes Music Library.xml", "<?xml version=\"1.0\"?><plist/>"));
+                    Assert(xmlReason != null && xmlReason.IndexOf("XML", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"store-sniff: the iTunes library XML is named as XML, not opened as a database (got: {xmlReason ?? "null"})");
+
+                    var jsonReason = NotAStoreReason(MakeT("mbxmoods.json", "{\"tracks\":{}}"));
+                    Assert(jsonReason != null && jsonReason.IndexOf("JSON", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"store-sniff: the catalog is named as JSON (got: {jsonReason ?? "null"})");
+
+                    var sideReason = NotAStoreReason(MakeB("mbxmoods.mbxs", new byte[] { (byte)'M', (byte)'B', (byte)'X', (byte)'S', 3, 0, 0, 0 }));
+                    Assert(sideReason != null && sideReason.IndexOf("sidecar", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"store-sniff: the mood sidecar is named as the sidecar (got: {sideReason ?? "null"})");
+
+                    var zipReason = NotAStoreReason(MakeB("pin.zip", new byte[] { 0x50, 0x4B, 0x03, 0x04, 0, 0 }));
+                    Assert(zipReason != null && zipReason.IndexOf("zip", StringComparison.OrdinalIgnoreCase) >= 0,
+                        $"store-sniff: a zip archive is named as a zip (got: {zipReason ?? "null"})");
+                }
+                finally { try { Directory.Delete(stDir, true); } catch { } }
+            }
+
+            // --- A flag that came from the config file must never consume something the operator
+            // typed. Config args are PREPENDED (Program.cs ~2707), so the trailing bare --store a
+            // config `store: true` produces sits directly in front of the first typed token. -----
+            {
+                // configCount = 3: ["--parallel","32","--store"] from the config file, then typed args.
+                var mixed = new[] { "--parallel", "32", "--store", @"C:\lib\iTunes Music Library.xml" };
+                Assert(!ArgValueFollows(mixed, 2, configCount: 3),
+                    "arg-origin: a config --store does not take the library path the operator typed");
+                Assert(ArgValueFollows(mixed, 0, configCount: 3),
+                    "arg-origin: a config flag still takes its own config value");
+
+                var typed = new[] { "--store", @"C:\somewhere\truedat.db" };
+                Assert(ArgValueFollows(typed, 0, configCount: 0),
+                    "arg-origin: a typed --store takes the path the operator typed after it");
+                Assert(!ArgValueFollows(new[] { "--moods" }, 0, configCount: 0),
+                    "arg-origin: nothing follows the last flag, so it has no value");
+                Assert(!ArgValueFollows(new[] { "--moods", "--store" }, 0, configCount: 0),
+                    "arg-origin: a flag is not another flag's value");
+                // The autoscan contract: the hub's plugin pipes paths to `truedat --file-list -`.
+                // A bare "-" is stdin, a VALUE — it only looks like the start of a flag.
+                Assert(ArgValueFollows(new[] { "--file-list", "-" }, 0, configCount: 0),
+                    "arg-origin: a bare - is a value (stdin), not a flag");
+                Assert(TryValidateArgValues(new[] { "--file-list", "-" }, 0, out _),
+                    "arg-required: --file-list - (the autoscan plugin's stdin form) is accepted");
+
+                // What is missing, or what is unexpected — the operator must not have to guess.
+                var endMsg = MissingValueMessage("--moods", "a path", new[] { "--moods" }, 0);
+                Assert(endMsg.IndexOf("--moods", StringComparison.Ordinal) >= 0 && endMsg.IndexOf("a path", StringComparison.Ordinal) >= 0,
+                    $"arg-missing: the message names the flag and what it needs (got: {endMsg})");
+                var flagMsg = MissingValueMessage("--moods", "a path", new[] { "--moods", "--store" }, 0);
+                Assert(flagMsg.IndexOf("--store", StringComparison.Ordinal) >= 0,
+                    $"arg-missing: the message names the unexpected argument it found instead (got: {flagMsg})");
+            }
+
+            // --- A required value that never arrived stops the run. Before this the whole `else if`
+            // arm fell through on `i + 1 < args.Length` and the flag was dropped in SILENCE, so
+            // `truedat --analyze-file` with no path ran a full library scan, and `--restore` with no
+            // archive scanned instead of restoring. Checked before the parse loop, so no mode is
+            // half-set when it stops. ---------------------------------------------------------
+            {
+                Assert(!TryValidateArgValues(new[] { "--analyze-file" }, 0, out var e1)
+                       && e1 != null && e1.IndexOf("--analyze-file", StringComparison.Ordinal) >= 0,
+                    $"arg-required: --analyze-file with no path stops and names the flag (got: {e1 ?? "null"})");
+                Assert(!TryValidateArgValues(new[] { "--restore" }, 0, out var e2) && e2 != null,
+                    "arg-required: --restore with no archive stops rather than scanning");
+                Assert(!TryValidateArgValues(new[] { "--moods", "--store" }, 0, out var e3)
+                       && e3 != null && e3.IndexOf("--store", StringComparison.Ordinal) >= 0,
+                    $"arg-required: a flag is not a value, and the message names what followed (got: {e3 ?? "null"})");
+                Assert(!TryValidateArgValues(new[] { "--file-list" }, 0, out var e4)
+                       && e4 != null && e4.IndexOf("nothing followed", StringComparison.Ordinal) >= 0,
+                    $"arg-required: the message says nothing followed the flag (got: {e4 ?? "null"})");
+
+                Assert(TryValidateArgValues(new[] { "--moods", @"C:\lib\mbxmoods.json" }, 0, out _),
+                    "arg-required: a flag with its value is accepted");
+                Assert(TryValidateArgValues(new[] { "--refresh" }, 0, out _),
+                    "arg-required: a flag that takes no value is never asked for one");
+                Assert(TryValidateArgValues(new[] { "--store" }, 0, out _),
+                    "arg-required: --store's path is optional, so its absence is not an error");
+                Assert(TryValidateArgValues(new[] { "--parallel", "32", "--store" }, 3, out _),
+                    "arg-required: the config file's own flags carry their own values");
+
+                // A typo in the table would silently protect nothing, so the table is pinned to the
+                // real flag list rather than trusted.
+                var unknownInTable = ValueTakingFlags.Keys.Where(k => !KnownFlags.Contains(k)).OrderBy(k => k).ToList();
+                Assert(unknownInTable.Count == 0,
+                    $"arg-required: every flag in the value-taking table is a real flag (not: {string.Join(", ", unknownInTable)})");
             }
 
             // --- A re-analysis must not drop a block it did not observe. Field report 2026-10-26:
