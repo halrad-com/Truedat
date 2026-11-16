@@ -2639,8 +2639,8 @@ namespace Truedat
                 KeepAwakeRelease();
                 if (pause)
                 {
-                    Console.WriteLine();
-                    Console.Write("Done - press any key to close...");
+                    Console.Error.WriteLine();
+                    Console.Error.Write("Done - press any key to close...");
                     try { Console.ReadKey(true); } catch { }
                 }
             }
@@ -3214,7 +3214,7 @@ namespace Truedat
                 // it was resolved against is a GUESS (the cwd fallback), which is where a stash directory would otherwise land.
                 else if (_storeFromConfig && !storeVerb && (analyzeFileMode || fileListMode) && analyzeFileMoods == null)
                 {
-                    Console.WriteLine("  store: config says store = true but this mode has no --moods catalog target, so nothing would be written; store skipped this run");
+                    (jsonOutput ? Console.Error : Console.Out).WriteLine("  store: config says store = true but this mode has no --moods catalog target, so nothing would be written; store skipped this run");
                     storePath = null;
                 }
                 else
@@ -3224,7 +3224,7 @@ namespace Truedat
                 // a read verb answering from a store should say which one.
                 bool readVerb = statsMode || duplicatesMode || storeVerb || verifyMode || previewMode || listReviewMode || listSpeechMode;
                 if (storeAdopted && storePath != null && !readVerb)
-                    Console.WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
+                    (jsonOutput && (analyzeFileMode || fileListMode) ? Console.Error : Console.Out).WriteLine($"  Store:      using the store already at \"{storePath}\"{(_stageOpts.Edges ? " with edges" : "")} (--no-store / --no-edges, or truedat --config store false, leaves it alone)");
                 if (storePath != null) ApplyStoreLocation(storePath, storeCatalog);
                 // Nothing named and nothing discovered: the resolved catalog is the cwd GUESS. With the store named explicitly, --store-info
                 // must not report (or recommend publishing) against a catalog nobody named — it reads beside the store, as it did before
@@ -4296,6 +4296,7 @@ namespace Truedat
             // --analyze-file: single file Essentia analysis (no iTunes XML needed)
             if (analyzeFileMode)
             {
+                using var afConsole = new JsonConsoleScope(jsonOutput);
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 // No path at all is a usage error and stays exit 1 — there is nothing to
@@ -4711,7 +4712,7 @@ namespace Truedat
                         }
                         jw.WriteEndObject();
                     }
-                    Console.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
+                    afConsole.ResultWriter.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
                 }
 
                 // Save moods file if --moods specified
@@ -4928,6 +4929,7 @@ namespace Truedat
             //   --file-list -       read paths from stdin (one per line, # comments)
             if (fileListMode)
             {
+                using var flConsole = new JsonConsoleScope(jsonOutput);
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 List<string> filePaths;
@@ -5660,7 +5662,7 @@ namespace Truedat
                     };
                     var summaryJson = System.Text.Json.JsonSerializer.Serialize(summary,
                         new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                    Console.WriteLine(summaryJson);
+                    flConsole.ResultWriter.WriteLine(summaryJson);
                 }
 
                 foreach (var line in ThisCommand()) Console.Error.WriteLine(line);
