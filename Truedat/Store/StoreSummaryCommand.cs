@@ -20,14 +20,21 @@ namespace Truedat.Store
     }
 
     /// <summary>Read-only summary of a truedat store, short enough to paste into a forum post
-    /// (<c>--store-summary</c>). Four questions, in the order they inform a decision:
+    /// (<c>--store-summary</c>). Six questions, in the order they inform a decision:
     ///
     /// <list type="number">
     /// <item>how often the three key profiles agree, per region, and which rung supplied the whole-track key;</item>
+    /// <item>how the tracks spread over the Camelot codes;</item>
     /// <item>how often the start, whole and end keys agree with each other under the hub's compatibility rule;</item>
+    /// <item>how close whole-track chroma puts two tracks, and where a same-key pair falls among all pairs;</item>
     /// <item>whether the edge key or the whole-track key better predicts the chroma actually present at a join;</item>
-    /// <item>how this library's raw feature spread sits against the range the shipped mood model was fitted on.</item>
+    /// <item>how this library's raw feature spread sits against the range the shipped mood model was fitted on, at
+    /// both ends, with the statistics needed to pool several libraries.</item>
     /// </list>
+    ///
+    /// <para>The sections that read whole-track values use every track. The ones that need an edge window say how
+    /// many tracks that is, so a store whose edges are complete, partly filled or absent prints a block that reads
+    /// the same way.</para>
     ///
     /// <para>It opens the store through <see cref="SqliteDb.OpenReadOnly"/>, so whatever it does it cannot change a
     /// byte of the database (proven by hashing one either side of a run); opening a WAL store still creates the
@@ -89,6 +96,14 @@ namespace Truedat.Store
         /// std 1 the "sigma" of a library's value is just the value. Named so the output can say which and why rather
         /// than print a column of nonsense. (spectralFlatness, mood-model v3 — reported to the hub lane 2026-11-10.)</summary>
         internal static bool HasUsableScale(Feat f) => f.Std > 0 && !(f.Mean == 0.0 && f.Std == 1.0);
+
+        /// <summary>Where the same model's valence side stops reading an input: each standardized input is clipped to
+        /// plus or minus this many fitted standard deviations before it is combined (<c>zBound</c> on the served
+        /// head's valence axis in the same <c>mood-model.json</c>; <c>MoodModelLoader</c> applies it). Its arousal
+        /// axis carries no bound. The range table counts the tracks past it, because that is the line beyond which
+        /// one side of the model stops telling tracks apart and the other extrapolates. Tagged by
+        /// <see cref="ModelTag"/> like the scale: a refit can move it.</summary>
+        internal const double ValenceInputBound = 4.0;
 
         internal static int Run(string storePath, bool explanations = true)
         {
@@ -199,8 +214,12 @@ namespace Truedat.Store
                 o.Add(CoverageGapLine(chromaNoKey));
             o.Add("");
 
+            // Whole-track sections read every track; the ones that need an edge window say how many tracks that is.
+            // So a store whose edges are complete, partly filled or absent all print a block that reads the same way.
             KeyAgreement(tracks, wholeKeyRows, o);
+            KeyShares(tracks, o);
             RegionalCompatibility(tracks, o);
+            WholeTrackSound(tracks, o);
             JoinSeparation(tracks, o);
             FeatureSpread(db, contentRows, o);
 
@@ -291,9 +310,104 @@ namespace Truedat.Store
             o.Add($"  {label}: compatible {Pct(l.Count(d => d == 0.0), l.Count)}  near {Pct(l.Count(d => d == 0.5), l.Count)}  clash {Pct(l.Count(d => d == 1.0), l.Count)}");
         }
 
+        // ---------------------------------------------------------------- key shares
+
+        /// <summary>How the library's tracks spread over the 24 Camelot codes, as shares so two libraries of
+        /// different sizes read side by side. A rule that joins by key can only pick from the codes compatible with
+        /// the current one, so a thin code is a thin band of candidates — which a library-wide agreement figure
+        /// cannot show. Whole-track keys only: it needs no edge window.</summary>
+        internal static void KeyShares(List<SummaryTrack> tracks, List<string> o)
+        {
+            o.Add("KEYS — share of tracks on each Camelot code (the stored key), percent");
+            var counts = new int[2, 13];
+            int n = 0;
+            foreach (var t in tracks)
+            {
+                if (!StoreSummary.TryParseCode(t.WholeCode, out int hour, out char ring)) continue;
+                counts[ring == 'A' ? 0 : 1, hour]++;
+                n++;
+            }
+            if (n == 0) { o.Add("  not computed: no track carries a whole-track key"); o.Add(""); return; }
+
+            var hours = Enumerable.Range(1, 12).ToList();
+            o.Add("    " + string.Concat(hours.Select(h => h.ToString(CultureInfo.InvariantCulture).PadLeft(6))));
+            for (int r = 0; r < 2; r++)
+            {
+                int ring = r;
+                o.Add("  " + (ring == 0 ? "A" : "B") + " " +
+                      string.Concat(hours.Select(h => (100.0 * counts[ring, h] / n).ToString("F1", CultureInfo.InvariantCulture).PadLeft(6))));
+            }
+            int minor = hours.Sum(h => counts[0, h]);
+            o.Add($"  minor (A) {Pct(minor, n)}   major (B) {Pct(n - minor, n)}   (n={n})");
+            Explain(o, "A is the minor ring and B the major. A join by key draws its candidates from one code, the same " +
+                    "hour on the other ring and the two neighboring hours on its own, so a thin code leaves few to " +
+                    "choose from.");
+            o.Add("");
+        }
+
+        // ---------------------------------------------------------------- whole-track sound
+
+        /// <summary>Whole-track chroma between tracks, from every track that carries a key and a chroma vector — edge
+        /// windows or not. It used to be read off the join section's pairs, which only exist for tracks a scan has
+        /// folded AND whose two window keys EDMA decided; on a library still filling its edges that was a small and
+        /// unrepresentative part, for a measurement that never needed an edge.
+        ///
+        /// <para>The self-check is a RELATIONSHIP, not a figure. An earlier wording quoted the two means measured on
+        /// two libraries as what a healthy store reads; a healthy library need not sit on them, and the chroma
+        /// grouping fix moves them again. What must hold everywhere is that pairs sharing a key sit clearly closer
+        /// than pairs that do not.</para>
+        ///
+        /// <para>The last row is the hub's own rank (<see cref="StoreSummary.CloserThanPercent"/>) applied to the
+        /// mean same-key pair: what a join by key amounts to on this library's scale of pair distances.</para></summary>
+        internal static void WholeTrackSound(List<SummaryTrack> tracks, List<string> o)
+        {
+            o.Add("SOUND — whole-track chroma between tracks (needs no edge windows)");
+            var usable = tracks.Where(t => t.W12 != null && t.WholeCode != null).ToList();
+            if (usable.Count < 2)
+            {
+                Note(o, "not computed: fewer than two tracks carry both a whole-track key and whole-track chroma (hpcp12).");
+                o.Add("");
+                return;
+            }
+
+            var rnd = new Random(Seed);
+            var all = new List<double>(PairSamples);
+            var same = new List<double>(); var other = new List<double>();
+            for (int i = 0; i < PairSamples; i++)
+            {
+                int ia = rnd.Next(usable.Count), ib = rnd.Next(usable.Count);
+                if (ia == ib) continue;
+                var a = usable[ia]; var b = usable[ib];
+                double d = StoreSummary.CosineDistance(a.W12!, b.W12!);
+                all.Add(d);
+                (a.WholeCode == b.WholeCode ? same : other).Add(d);
+            }
+            double sameMean = StoreSummary.Mean(same);
+            o.Add($"  pairs sharing a key:   {F(sameMean, 4)}  (n={same.Count})");
+            o.Add($"  pairs on another key:  {F(StoreSummary.Mean(other), 4)}  (n={other.Count})");
+            all.Sort();
+            o.Add($"  any pair: p5 {F(StoreSummary.Percentile(all, 5), 3)}  p10 {F(StoreSummary.Percentile(all, 10), 3)}  " +
+                  $"p25 {F(StoreSummary.Percentile(all, 25), 3)}  p50 {F(StoreSummary.Percentile(all, 50), 3)}  (n={all.Count})");
+
+            double closeness = usable.Count >= StoreSummary.MinClosenessTracks && same.Count > 0
+                ? StoreSummary.CloserThanPercent(sameMean, all) : double.NaN;
+            if (double.IsNaN(closeness))
+                Note(o, "closeness of a same-key pair: not computed. It needs " + StoreSummary.MinClosenessTracks +
+                        " tracks with a key and whole-track chroma, and at least one sampled pair sharing a key.");
+            else
+                o.Add($"  pairs sharing a key are closer than {F(closeness, 1)}% of this library's pairs");
+
+            Explain(o, "The first two rows are a self-check. Pairs sharing a key must sit clearly closer than pairs on " +
+                    "another key; if they do not, this store or this reader is wrong and the rest of this block should " +
+                    "not be trusted. The last row puts a join by key on this library's own scale: the share of its " +
+                    "pairs that an average same-key pair is closer than. These rows read whole-track chroma only, so " +
+                    "they cover every track whether or not its edge windows have been folded.");
+            o.Add("");
+        }
+
         // ---------------------------------------------------------------- part 3
 
-        static void JoinSeparation(List<SummaryTrack> tracks, List<string> o)
+        internal static void JoinSeparation(List<SummaryTrack> tracks, List<string> o)
         {
             // Not headed "EDGES": the rows below compare key verdicts AND a whole-track rule that needs no edge
             // capture at all, so naming the section after edges invited reading the last row as a verdict on them.
@@ -308,6 +422,14 @@ namespace Truedat.Store
                 return;
             }
 
+            // How much of the library everything below describes. A store whose edge windows are still being filled
+            // (an interrupted --refresh, or a background fill) answers this section from the part folded so far, and
+            // without this row a block from 1% of a library reads exactly like a block from all of it.
+            o.Add($"  tracks carrying everything a join needs: {usable.Count} of {tracks.Count} ({Pct(usable.Count, tracks.Count)})");
+            Explain(o, "The rows below describe only those tracks: a whole key, a decided key in both windows and all " +
+                    "three chroma vectors. While a library's edge windows are still being filled that is a part of " +
+                    "it, and not a random sample.");
+
             var rnd = new Random(Seed);
             var joinByEdge = Classes(); var joinByWhole = Classes();
             // The same two splits over only the pairs the HUB would have an opinion on. A key the scorer does not
@@ -316,11 +438,9 @@ namespace Truedat.Store
             // rows above do — therefore measures something the hub never acts on, which is why both are printed.
             var trustedByEdge = Classes(); var trustedByWhole = Classes();
             var join = new List<double>(PairSamples);
-            // Three more chroma readings, from the same pairs, each answering a question the rows above raise but
-            // cannot settle on their own: what the distances mean on a scale, whether the measurement is working at
-            // all in this library, and why a whole-track vector competes with a window key.
+            // The whole-track distance of the same pairs, for the one reading that needs both: how much of what
+            // happens at a join is already visible in the whole-track vector.
             var wholeChroma = new List<double>(PairSamples);
-            var wholeSameKey = new List<double>(); var wholeDiffKey = new List<double>();
 
             for (int i = 0; i < PairSamples; i++)
             {
@@ -333,9 +453,7 @@ namespace Truedat.Store
                 double dw = StoreSummary.CamelotDistance(a.WholeCode, b.WholeCode);
                 joinByEdge[de].Add(d);
                 joinByWhole[dw].Add(d);
-                double dwc = StoreSummary.CosineDistance(a.W12!, b.W12!);
-                wholeChroma.Add(dwc);
-                (a.WholeCode == b.WholeCode ? wholeSameKey : wholeDiffKey).Add(dwc);
+                wholeChroma.Add(StoreSummary.CosineDistance(a.W12!, b.W12!));
                 if (Trusted(a.TailAgree, a.TailPresent) && Trusted(b.HeadAgree, b.HeadPresent)) trustedByEdge[de].Add(d);
                 if (Trusted(a.FlatAgree, a.FlatPresent) && Trusted(b.FlatAgree, b.FlatPresent)) trustedByWhole[dw].Add(d);
             }
@@ -362,40 +480,33 @@ namespace Truedat.Store
                     "brightness, tension and loudness that this row does not look at.");
             o.Add("");
 
-            ChromaReadings(usable, join, wholeChroma, wholeSameKey, wholeDiffKey, o);
+            ChromaReadings(usable, join, wholeChroma, o);
         }
 
-        /// <summary>The three chroma readings that make the join numbers above readable, and no others.
+        /// <summary>The two chroma readings that make the join numbers above readable, and no others.
         ///
         /// <para>A scale: a track's own start window against its own end window. Without it nobody can tell whether
         /// "compatible 0.24 against clash 0.34" is a wide gap or a rounding error, because the unit is arbitrary.</para>
         ///
-        /// <para>A self-check: whole-track chroma for pairs that share a Camelot code against pairs that do not. Two
-        /// independent measurements of this exist (labs 0.082 / 0.152, the hub lane 0.083 / 0.157), so a posted figure
-        /// far from those says the store or the reader is wrong and the rest of the post should be discarded. That
-        /// matters more here than usual, since the point of the block is collecting other people's numbers.</para>
-        ///
         /// <para>A reason: how well whole-track chroma distance tracks the distance actually at the join. It is the
-        /// answer to "why does a whole-track vector beat a window key", and it needs no edge capture to compute.</para>
+        /// answer to "why does a whole-track vector beat a window key".</para>
+        ///
+        /// <para>The whole-track self-check lived here once. It needs no edge window, so it moved to
+        /// <see cref="WholeTrackSound"/>, where it reads every track and not only the folded ones.</para>
         ///
         /// <para>Deliberately NOT here: head-against-head or tail-against-tail (no join is ever made of those, so the
         /// number informs nothing), window-against-whole-track for the same track (an edge-quality question, not one
         /// of the two decisions this block feeds, and already measured elsewhere), and anything per chroma bin (no
         /// consumer reads a bin).</para></summary>
-        static void ChromaReadings(List<SummaryTrack> usable, List<double> join, List<double> wholeChroma,
-                                   List<double> sameKey, List<double> diffKey, List<string> o)
+        static void ChromaReadings(List<SummaryTrack> usable, List<double> join, List<double> wholeChroma, List<string> o)
         {
-            o.Add("CHROMA — a scale for those distances, and a check that the measure works");
+            o.Add("CHROMA — a scale for the join distances");
             var own = usable.Select(t => StoreSummary.CosineDistance(t.H36!, t.T36!)).ToList();
             o.Add($"  a track's own start vs its own end:  {F(StoreSummary.Mean(own), 4)}  (n={own.Count})");
-            o.Add($"  whole-track, pairs sharing a key:    {F(StoreSummary.Mean(sameKey), 4)}  (n={sameKey.Count})");
-            o.Add($"  whole-track, pairs on another key:   {F(StoreSummary.Mean(diffKey), 4)}  (n={diffKey.Count})");
             o.Add($"  whole-track distance vs join distance: r = {F(StoreSummary.Pearson(wholeChroma, join), 2)}");
             Explain(o, "The first line is the yardstick: two ends of one track are this far apart, so a join closer than " +
-                    "that is as close as music gets to itself. The middle two are a self-check. Other measurements of " +
-                    "them sit near 0.08 and 0.15, so a figure far from that means this store or this reader is wrong " +
-                    "and the rest of this block should not be trusted. The last says how much of what happens at a " +
-                    "join is already visible in the whole-track vector, which needs no edge capture.");
+                    "that is as close as music gets to itself. The second says how much of what happens at a join is " +
+                    "already visible in the whole-track vector, which needs no edge capture.");
             o.Add("");
         }
 
@@ -469,18 +580,54 @@ namespace Truedat.Store
             Explain(o, "A hub set to another model (autoQ.model, or a mood-model json in its data folder) was fitted " +
                     "on a different range, and these sigmas are not its. Raw stored values, not the scaled " +
                     "valence/arousal, which clamp at the ends and would hide exactly this.");
-            o.Add("  feature              p5         p50        p95        p50 sigma  p95 sigma");
+            var data = new List<(Feat F, List<double> Values)>();
+            foreach (var f in ModelScale) data.Add((f, ReadFeature(db, f.Name)));
+            RangeTables(data, o);
+        }
 
-            var absent = new List<string>();
-            var noScale = new List<string>();
-            foreach (var f in ModelScale)
+        /// <summary>The two range tables, apart from the store read so they are testable on plain numbers.
+        ///
+        /// <para>The first is the library's own raw statistics. n, mean and std are there so several libraries'
+        /// blocks can be POOLED into one scale without anyone's tracks: a combined mean and standard deviation follow
+        /// exactly from each block's three numbers. That is also why a feature the model has no fitted range for
+        /// still gets its row here.</para>
+        ///
+        /// <para>The second is the same library in the model's fitted sigmas, at both ends. A median can sit inside
+        /// the fitted range while a tail is far outside it, and the tails are where a model that fits a library badly
+        /// misreads it — so both ends are printed, with the share of tracks past
+        /// <see cref="ValenceInputBound"/> each way.</para></summary>
+        internal static void RangeTables(IReadOnlyList<(Feat F, List<double> Values)> data, List<string> o)
+        {
+            var raw = new List<string>(); var sigma = new List<string>();
+            var absent = new List<string>(); var noScale = new List<string>();
+            foreach (var (f, values) in data)
             {
-                var vals = ReadFeature(db, f.Name);
-                if (vals.Count == 0) { absent.Add(f.Name); continue; }
-                if (!HasUsableScale(f)) { noScale.Add(f.Name); continue; }
+                if (values.Count == 0) { absent.Add(f.Name); continue; }
+                var vals = new List<double>(values);
                 vals.Sort();
+                int n = vals.Count;
                 double p5 = StoreSummary.Percentile(vals, 5), p50 = StoreSummary.Percentile(vals, 50), p95 = StoreSummary.Percentile(vals, 95);
-                o.Add($"  {f.Name,-20} {G(p5),-10} {G(p50),-10} {G(p95),-10} {Sig((p50 - f.Mean) / f.Std),-10} {Sig((p95 - f.Mean) / f.Std)}");
+                raw.Add("  " + f.Name.PadRight(18) + " " + n.ToString(CultureInfo.InvariantCulture).PadRight(7) + " " +
+                        Col(G(p5)) + Col(G(p50)) + Col(G(p95)) + Col(G(StoreSummary.Mean(vals))) + G(StoreSummary.Std(vals)));
+
+                if (!HasUsableScale(f)) { noScale.Add(f.Name); continue; }
+                var tail = StoreSummary.TailCounts(vals, f.Mean, f.Std, ValenceInputBound);
+                sigma.Add("  " + f.Name.PadRight(18) + " " +
+                          Sig((p5 - f.Mean) / f.Std).PadRight(7) + Sig((p50 - f.Mean) / f.Std).PadRight(7) + Sig((p95 - f.Mean) / f.Std).PadRight(7) +
+                          Pct2(tail.Under, n).PadRight(10) + Pct2(tail.Over, n));
+            }
+
+            if (raw.Count > 0)
+            {
+                o.Add("  " + "feature".PadRight(18) + " " + "n".PadRight(7) + " " + Col("p5") + Col("p50") + Col("p95") + Col("mean") + "std");
+                o.AddRange(raw);
+            }
+            if (sigma.Count > 0)
+            {
+                string bound = ValenceInputBound.ToString("0.##", CultureInfo.InvariantCulture);
+                o.Add("  " + "in fitted sigmas".PadRight(18) + " " + "p5".PadRight(7) + "p50".PadRight(7) + "p95".PadRight(7) +
+                      ("under -" + bound).PadRight(10) + "over +" + bound);
+                o.AddRange(sigma);
             }
             if (absent.Count > 0)
                 // Wrapped, like the noScale list below it: a sparse store names enough features here to run the line
@@ -488,11 +635,21 @@ namespace Truedat.Store
                 Note(o, "no value stored in this library: " + string.Join(", ", absent));
             if (noScale.Count > 0)
                 Note(o, "no fitted range to compare against, the model's scale for it being mean 0 / std 1: " + string.Join(", ", noScale));
-            Explain(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p95 past about 2 sigma " +
-                    "means this library's top end sits outside most of what the model was trained on. Mean and sigma " +
-                    "are not a min and a max, so this bounds the comparison rather than proving a value was never seen.");
+            Explain(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p5 or p95 past about 2 " +
+                    "sigma means that end of this library sits outside most of what the model was trained on. This " +
+                    "model's valence side stops reading an input at 4 sigma, so a track past it is scored as if it " +
+                    "sat at 4, while its arousal side reads the full value; the last two columns are the share of " +
+                    "tracks out there. n, mean and std are enough to pool several libraries into one scale without " +
+                    "their tracks. Mean and sigma are not a min and a max, so this bounds the comparison rather than " +
+                    "proving a value was never seen.");
             o.Add("");
         }
+
+        static string Col(string s) => s.PadRight(8) + " ";
+
+        /// <summary>A share to two places: the tails this is used for are a fraction of a percent of a library, and one
+        /// place would print most of them as 0.0%.</summary>
+        static string Pct2(int k, int n) => n == 0 ? "n/a" : (100.0 * k / n).ToString("0.00", CultureInfo.InvariantCulture) + "%";
 
         static List<double> ReadFeature(SqliteDb db, string name)
         {
@@ -682,7 +839,14 @@ namespace Truedat.Store
 
         static string Pct(int k, int n) => n == 0 ? "n/a" : $"{100.0 * k / n:0.0}%";
         static string F(double v, int dp) => double.IsNaN(v) ? "n/a" : v.ToString("F" + dp.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
-        static string Sig(double v) => double.IsNaN(v) || double.IsInfinity(v) ? "n/a" : (v >= 0 ? "+" : "") + v.ToString("F1", CultureInfo.InvariantCulture);
+        /// <summary>A sigma to one place with its sign, and zero with none. The sign is taken AFTER rounding: a value
+        /// just under zero used to print "0.0" beside an exact zero's "+0.0" in the same column.</summary>
+        internal static string Sig(double v)
+        {
+            if (double.IsNaN(v) || double.IsInfinity(v)) return "n/a";
+            var magnitude = Math.Abs(v).ToString("F1", CultureInfo.InvariantCulture);
+            return magnitude == "0.0" ? magnitude : (v > 0 ? "+" : "-") + magnitude;
+        }
 
         static string G(double v)
         {

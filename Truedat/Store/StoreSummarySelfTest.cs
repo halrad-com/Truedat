@@ -27,6 +27,13 @@ namespace Truedat.Store
             try { TestModelScale(assert); } catch (Exception ex) { assert(false, $"StoreSummary.ModelScale: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Store-summary self-test (--store-summary-min: the sentences go, every row stays)");
             try { TestMinimalMode(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Minimal: threw {ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("Store-summary self-test (tail shares and pooled statistics, key shares, closeness, a partial edge fill)");
+            try { TestTailAndPooled(assert); } catch (Exception ex) { assert(false, $"StoreSummary.TailAndPooled: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestCloseness(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Closeness: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestKeyShares(assert); } catch (Exception ex) { assert(false, $"StoreSummary.KeyShares: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestWholeTrackSound(assert); } catch (Exception ex) { assert(false, $"StoreSummary.Sound: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestRangeTables(assert); } catch (Exception ex) { assert(false, $"StoreSummary.RangeTables: threw {ex.GetType().Name}: {ex.Message}"); }
+            try { TestPartialFill(assert); } catch (Exception ex) { assert(false, $"StoreSummary.PartialFill: threw {ex.GetType().Name}: {ex.Message}"); }
             Console.WriteLine("Store-summary self-test (both modes end to end over real stores, incl. the shapes that compute nothing)");
             try { TestModesEndToEnd(assert); } catch (Exception ex) { assert(false, $"StoreSummary.EndToEnd: threw {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -79,6 +86,14 @@ namespace Truedat.Store
                 var minLines = Shape(assert, withRow, "one track", "reference: " + StoreSummaryCommand.ModelTag, shorterThanFull: true);
                 assert(minLines.Any(l => l.TrimStart().StartsWith("bpm", StringComparison.Ordinal) && l.Contains("120")),
                        "End to end: the range table's rows are printed in min — the strip takes sentences, not data");
+
+                // The sections added after the first release are reached from the real entry point, in order. The
+                // unit tests call each one directly, so only this sees a section left out of the block.
+                int At(string head) => minLines.FindIndex(l => l.StartsWith(head, StringComparison.Ordinal));
+                int shares = At("KEYS — share of tracks"), sound = At("SOUND — whole-track chroma"), join = At("AT A JOIN"),
+                    sigmas = minLines.FindIndex(l => l.Contains("in fitted sigmas"));
+                assert(shares > 0 && sound > shares && join > sound && sigmas > join,
+                       $"End to end: key shares, whole-track sound, the join section and the sigma table all print, in that order (at {shares}, {sound}, {join}, {sigmas})");
             }
             finally
             {
@@ -219,6 +234,234 @@ namespace Truedat.Store
         }
 
         static bool Near(double a, double b, double tol = 1e-9) => Math.Abs(a - b) <= tol;
+
+        // ---------------------------------------------------------------- tails, pooled statistics, key shares, closeness
+
+        static double[] E(int bin, int dim) { var v = new double[dim]; v[bin] = 1; return v; }
+
+        /// <summary>A track with a whole-track key and chroma and NO edge windows — what most of a library looks
+        /// like while its edges are still being filled.</summary>
+        static SummaryTrack W(string code, int bin) => new SummaryTrack
+        {
+            WholeCode = code, W12 = E(bin, 12), FlatAgree = 3, FlatPresent = 3, EdmaAgree = 3, EdmaPresent = 3, Provenance = "edma",
+        };
+
+        /// <summary>A track with everything a join needs.</summary>
+        static SummaryTrack Full(string code, int bin) => new SummaryTrack
+        {
+            WholeCode = code, HeadCode = code, TailCode = code, W12 = E(bin, 12), H36 = E(bin, 36), T36 = E(bin, 36),
+            FlatAgree = 3, FlatPresent = 3, EdmaAgree = 3, EdmaPresent = 3,
+            HeadAgree = 3, HeadPresent = 3, TailAgree = 3, TailPresent = 3, Provenance = "edma",
+        };
+
+        static string[] Cells(string line) => line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+        /// <summary>The section printed both ways: every line min prints is one full prints, and full says more.</summary>
+        static void MinIsSubset(Action<bool, string> assert, string what, Action<List<string>> section)
+        {
+            var full = new List<string>(); var min = new List<string>();
+            bool saved = StoreSummaryCommand.Explanations;
+            try
+            {
+                StoreSummaryCommand.Explanations = true; section(full);
+                StoreSummaryCommand.Explanations = false; section(min);
+            }
+            finally { StoreSummaryCommand.Explanations = saved; }
+            var fullSet = new HashSet<string>(full);
+            var extra = min.Where(l => !fullSet.Contains(l)).ToList();
+            assert(min.Count > 0 && extra.Count == 0,
+                   $"{what}: every line min prints is one the full block also prints ({min.Count} lines"
+                   + (extra.Count > 0 ? $", extra: \"{extra[0]}\")" : ")"));
+            assert(min.Count < full.Count, $"{what}: min drops the explanation and nothing else ({min.Count} vs {full.Count} lines)");
+            var wide = full.Where(l => l.Length > StoreSummaryCommand.BlockWidth).ToList();
+            assert(wide.Count == 0, $"{what}: every line fits the {StoreSummaryCommand.BlockWidth}-column block"
+                                    + (wide.Count > 0 ? $" (first {wide[0].Length}: \"{wide[0]}\")" : ""));
+        }
+
+        static void TestTailAndPooled(Action<bool, string> assert)
+        {
+            // Divide by n, not n-1: this is compared against the model's fitted scale, and that scaler divides by n.
+            assert(Near(StoreSummary.Std(new double[] { 2, 4, 4, 4, 5, 5, 7, 9 }), 2.0, 1e-12),
+                   $"Std: the population standard deviation of 2,4,4,4,5,5,7,9 is 2 (got {StoreSummary.Std(new double[] { 2, 4, 4, 4, 5, 5, 7, 9 })})");
+            assert(Near(StoreSummary.Std(new double[] { 7 }), 0.0), "Std: one value has no spread (0)");
+            assert(double.IsNaN(StoreSummary.Std(new double[0])), "Std: an empty sample is NaN");
+
+            // Mean 10, std 2, bound 4: past the bound is under 2 or over 18.
+            var t = StoreSummary.TailCounts(new double[] { 1.9, 2, 10, 18, 18.1, 30 }, 10, 2, 4);
+            assert(t.Under == 1 && t.Over == 2, $"Tail: one value under mean - 4 std and two over mean + 4 std (got {t.Under} under, {t.Over} over)");
+            var at = StoreSummary.TailCounts(new double[] { 2, 18 }, 10, 2, 4);
+            assert(at.Under == 0 && at.Over == 0, $"Tail: a value exactly at the bound is not past it (got {at.Under}, {at.Over})");
+            var flat = StoreSummary.TailCounts(new double[] { 1, 2, 3 }, 0, 0, 4);
+            assert(flat.Under == 0 && flat.Over == 0, $"Tail: no fitted spread means no tail to count (got {flat.Under}, {flat.Over})");
+        }
+
+        static void TestCloseness(Action<bool, string> assert)
+        {
+            // The hub's JoinCloseness.CloserThanPercent: the share of the sample STRICTLY farther apart.
+            var ramp = new double[1000];
+            for (int i = 0; i < ramp.Length; i++) ramp[i] = i / 1000.0;
+            assert(Near(StoreSummary.CloserThanPercent(0.25, ramp), 74.9),
+                   $"Closeness: 0.25 on an even ramp of 1000 is closer than 74.9% of it (got {StoreSummary.CloserThanPercent(0.25, ramp)})");
+            assert(Near(StoreSummary.CloserThanPercent(-1, ramp), 100.0), "Closeness: nearer than every pair is 100");
+            assert(Near(StoreSummary.CloserThanPercent(2, ramp), 0.0), "Closeness: farther than every pair is 0");
+
+            var ties = Enumerable.Repeat(0.5, 100).ToArray();
+            assert(Near(StoreSummary.CloserThanPercent(0.5, ties), 0.0), "Closeness: a pair at the same distance is not farther, so ties count for nothing");
+
+            assert(double.IsNaN(StoreSummary.CloserThanPercent(0.25, ramp.Take(StoreSummary.MinClosenessSample - 1).ToArray())),
+                   "Closeness: a sample under the hub's minimum has no rank (NaN, never a number)");
+            assert(double.IsNaN(StoreSummary.CloserThanPercent(double.NaN, ramp)), "Closeness: a distance that is not a number has no rank");
+            assert(StoreSummary.MinClosenessSample == 100 && StoreSummary.MinClosenessTracks == 100,
+                   "Closeness: the minimum sample and track count are the hub's (100 and 100)");
+        }
+
+        static void TestKeyShares(Action<bool, string> assert)
+        {
+            // Two tracks on 8B, one on 8A, one on 1A, and one with no key at all (it is in no share).
+            var tracks = new List<SummaryTrack> { W("8B", 0), W("8B", 0), W("8A", 1), W("1A", 2), new SummaryTrack() };
+            var o = new List<string>();
+            StoreSummaryCommand.KeyShares(tracks, o);
+
+            var head = o.FirstOrDefault(l => Cells(l).SequenceEqual(Enumerable.Range(1, 12).Select(n => n.ToString())));
+            assert(head != null, "Key shares: a header row numbers the twelve Camelot hours");
+            var a = o.Where(l => l.StartsWith("  A ", StringComparison.Ordinal)).Select(Cells).FirstOrDefault();
+            var b = o.Where(l => l.StartsWith("  B ", StringComparison.Ordinal)).Select(Cells).FirstOrDefault();
+            assert(a != null && a.Length == 13 && a[1] == "25.0" && a[8] == "25.0" && a[2] == "0.0",
+                   "Key shares: the minor ring holds 25.0 at hour 1 and 25.0 at hour 8, of the tracks that carry a key"
+                   + (a != null ? $" (got {string.Join(" ", a)})" : " (no A row)"));
+            assert(b != null && b.Length == 13 && b[8] == "50.0" && b[1] == "0.0",
+                   "Key shares: the major ring holds 50.0 at hour 8" + (b != null ? $" (got {string.Join(" ", b)})" : " (no B row)"));
+            assert(o.Any(l => l.Contains("minor (A) 50.0%") && l.Contains("major (B) 50.0%") && l.Contains("(n=4)")),
+                   "Key shares: the two rings are totalled, over the four tracks that carry a key");
+
+            var none = new List<string>();
+            StoreSummaryCommand.KeyShares(new List<SummaryTrack> { new SummaryTrack() }, none);
+            assert(none.Any(l => l.Contains("not computed")), "Key shares: no keyed track is 'not computed', never a row of zeros");
+
+            MinIsSubset(assert, "Key shares", l => StoreSummaryCommand.KeyShares(tracks, l));
+        }
+
+        static void TestWholeTrackSound(Action<bool, string> assert)
+        {
+            // 120 tracks, none with an edge window. Two keys, and chroma that follows the key exactly: a same-key pair
+            // is 0 apart and any other pair is 1 apart.
+            var lib = new List<SummaryTrack>();
+            for (int i = 0; i < 60; i++) { lib.Add(W("8B", 0)); lib.Add(W("3A", 1)); }
+            var o = new List<string>();
+            StoreSummaryCommand.WholeTrackSound(lib, o);
+
+            assert(o.Any(l => l.Contains("pairs sharing a key:") && l.Contains("0.0000")),
+                   "Sound: computed from tracks that carry no edge windows at all — same-key pairs average 0.0000");
+            assert(o.Any(l => l.Contains("pairs on another key:") && l.Contains("1.0000")),
+                   "Sound: pairs on another key average 1.0000");
+            assert(o.Any(l => l.Contains("any pair:") && l.Contains("p5 ") && l.Contains("p10 ") && l.Contains("p25 ") && l.Contains("p50 ")),
+                   "Sound: the library's own pair distances are printed as percentiles");
+
+            // About half of all pairs are other-key pairs at distance 1, strictly farther than the same-key mean of 0.
+            var row = o.FirstOrDefault(l => l.Contains("% of this library's pairs"));
+            var m = row == null ? null : System.Text.RegularExpressions.Regex.Match(row, @"pairs sharing a key are closer than ([0-9.]+)% of this library's pairs");
+            double pct = m != null && m.Success ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) : double.NaN;
+            assert(pct > 45 && pct < 56,
+                   $"Sound: 'pairs sharing a key are closer than N% of this library's pairs', N near 50 here (got \"{row}\")");
+
+            // The self-check is a relationship, not a figure: an earlier wording quoted two numbers from other
+            // libraries as the expected reading, and a healthy library elsewhere need not sit on them.
+            // (Whitespace collapsed: the sentence is wrapped to the block width, so its words can straddle two lines.)
+            var text = System.Text.RegularExpressions.Regex.Replace(string.Join(" ", o), @"\s+", " ");
+            assert(text.Contains("clearly closer") && !text.Contains("0.08") && !text.Contains("0.15"),
+                   "Sound: the self-check names the relationship (same key clearly closer) and quotes no other library's figures");
+
+            // Under the hub's minimum a library is not ranked against at all; the two means still print.
+            var small = new List<SummaryTrack>();
+            for (int i = 0; i < 5; i++) { small.Add(W("8B", 0)); small.Add(W("3A", 1)); }
+            var o2 = new List<string>();
+            StoreSummaryCommand.WholeTrackSound(small, o2);
+            assert(o2.Any(l => l.Contains("pairs sharing a key:") && l.Contains("0.0000")), "Sound: a small library still prints its two means");
+            assert(o2.Any(l => l.Contains("closeness") && l.Contains("not computed")) && !o2.Any(l => l.Contains("% of this library's pairs")),
+                   "Sound: under 100 tracks the closeness row is 'not computed', as the hub gives no rank there");
+
+            var o3 = new List<string>();
+            StoreSummaryCommand.WholeTrackSound(new List<SummaryTrack> { W("8B", 0) }, o3);
+            assert(o3.Any(l => l.Contains("not computed")), "Sound: one track is 'not computed'");
+
+            MinIsSubset(assert, "Sound", l => StoreSummaryCommand.WholeTrackSound(lib, l));
+        }
+
+        static void TestRangeTables(Action<bool, string> assert)
+        {
+            // Fitted mean 100, std 10. One value under 4 sigma (below 60), one over (above 140).
+            var data = new List<(StoreSummaryCommand.Feat F, List<double> Values)>
+            {
+                (new StoreSummaryCommand.Feat("bpm", 100, 10), new List<double> { 140.1, 100, 59.9, 100, 100 }),
+                (new StoreSummaryCommand.Feat("spectralFlatness", 0, 1), new List<double> { 0.1, 0.2 }),
+                (new StoreSummaryCommand.Feat("hfc", 20, 13), new List<double>()),
+            };
+            var o = new List<string>();
+            StoreSummaryCommand.RangeTables(data, o);
+
+            int split = o.FindIndex(l => l.Contains("in fitted sigmas"));
+            assert(split > 0, "Range: a second table, in fitted sigmas, follows the raw one");
+            var raw = split > 0 ? o.Take(split).ToList() : new List<string>();
+            var sig = split > 0 ? o.Skip(split).ToList() : new List<string>();
+
+            assert(raw.Count > 0 && Cells(raw[0]).SequenceEqual(new[] { "feature", "n", "p5", "p50", "p95", "mean", "std" }),
+                   "Range: the raw table's columns are n, p5, p50, p95, mean, std");
+            var r = raw.Select(Cells).FirstOrDefault(c => c.Length > 0 && c[0] == "bpm");
+            assert(r != null && r.Length == 7 && r[1] == "5" && r[2] == "67.920" && r[3] == "100.0" && r[4] == "132.1" && r[5] == "100.0" && r[6].StartsWith("25.36", StringComparison.Ordinal),
+                   "Range: the raw row carries n 5, p5 67.920, p50 100.0, p95 132.1, mean 100.0, std 25.36"
+                   + (r != null ? $" (got {string.Join(" ", r)})" : " (no row)"));
+
+            assert(sig.Count > 0 && sig[0].Contains("under -4") && sig[0].Contains("over +4"),
+                   "Range: the sigma table's last two columns are the shares of tracks past 4 sigma each way");
+            var s = sig.Select(Cells).FirstOrDefault(c => c.Length > 0 && c[0] == "bpm");
+            assert(s != null && s.SequenceEqual(new[] { "bpm", "-3.2", "0.0", "+3.2", "20.00%", "20.00%" }),
+                   "Range: the sigma row carries p5 -3.2, p50 0.0, p95 +3.2, and 20.00% of tracks past the bound each way"
+                   + (s != null ? $" (got {string.Join(" ", s)})" : " (no row)"));
+
+            // Zero carries no sign, from either side: a column mixing "+0.0", "0.0" and "-0.0" for the same reading
+            // looks like three different values to someone lining blocks up.
+            var z = new[] { 0.0, 0.04, -0.04 }.Select(StoreSummaryCommand.Sig).ToArray();
+            assert(z.All(x => x == "0.0"), $"Range: a sigma that rounds to zero prints as 0.0 whichever side it came from (got {string.Join(", ", z)})");
+            assert(StoreSummaryCommand.Sig(0.2) == "+0.2" && StoreSummaryCommand.Sig(-0.2) == "-0.2",
+                   $"Range: any other sigma carries its sign (got {StoreSummaryCommand.Sig(0.2)}, {StoreSummaryCommand.Sig(-0.2)})");
+
+            // A feature the model has no fitted range for still has raw statistics worth pooling; it has no sigmas.
+            assert(raw.Select(Cells).Any(c => c.Length == 7 && c[0] == "spectralFlatness" && c[1] == "2"),
+                   "Range: a feature with no usable fitted scale still gets its raw row");
+            assert(!sig.Select(Cells).Any(c => c.Length > 0 && c[0] == "spectralFlatness" && c.Length == 6),
+                   "Range: and no sigma row");
+            assert(o.Any(l => l.Contains("no fitted range to compare against")) && string.Join(" ", o).Contains("spectralFlatness"),
+                   "Range: the output says which feature has no fitted range");
+            assert(o.Any(l => l.Contains("no value stored in this library: hfc")),
+                   "Range: a feature with no stored value is named, not printed as a row of zeros");
+            assert(StoreSummaryCommand.ValenceInputBound == 4.0, "Range: the bound is the model's own input bound (4 sigma)");
+
+            MinIsSubset(assert, "Range", l => StoreSummaryCommand.RangeTables(data, l));
+        }
+
+        static void TestPartialFill(Action<bool, string> assert)
+        {
+            // Three tracks a scan has folded, two it has not reached yet.
+            var tracks = new List<SummaryTrack> { Full("8B", 0), Full("8B", 0), Full("3A", 1), W("5A", 2), W("5A", 2) };
+            var o = new List<string>();
+            StoreSummaryCommand.JoinSeparation(tracks, o);
+            assert(o.Any(l => l.Contains("tracks carrying everything a join needs: 3 of 5 (60.0%)")),
+                   "Partial fill: the join section says how much of the library its rows describe (3 of 5)");
+
+            var min = new List<string>();
+            bool saved = StoreSummaryCommand.Explanations;
+            try { StoreSummaryCommand.Explanations = false; StoreSummaryCommand.JoinSeparation(tracks, min); }
+            finally { StoreSummaryCommand.Explanations = saved; }
+            assert(min.Any(l => l.Contains("tracks carrying everything a join needs: 3 of 5 (60.0%)")),
+                   "Partial fill: the coverage row is data, so it survives --store-summary-min");
+            var fullSet = new HashSet<string>(o);
+            assert(min.All(fullSet.Contains), "Partial fill: the join section in min is a subset of the full one");
+
+            // The whole-track sections do not wait for edges: the two unfolded tracks are counted there.
+            var keys = new List<string>();
+            StoreSummaryCommand.KeyShares(tracks, keys);
+            assert(keys.Any(l => l.Contains("(n=5)")), "Partial fill: key shares count every keyed track, folded or not");
+        }
 
         // ---------------------------------------------------------------- the hub's rules
 
@@ -409,6 +652,13 @@ namespace Truedat.Store
                    "AUC: an empty side has no separation to report (NaN, never 0)");
             assert(double.IsNaN(StoreSummary.Auc(new double[] { 1 }, new double[0])),
                    "AUC: an empty high side is NaN too");
+
+            // A class of more than 46,340 pairs: n * (n + 1) no longer fits a 32-bit integer. The report samples
+            // 200,000 pairs, so any library where more than about 23% of them fall in one class reaches this, and
+            // the figure came out below 0.5 for a verdict whose two means were plainly the right way round.
+            var big = Enumerable.Repeat(1.0, 50000).ToArray();
+            double aucBig = StoreSummary.Auc(big, new double[] { 2.0, 3.0 });
+            assert(Near(aucBig, 1.0), $"AUC: 50,000 low values all under the high ones is still 1.0 (got {aucBig})");
 
             var s = new double[] { 0, 1, 2, 3, 4 };
             assert(Near(StoreSummary.Percentile(s, 0), 0.0), "Percentile: p0 is the smallest value");

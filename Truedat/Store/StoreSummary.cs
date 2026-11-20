@@ -6,8 +6,9 @@ using Truedat.Edges;
 namespace Truedat.Store
 {
     /// <summary>The arithmetic behind <c>--store-summary</c>, kept apart from the store reads so every rule here is
-    /// testable without a database. Two of these rules are the HUB's, mirrored from its source and not ours to change
-    /// (<see cref="CamelotDistance"/>, <see cref="HarmonicTrust"/>); the rest are this report's own.
+    /// testable without a database. Three of these rules are the HUB's, mirrored from its source and not ours to change
+    /// (<see cref="CamelotDistance"/>, <see cref="HarmonicTrust"/>, <see cref="CloserThanPercent"/>); the rest are
+    /// this report's own.
     ///
     /// <para>The Camelot table itself is NOT duplicated here — <see cref="CamelotOf"/> calls the producer's own mapping
     /// in <c>EdgeKey</c>, so the report cannot drift from the codes the store was written with. Only the enharmonic
@@ -39,7 +40,7 @@ namespace Truedat.Store
             return 0.0;                                     // the key in use is outvoted or alone
         }
 
-        static bool TryParseCode(string? code, out int num, out char letter)
+        internal static bool TryParseCode(string? code, out int num, out char letter)
         {
             num = 0; letter = ' ';
             if (string.IsNullOrEmpty(code) || code!.Length < 2) return false;
@@ -208,7 +209,9 @@ namespace Truedat.Store
             var r = Ranks(all);
             double rLow = 0;
             for (int i = 0; i < low.Count; i++) rLow += r[i];
-            double u = rLow - low.Count * (low.Count + 1) / 2.0;   // Mann-Whitney U: times a low beat a high
+            // In double from the first factor: as an int product, n * (n + 1) overflows past 46,340 values, and one
+            // class of a 200,000-pair sample reaches that on an ordinary library.
+            double u = rLow - (double)low.Count * (low.Count + 1) / 2.0;   // Mann-Whitney U: times a low beat a high
             return 1.0 - u / ((double)low.Count * high.Count);
         }
 
@@ -245,6 +248,49 @@ namespace Truedat.Store
         {
             if (xs.Count == 0) return double.NaN;
             double s = 0; foreach (var x in xs) s += x; return s / xs.Count;
+        }
+
+        /// <summary>Population standard deviation — divided by n, not n-1. It is printed beside a model's fitted scale,
+        /// and that scale was fitted the same way, so the two are comparable and several libraries' n / mean / std can
+        /// be pooled into one scale exactly.</summary>
+        internal static double Std(IReadOnlyList<double> xs)
+        {
+            if (xs.Count == 0) return double.NaN;
+            double m = Mean(xs), s = 0;
+            foreach (var x in xs) { double d = x - m; s += d * d; }
+            return Math.Sqrt(s / xs.Count);
+        }
+
+        /// <summary>How many values sit strictly past <paramref name="bound"/> fitted standard deviations from the
+        /// fitted mean, each way. A value exactly at the bound is not past it. No fitted spread means no tail.</summary>
+        internal static (int Under, int Over) TailCounts(IReadOnlyList<double> values, double mean, double std, double bound)
+        {
+            if (!(std > 0) || double.IsNaN(mean)) return (0, 0);
+            double lo = mean - bound * std, hi = mean + bound * std;
+            int under = 0, over = 0;
+            foreach (var v in values) { if (v < lo) under++; else if (v > hi) over++; }
+            return (under, over);
+        }
+
+        // ---------------------------------------------------------------- the hub's closeness rank, mirrored
+
+        /// <summary>MBXH/Core/JoinCloseness.cs MinSample and MinTracks: under either, the hub gives no rank at all.</summary>
+        internal const int MinClosenessSample = 100;
+        internal const int MinClosenessTracks = 100;
+
+        /// <summary>MBXH/Core/JoinCloseness.cs CloserThanPercent: the share of an ASCENDING-sorted sample, 0..100, that
+        /// is STRICTLY farther apart than <paramref name="distance"/>. NaN where the hub answers "not known".</summary>
+        internal static double CloserThanPercent(double distance, IReadOnlyList<double> sortedSample)
+        {
+            if (sortedSample == null || sortedSample.Count < MinClosenessSample) return double.NaN;
+            if (double.IsNaN(distance) || double.IsInfinity(distance)) return double.NaN;
+            int lo = 0, hi = sortedSample.Count;            // first index whose value is strictly greater
+            while (lo < hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (sortedSample[mid] > distance) hi = mid; else lo = mid + 1;
+            }
+            return 100.0 * (sortedSample.Count - lo) / sortedSample.Count;
         }
     }
 }
