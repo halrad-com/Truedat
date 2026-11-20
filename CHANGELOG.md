@@ -6,6 +6,14 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV2.2] — 2026-11-19
+
+### Fixed
+
+- The review list now clears entries for deleted files, and `--fixup` cleans it too.
+- The chroma grouping is corrected; existing tracks keep old values until rescanned.
+- `--json-output` in per-file modes prints only JSON.
+
 ## [0.5.5.4-EV2.1] — 2026-11-12
 
 ### Added
