@@ -131,6 +131,34 @@ namespace Truedat
         /// <summary>The review queue is what a human still has to look at. `ignore` was
         /// decided by the operator and `auto` by truedat, so neither is pending work.</summary>
         internal static bool NeedsReview(ReviewRecord r) => r.State == ReviewState.Review;
+
+        /// <summary>
+        /// Does this record stop its file being attempted? Only two things do: the operator's
+        /// <see cref="ReviewState.Ignore"/>, and a recorded FAILURE.
+        ///
+        /// A policy, structural or exclusion record does not. Those are decided by a rule, the
+        /// rule is cheap, and it is evaluated for every unrecorded file anyway — so it is
+        /// evaluated again for a recorded one. When a record of that kind stopped the attempt, the
+        /// scan never reached the rule: a file once recorded as too short stayed skipped after
+        /// <c>--enableshortfiles</c>, and the summary's own advice to pass that flag could not work.
+        ///
+        /// <c>--retry-errors</c> re-attempts a failure still in <see cref="ReviewState.Review"/>
+        /// only; an <see cref="ReviewState.Auto"/> conclusion on a failure holds.
+        /// </summary>
+        internal static bool StopsAttempt(ReviewRecord r, bool retryErrors)
+        {
+            if (r.State == ReviewState.Ignore) return true;
+            if (r.Disposition != ReviewDisposition.Failed) return false;
+            if (r.State == ReviewState.Review) return !retryErrors;
+            return true;
+        }
+
+        /// <summary>Leads a reprinted reason. A reason read back from the ledger describes an
+        /// earlier run, and printed bare it is indistinguishable from a failure in this one.</summary>
+        internal static string RecordedPrefix(ReviewRecord r)
+            => r.FirstSeenUtc == DateTime.MinValue
+                ? "previous record — "
+                : "recorded " + r.FirstSeenUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " — ";
     }
 
     /// <summary>
@@ -153,8 +181,9 @@ namespace Truedat
         internal ReviewRecord? Find(string path)
             => _byPath.TryGetValue(path ?? "", out var r) ? r : null;
 
-        /// <summary>True when a record exists that should stop this file being attempted.
-        /// Existence is sufficient — nothing is retried implicitly, in any mode.</summary>
+        /// <summary>True when the ledger holds a record for this path — "already accounted for",
+        /// which is what the stats breakdown asks. Whether a record STOPS an attempt is a different
+        /// question with a different answer: <see cref="ReviewLedgerRules.StopsAttempt"/>.</summary>
         internal bool ShouldSkip(string path) => Find(path) != null;
 
         /// <summary>
@@ -185,6 +214,14 @@ namespace Truedat
             existing.DurationSec = incoming.DurationSec ?? existing.DurationSec;
             existing.LastRunMode = incoming.LastRunMode ?? existing.LastRunMode;
             if (isRetry) existing.Attempts++;
+            // A skip is definitive by rule, so it brings its own conclusion: a record that held a
+            // failure's "the extractor said silent" must not keep saying so once the file is
+            // missing or ruled out. The operator's ignore still holds.
+            if (incoming.Disposition != ReviewDisposition.Failed && existing.State != ReviewState.Ignore)
+            {
+                existing.State = ReviewState.Auto;
+                existing.StateReason = incoming.StateReason ?? incoming.Reason;
+            }
             // An operator decision is never overwritten by an automatic conclusion.
             if (existing.State == ReviewState.Review) ApplyAuto(existing);
             return existing;
@@ -261,6 +298,40 @@ namespace Truedat
         /// stale and must go — otherwise a file that rescanned fine stays in the review list
         /// forever. Returns false when the path had no record.</summary>
         internal bool Remove(string path) => _byPath.Remove(path ?? "");
+
+        /// <summary>
+        /// Retire every record whose path the library no longer lists. Returns how many.
+        ///
+        /// A record used to leave only when its file was analyzed, so a file removed from the
+        /// library — never walked again, never analyzed — kept its record for good, and no verb
+        /// could clear it. The operator's <see cref="ReviewState.Ignore"/> is kept: membership
+        /// comes from whichever library file the run was handed, and a decision a person made is
+        /// not discarded on that evidence alone (<see cref="RetireGone"/> retires it once the file
+        /// itself is gone).
+        ///
+        /// <paramref name="libraryPaths"/> must compare with <see cref="PathComparer"/>.
+        /// </summary>
+        internal int RetireNotListed(ICollection<string> libraryPaths)
+        {
+            if (libraryPaths == null) return 0;
+            var drop = _byPath.Values
+                .Where(r => r.State != ReviewState.Ignore && !libraryPaths.Contains(r.Path))
+                .Select(r => r.Path).ToList();
+            foreach (var p in drop) _byPath.Remove(p);
+            return drop.Count;
+        }
+
+        /// <summary>Retire every record whose file no longer exists, in any state: there is
+        /// nothing left to review or to ignore. The caller owns the meaning of "gone" — it must
+        /// have ruled out an unreachable volume first, exactly as <c>--fixup</c> does for catalog
+        /// entries. Returns how many.</summary>
+        internal int RetireGone(Func<string, bool> fileIsGone)
+        {
+            if (fileIsGone == null) return 0;
+            var drop = _byPath.Values.Where(r => fileIsGone(r.Path)).Select(r => r.Path).ToList();
+            foreach (var p in drop) _byPath.Remove(p);
+            return drop.Count;
+        }
 
         /// <summary>Set an operator state. Returns false when the path has no record.</summary>
         internal bool SetState(string path, ReviewState state)

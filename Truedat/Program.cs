@@ -836,6 +836,8 @@ namespace Truedat
             Console.WriteLine("                      With --remap, performs a pure prefix swap (see --remap below).");
             Console.WriteLine("                      Refuses if a library volume is unreachable (offline NAS) so an");
             Console.WriteLine("                      unmounted share can't read as a mass deletion and gut the catalog.");
+            Console.WriteLine("                      Also retires review-list records (--list-review) for files that are");
+            Console.WriteLine("                      gone or that the library no longer lists.");
             Console.WriteLine("  --force-clean       With --fixup: proceed even when a library root is unreachable or a");
             Console.WriteLine("                      run would orphan most of the catalog. Purges entries for a volume you");
             Console.WriteLine("                      KNOW is gone. Disables the offline-volume safety net — use deliberately.");
@@ -5846,6 +5848,10 @@ namespace Truedat
             {
                 if (_storePath != null) Environment.ExitCode = RunStoreBackedVerb("fixup", "--fixup", moodsPath, () => { RunFixup(xmlPath, moodsPath); return Environment.ExitCode; });   // store-v3 T06
                 else RunFixup(xmlPath, moodsPath);
+                // The ledger half, against the REAL catalog path (under a store the verb above ran on a
+                // working copy). Only after a fixup that was not refused: a run that declined to judge
+                // the catalog because a volume was down must not judge the ledger either.
+                if (Environment.ExitCode == 0) ReconcileReviewLedger(xmlPath, moodsPath);
                 if (auditLog) Console.WriteLine($"Log:    {logPath}"); tee?.Dispose(); return;
             }
 
@@ -6515,28 +6521,6 @@ namespace Truedat
                             return;
                         }
 
-                        // A review record is sufficient to stop the attempt. Nothing is
-                        // retried implicitly: --retry-errors is the operator saying so out
-                        // loud, and without it a recorded file is not re-attempted at all.
-                        var reviewRec = ReviewSkipReason(t.Location);
-                        if (reviewRec != null)
-                        {
-                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {reviewRec})");
-                            Interlocked.Increment(ref skipped);
-                            EtaDrainNewPool();
-                            trackClass = "skip·error";
-                            return;
-                        }
-
-                        if (existingErrors.TryGetValue(t.Location, out var prevError))
-                        {
-                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {prevError})");
-                            Interlocked.Increment(ref skipped);
-                            EtaDrainNewPool();
-                            trackClass = "skip·error";
-                            return;
-                        }
-
                         // Missing-file skip: catch it at scan entry with an accurate reason
                         // instead of letting it die deep in staging/Essentia as a generic
                         // analysis error. scanPath already carries the \\?\ fallback for
@@ -6594,6 +6578,32 @@ namespace Truedat
                             Interlocked.Increment(ref missingSkipped);
                             EtaDrainNewPool();
                             trackClass = "skip·missing";
+                            return;
+                        }
+
+                        // A recorded FAILURE (or the operator's ignore) stops the attempt. Nothing is
+                        // retried implicitly: --retry-errors is the operator saying so out loud.
+                        //
+                        // AFTER the existence check, and that order is the fix: these two checks used
+                        // to run first, so a file that had been deleted but was still listed by the
+                        // library printed its old reason on every run and never reached "file not
+                        // found". The file is now looked at before its history is.
+                        var reviewRec = ReviewSkipReason(t.Location);
+                        if (reviewRec != null)
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: {reviewRec})");
+                            Interlocked.Increment(ref skipped);
+                            EtaDrainNewPool();
+                            trackClass = "skip·error";
+                            return;
+                        }
+
+                        if (existingErrors.TryGetValue(t.Location, out var prevError))
+                        {
+                            Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (skip: previous error — {prevError})");
+                            Interlocked.Increment(ref skipped);
+                            EtaDrainNewPool();
+                            trackClass = "skip·error";
                             return;
                         }
                         if (!ReferenceEquals(scanPath, t.Location) && _audit)
@@ -7311,6 +7321,7 @@ namespace Truedat
             if (_fpReadsGaveUp > 0)
                 Console.WriteLine($"  Contention: {_fpReadsGaveUp:N0} file(s) fingerprint still locked after retries"
                                   + "   (no catalog entry written — listed in mbxmoods-errors.csv)");
+            RetireUnlistedReviewRecords(libraryKeys);
             FlushRunLedger(runLedgerPath);
             PruneErrorsCsv(errorsPath);
             ReportPhantomKeys(_analyzeCount, _audit);   // surface any wrong/absent extractor key this scan
@@ -17084,6 +17095,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Edges.EdgeStampSelfTest.Run(Assert);     // hub:H02 store_meta 'edges.selectedVersion' (architect-2, TDA 086 / keeper 108)
             global::Truedat.Store.StoreTransferSelfTest.Run(Assert); // T09 snapshot/restore, T10 store merge source, T12 state (architect-2)
             global::Truedat.Store.StoreSummarySelfTest.Run(Assert);  // --store-summary: the hub's two mirrored rules + this report's arithmetic
+            ReviewLedgerScanSelfTest.Run(Assert);                    // the scan and --fixup against a review ledger on disk
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -23471,12 +23483,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     SizeMb = mb,
                 };
 
-                // Existence is sufficient to stop an attempt — in every mode, not just scan.
+                // A recorded path is found whatever its spelling. (Whether the record STOPS an attempt
+                // is ReviewLedgerRules.StopsAttempt, pinned further down.)
                 var led = new ReviewLedger();
                 led.Upsert(Rec(@"D:\m\a.flac", "essentia exit 1", 4.0), t0, isRetry: false);
-                Assert(led.ShouldSkip(@"D:\m\a.flac"), "ledger: a record stops the file being attempted");
-                Assert(led.ShouldSkip(@"d:/m/A.FLAC"), "ledger: skip lookup folds case and slash direction");
-                Assert(!led.ShouldSkip(@"D:\m\other.flac"), "ledger: an unrecorded file is still attempted");
+                Assert(led.ShouldSkip(@"D:\m\a.flac"), "ledger: a recorded path is found");
+                Assert(led.ShouldSkip(@"d:/m/A.FLAC"), "ledger: the lookup folds case and slash direction");
+                Assert(!led.ShouldSkip(@"D:\m\other.flac"), "ledger: an unrecorded path is not found");
 
                 // THE fix. The old ledger was deleted wholesale by the command the advisor
                 // recommended, so failure history never survived a retry.
@@ -23535,6 +23548,81 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var led5 = new ReviewLedger();
                 led5.Upsert(Rec(@"D:\m\r.flac", "essentia exit 1", 4.0), t0, false);
                 Assert(led5.NeedsReviewCount == 1, "ledger: a fresh failure is pending review");
+
+                // --- Which records stop an attempt, and how a record leaves the ledger -------------
+                // A record used to stop its file on existence alone, and left the ledger only when
+                // the file was analyzed. So a policy skip (too short) was never decided again, and
+                // a record for a deleted file stayed forever.
+                ReviewRecord Skip(string p, string reason) => new ReviewRecord
+                {
+                    Path = p, Disposition = ReviewDisposition.Skipped, Reason = reason,
+                    State = ReviewState.Auto, StateReason = reason,
+                };
+                var rShort = Skip(@"D:\m\short.flac", "short file (4s < 20s)");
+                Assert(!ReviewLedgerRules.StopsAttempt(rShort, retryErrors: false),
+                    "review-stop: a policy skip does not stop the attempt — its rule decides again each run");
+                var rExcl = new ReviewRecord { Path = @"D:\m\x.flac", Disposition = ReviewDisposition.Excluded, State = ReviewState.Auto };
+                Assert(!ReviewLedgerRules.StopsAttempt(rExcl, false), "review-stop: an exclusion record does not stop the attempt — the rule file decides");
+                var rFail = Rec(@"D:\m\bad.flac", "essentia exit 1", 4.0);
+                Assert(ReviewLedgerRules.StopsAttempt(rFail, false), "review-stop: a recorded failure stops the attempt");
+                Assert(!ReviewLedgerRules.StopsAttempt(rFail, retryErrors: true), "review-stop: --retry-errors re-attempts a failure still in review");
+                var rFailAuto = Rec(@"D:\m\silent.flac", "silent file"); rFailAuto.State = ReviewState.Auto; rFailAuto.StateReason = "silent";
+                Assert(ReviewLedgerRules.StopsAttempt(rFailAuto, retryErrors: true), "review-stop: --retry-errors does not resurrect an auto-concluded failure");
+                var rIgnSkip = Skip(@"D:\m\ign.flac", "short file (4s < 20s)"); rIgnSkip.State = ReviewState.Ignore;
+                Assert(ReviewLedgerRules.StopsAttempt(rIgnSkip, retryErrors: true), "review-stop: the operator's ignore stops the attempt whatever the disposition");
+
+                // The scan's one skip rule reads the same decision, and says the reason is a previous record.
+                var ledStop = new ReviewLedger();
+                ledStop.Upsert(Skip(@"D:\m\short.flac", "short file (4s < 20s)"), t0, false);
+                ledStop.Upsert(Rec(@"D:\m\bad.flac", "essentia exit 1", 4.0), t0, false);
+                _runLedger = ledStop;
+                try
+                {
+                    Assert(ReviewSkipReason(@"D:\m\short.flac") == null,
+                        $"review-stop: the scan attempts a file recorded only as a policy skip (got '{ReviewSkipReason(@"D:\m\short.flac")}')");
+                    var badWhy = ReviewSkipReason(@"D:\m\bad.flac") ?? "";
+                    Assert(badWhy == "recorded 2026-08-01 — essentia exit 1",
+                        $"review-stop: a reprinted reason names the date it was recorded (got '{badWhy}')");
+                }
+                finally { _runLedger = null; }
+
+                // A skip arriving for a path that holds a failure record replaces the failure's conclusion:
+                // the file is now missing (or too short), and the old "extractor said silent" no longer describes it.
+                var ledSwap = new ReviewLedger();
+                ledSwap.Upsert(Rec(@"D:\m\s.flac", "silent file"), t0, false);
+                ledSwap.Upsert(Skip(@"D:\m\s.flac", "file not found"), t1, false);
+                var swapped = ledSwap.Find(@"D:\m\s.flac")!;
+                Assert(swapped.Disposition == ReviewDisposition.Skipped && swapped.State == ReviewState.Auto && swapped.StateReason == "file not found",
+                    $"ledger: a skip over a failure record carries the skip's own conclusion ({swapped.Disposition}/{swapped.State}/{swapped.StateReason})");
+                ledSwap.SetState(@"D:\m\s.flac", ReviewState.Ignore);
+                ledSwap.Upsert(Skip(@"D:\m\s.flac", "file not found"), t1, false);
+                Assert(ledSwap.Find(@"D:\m\s.flac")!.State == ReviewState.Ignore, "ledger: a skip does not overwrite the operator's ignore");
+
+                // Retirement. The library no longer lists the path: the record goes, except the operator's own decision.
+                var ledRet = new ReviewLedger();
+                ledRet.Upsert(Skip(@"D:\m\gone1.flac", "short file (4s < 20s)"), t0, false);
+                ledRet.Upsert(Rec(@"D:\m\gone2.flac", "essentia exit 1", 4.0), t0, false);
+                ledRet.Upsert(Skip(@"D:\m\gone3.flac", "short file (4s < 20s)"), t0, false);
+                ledRet.SetState(@"D:\m\gone3.flac", ReviewState.Ignore);
+                ledRet.Upsert(Skip(@"D:\m\still.flac", "short file (4s < 20s)"), t0, false);
+                var listed = new HashSet<string>(new[] { @"d:/m/STILL.flac" }, PathComparer.Instance);
+                int retiredN = ledRet.RetireNotListed(listed);
+                Assert(retiredN == 2, $"ledger-retire: records for paths the library no longer lists are retired (retired {retiredN}, expected 2)");
+                Assert(ledRet.Find(@"D:\m\still.flac") != null, "ledger-retire: a listed path keeps its record (case and slash folded)");
+                Assert(ledRet.Find(@"D:\m\gone3.flac") != null, "ledger-retire: the operator's ignore is not retired by library membership");
+                Assert(ledRet.Find(@"D:\m\gone1.flac") == null && ledRet.Find(@"D:\m\gone2.flac") == null, "ledger-retire: the retired records are gone");
+                // The file itself is gone (and its volume answered): the record goes whatever its state — there is nothing left to ignore.
+                int goneN = ledRet.RetireGone(p => p.EndsWith("gone3.flac", StringComparison.OrdinalIgnoreCase));
+                Assert(goneN == 1 && ledRet.Find(@"D:\m\gone3.flac") == null && ledRet.Count == 1,
+                    $"ledger-retire: a record whose file no longer exists is retired in any state (retired {goneN}, {ledRet.Count} left)");
+
+                // What "the file is gone" means for --fixup's half of the ledger: ground truth only.
+                Func<string, bool> noFile = _ => false, anyFile = _ => true, up = _ => true, down = _ => false;
+                Assert(ReviewFileIsGone(@"D:\m\deleted.flac", noFile, up), "review-gone: a rooted path that does not exist on an answering volume is gone");
+                Assert(!ReviewFileIsGone(@"D:\m\here.flac", anyFile, up), "review-gone: a file that exists is not gone");
+                Assert(!ReviewFileIsGone(@"\\nas\music\a.flac", noFile, down), "review-gone: a file on a volume that does not answer is NOT gone (offline is not deleted)");
+                Assert(!ReviewFileIsGone("http://stream.example/radio", noFile, up), "review-gone: a stream URL is never gone — there was never a file");
+                Assert(!ReviewFileIsGone("", noFile, up), "review-gone: an empty path is never gone");
 
                 // Envelope: kind is DECLARED, never sniffed from the shape.
                 var env = led5.ToJson("test", t1);
@@ -25798,6 +25886,91 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (removed) Interlocked.Increment(ref _reviewRecordsCleared);
         }
         static int _reviewRecordsCleared;
+
+        /// <summary>Records retired this run because the library no longer lists their path.</summary>
+        static int _reviewRecordsRetired;
+
+        /// <summary>End of a library scan: retire the records the library no longer lists.
+        /// The scan only ever looks at listed paths, so without this a record for a file removed
+        /// from the library is carried forward unchanged on every run and stays in the review list.
+        /// An empty membership set retires nothing: it means the library was not read, not that
+        /// it is empty.</summary>
+        static void RetireUnlistedReviewRecords(HashSet<string> libraryPaths)
+        {
+            var led = _runLedger;
+            if (led == null || libraryPaths == null || libraryPaths.Count == 0) return;
+            int n;
+            lock (_runLedgerLock) n = led.RetireNotListed(libraryPaths);
+            if (n > 0) Interlocked.Add(ref _reviewRecordsRetired, n);
+        }
+
+        /// <summary>
+        /// Is the file behind a review record gone? True only on filesystem ground truth: a rooted
+        /// path, on a volume that answers, that does not exist. A stream URL or any other
+        /// unrooted "path" is never gone (there was never a file), and an unreachable volume is
+        /// never gone (a downed share must not read as a deletion — the rule <c>--fixup</c>
+        /// already applies to catalog entries). The probes are parameters so the rule is testable
+        /// without a filesystem.
+        /// </summary>
+        internal static bool ReviewFileIsGone(string path, Func<string, bool> exists, Func<string, bool> rootAnswers)
+        {
+            if (string.IsNullOrEmpty(path) || exists == null || rootAnswers == null) return false;
+            if (path.IndexOf("://", StringComparison.Ordinal) >= 0) return false;
+            string root;
+            try { root = ReachabilityRoot(path); } catch { return false; }
+            if (root.Length == 0) return false;          // not a rooted file path: no file to be gone
+            if (!rootAnswers(root)) return false;        // offline is not deleted
+            return !exists(path);
+        }
+
+        /// <summary><c>--fixup</c>'s half of the ledger: after the catalog is reconciled, retire the
+        /// review records the library no longer lists and the ones whose file is gone. Fixup
+        /// reported "all paths valid" while the review list still named deleted files, because it
+        /// only ever looked at catalog entries and a skipped file never had one.</summary>
+        static void ReconcileReviewLedger(string xmlPath, string moodsPath)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                var ledgerPath = ResolveReviewLedgerPath(dir);
+                if (!File.Exists(ledgerPath)) return;
+                var led = ReviewLedger.Load(ledgerPath, out var err);
+                if (err != null)
+                {
+                    Console.Error.WriteLine($"WARNING: the review ledger at {ledgerPath} is unreadable ({err}) — left as it is.");
+                    return;
+                }
+                if (led.Count == 0) return;
+
+                var library = ITunesParser.Parse(xmlPath, out _);
+                var listed = new HashSet<string>(
+                    library.Where(t => !string.IsNullOrEmpty(t.Location)).Select(t => t.Location!), PathComparer.Instance);
+                int unlisted = listed.Count > 0 ? led.RetireNotListed(listed) : 0;
+
+                var rootUp = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                int gone = led.RetireGone(p => ReviewFileIsGone(p,
+                    q => { try { return File.Exists(q.Length >= 260 ? ExtendedLengthPath(q) : q); } catch { return true; } },
+                    r =>
+                    {
+                        if (!rootUp.TryGetValue(r, out var up)) rootUp[r] = up = ProbeRootReachable(r, out _);
+                        return up;
+                    }));
+                if (unlisted + gone == 0) return;
+
+                if (SaveReviewLedger(led, ledgerPath, out var saveErr))
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"Review:  {unlisted + gone:N0} record(s) retired from {Path.GetFileName(ledgerPath)}"
+                                      + $"   ({unlisted:N0} no longer in the library, {gone:N0} file gone); {led.Count:N0} left");
+                }
+                else Console.Error.WriteLine($"WARNING: could not write the review ledger: {saveErr}");
+            }
+            catch (Exception ex)
+            {
+                // The catalog reconcile already succeeded; a ledger problem must not turn that into a failure.
+                Console.Error.WriteLine($"WARNING: could not reconcile the review ledger: {ex.Message}");
+            }
+        }
         /// <summary>Every path analyzed and written this run — the set whose old error rows
         /// are no longer current. Read once, at end of run, by <see cref="PruneErrorsCsv"/>.</summary>
         static readonly ConcurrentBag<string> _analyzedOkPaths = new ConcurrentBag<string>();
@@ -25881,12 +26054,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             ReviewRecord? rec;
             lock (_runLedgerLock) rec = led.Find(path);
             if (rec == null) return null;
-            if (_retryErrorsRun && rec.State == ReviewState.Review) return null;
+            if (!ReviewLedgerRules.StopsAttempt(rec, _retryErrorsRun)) return null;
             if (rec.State == ReviewState.Ignore)
                 return $"ignored — {(rec.Reason.Length > 0 ? rec.Reason : "operator decision")}";
+            // The reason describes an EARLIER run. Say so, with its date: printed bare it reads as
+            // a failure in this one.
             if (rec.State == ReviewState.Auto)
-                return $"auto — {rec.StateReason ?? rec.Reason}";
-            return rec.Reason.Length > 0 ? rec.Reason : "in review";
+                return ReviewLedgerRules.RecordedPrefix(rec) + $"auto: {rec.StateReason ?? rec.Reason}";
+            return ReviewLedgerRules.RecordedPrefix(rec) + (rec.Reason.Length > 0 ? rec.Reason : "in review");
         }
 
         /// <summary>Write the run's ledger, once, at the end. Reports what it holds so the
@@ -25910,11 +26085,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             int cleared = Interlocked.Exchange(ref _reviewRecordsCleared, 0);
-            if (led.Count == 0 && cleared == 0) return;
+            int retired = Interlocked.Exchange(ref _reviewRecordsRetired, 0);
+            // Written even when clearing or retiring left it EMPTY — skipping that write is what
+            // would keep the stale records on disk.
+            if (led.Count == 0 && cleared == 0 && retired == 0) return;
             if (SaveReviewLedger(led, ledgerPath, out var err))
             {
                 if (cleared > 0)
                     Console.WriteLine($"  Review:     {cleared:N0} record(s) cleared — file is now in the catalog");
+                if (retired > 0)
+                    Console.WriteLine($"  Review:     {retired:N0} record(s) retired — no longer in the library");
                 if (led.Count > 0)
                 Console.WriteLine($"  Review:     {led.Count:N0} files not analyzed"
                                   + (led.NeedsReviewCount > 0 ? $", {led.NeedsReviewCount:N0} need review" : "")

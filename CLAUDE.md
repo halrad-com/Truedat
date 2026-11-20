@@ -100,6 +100,19 @@ local tidy-up:
   (the volume is unreachable *and* the operator asserted it), not on a classification.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
+- **The `kind` string in every JSON artifact written to the hub's review folder is a contract** (2026-11-20).
+  The hub lists that folder and decides from `kind` which files are something a person acts on. Four land
+  there: `review` (`mbxmoods-review.json`, the review ledger — bookkeeping), `preview`, `dupes`, and
+  `exclusion-apply-result` (bookkeeping). Renaming one, or writing a new artifact into that folder, needs a
+  heads-up to restfulbee.
+- **A review-ledger record leaves in three ways, and only a failure record stops an attempt** (2026-11-20).
+  It is cleared when its file is analyzed; retired at the end of a library scan when the library no longer
+  lists its path (the operator's `ignore` is kept); and retired by `--fixup` when its file is gone on a volume
+  that answers, or is no longer listed. Before this a record could only be cleared by a successful analysis,
+  so a deleted or too-short file stayed in the review list for good. A policy, structural or
+  exclusion record never stops the attempt — its rule is decided again each run, which is what lets
+  `--enableshortfiles` or a raised `--max-duration` take effect on a file already recorded
+  (`ReviewLedgerRules.StopsAttempt`). The scan checks that a file exists BEFORE it consults the record.
 - **`ruleId` in `mbxmoods-review.json` is a KEY, and its format is a contract.** 64-bit
   FNV-1a over `ExclusionRule.Identity()`, rendered as **16 lowercase hex chars**. The hub
   pins it, persists it, and keys an irreversible action (undo-an-exclusion) on it, and it has
