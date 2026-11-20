@@ -6,6 +6,18 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV2.3] — 2026-11-20
+
+### Added
+
+- `--store-summary` shows both ends of each feature's range against the model, the share of tracks far outside it, and each feature's count, mean and spread.
+- `--store-summary` shows the share of tracks on each key, and how close same-key tracks sit among all of the library's pairs.
+- `--store-summary` says how many tracks its join figures cover, so a library still filling its edges reads correctly.
+
+### Fixed
+
+- `--store-summary`: the `sep` figure was wrong on any row with more than 46,340 pairs in its "compatible" column.
+
 ## [0.5.5.4-EV2.2] — 2026-11-19
 
 ### Fixed
