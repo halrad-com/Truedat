@@ -6,6 +6,22 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV6] — 2026-11-20
+
+### Added
+
+- `--reset` starts a library over: it archives every file truedat wrote into one zip, removes them, and scans from nothing. It asks you to type `RESET` first (`--imeanit` for scripts); `--restore` of the zip goes back.
+
+### Changed
+
+- The per-track progress line is shorter: count, percent, time left and workers in use. The rest is in the end summary.
+- Reading the library no longer warns about a removed invalid character on every run. It says so only when the character was in a file path, and names the track; `--audit` lists the rest.
+
+### Fixed
+
+- Long tracks no longer hit a fixed 300-second limit on conversion; a conversion runs while it is making progress.
+- A hi-res track is not converted when the copy would not fit in the staging folder; the original is analyzed instead.
+
 ## [0.5.5.4-EV2.3] — 2026-11-20
 
 ### Added
