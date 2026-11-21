@@ -210,7 +210,10 @@ together, at one generation. The nine catalog-changing verbs (`--fixup`, `--rema
 `--migrate`, `--strip-smfm`, `--prune-entry`, `--prune-excluded`, `--merge-moods`, `--restore`) do the
 same. A store and a catalog that disagree refuse the run and name the command that reconciles them. The
 store saves at the scan's five-minute checkpoints and at the end; `store-result.json` beside it records
-each run's outcome (`completed`, `failed`, `interrupted`). A stored value
+each run's outcome (`completed`, `failed`, `interrupted`). A scan with no store writes the same record in
+the same place, with `store` and `export` null. A list scan (`--file-list`) adds a `list` block: how many
+paths were listed and how many were analyzed, already current, excluded, skipped, failed, not found or not
+reached, with the failed and not-found paths named. A stored value
 that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
 scan measures it; an older extractor build never overwrites a newer build's description, and a newer
 one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,
@@ -574,6 +577,12 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --budget <time>         Library scan: after 90s / 30m / 2h / 1h30m, finish the tracks in hand, save and
                           exit. Run the same command again to continue.
   --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
+  --refresh-chroma        Re-analyze every track that does not carry the current chroma marker
+                          (chromaFold): tracks analyzed before the chroma grouping was corrected,
+                          and any analyzed before the marker existed. On an older library that is
+                          every track, so it is a full pass; a second run finds nothing to do.
+                          Opt-in, also a config key. Works with a library scan, --folder and
+                          --file-list alike.
   --refresh-authenticity
                           Re-analyze cached tracks whose stored bitUsage was measured by an older method
                           (the tag differs from this build's). Opt-in; --refresh alone never does this.
@@ -1306,6 +1315,7 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "averageLoudness": 0.87,
       "hpcp12": [1.0, 0.21, 0.44, "..."],
       "thpcp12": [1.0, 0.33, 0.18, "..."],
+      "chromaFold": 2,
       "dynamicComplexity": 3.14,
       "beatsIntervalMean": 0.469, "beatsIntervalStdev": 0.011,
       "beatsIntervalMin": 0.44, "beatsIntervalMax": 0.51,

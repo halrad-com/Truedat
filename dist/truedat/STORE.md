@@ -31,6 +31,11 @@ on for one run. Use it only with a hub that reads the store; a hub that reads th
   never makes a scan refuse: no SQLite on the machine or a failed seed means a scan without a store and a
   note; an extractor older than `.5` skips edges with a note.
 - Beside the store: `store-result.json`, `store-import-result.json`, `store-info.json`.
+- `store-result.json` is written by every scan, store or no store. With no store in force it sits where the
+  store would be and its `store` and `export` are null. A list scan's record has verb `scan-list` and a `list`
+  block: `path`, `listed`, then `analyzed`, `current`, `excluded`, `skipped`, `failed`, `notFound` and
+  `notExamined`, which add up to `listed`; `outcomes` names the failed and not-found paths (up to 1,000, with
+  `outcomesOmitted` for the rest). A count not known yet is null, never 0.
 - Not beside the store: the in-flight edge stashes. They are transient — written during a scan, consumed by
   the flush that commits their rows, deleted — so they live in `pending\` under the stage directory and move
   with `--stage-dir`. Leftovers from an interrupted scan are swept.
@@ -58,6 +63,11 @@ One row of file facts per copy, one audio description per media:
 
 Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql` … `v4.sql`); an older store migrates
 forward on first open by a newer build (backup first), and an older build refuses a newer store.
+
+**The chroma marker (schema v5, 2026-11-21).** `track_content.chromaFold` says how a track's `hpcp12` / `thpcp12` were
+grouped (the catalog's `chromaFold`); NULL means the track was described before the marker existed. A store at v4 gains the
+column when it is opened, after a backup beside it (`truedat.db.bak.v4.<time>`). The marker is never taken from a different
+source than the chroma it describes: an arrival that carries chroma keeps its own marker, a missing one included.
 
 **Edges and verdicts (schema v4, 2026-10-16).** The edge is a typed `edge` row per edge. By default it holds
 the scalars the readers use — status, window, key name / scale / code / strength / agreement / votes, bpm with
