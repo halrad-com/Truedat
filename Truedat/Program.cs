@@ -954,6 +954,8 @@ namespace Truedat
             Console.WriteLine("                      playlist's folder and stream URLs are skipped. Maintain the playlist in");
             Console.WriteLine("                      MusicBee for an incremental 'scan just these' run.");
             Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
+            Console.WriteLine("                      May be given more than once: the lists are read as one. A path listed more");
+            Console.WriteLine("                      than once, in any spelling, is processed once.");
             Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
             Console.WriteLine("                      NOTE: results are recorded ONLY if --moods is also given.");
             Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them. The word 'music'");
@@ -2827,6 +2829,7 @@ namespace Truedat
 
             bool fileListMode = false;
             string? fileListPath = null;
+            var fileListPaths = new List<string>();   // every --file-list on the line, in order; fileListPath stays the last one
 
             // --folder <dir> walks dir recursively for audio files (per AudioExtensions
             // allowlist) and feeds them into the same worker pool as --file-list.
@@ -3039,7 +3042,7 @@ namespace Truedat
                 else if (canonical == "merge-source" && i + 1 < args.Length) mergeSources.Add(args[++i]);
                 else if (canonical == "merge-output" && i + 1 < args.Length) mergeOutput = args[++i];
                 else if (canonical == "analyze-file" && i + 1 < args.Length) { analyzeFileMode = true; analyzeFilePath = args[++i]; }
-                else if (canonical == "file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; }
+                else if (canonical == "file-list" && i + 1 < args.Length) { fileListMode = true; fileListPath = args[++i]; fileListPaths.Add(fileListPath); }
                 else if (canonical == "folder" && i + 1 < args.Length) { folderMode = true; folderPath = args[++i]; }
                 else if (canonical == "hash-only") hashOnlyMode = true;
                 else if (canonical == "level" && i + 1 < args.Length) hashLevel = args[++i].ToLowerInvariant();
@@ -5058,6 +5061,43 @@ namespace Truedat
                     Console.Error.WriteLine($"  Found {filePaths.Count} audio file(s)" +
                         (unsupportedCount > 0 ? $" (skipped {unsupportedCount} non-audio: DSD/video/playlist — see mbxmoods-skipped.csv)" : ""));
                 }
+                else if (fileListPaths.Count > 1)
+                {
+                    // Several lists on one command line are one work list. Giving --file-list twice used to keep the last
+                    // and drop the rest without a word.
+                    filePaths = new List<string>();
+                    bool stdinTaken = false;
+                    foreach (var one in fileListPaths)
+                    {
+                        if (one == "-")
+                        {
+                            if (stdinTaken) continue;   // stdin can only be read once
+                            stdinTaken = true;
+                            string? line;
+                            while ((line = Console.In.ReadLine()) != null)
+                            {
+                                var trimmed = line.Trim();
+                                if (!string.IsNullOrWhiteSpace(trimmed) && !trimmed.StartsWith("#")) filePaths.Add(trimmed);
+                            }
+                            continue;
+                        }
+                        if (!File.Exists(one))
+                        {
+                            Console.Error.WriteLine($"Error: File list not found: {one}");
+                            Environment.ExitCode = 1;
+                            return;
+                        }
+                        var part = ReadFileListPaths(one, out var partErr, out _);
+                        if (partErr != null)
+                        {
+                            Console.Error.WriteLine($"Error: {partErr}");
+                            Environment.ExitCode = 1;
+                            return;
+                        }
+                        filePaths.AddRange(part);
+                    }
+                    Console.Error.WriteLine($"  Read {filePaths.Count} path(s) from {fileListPaths.Count} lists");
+                }
                 else if (fileListPath == "-")
                 {
                     Console.Error.WriteLine("Reading file list from stdin (one path per line, # comments, EOF to start)...");
@@ -5101,6 +5141,11 @@ namespace Truedat
                         Console.Error.WriteLine($"  Read {filePaths.Count} path(s) from playlist {fileListPath}"
                             + (flUrlSkipped > 0 ? $" ({flUrlSkipped} stream URL(s) skipped)" : ""));
                 }
+
+                // Each path once, whatever listed it and however often.
+                filePaths = DedupePaths(filePaths, out int listedAgain);
+                if (listedAgain > 0)
+                    Console.Error.WriteLine($"  {listedAgain:N0} path(s) were listed more than once; each is processed once");
 
                 if (filePaths.Count == 0)
                 {
@@ -6003,6 +6048,7 @@ namespace Truedat
                 skippedPath = InsertFilenameSuffix(skippedPath, chunkHostSuffix);
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
+            try { LibraryXmlWrittenUtc = File.GetLastWriteTimeUtc(xmlPath); } catch { LibraryXmlWrittenUtc = default(DateTime); }
             var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues, out var xmlPathIssues);
             // A character XML cannot hold was removed while reading. By default only where it can matter — in a file path —
             // and naming the track; the rest (titles, comments) changes nothing the scan does and is detail for --audit.
@@ -17218,6 +17264,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             ResampleSelfTest.Run(Assert);                            // conversions: run while progressing, only when the copy fits
             XmlIssuesSelfTest.Run(Assert);                           // a character removed from the library XML: what it touched
             FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
+            ListScanSelfTest.Run(Assert);                            // --file-list: each path once, every list read, an older XML does not win
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -30524,7 +30571,31 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// the cached values are stale (e.g. tag edits diverge fileMd5). Otherwise
         /// pass null and the source's existing values are kept.
         /// </summary>
-        static TrackEntry RebuildCacheEntry(
+        /// <summary>When the library XML this scan is reading was last written (UTC); default when no library scan is running.</summary>
+        internal static DateTime LibraryXmlWrittenUtc;
+
+        /// <summary>Is the XML's text for a track older than the file itself. MusicBee writes the XML when it exits, so a file
+        /// written after that carries tags the XML has not seen. Strictly after, and only when the XML's time is known.</summary>
+        internal static bool XmlTextIsOlderThanFile(DateTime fileLastModUtc, DateTime xmlWrittenUtc)
+            => xmlWrittenUtc != default(DateTime) && fileLastModUtc != default(DateTime) && fileLastModUtc.ToUniversalTime() > xmlWrittenUtc.ToUniversalTime();
+
+        /// <summary>The paths of a list, each once, in the order first listed and in the spelling first used. Compared the way
+        /// the catalog compares its keys (case and separator direction do not make two paths), so a path cannot be handed
+        /// to two workers and analyzed twice because a list — or two lists — named it twice.</summary>
+        internal static List<string> DedupePaths(IEnumerable<string> paths, out int repeated)
+        {
+            var seen = new HashSet<string>(PathComparer.Instance);
+            var unique = new List<string>();
+            repeated = 0;
+            foreach (var p in paths)
+            {
+                if (seen.Add(p)) unique.Add(p);
+                else repeated++;
+            }
+            return unique;
+        }
+
+        internal static TrackEntry RebuildCacheEntry(
             TrackEntry source,
             ITunesTrack t,
             DateTime newLastMod,
@@ -30533,7 +30604,19 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             string? refreshedSha = null,
             string? refreshedShaSource = null)
         {
-            return RebuildCacheEntryCore(source, t.TrackId, t.Artist, t.Name, t.Album, t.Genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
+            // The XML supplies the text of a library scan. Where the file was written after the XML, the XML's text for it
+            // may be behind the file's own tags, and an entry a list scan made holds those tags already: keep what the
+            // entry has, field by field, and take the XML's only where the entry has none.
+            string artist = t.Artist, title = t.Name, album = t.Album, genre = t.Genre;
+            if (XmlTextIsOlderThanFile(newLastMod, LibraryXmlWrittenUtc) && source.Features != null)
+            {
+                string Keep(string? held, string fromXml) => string.IsNullOrEmpty(held) ? fromXml : held!;
+                artist = Keep(source.Features.Artist, artist);
+                title = Keep(source.Features.Title, title);
+                album = Keep(source.Features.Album, album);
+                genre = Keep(source.Features.Genre, genre);
+            }
+            return RebuildCacheEntryCore(source, t.TrackId, artist, title, album, genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
         }
 
         /// <summary>
