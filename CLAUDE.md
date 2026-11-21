@@ -109,7 +109,12 @@ local tidy-up:
   the library's files on this machine. It needs the typed word `RESET` or `--imeanit`; **neither flag may ever become a
   config key** (pinned by the self-test), and it is refused beside any other verb. A store that was in force is
   recreated by the scan that follows (`ResetCommand.StoreAfterReset`, decided while the file still exists).
-  `--restore <reset archive>` brings the catalog (and the store) back.
+  `--restore <reset archive>` brings the catalog back, and the store when the restore run has a store in force
+  (`--store`); without one it restores the catalog alone and says the archive holds a store. The operator's `ignore`
+  decisions in the review list go with the ledger, by the operator's ruling that a reset takes the review files too;
+  the confirmation text says so. The store's write-ahead log is folded into its main file before archiving
+  (`ResetCommand.FoldStoreLog`), because `--restore` takes only the main file out of an archive. The new store's
+  generation starts over (operator: "reset means reset"); a hub left running reloads with Reload mood data.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 - **The `kind` string in every JSON artifact written to the hub's review folder is a contract** (2026-11-20).

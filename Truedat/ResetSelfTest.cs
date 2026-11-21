@@ -24,6 +24,7 @@ namespace Truedat
             TestConfirm(assert);
             TestAbsentLibrary(assert);
             TestStoreAfterReset(assert);
+            TestStoreIsWholeBeforeArchiving(assert);
             TestCollectAndExecute(assert);
             TestCli(assert);
         }
@@ -43,6 +44,8 @@ namespace Truedat
             assert(C("--reset", Path.Combine("C:", "lib", "iTunes Music Library.xml")) == null,
                 "reset-flags: the positional library path is not a flag");
             assert(C("/reset", "/imeanit", "/no-store") == null, "reset-flags: slash spellings are read the same way");
+            assert(C("--reset", "--analyze") == null, $"reset-flags: --analyze names the library scan itself ({C("--reset", "--analyze")})");
+            assert(C("--reset", "--audit-verdicts") == null, $"reset-flags: --audit-verdicts is --audit with more detail ({C("--reset", "--audit-verdicts")})");
 
             var known = new HashSet<string>(Program.KnownFlags, StringComparer.OrdinalIgnoreCase);
             var unknown = ResetCommand.ScanOptions.Where(f => !known.Contains(f)).ToList();
@@ -140,6 +143,55 @@ namespace Truedat
             assert(named.Store == other && named.InForce, $"reset-store: a store the command line named is the one, wherever it is ({Show(named)})");
         }
 
+        /// <summary>A store whose last changes are still in its write-ahead log (a scan that was killed) must go into the
+        /// archive whole. <c>--restore</c> takes the store's main file out of an archive, so anything left in the log would
+        /// be in the zip and yet missing from what is restored.</summary>
+        static void TestStoreIsWholeBeforeArchiving(Action<bool, string> assert)
+        {
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-wal-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(root, "killed"));
+                var live = Path.Combine(root, "live.db");
+                var killed = Path.Combine(root, "killed", "truedat.db");
+                void CopyShared(string from, string to)
+                {
+                    using var src = new FileStream(from, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var dst = File.Create(to);
+                    src.CopyTo(dst);
+                }
+                long GenerationOfMainFileAlone(string db)
+                {
+                    var alone = Path.Combine(root, "alone-" + Guid.NewGuid().ToString("N") + ".db");
+                    CopyShared(db, alone);
+                    using var d = global::Truedat.Store.SqliteDb.Open(alone, create: false);
+                    using var os = new global::Truedat.Store.StoreDal(d);
+                    return os.Generation();
+                }
+                using (global::Truedat.Store.StoreLog.Quiet())
+                {
+                    using (var os = global::Truedat.Store.OpenStore.Open(live, true, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
+                        os.Dal.AdvanceGeneration();   // generation 1, checkpointed on close
+                    using (var w = global::Truedat.Store.SqliteDb.Open(live, create: false))
+                    {
+                        w.Exec("PRAGMA wal_autocheckpoint=0;");
+                        w.Exec("UPDATE store_meta SET value = '777' WHERE key = '" + global::Truedat.Store.StoreDal.GenerationKey + "';");   // committed, in the log only
+                        CopyShared(live, killed);
+                        CopyShared(live + "-wal", killed + "-wal");
+                    }
+                    long loose = GenerationOfMainFileAlone(killed);
+                    assert(loose == 1, $"reset-wal: the fixture is a store whose last change is only in its log (main file alone reads generation {loose})");
+                    bool folded = ResetCommand.FoldStoreLog(killed);
+                    long whole = GenerationOfMainFileAlone(killed);
+                    assert(folded && whole == 777, $"reset-wal: before archiving, the log is folded into the store's main file (folded {folded}, main file alone reads generation {whole})");
+                    assert(!ResetCommand.FoldStoreLog(Path.Combine(root, "missing.db")), "reset-wal: a store that is not there is not an error, and nothing is made");
+                    assert(!File.Exists(Path.Combine(root, "missing.db")), "reset-wal: in particular no empty store is created");
+                }
+            }
+            catch (Exception ex) { assert(false, "reset-wal: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { try { Directory.Delete(root, true); } catch { } }
+        }
+
         static void TestCollectAndExecute(Action<bool, string> assert)
         {
             var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-" + Guid.NewGuid().ToString("N"));
@@ -183,10 +235,13 @@ namespace Truedat
 
                 // A store kept somewhere else (--store-dir, or a network library's local store).
                 Put(far, "truedat.db"); Put(far, "truedat.db-wal"); Put(far, "store-result.json"); Put(far, "someone-elses.txt");
+                Put(far, "truedat.db.bak.v2.20260101-000000");
+                // That folder is not this library's: another library's lists, a log and an exported edges file may sit there too.
+                Put(far, "mbxmoods-errors.csv"); Put(far, "truedat.log"); Put(far, "mbxedges.v1.json"); Put(far, "other.db");
                 var split = ResetCommand.Collect(catalog, Path.Combine(far, "truedat.db"), null);
                 var farGot = string.Join("|", split.Where(f => f.EntryName.StartsWith("store/", StringComparison.Ordinal)).Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal));
-                assert(farGot == "store/store-result.json|store/truedat.db|store/truedat.db-wal",
-                    $"reset-collect: a store in another folder comes with its own files and no stranger's ({farGot})");
+                assert(farGot == "store/store-result.json|store/truedat.db|store/truedat.db-wal|store/truedat.db.bak.v2.20260101-000000",
+                    $"reset-collect: from a store's own folder, only the store, what is named after it, and its result files ({farGot})");
 
                 // ---- a held file stops everything before anything is written or removed
                 string? held;
@@ -204,11 +259,15 @@ namespace Truedat
                 assert(files.All(f => File.Exists(f.Path)), "reset-execute: and when the archive is not written, no file is removed");
                 assert(File.ReadAllText(taken) == "already here", "reset-execute: the file already at that name is not written over");
 
-                // ---- the real thing
+                // ---- the real thing, with a leftover from a reset that was stopped while it was archiving
+                var staleTemp = Path.Combine(lib, "mbxmoods-reset-20250505-050505.zip.tmp");
+                File.WriteAllText(staleTemp, "half an archive");
                 var before = files.ToDictionary(f => f.EntryName, f => File.ReadAllBytes(f.Path), StringComparer.Ordinal);
                 var zipPath = Path.Combine(lib, "mbxmoods-reset-20260102-030405.zip");
                 var result = ResetCommand.Execute(files, zipPath);
                 assert(File.Exists(zipPath), "reset-execute: the archive is written");
+                assert(!File.Exists(staleTemp), "reset-execute: an unfinished archive left by an earlier reset is removed, not kept for good");
+                assert(File.Exists(Path.Combine(lib, "mbxmoods-reset-20250101-000000.zip")), "reset-execute: a finished earlier archive is still kept");
                 assert(result.Archived == files.Count && result.NotRemoved.Count == 0, $"reset-execute: every file archived and removed ({result.Archived} of {files.Count}, {result.NotRemoved.Count} left)");
                 assert(result.Bytes == before.Values.Sum(b => (long)b.Length), $"reset-execute: the byte count is the files' own ({result.Bytes})");
                 var left = files.Where(f => File.Exists(f.Path)).Select(f => f.EntryName).ToList();
@@ -321,6 +380,15 @@ namespace Truedat
                     "reset-cli: a refused reset leaves every file as it was");
                 Check(Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*").Length == 0, "reset-cli: a refused reset writes no archive");
 
+                Check(refused.Contains("ignore"), "reset-cli: the list of what goes says the review list's ignore decisions go with it");
+
+                // ---- no library named and none found: a refusal, never a help page and exit 0. Run WITHOUT the confirmation and
+                //      with nothing to discover, so whatever a discovery ladder turned up on the machine running this, nothing changes.
+                var nowhere = Path.Combine(root, "nowhere"); Directory.CreateDirectory(nowhere);
+                var lost = RunChild(exe, nowhere, "--no-config --reset", out int lostExit, appData: nowhere);
+                File.WriteAllText(Path.Combine(root, "nolibrary.log"), lost);
+                Check(lostExit == 2, $"reset-cli: --reset with no library to reset is refused with exit 2, not reported as a success (got {lostExit})");
+
                 // ---- another verb on the line: refused before anything
                 var mixed = RunChild(exe, lib, common + " --reset --imeanit --fixup", out int mixedExit);
                 File.WriteAllText(Path.Combine(root, "mixed.log"), mixed);
@@ -370,6 +438,13 @@ namespace Truedat
                     Check(againExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a library with a store has one again after the reset (exit {againExit})");
                     Check(again.Contains("truedat.db") && again.Contains("Existing moods: 0"), "reset-cli: the old store was archived with the rest and the scan started from nothing");
                     Check(Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip").Length == 2, "reset-cli: the second reset wrote its own archive and left the first one alone");
+
+                    // ---- going back without a store in force: the catalog returns, and the run says the archive holds a store too
+                    var newest = Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip").OrderBy(f => f, StringComparer.Ordinal).Last();
+                    var back = RunChild(exe, lib, "--no-config --no-store --restore " + Q(newest) + " --moods " + Q(catalog), out int backExit);
+                    File.WriteAllText(Path.Combine(root, "restore.log"), back);
+                    Check(backExit == 0 && back.Contains("Restored:"), $"reset-cli: --restore of a reset archive brings the catalog back (exit {backExit})");
+                    Check(back.Contains("--store"), "reset-cli: and when the archive also holds a store that was not restored, the run says so and how to get it");
                 }
                 else
                     Console.WriteLine("  NOT RUN  reset-cli exit code and fresh entry: needs ffmpeg.exe beside the test binary to make a track the extractor will analyze");
@@ -387,7 +462,7 @@ namespace Truedat
         }
 
         /// <summary>stdin is redirected and closed on purpose: a child that inherited a console would sit at the prompt.</summary>
-        static string RunChild(string exe, string cwd, string args, out int exitCode)
+        static string RunChild(string exe, string cwd, string args, out int exitCode, string? appData = null)
         {
             var start = new ProcessStartInfo
             {
@@ -395,6 +470,7 @@ namespace Truedat
                 UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
             };
+            if (appData != null) { start.EnvironmentVariables["APPDATA"] = appData; start.EnvironmentVariables["LOCALAPPDATA"] = appData; }
             using var child = Process.Start(start) ?? throw new InvalidOperationException("could not start the child");
             child.StandardInput.Close();
             var stdout = child.StandardOutput.ReadToEndAsync(); var stderr = child.StandardError.ReadToEndAsync();

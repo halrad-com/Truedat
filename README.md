@@ -125,6 +125,9 @@ other it stops and changes nothing.
   earlier backups.
 - **Kept:** `mbxmoods-exclude.json`, the config file, earlier snapshots, earlier reset archives.
 
+The review list goes with the rest. Files you marked `ignore` there are forgotten and are tried again by
+the new scan.
+
 What to expect:
 
 - It is a full analysis pass. Until the new scan's first save the library has no catalog.
@@ -141,8 +144,10 @@ What to expect:
   and if it is started while the catalog is absent it shows no moods; either way, use Reload mood
   data in MBXHub (or restart MusicBee) once the scan has finished. Closing MusicBee for the reset
   avoids both.
-- To go back, `truedat --restore mbxmoods-reset-<time>.zip` restores the catalog, and the store when
-  the archive holds one. The error and skip lists and the review records are in the zip as well.
+- To go back, `truedat --restore mbxmoods-reset-<time>.zip` restores the catalog. If the library had a
+  store, add `--store` so the store is restored and the catalog published from it (without it the run
+  restores the catalog alone and tells you the archive holds a store). The error and skip lists and the
+  review records are in the zip as well and are not put back.
 
 ### Filename Check (`--check-filenames`)
 
@@ -652,7 +657,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks. A second Ctrl+C, a closed console window, logoff or shutdown saves what has completed — fresh analyses and cache-only updates alike — before the process ends, with one owner for that save however many stop signals arrive, and the scan's record (`store-result.json`) is sealed with what happened, so a stopped run never reads as completed; only a hard kill falls back to the last 5-minute save.
 - **The summary is kept** - The end-of-scan summary is saved beside the catalog as `mbxmoods-scan-<start date>-<n>.txt` (`n` = the scan's number that day), exactly as printed, with a `Workers:` line naming the worker count and where it came from. Config key `scan-summary` set to `false` turns the file off.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches disk, writing `mbxmoods-verify.csv` and exiting 1 on any drift / missing / error (CI-friendly). FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`); FLACs whose tags were rewritten *before* upgrading are re-keyed automatically during a normal scan (props-gated, reported as `FLAC re-key`), or by `--verify --backfill --accept-flac-tag-drift` without a scan. `--backfill` repairs missing fields in place with no Essentia re-run: the identity tier (TagLib-driven, fast) and the features tier (ffmpeg-driven, ~30 s per applicable lossless 24-bit track) both run by default — narrow with `--backfill-level identity|features`. Every tier is gated by the drift check, so drifted entries are flagged `REANALYZE_NEEDED` rather than touched.
-- **ETA tracking** - The progress line shows estimated completion, running average per track, and live throughput as `Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.
+- **ETA tracking** - Each per-track line shows the count, the percent, the estimated time left and how many workers are busy (`[7945/7962 97% ETA 5m02s · ess 19/20] Artist - Title`). The per-track cost and the throughput (`Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote) are in the end-of-scan summary, not repeated on every line. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
 
 ```cmd

@@ -87,7 +87,18 @@ namespace Truedat
             assert(Program.ConversionCeilingMs(60) == five, $"conversion-ceiling: a short track gets the floor ({Program.ConversionCeilingMs(60):N0} ms)");
             assert(Program.ConversionCeilingMs(300) == five && Program.ConversionCeilingMs(301) == 301 * 1000L, "conversion-ceiling: past the floor the ceiling is the track's own length");
             assert(Program.ConversionCeilingMs(8 * 3600) == 8 * 3600 * 1000L, $"conversion-ceiling: eight hours of audio may take eight hours ({Program.ConversionCeilingMs(8 * 3600):N0} ms)");
-            assert(Program.ConversionCeilingMs(0) == 0 && Program.ConversionCeilingMs(-5) == 0, "conversion-ceiling: an unknown length sets no ceiling (the stall rule still applies)");
+            // Length unknown: the file's size bounds how long it can be, at the lowest bitrate audio is commonly kept at.
+            long perSec = Program.LowestPlausibleBytesPerSec;
+            assert(Program.ConversionCeilingMs(0, perSec * 1000) == 1000 * 1000L, $"conversion-ceiling: with no length, a file's size says how long it could be at most ({Program.ConversionCeilingMs(0, perSec * 1000):N0} ms)");
+            assert(Program.ConversionCeilingMs(0, perSec * 10) == five, "conversion-ceiling: and a small file of unknown length still gets the floor");
+            assert(Program.ConversionCeilingMs(0, 0) == five && Program.ConversionCeilingMs(-5, -1) == five, "conversion-ceiling: with nothing known at all the floor applies; a conversion is never without a ceiling");
+            assert(Program.ConversionCeilingMs(3600, perSec * 10) == 3600 * 1000L, "conversion-ceiling: a known length is used as it is, whatever the size");
+
+            // The per-track line: how far, how long to go, how many workers are busy. Nothing that repeats on every line without changing a decision.
+            assert(Program.ProgressSuffix("5m02s", 19, 20) == " ETA 5m02s · ess 19/20", $"progress: ETA and worker use ('{Program.ProgressSuffix("5m02s", 19, 20)}')");
+            assert(Program.ProgressSuffix(null, 3, 20) == " ess 3/20", $"progress: before there is an estimate, worker use alone ('{Program.ProgressSuffix(null, 3, 20)}')");
+            assert(Program.ProgressSuffix("12s", 0, 0) == " ETA 12s", $"progress: outside a scan with workers, the ETA alone ('{Program.ProgressSuffix("12s", 0, 0)}')");
+            assert(Program.ProgressSuffix(null, 0, 0) == "", "progress: nothing to say, nothing said");
 
             using (var idle = Start(cmd!, "/c pause", holdInput: true))
             {

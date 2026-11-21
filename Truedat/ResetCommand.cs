@@ -36,7 +36,7 @@ namespace Truedat
         internal static readonly string[] ScanOptions =
         {
             Flag, ConfirmFlag,
-            "p", "parallel", "audit", "pause", "allow-sleep", "background", "cpu-limit", "budget",
+            "analyze", "p", "parallel", "audit", "audit-verdicts", "pause", "allow-sleep", "background", "cpu-limit", "budget",
             "no-config", "no-stage", "stage-dir", "no-quick-cache", "no-dir-batch",
             "file-md5", "no-bitusage", "no-hf-analysis", "smfm", "no-smfm",
             "enableshortfiles", "max-duration", "long-track-mins",
@@ -142,9 +142,15 @@ namespace Truedat
                 foreach (var f in Directory.GetFiles(storeDir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                 {
                     var name = Path.GetFileName(f);
-                    if (IsKept(name)) continue;
-                    // No catalog names here: in this folder only the store, what is named after it, and its result files are ours.
-                    if (Program.ClassifySideFile(name, "", "", null, storeName) != Program.SideFile.None) Add(f, "store/" + name);
+                    // This folder is not the library's: another library's lists, a log or an exported edges file may sit in it.
+                    // Only the store, its write-ahead pair, what is named after it, and the store's own result files are ours here —
+                    // decided by name, not by the classifier, which is right about a catalog's folder and too generous for this one.
+                    bool ours = string.Equals(name, storeName, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, storeName + "-wal", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, storeName + "-shm", StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith(storeName + ".", StringComparison.OrdinalIgnoreCase)
+                        || (name.StartsWith("store-", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".json", StringComparison.OrdinalIgnoreCase));
+                    if (ours) Add(f, "store/" + name);
                 }
             }
 
@@ -185,6 +191,18 @@ namespace Truedat
             return (null, false);
         }
 
+        /// <summary>Fold a store's write-ahead log into its main file, so the main file by itself is the whole store. A store
+        /// closed normally is already like that; one whose scan was killed can hold its last committed changes in the log
+        /// only. <c>--restore</c> takes the main file out of an archive, so without this those changes would sit in the zip
+        /// and be missing from what is restored. Opening and closing the store is all it takes — the close checkpoints.
+        /// False when there is no store or it will not open (a damaged store is then archived as it is).</summary>
+        internal static bool FoldStoreLog(string storePath)
+        {
+            if (!File.Exists(storePath)) return false;
+            try { using (global::Truedat.Store.SqliteDb.Open(storePath, create: false)) { } return true; }
+            catch (Exception) { return false; }
+        }
+
         internal sealed class Result
         {
             public int Archived;
@@ -201,6 +219,14 @@ namespace Truedat
         internal static Result Execute(IReadOnlyList<(string Path, string EntryName)> files, string archivePath, string? storeName = null)
         {
             var result = new Result();
+            // An archive that was being written when an earlier reset was stopped: unfinished, never moved into place, and
+            // named for that run's time, so nothing would ever write over it or remove it.
+            try
+            {
+                foreach (var stale in Directory.GetFiles(Path.GetDirectoryName(Path.GetFullPath(archivePath)) ?? ".", ArchivePrefix + "*.zip.tmp"))
+                    try { File.Delete(stale); } catch { }
+            }
+            catch { }
             foreach (var f in files) result.Bytes += new FileInfo(f.Path).Length;
             CatalogArchive.WriteZipBackup(files, archivePath, requireWholeDocuments: false);
             result.Archived = files.Count;

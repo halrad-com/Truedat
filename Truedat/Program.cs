@@ -5796,7 +5796,9 @@ namespace Truedat
                 // Keeper P2-d on b4622f7: this returned with exit 0 and (since the record now begins first) a scan record saying completed —
                 // a false success. A refusal is a refusal: exit 2 like the other not-found cases whenever the operator NAMED the library or a
                 // store is in force; only the bare "truedat" with nothing found and no store keeps the help page + exit 0 (a separate call).
-                if (XmlNotFoundRefuses(libraryScan, migrateMode || fixupMode, xmlExplicit, _storePath != null, !string.IsNullOrEmpty(analyzeFileMoods)))
+                // --reset names what it wants as plainly as a typed library does: with none found it is a refusal, never the help
+                // page and exit 0, which a script would record as a reset that happened.
+                if (XmlNotFoundRefuses(libraryScan, migrateMode || fixupMode, xmlExplicit || _resetRequested, _storePath != null, !string.IsNullOrEmpty(analyzeFileMoods)))
                 {
                     if (libraryScan) Environment.ExitCode = RefuseScan(_storePath, $"Error: iTunes library not found: {xmlPath} (run --paths to see what resolved)", 2);
                     else
@@ -5984,9 +5986,16 @@ namespace Truedat
                 skippedPath = InsertFilenameSuffix(skippedPath, chunkHostSuffix);
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
-            var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues);
+            var tracks = ITunesParser.Parse(xmlPath, out var xmlIssues, out var xmlPathIssues);
+            // A character XML cannot hold was removed while reading. By default only where it can matter — in a file path —
+            // and naming the track; the rest (titles, comments) changes nothing the scan does and is detail for --audit.
+            if (xmlPathIssues != null)
+                foreach (var line in xmlPathIssues) Console.WriteLine(line);
             if (_audit && xmlIssues != null)
-                foreach (var issue in xmlIssues) Console.WriteLine(issue);
+            {
+                Console.WriteLine($"  Library XML: {xmlIssues.Count:N0} character(s) XML cannot hold were removed while reading it:");
+                foreach (var issue in xmlIssues) Console.WriteLine("  " + issue);
+            }
             Console.WriteLine($"Found {tracks.Count} tracks");
             // True library membership, captured BEFORE the video/remote/non-audio/exclusion
             // filters run. An mbxmoods.json entry whose path isn't in here is genuinely gone
@@ -11450,6 +11459,15 @@ namespace Truedat
 
             Console.WriteLine();
             Console.WriteLine($"Restored: {destCatalog}" + (tc.HasValue ? $" ({tc.Value:N0} tracks)" : ""));
+            // The archive of a --reset (or a raw store handed to --restore) can hold a store as well. Only a run with a store
+            // in force restores it; without one this path restores the catalog alone, and saying nothing left the store and
+            // its edges in the zip with no sign they were there.
+            try
+            {
+                if (_storePath == null && global::Truedat.Store.StoreTransfer.ArchiveContainsStore(archivePath))
+                    Console.WriteLine("  The archive also holds a store, which was not restored: run the same command with --store to restore it and publish the catalog from it.");
+            }
+            catch { }
             if (CatalogArchive.SniffFile(archivePath) == CatalogArchive.CatalogFormat.Zip
                 && CatalogArchive.ArchiveContainsExclude(archivePath))
                 Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
@@ -17143,6 +17161,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             ReviewLedgerScanSelfTest.Run(Assert);                    // the scan and --fixup against a review ledger on disk
             ResetSelfTest.Run(Assert);                               // --reset: archive, remove, scan from nothing
             ResampleSelfTest.Run(Assert);                            // conversions: run while progressing, only when the copy fits
+            XmlIssuesSelfTest.Run(Assert);                           // a character removed from the library XML: what it touched
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -24639,13 +24658,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                TryReadRateAndChannels(audioPath, out _, out _, out double downmixDurationSec);   // 0 when unreadable: no ceiling, the stall rule only
-                var downmixWait = WaitForConversion(proc, default, downmixDurationSec);
+                var downmixWait = WaitForConversion(proc, audioPath);
                 if (downmixWait != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
                     Console.Error.WriteLine(downmixWait == SubprocessWait.Outcome.Overran
-                        ? $"  WARNING: downmix to stereo stopped — it ran longer than the track itself lasts  [{Path.GetFileName(audioPath)}]"
+                        ? $"  WARNING: downmix to stereo stopped — it ran longer than the track could last  [{Path.GetFileName(audioPath)}]"
                         : $"  WARNING: downmix to stereo stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s)  [{Path.GetFileName(audioPath)}]");
                     try { File.Delete(tempPath); } catch { }
                     return null;
@@ -24742,10 +24760,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                if (WaitForConversion(proc) != SubprocessWait.Outcome.Exited)
+                if (WaitForConversion(proc, inputPath) != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine($"Error: ffmpeg transcode stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s).");
+                    Console.Error.WriteLine($"Error: ffmpeg transcode stopped: no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, or it ran longer than the track could last.");
                     return 1;
                 }
                 proc.WaitForExit();
@@ -24815,10 +24833,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var so = proc.StandardOutput.ReadToEndAsync();
                 var se = proc.StandardError.ReadToEndAsync();
-                if (WaitForConversion(proc) != SubprocessWait.Outcome.Exited)
+                if (WaitForConversion(proc, input) != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine($"    ffmpeg convert stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s)");
+                    Console.Error.WriteLine($"    ffmpeg convert stopped: no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, or it ran longer than the track could last");
                     try { File.Delete(output); } catch { }
                     return 1;
                 }
@@ -25648,6 +25666,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (files.Count > 40) Console.WriteLine($"    ... and {files.Count - 40:N0} more");
             Console.WriteLine($"  {files.Count:N0} file(s), {Mb(totalBytes)}  ->  {archive}");
             Console.WriteLine("  Kept: the exclusion rules, the config file, earlier snapshots and reset archives.");
+            if (files.Any(f => f.EntryName.EndsWith(ReviewLedger.FileName, StringComparison.OrdinalIgnoreCase)))
+                Console.WriteLine("  The review list goes with the rest, and with it any files you marked ignore there: they are tried again.");
             Console.WriteLine("  Every track is then analyzed again. Until that scan saves, this library has no catalog.");
 
             // 5. Nothing held by another program — asked before the confirmation, so nobody confirms a run that cannot start.
@@ -25669,6 +25689,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Console.WriteLine("  Not confirmed. Nothing was changed.");
                     return 2;
             }
+
+            // The store's main file must be the whole store before it is archived: --restore takes that file out of the zip,
+            // so changes still in the write-ahead log (a scan that was killed) would be archived and yet not restored.
+            if (store != null && ResetCommand.FoldStoreLog(store))
+                files = ResetCommand.Collect(moodsPath, store, ResolveReviewLedgerPath(outputDir));   // the log files are gone now
 
             // 7. Archive, then remove. A large store and catalog take minutes to compress, and a silent verb looks hung.
             Console.WriteLine($"  Archiving {Mb(totalBytes)} (compressed and read back before anything is removed; a large library takes a few minutes) ...");
@@ -28155,13 +28180,39 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>How long a conversion may run while still making progress: as long as the track itself lasts, and never
         /// less than <see cref="ConversionFloorSec"/>. Progress cannot tell a long job from an endless one — ffmpeg looping
         /// on a damaged file is busy the whole time — so something has to end it, and the track's own length is the bound
-        /// that scales with the work: a conversion slower than real time has already cost more than analysing the original
-        /// would have. 0 (no ceiling) when the length is unknown; the stall rule still applies.</summary>
-        internal static long ConversionCeilingMs(double durationSec)
-            => durationSec > 0 ? (long)(Math.Max(ConversionFloorSec, durationSec) * 1000.0) : 0;
+        /// that scales with the work: a conversion slower than real time has already cost more than analyzing the original
+        /// would have. With the length unknown, the file's size bounds how long it can be; a conversion is never left
+        /// without a ceiling.</summary>
+        /// <summary>32 kbit/s: about the lowest rate audio is commonly kept at, so a file's size divided by this is the
+        /// longest it could plausibly play.</summary>
+        internal const long LowestPlausibleBytesPerSec = 4000;
 
-        static SubprocessWait.Outcome WaitForConversion(Process proc, CancellationToken ct = default, double durationSec = 0)
-            => SubprocessWait.WhileProgressing(proc, EssentiaPollSeconds * 1000, EssentiaStallIdlePolls, () => ct.IsCancellationRequested, ConversionCeilingMs(durationSec));
+        internal static long ConversionCeilingMs(double durationSec, long fileBytes = 0)
+        {
+            double secs = durationSec > 0 ? durationSec
+                : fileBytes > 0 ? fileBytes / (double)LowestPlausibleBytesPerSec
+                : 0;
+            return (long)(Math.Max(ConversionFloorSec, secs) * 1000.0);
+        }
+
+        /// <summary>What follows the count on a per-track line: the time left and how many workers are busy. The audio hours,
+        /// the per-track cost and the throughput used to ride on every line too; they change slowly, decide nothing while a
+        /// scan runs, and are all in the summary at the end.</summary>
+        internal static string ProgressSuffix(string? eta, int essActive, int essTotal)
+        {
+            var parts = new List<string>(2);
+            if (!string.IsNullOrEmpty(eta)) parts.Add("ETA " + eta);
+            if (essTotal > 0) parts.Add($"ess {essActive}/{essTotal}");
+            return parts.Count == 0 ? "" : " " + string.Join(" · ", parts);
+        }
+
+        static SubprocessWait.Outcome WaitForConversion(Process proc, string inputPath, CancellationToken ct = default, double durationSec = -1)
+        {
+            if (durationSec < 0) TryReadRateAndChannels(inputPath, out _, out _, out durationSec);   // not read by the caller: read it here
+            long bytes = 0;
+            try { bytes = new FileInfo(inputPath).Length; } catch { }
+            return SubprocessWait.WhileProgressing(proc, EssentiaPollSeconds * 1000, EssentiaStallIdlePolls, () => ct.IsCancellationRequested, ConversionCeilingMs(durationSec, bytes));
+        }
 
         /// <summary>The source's sample rate and channel count from a header read (TagLib, no decode). False when
         /// TagLib cannot read it — the caller then leaves the file as it is.</summary>
@@ -28255,7 +28306,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 string Sz(long b) => b >= 1L << 30 ? (b / (double)(1L << 30)).ToString("F1", inv) + " GB" : (b / (double)(1L << 20)).ToString("F0", inv) + " MB";
                 Console.Error.WriteLine($"  NOTE: not resampling to 44.1 kHz: the copy needs {Sz(need)} and the staging folder has {Sz(free)} free"
                     + (reservedNow - need > 0 ? $", {Sz(reservedNow - need)} of it promised to conversions already running" : "")
-                    + $" ({Sz(StageHeadroomBytes)} is kept clear); analysing the original  [{shown}]");
+                    + $" ({Sz(StageHeadroomBytes)} is kept clear); analyzing the original  [{shown}]");
                 return null;
             }
             string tempPath = Path.Combine(dir, $"truedat_44k_{Guid.NewGuid():N}.wav");   // swept with the rest of the stage dir
@@ -28278,14 +28329,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                var waited = WaitForConversion(proc, ct, durationSec);
+                var waited = WaitForConversion(proc, audioPath, ct, Math.Max(0, durationSec));
                 if (waited != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
                     if (waited == SubprocessWait.Outcome.Stalled)
-                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analysing the original  [{shown}]");
+                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analyzing the original  [{shown}]");
                     else if (waited == SubprocessWait.Outcome.Overran)
-                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stopped after {sw.Elapsed.TotalSeconds:F0} s — longer than the track itself lasts; analysing the original  [{shown}]");
+                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stopped after {sw.Elapsed.TotalSeconds:F0} s — longer than the track could last; analyzing the original  [{shown}]");
                     try { File.Delete(tempPath); } catch { }
                     return null;
                 }
@@ -28298,12 +28349,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return tempPath;
                 }
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
-                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed (exit {proc.ExitCode}); analysing the original  [{shown}] {stderr.Substring(0, Math.Min(200, stderr.Length)).Trim()}");
+                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed (exit {proc.ExitCode}); analyzing the original  [{shown}] {stderr.Substring(0, Math.Min(200, stderr.Length)).Trim()}");
                 try { File.Delete(tempPath); } catch { }
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed ({ex.Message}); analysing the original  [{shown}]");
+                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed ({ex.Message}); analyzing the original  [{shown}]");
                 try { File.Delete(tempPath); } catch { }
             }
             finally
@@ -30616,32 +30667,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (done < 10 || total <= done) return "";
             var etaSecs = ComputeEtaSecs(elapsed, done, total);
-            // Per-track avg. Once anything has analyzed, show the ANALYZED-class
-            // average (Essentia thread-time — the cost that actually matters); the
-            // blended wall average is dominated by ~0ms cache hits and reads as
-            // nonsense ("163ms/trk" while podcasts take minutes). The blend only
-            // remains for pure-cache runs, where it genuinely is the per-track cost.
-            string avgTag;
-            int an = Volatile.Read(ref _analyzeCount);
-            if (an > 0)
-            {
-                var aAvg = (double)Interlocked.Read(ref _analyzeTicksTotal) / Stopwatch.Frequency / an;
-                avgTag = aAvg >= 60 ? $"{FormatTimeSpan(TimeSpan.FromSeconds(aAvg))}/analyzed" : $"{aAvg:F1}s/analyzed";
-            }
-            else
-            {
-                var avg = elapsed.TotalSeconds / done;
-                avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
-            }
-            // Live analyzed throughput (trailing window). Headline is DURATION-
-            // normalized (Nx realtime = audio-seconds per wall-second): a FLAC and a
-            // low-bitrate MP3 of the same content cost the same to scan, so MB/s
-            // can't compare across libraries — it stays as the IO footnote.
-            var rate = CurrentRateMBps(elapsed.TotalSeconds);
-            var rtfLive = CurrentRealtimeFactor(elapsed.TotalSeconds);
-            var rateTag = rtfLive > 0
-                ? $" · {rtfLive:F1}x realtime{(rate > 0 ? $" ({rate:F1} MB/s)" : "")}"
-                : (rate > 0 ? $" · {rate:F1} MB/s" : "");
             // Saturation gauge: running Essentia subprocesses vs the worker count.
             // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
             // "ess 8/14" well below full while new work remains = workers parked
@@ -30650,18 +30675,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // this line is printed by a worker at its own track boundary, so a raw
             // instantaneous sample can never include the printer and would read
             // P-1 on a fully saturated box (looks like a missing worker).
-            var essTag = _scanParallelism > 0
-                ? $" · ess {Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive))}/{_scanParallelism}"
-                : "";
-            // Duration progress: audio processed / total audio in the work list — the
-            // honest "how far through the library" (see the pct note). Leads the suffix.
-            long totMs = Volatile.Read(ref _scanAudioMsTotal);
-            var audioTag = totMs > 0
-                ? $"{FormatTimeSpan(TimeSpan.FromMilliseconds(Interlocked.Read(ref _processedAudioMsTotal)))}/{FormatTimeSpan(TimeSpan.FromMilliseconds(totMs))} audio · "
-                : "";
-            // Negative = no honest estimate yet; show the measured bits without an ETA.
-            var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
-            return $" {audioTag}{etaTag}{avgTag}{rateTag}{essTag}";
+            int essNow = _scanParallelism > 0 ? Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive)) : 0;
+            // Negative = no honest estimate yet; the line then carries worker use alone.
+            return ProgressSuffix(etaSecs < 0 ? null : FormatTimeSpan(TimeSpan.FromSeconds(etaSecs)), essNow, _scanParallelism);
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>

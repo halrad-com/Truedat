@@ -46,13 +46,14 @@ namespace Truedat
         private readonly StreamReader _inner;
         private int _stripped;
         private int _line = 1;
-        private List<string>? _issues;
+        private readonly List<(int Line, int Code)> _removed = new List<(int Line, int Code)>();
 
         // Pending low surrogate from a valid pair split across Read() calls
         private int _pending = -1;
 
         public int StrippedCount => _stripped;
-        public List<string>? Issues => _issues;
+        /// <summary>Each character removed, with the line it was on, in the order it was read.</summary>
+        public List<(int Line, int Code)> Removed => _removed;
 
         public SanitizingTextReader(StreamReader inner)
         {
@@ -125,8 +126,7 @@ namespace Truedat
         private void RecordStripped(char c)
         {
             _stripped++;
-            _issues ??= new List<string>();
-            _issues.Add($"  Line {_line}: U+{(int)c:X4}");
+            _removed.Add((_line, (int)c));
         }
 
         protected override void Dispose(bool disposing)
@@ -205,6 +205,14 @@ namespace Truedat
         }
 
         public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues)
+            => Parse(xmlPath, out xmlIssues, out _);
+
+        /// <summary>Read the library. <paramref name="xmlIssues"/> lists every character that had to be removed because XML
+        /// cannot hold it, each with the field and track it was in (null when there were none) — detail for --audit.
+        /// <paramref name="pathIssues"/> holds the ones worth a line on any run: a character removed from a file PATH, where
+        /// the track may then not be found. One in a title or a comment changes nothing a scan does, so it is not on that
+        /// list; a line about it on every run read as a fault and gave the reader nothing to do. Prints nothing itself.</summary>
+        public static List<ITunesTrack> Parse(string xmlPath, out List<string>? xmlIssues, out List<string>? pathIssues)
         {
             // Stream the XML through a sanitizing reader — never loads the full file into memory.
             // Previous approach used File.ReadAllText + XDocument.Parse which required ~10x the
@@ -219,6 +227,7 @@ namespace Truedat
                 IgnoreComments = true,
             };
             using var reader = XmlReader.Create(sanitizer, settings);
+            var notes = new RemovedCharNotes(sanitizer, reader as IXmlLineInfo);
 
             // Navigate to root <plist> element
             if (!reader.ReadToFollowing("plist"))
@@ -242,7 +251,7 @@ namespace Truedat
             var result = new List<ITunesTrack>();
             int depth = reader.Depth;
 
-            if (!reader.Read()) { FinalizeIssues(sanitizer, out xmlIssues); return result; }
+            if (!reader.Read()) { notes.Finish(out xmlIssues, out pathIssues); return result; }
 
             while (reader.Depth > depth)
             {
@@ -259,7 +268,7 @@ namespace Truedat
                     // Next element should be this track's <dict>
                     if (reader.NodeType == XmlNodeType.Element && reader.Name == "dict")
                     {
-                        var track = ReadTrackDict(reader, id);
+                        var track = ReadTrackDict(reader, id, notes);
                         if (!string.IsNullOrEmpty(track.Location))
                             result.Add(track);
                     }
@@ -275,15 +284,81 @@ namespace Truedat
                 }
             }
 
-            FinalizeIssues(sanitizer, out xmlIssues);
+            notes.Finish(out xmlIssues, out pathIssues);
             return result;
         }
 
-        private static void FinalizeIssues(SanitizingTextReader sanitizer, out List<string>? xmlIssues)
+        /// <summary>Says where each removed character was. The sanitizer knows the line; the reader knows which field and
+        /// which track a line belongs to; this joins the two as the tracks are read. The sanitizer reads ahead of the
+        /// reader, so a character on a line is already recorded by the time the reader gets to that line.</summary>
+        sealed class RemovedCharNotes
         {
-            xmlIssues = sanitizer.Issues;
-            if (sanitizer.StrippedCount > 0)
-                Console.WriteLine($"WARNING: Stripped {sanitizer.StrippedCount} invalid XML character(s) from library file");
+            readonly SanitizingTextReader _source;
+            readonly IXmlLineInfo? _lines;
+            int _next;   // the first removed character not yet placed
+            readonly List<(int Line, int Code, string Field)> _inTrack = new List<(int Line, int Code, string Field)>();
+            readonly List<string> _all = new List<string>();
+            readonly List<string> _paths = new List<string>();
+
+            public RemovedCharNotes(SanitizingTextReader source, IXmlLineInfo? lines)
+            {
+                _source = source;
+                _lines = lines != null && lines.HasLineInfo() ? lines : null;
+            }
+
+            /// <summary>The line the reader is on, or 0 when it cannot say.</summary>
+            public int Line => _lines?.LineNumber ?? 0;
+
+            /// <summary>A field that began on <paramref name="fromLine"/> and whose next sibling begins on <paramref name="toLine"/>.</summary>
+            public void Field(int fromLine, int toLine, string field)
+            {
+                if (fromLine <= 0) return;
+                var removed = _source.Removed;
+                while (_next < removed.Count)
+                {
+                    var r = removed[_next];
+                    if (r.Line < fromLine) { _all.Add($"  line {r.Line}: U+{r.Code:X4} removed (not in a track's field)"); _next++; continue; }
+                    bool inside = r.Line < toLine || (toLine <= fromLine && r.Line == fromLine);
+                    if (!inside) break;
+                    _inTrack.Add((r.Line, r.Code, field));
+                    _next++;
+                }
+            }
+
+            public void EndTrack(ITunesTrack track)
+            {
+                if (_inTrack.Count == 0) return;
+                string label = Label(track);
+                foreach (var r in _inTrack)
+                {
+                    _all.Add($"  line {r.Line}: U+{r.Code:X4} removed from {r.Field} of {label}");
+                    if (r.Field == "Location")
+                        _paths.Add($"  NOTE: the library lists {label} with a character in its file path that XML cannot hold (line {r.Line}, U+{r.Code:X4}). "
+                                 + "The path was read without it; if that track is reported missing, rename the file and export the library again.");
+                }
+                _inTrack.Clear();
+            }
+
+            static string Label(ITunesTrack t)
+            {
+                string artist = (t.Artist ?? "").Trim(), name = (t.Name ?? "").Trim();
+                if (artist.Length > 0 && name.Length > 0) return artist + " - " + name;
+                if (name.Length > 0) return name;
+                if (!string.IsNullOrEmpty(t.Location)) { try { return Path.GetFileName(t.Location); } catch { } }
+                return "track " + t.TrackId;
+            }
+
+            /// <summary>Anything removed up to where the reader stopped that no field claimed is listed plainly; what the
+            /// sanitizer read ahead beyond that point belongs to parts of the file the scan does not read.</summary>
+            public void Finish(out List<string>? all, out List<string>? paths)
+            {
+                int reached = _lines != null ? Line : int.MaxValue;
+                var removed = _source.Removed;
+                for (; _next < removed.Count && removed[_next].Line <= reached; _next++)
+                    _all.Add($"  line {removed[_next].Line}: U+{removed[_next].Code:X4} removed (not in a track's field)");
+                all = _all.Count > 0 ? _all : null;
+                paths = _paths.Count > 0 ? _paths : null;
+            }
         }
 
         /// <summary>
@@ -314,7 +389,7 @@ namespace Truedat
             return false;
         }
 
-        private static ITunesTrack ReadTrackDict(XmlReader reader, int id)
+        private static ITunesTrack ReadTrackDict(XmlReader reader, int id, RemovedCharNotes notes)
         {
             var track = new ITunesTrack { TrackId = id };
             int depth = reader.Depth;
@@ -325,6 +400,7 @@ namespace Truedat
             {
                 if (reader.NodeType == XmlNodeType.Element && reader.Name == "key")
                 {
+                    int keyLine = notes.Line;
                     var key = reader.ReadElementContentAsString();
 
                     // reader is now on the value element (string, integer, true, false, etc.)
@@ -395,6 +471,7 @@ namespace Truedat
                             SkipElement(reader);
                             break;
                     }
+                    notes.Field(keyLine, notes.Line, key);   // the reader is on whatever follows this field's value
                 }
                 else
                 {
@@ -405,6 +482,7 @@ namespace Truedat
             // Consume the end element of this track's <dict>
             if (reader.NodeType == XmlNodeType.EndElement)
                 reader.Read();
+            notes.EndTrack(track);
 
             // MusicBee's iTunes XML export has no Podcast boolean, no podcast Kind,
             // and no Track Type marker — a Genre=Podcast tag is the speech label it
