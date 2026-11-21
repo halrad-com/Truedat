@@ -6,6 +6,12 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV6.1] — 2026-11-21
+
+### Fixed
+
+- Reverted output estimates to provide running scan metrics.
+
 ## [0.5.5.4-EV6] — 2026-11-20
 
 ### Added
