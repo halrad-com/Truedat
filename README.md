@@ -104,6 +104,40 @@ store it replaces (`truedat.db.bak.<ts>.db`, same `--keep-backups` rotation); an
 because a restore is a change the hub must notice even when the restored bytes are older than what it
 cached. An archive carrying no store still refuses, and says which archive would have worked.
 
+### Starting over (`--reset`)
+
+A scan trusts what the catalog already holds: an entry with every field present is a cache hit,
+whatever build measured it. That keeps a rescan fast, and it means a value measured by an older
+build stays as it was. `--reset` measures the whole library again:
+
+```
+truedat --reset
+```
+
+It puts every file truedat wrote for this library into one zip beside the catalog
+(`mbxmoods-reset-<time>.zip`), removes them, and then runs the normal library scan from nothing, so
+every track is analyzed again. It lists the files and asks you to type `RESET` first. `--imeanit`
+confirms it instead when nobody is at the console (a script, a scheduled task). Without one or the
+other it stops and changes nothing.
+
+- **Archived and removed:** the catalog, its sidecar and `mbxedges.v1.json`, the store, the error and
+  skip lists, the review records, the saved scan summaries and other reports, and the catalog's
+  earlier backups.
+- **Kept:** `mbxmoods-exclude.json`, the config file, earlier snapshots, earlier reset archives.
+
+What to expect:
+
+- It is a full analysis pass. Until the new scan's first save the library has no catalog.
+- If the pass is interrupted, run a plain `truedat` (not `--reset` again): tracks already analyzed
+  are served from the new catalog and the rest continue.
+- A library that used the store and edges gets both back from the new scan.
+- It stops before changing anything when the extractor is not found, when part of the library is
+  unreachable or its files are not on this machine (a catalog copied from another machine could not
+  be rebuilt there), when another program holds one of the files (close MusicBee first), or when
+  another verb is on the command line.
+- To go back, `truedat --restore mbxmoods-reset-<time>.zip` restores the catalog, and the store when
+  the archive holds one. The error and skip lists and the review records are in the zip as well.
+
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:
@@ -419,6 +453,11 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           shards ONE AT A TIME — each save rewrites the whole catalog, so
                           concurrent shards would overwrite each other's backfills.
   --retry-errors          Re-attempt all previously failed files (clears error log)
+  --reset                 Start over: archive every file truedat wrote for this library into
+                          mbxmoods-reset-<time>.zip, remove them, then scan from nothing so every
+                          track is analyzed again. Asks you to type RESET first. Keeps the
+                          exclusion rules and the config file. Library scan only.
+  --imeanit               Confirms --reset when nobody is at the console to type the word.
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5), rename
                           SMFM keys (sensme*->smfm*) (creates a compressed backup). Field

@@ -1046,6 +1046,11 @@ namespace Truedat
             Console.WriteLine("                      consumes it; audioStreamSha256 is the durable identity). Also gates");
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
+            Console.WriteLine("  --reset             Start over: archive every file truedat wrote for this library into");
+            Console.WriteLine("                      mbxmoods-reset-<time>.zip, remove them, then scan from nothing so every");
+            Console.WriteLine("                      track is analyzed again. Asks you to type RESET first. Keeps the exclusion");
+            Console.WriteLine("                      rules and the config file. Library scan only.");
+            Console.WriteLine("  --imeanit           Confirms --reset when nobody is at the console to type the word.");
             Console.WriteLine("  --refresh           Re-analyze entries missing the newest feature fields; with the store and");
             Console.WriteLine("                      edges on (config or flags), also tracks the store lists as lacking edge rows:");
             Console.WriteLine("                      one scan, the scan's workers and progress, edges written as each track lands.");
@@ -1132,6 +1137,9 @@ namespace Truedat
             "split-mb",
             // store-only (config key `publish`, default true): --no-publish writes the store only; --publish beats config `publish false`
             "publish", "no-publish",
+            // --reset archives the library's truedat files, removes them and scans from nothing; --imeanit is its confirmation
+            // when nobody is at the console. Neither is a config key.
+            "reset", "imeanit",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1152,6 +1160,9 @@ namespace Truedat
             "budget",   // "edges-export" is deliberately absent: its value is optional (bare = beside the catalog).
             "split-mb",
         };
+
+        /// <summary>True when <paramref name="canonical"/> consumes the next token as its value.</summary>
+        internal static bool TakesValue(string canonical) => ValueFlags.Contains(canonical, StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Nearest KnownFlags entry by Damerau-Levenshtein distance, or
         /// null when nothing is close enough to be a plausible typo. Threshold:
@@ -1620,6 +1631,10 @@ namespace Truedat
         // WANTS those entries cleaned (a genuinely-removed drive), so it proceeds
         // regardless. It disables the whole net; use only for a volume you know is gone.
         internal static bool _forceClean;
+        /// <summary>--reset was typed; --imeanit was typed with it; and, once a reset has happened, the sentence the end
+        /// summary carries so the saved summary of that scan says what preceded it.</summary>
+        static bool _resetRequested, _resetConfirmed;
+        static string? _resetSummary;
 
         // Fixup mass-orphan backstop: refuse (unless --force-clean) when a run would
         // orphan more than MassOrphanFraction of the catalog AND more than the floor —
@@ -3090,6 +3105,8 @@ namespace Truedat
                 else if (canonical == "accept-flac-tag-drift") _acceptFlacTagDrift = true;
                 else if (canonical == "force-clean") _forceClean = true;
                 else if (canonical == "refresh" || canonical == "refresh-features") _refreshFeatures = true;   // --refresh-features kept as an undocumented alias
+                else if (canonical == ResetCommand.Flag) _resetRequested = true;
+                else if (canonical == ResetCommand.ConfirmFlag) _resetConfirmed = true;
                 else if (canonical == "pause") { /* consumed by the Main wrapper (hold console at exit) */ }
                 else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "enableshortfiles") _enableShortFiles = true;
@@ -3160,6 +3177,25 @@ namespace Truedat
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
+            // --reset belongs to the library scan and to nothing else. Checked here, before the store is resolved or any
+            // verb is dispatched: beside another verb it would either be dropped without a word or run next to it.
+            if (_resetRequested)
+            {
+                var resetConflict = ResetCommand.ConflictingFlag(args);
+                if (resetConflict != null)
+                {
+                    Console.Error.WriteLine($"Error: --reset runs with the library scan only, and {resetConflict} is not one of its options. Nothing was changed.");
+                    Console.Error.WriteLine("  --reset archives this library's truedat files, removes them and scans from nothing: truedat --reset");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+            }
+            else if (_resetConfirmed)
+            {
+                Console.Error.WriteLine("Error: --imeanit confirms --reset, and --reset was not given. Nothing was changed.");
+                Environment.ExitCode = 2;
+                return;
+            }
             bool storeVerb = storeImportMode || storeExportPath != null || storeRoundtripCatalog != null || storeInfoMode || storeSummaryMode || storeVacuumMode || edgesExportMode;
             // Store and edges are ON by default (operator 2026-10-18), but this block only RESOLVES a store the command line or the
             // config file asked for, or adopts one that exists. Making one when there is none happens at each scan's entry
@@ -5742,7 +5778,9 @@ namespace Truedat
             // store-result.json begins now, so an XML / extractor refusal cannot leave the PREVIOUS verb's record in place (TDA review P2b).
             bool libraryScan = !checkFilenames && !duplicatesMode && !migrateMode && !fixupMode;
             bool xmlExplicit = !string.IsNullOrEmpty(xmlPath);
-            if (libraryScan) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
+            // Under --reset the record begins after the reset (EnsureDefaultStore / EdgesPreflight below): the previous run's
+            // store-result.json is one of the files being archived, and a reset that is refused must leave it as it was.
+            if (libraryScan && !_resetRequested) global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
             // T18e (Q4): shards on different machines would each publish the catalog from their own store, and combining stores is the
             // portable merge (T10), not built — refuse rather than publish one shard's share as the whole library.
             if (libraryScan && chunkTotal > 0 && _storePath != null)
@@ -5809,6 +5847,12 @@ namespace Truedat
             {
                 chunkHostSuffix = SanitizeForFilename(Environment.MachineName);
                 moodsPath = InsertFilenameSuffix(moodsPath, chunkHostSuffix);
+            }
+            // --reset: before the store is settled and before anything is loaded, so the scan below starts from nothing.
+            if (_resetRequested)
+            {
+                int resetExit = RunReset(xmlPath, moodsPath, outputDir);
+                if (resetExit != 0) { Environment.ExitCode = resetExit; return; }
             }
             // No store yet: the library scan makes one now that its catalog path is known, and then begins the run record
             // for it (BeginScan above ran with no store and recorded nothing). A --chunk shard never does.
@@ -7169,6 +7213,7 @@ namespace Truedat
                 Environment.ExitCode = 3;
             }
             foreach (var line in ThisCommand()) Console.WriteLine(line);   // what this run was, where the operator reads after it
+            if (_resetSummary != null) Console.WriteLine("Reset:      " + _resetSummary);
             Console.WriteLine($"Started:    {startTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Finished:   {endTime:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"Elapsed:    {FormatTimeSpan(sw.Elapsed + finalSaveSw.Elapsed)}  (scan {FormatTimeSpan(sw.Elapsed)}, write {finalSaveSw.Elapsed.TotalSeconds:F1}s)");
@@ -17096,6 +17141,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.StoreTransferSelfTest.Run(Assert); // T09 snapshot/restore, T10 store merge source, T12 state (architect-2)
             global::Truedat.Store.StoreSummarySelfTest.Run(Assert);  // --store-summary: the hub's two mirrored rules + this report's arithmetic
             ReviewLedgerScanSelfTest.Run(Assert);                    // the scan and --fixup against a review ledger on disk
+            ResetSelfTest.Run(Assert);                               // --reset: archive, remove, scan from nothing
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -25502,6 +25548,139 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             if (!string.IsNullOrEmpty(freshMd5)) { rebuilt.FileMd5 = freshMd5; return; }
             rebuilt.FileMd5 = null;
             rebuilt.CopyCleared = (rebuilt.CopyCleared ?? 0UL) | global::Truedat.Store.TrackEntryMapper.CopyMaskOf("fileMd5");
+        }
+
+        /// <summary>The <c>--reset</c> step of a library scan: check that the scan which follows can run, show what will be
+        /// archived and removed, get the confirmation, do it. Returns 0 to go on into the scan, otherwise the exit code of a
+        /// refusal — and on every refusal nothing has been changed, except the one case that says otherwise in its message
+        /// (files archived but not all removed).
+        ///
+        /// It also settles which store this library's scans use BEFORE the store file is removed. An existing store is
+        /// what makes a plain scan adopt it; once the file is gone that reason is gone with it, and the new scan would
+        /// run without a store — so a library that had edges would need the whole pass again to get them back.</summary>
+        static int RunReset(string xmlPath, string moodsPath, string outputDir)
+        {
+            Console.WriteLine("=== Reset ===");
+            // 1. The scan that follows must be able to run: this removes the analysis it would replace.
+            if (FindTool("essentia_streaming_extractor_music.exe", AppDomain.CurrentDomain.BaseDirectory, outputDir, Environment.CurrentDirectory) == null)
+            {
+                Console.Error.WriteLine("Error: --reset removes this library's analysis and then analyzes it again, and essentia_streaming_extractor_music.exe was not found, so it could not. Nothing was changed.");
+                return 2;
+            }
+
+            // 2. The library's audio must be on this machine. A catalog copied to a machine without the audio is the one
+            //    place a reset would lose the analysis for good.
+            List<string> locations;
+            try
+            {
+                locations = ITunesParser.Parse(xmlPath, out _)
+                    .Where(t => !string.IsNullOrEmpty(t.Location) && t.Location!.IndexOf("://", StringComparison.Ordinal) < 0)
+                    .Select(t => t.Location!).ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: --reset could not read the library ({ex.Message}). Nothing was changed.");
+                return 2;
+            }
+            var rootCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var loc in locations)
+            {
+                var r = ReachabilityRoot(loc);
+                if (r.Length > 0) rootCounts[r] = rootCounts.TryGetValue(r, out var c) ? c + 1 : 1;
+            }
+            var (rootsDown, downDetail) = EvaluateReachability(rootCounts
+                .Select(kv => (Root: kv.Key, EntryCount: kv.Value, Reachable: ProbeRootReachable(kv.Key, out _))).ToList());
+            if (rootsDown)
+            {
+                Console.Error.WriteLine($"Error: --reset: part of the library is unreachable ({downDetail}), so it could not be analyzed again. Nothing was changed.");
+                return 3;
+            }
+            var sample = ResetCommand.SampleIndexes(locations.Count, 200);
+            int present = sample.Count(i => File.Exists(locations[i]));
+            if (ResetCommand.LibraryLooksAbsent(sample.Count, present))
+            {
+                Console.Error.WriteLine(sample.Count == 0
+                    ? "Error: --reset: the library lists no files to analyze, so there is nothing to rebuild the catalog from. Nothing was changed."
+                    : $"Error: --reset: only {present:N0} of {sample.Count:N0} sampled library files are on this machine, so the library could not be analyzed again here. Nothing was changed.");
+                return 3;
+            }
+
+            // 3. The store this library's scans use — as EnsureDefaultStore would settle it, decided while the file still exists.
+            string? derived = null;
+            try { derived = global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, moodsPath, out _); } catch { }
+            var (store, storeInForce) = ResetCommand.StoreAfterReset(_storePath, _storeExplicit, derived,
+                derived != null && File.Exists(derived), _noStoreTyped, ConfigSaysOff("store"));
+
+            // 4. The file set.
+            var files = ResetCommand.Collect(moodsPath, store, ResolveReviewLedgerPath(outputDir));
+            if (files.Count == 0)
+            {
+                Console.WriteLine("  Nothing to archive: this library has no truedat files yet. Scanning.");
+                Console.WriteLine();
+                return 0;
+            }
+            string archive = ResetCommand.ArchivePathFor(moodsPath, DateTime.Now);
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string Mb(long b) => b >= 1024 * 1024 ? (b / (1024.0 * 1024.0)).ToString("F1", inv) + " MB" : b.ToString("N0", inv) + " B";
+            long totalBytes = 0;
+            Console.WriteLine($"  Library:  {xmlPath}");
+            Console.WriteLine("  These files are archived into one zip and then removed:");
+            for (int i = 0; i < files.Count; i++)
+            {
+                long len = 0; try { len = new FileInfo(files[i].Path).Length; } catch { }
+                totalBytes += len;
+                if (i < 40) Console.WriteLine($"    {Mb(len),12}  {files[i].Path}");
+            }
+            if (files.Count > 40) Console.WriteLine($"    ... and {files.Count - 40:N0} more");
+            Console.WriteLine($"  {files.Count:N0} file(s), {Mb(totalBytes)}  ->  {archive}");
+            Console.WriteLine("  Kept: the exclusion rules, the config file, earlier snapshots and reset archives.");
+            Console.WriteLine("  Every track is then analyzed again. Until that scan saves, this library has no catalog.");
+
+            // 5. Nothing held by another program — asked before the confirmation, so nobody confirms a run that cannot start.
+            var held = ResetCommand.FirstHeld(files);
+            if (held != null)
+            {
+                Console.Error.WriteLine($"Error: {held} is open in another program or cannot be written, so the reset did not start. Nothing was changed.");
+                Console.Error.WriteLine($"  {FileLockInfo.Describe(FileLockInfo.TryGetHolders(held))}. Close it and run --reset again.");
+                return 1;
+            }
+
+            // 6. The confirmation.
+            switch (ResetCommand.Confirm(_resetConfirmed, Console.IsInputRedirected, Console.ReadLine, Console.Out))
+            {
+                case ResetCommand.Confirmation.NotAsked:
+                    Console.Error.WriteLine($"Error: --reset was not confirmed, so nothing was changed. Run it at a console and type {ResetCommand.ConfirmWord} when asked, or add --{ResetCommand.ConfirmFlag}.");
+                    return 2;
+                case ResetCommand.Confirmation.Declined:
+                    Console.WriteLine("  Not confirmed. Nothing was changed.");
+                    return 2;
+            }
+
+            // 7. Archive, then remove.
+            ResetCommand.Result result;
+            try { result = ResetCommand.Execute(files, archive, store != null ? Path.GetFileName(store) : null); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error: the archive could not be written ({ex.Message}), so nothing was removed.");
+                return 1;
+            }
+            Console.WriteLine($"  Archived {result.Archived:N0} file(s), {Mb(result.Bytes)}  ->  {archive}");
+            if (result.NotRemoved.Count > 0)
+            {
+                Console.Error.WriteLine($"Error: {result.NotRemoved.Count:N0} file(s) are in the archive but could not be removed, so the scan did not start:");
+                foreach (var f in result.NotRemoved) Console.Error.WriteLine("  " + f);
+                Console.Error.WriteLine("  Remove them and run a scan; the archive already holds them.");
+                return 1;
+            }
+            Console.WriteLine("  Removed. Scanning from nothing.");
+            Console.WriteLine();
+            _resetSummary = $"archived {result.Archived:N0} file(s) to {archive}, then scanned from nothing";
+            if (storeInForce)
+            {
+                _storePath = store;
+                ApplyStoreLocation(store!, moodsPath);
+            }
+            return 0;
         }
 
         /// <summary>What <see cref="EnsureDefaultStore"/> decided: no store for this scan; a store in force (created or seeded); or the

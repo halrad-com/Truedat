@@ -98,6 +98,18 @@ local tidy-up:
   operator KNOWS is gone. Their contract briefly listed a `purge` mode for truedat; it was removed
   on our correction. Do not implement one to satisfy a doc — `--force-clean` acts on ground truth
   (the volume is unreachable *and* the operator asserted it), not on a classification.
+- **`--reset` is not a third way to lose an entry on a classification — it is the operator starting over** (2026-11-20).
+  It archives every file truedat wrote for the library into `mbxmoods-reset-<time>.zip` beside the catalog, removes
+  them, and runs the library scan from nothing. The file set is whatever the scan summary's size block counts
+  (`ClassifySideFile`, one definition of "ours") less `ResetCommand.IsKept` — the exclusion rules, the field registry,
+  snapshots and earlier reset archives stay, and so does the config file. In the hub's review folder it takes
+  `mbxmoods-review.json` and nothing else. Nothing is removed until the archive has been written and read back; a file
+  another program holds stops it before the archive is written (so it refuses while the hub holds the store); and it
+  refuses unless the scan after it can run — extractor found, library roots answering, at least half of a sample of
+  the library's files on this machine. It needs the typed word `RESET` or `--imeanit`; **neither flag may ever become a
+  config key** (pinned by the self-test), and it is refused beside any other verb. A store that was in force is
+  recreated by the scan that follows (`ResetCommand.StoreAfterReset`, decided while the file still exists).
+  `--restore <reset archive>` brings the catalog (and the store) back.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 - **The `kind` string in every JSON artifact written to the hub's review folder is a contract** (2026-11-20).
