@@ -11751,17 +11751,21 @@ namespace Truedat
 
         /// <summary>The RAM spool cap for ONE track: what is left of this worker's share (60 % of available RAM / N) once the extractor's own
         /// cost for this track is taken out — 109.1 + 0.0656 MiB per audio-second (essentia-build/spike-x6/b5-mem.txt, .7 with B5, 10 real rows) —
-        /// clamped to [0, 256 MiB]. So extractor + spool stays inside the share whatever the track's channel count or sample rate: the spool
+        /// and never below zero. There is no fixed ceiling: the share IS the limit, and it is measured rather than chosen, so a box with RAM
+        /// to spare spools a whole side of a record or a live set while a small box still gets a small cap. The 256 MiB constant this replaces
+        /// held every machine to about 12.7 minutes of 44.1 kHz stereo — short enough that live sets, DJ mixes, podcast episodes and vinyl
+        /// side rips all fell back to decoding once per pass, and it bound even the 8 GB box, whose own share allows about 21 minutes.
+        /// So extractor + spool stays inside the share whatever the track's channel count or sample rate: the spool
         /// records the SOURCE format, and the earlier run-wide cap, which assumed stereo 44.1 kHz, let a mono track spool twice the duration
         /// past it (review 2026-10-25 R3). Unknown duration = 0. Zero = no spool: the extractor decodes per pass as before, same output.
         /// Operator 2026-10-25: it has to work at 8 GB.</summary>
         internal static long SpoolCapBytes(long availableRamBytes, int workers, double durationSec)
         {
-            const double BaseMiB = 109.1, ExtractorMiBPerSec = 0.0656, Share = 0.6, CeilingMiB = 256;
+            const double BaseMiB = 109.1, ExtractorMiBPerSec = 0.0656, Share = 0.6;
             if (availableRamBytes <= 0 || !(durationSec > 0)) return 0;
             int n = Math.Max(1, workers);
             double cap = Share * (availableRamBytes / 1048576.0) / n - BaseMiB - ExtractorMiBPerSec * durationSec;
-            return (long)(Math.Max(0, Math.Min(CeilingMiB, cap)) * 1048576);
+            return (long)(Math.Max(0, cap) * 1048576);
         }
 
         /// <summary>A track's length for the spool cap: TagLib's header read (~1 ms, no audio decoded); 0 when it cannot say.</summary>

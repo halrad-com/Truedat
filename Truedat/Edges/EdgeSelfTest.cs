@@ -83,8 +83,12 @@ namespace Truedat.Edges
             // holds whatever the channel count or rate the spool records. Unknown length or no RAM reading = 0 (no spool).
             var got = new[] { MiB(Program.SpoolCapBytes(8 * GiB, 4, 600)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 60)), MiB(Program.SpoolCapBytes(8 * GiB, 20, 300)),
                               MiB(Program.SpoolCapBytes(8 * GiB, 20, 600)), MiB(Program.SpoolCapBytes(16 * GiB, 20, 300)), MiB(Program.SpoolCapBytes(8 * GiB, 8, 0)), MiB(Program.SpoolCapBytes(0, 8, 300)) };
-            assert(got[0] == 256 && got[1] == 132.7 && got[2] == 117.0 && got[3] == 97.3 && got[4] == 256 && got[5] == 0 && got[6] == 0,
-                $"spool cap MiB at 8 GiB x4 600 s, x20 60/300/600 s, 16 GiB x20 300 s, unknown length, no RAM reading: {string.Join(" / ", got)} (expected 256 / 132.7 / 117.0 / 97.3 / 256 / 0 / 0)");
+            assert(got[0] == 1080.3 && got[1] == 132.7 && got[2] == 117.0 && got[3] == 97.3 && got[4] == 362.7 && got[5] == 0 && got[6] == 0,
+                $"spool cap MiB at 8 GiB x4 600 s, x20 60/300/600 s, 16 GiB x20 300 s, unknown length, no RAM reading: {string.Join(" / ", got)} (expected 1080.3 / 132.7 / 117.0 / 97.3 / 362.7 / 0 / 0)");
+            // No fixed ceiling: the machine's own share is the limit. A box with RAM to spare spools a whole side of a record or a live set
+            // rather than stopping at a constant that was chosen for the smallest box, and that box's share still binds there.
+            assert(Program.SpoolCapBytes(128 * GiB, 30, 1) > 1900L * 1048576 && Program.SpoolCapBytes(6 * GiB, 6, 1) > 400L * 1048576,
+                $"spool cap: a large box is not held to a constant ({MiB(Program.SpoolCapBytes(128 * GiB, 30, 1))} MiB on 128 GiB x30, {MiB(Program.SpoolCapBytes(6 * GiB, 6, 1))} MiB on 6 GiB x6)");
             // Whatever the source format (the reviewer's mono case included), extractor + spool never exceed the worker's share: the cap
             // is what is left after the extractor's own cost for that length, so a long track gets a small cap or none (8 GiB x20, 1 h).
             const double ShareMiB = 0.6 * 8 * 1024 / 20;
