@@ -6306,16 +6306,9 @@ namespace Truedat
                     else
                         Console.WriteLine("  Estimated time: not estimable yet (no analyzed history to learn a rate from)");
                 }
-                if (!_refreshFeatures)
-                {
-                    int waveMissing = 0;
-                    foreach (var e in allTracks.Values)
-                        if (e.Features != null && e.Features.Mfcc != null && e.Features.Mfcc.Length > 0
-                            && (e.Features.AverageLoudness == null || e.Features.DynamicComplexity == null || e.Features.SpectralContrastCoeffs == null))
-                            waveMissing++;
-                    if (waveMissing > 0)
-                        Console.WriteLine($"  {CountOf(waveMissing, "entry", "entries")} without the latest features — run: truedat --refresh");
-                }
+                // No "N entries without the latest features — run: truedat --refresh" line here any more. It counted every such
+                // entry and sent all of them to --refresh, including the ones a refresh can never reach (on the error list,
+                // skipped as too short, no longer listed). The end-of-scan summary sorts them and names the command for each.
             }
             int flacRekeyed = 0;       // tier 2.5: FLAC transition rescue (pre-flac-frames sha + tag rewrite; props-gated re-key)
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
@@ -17289,6 +17282,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             XmlIssuesSelfTest.Run(Assert);                           // a character removed from the library XML: what it touched
             FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
             ListScanSelfTest.Run(Assert);                            // --file-list: each path once, every list read, an older XML does not win
+            SummaryAdviceSelfTest.Run(Assert);                       // the scan summary's advice for entries lacking the newest fields
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
