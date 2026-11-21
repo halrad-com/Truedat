@@ -104,6 +104,13 @@ namespace Truedat.Store
     internal static class ImportCommand
     {
         internal const string ResultFileName = "store-import-result.json";
+        /// <summary>Is a description being replaced the expected course of things. A description seeded from a catalog and
+        /// then measured by a scan is: the seed stood in until the scan read the audio, and the summary counts it. It was
+        /// logged as a warning, one line per track, on the first scan of every seeded library - a wall of warnings about
+        /// nothing wrong. Any other replacement (a catalog's values over a measurement, one build's over another's) stays a
+        /// warning.</summary>
+        internal static bool ReplacementIsExpected(string? existingProducerKey, string? arrivingProducerKey)
+            => string.Equals(existingProducerKey, "import", StringComparison.Ordinal) && !string.Equals(arrivingProducerKey, "import", StringComparison.Ordinal);
 
         internal static int Run(ImportOptions o)
         {
@@ -813,7 +820,8 @@ namespace Truedat.Store
                         dal.UpsertContent(entityId, contentKey, contentKeyKind, runId, TrackEntryMapper.WithStoredContentWhereUnobserved(row, existing.Values), now);
                         dal.InsertReplacedConflict(entityId, $"{existing.ProducerKey}@{existing.ProducerVersion}", $"{producerKey}@{producerVersion}", existing.RunId, runId, displayPath, now);
                         contentWritten = true; r.ContentReplaced++;
-                        StoreLog.Warn($"description replaced on {displayPath}: {existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion} ({drift.Count} field(s) changed; the pair is recorded as a resolved content-replaced conflict)");
+                        string replacedLine = $"description replaced on {displayPath}: {existing.ProducerKey}@{existing.ProducerVersion} -> {producerKey}@{producerVersion} ({drift.Count} field(s) changed; the pair is recorded as a resolved content-replaced conflict)";
+                        if (ReplacementIsExpected(existing.ProducerKey, producerKey)) StoreLog.Debug(replacedLine); else StoreLog.Warn(replacedLine);
                     }
                 }
                 else if (!isImport && !sameProducer && !ArrivalIsOlder(existing.ProducerKey, existing.ProducerVersion, producerKey, producerVersion))

@@ -97,6 +97,26 @@ namespace Truedat
                 Check(output.Contains("1 previously errored") && output.Contains("--retry-errors"), "scan-advice: the one on the error list is sent to --retry-errors");
                 Check(output.Contains("1 skipped, not analyzable"), "scan-advice: the one a scan skips every time is named as that");
                 Check(!output.Contains("just stale") && !output.Contains("truedat --refresh"), "scan-advice: and neither is recommended a --refresh, which could reach neither");
+
+                // ---- a line that reads as a warning is for something that needs attention
+                Check(global::Truedat.Store.ImportCommand.ReplacementIsExpected("import", "essentia"),
+                    "replace-log: a description seeded from a catalog and then measured by a scan is the expected course, not a warning");
+                Check(!global::Truedat.Store.ImportCommand.ReplacementIsExpected("essentia", "import"),
+                    "replace-log: a catalog's values going over a scan's measurement is worth a warning");
+                Check(!global::Truedat.Store.ImportCommand.ReplacementIsExpected("essentia", "essentia") && !global::Truedat.Store.ImportCommand.ReplacementIsExpected("import", "import"),
+                    "replace-log: so is any other replacement");
+
+                // ---- the store summary is made to be pasted: nothing but the block, and no path above it
+                var storeDir = Path.Combine(root, "store"); Directory.CreateDirectory(storeDir);
+                var store = Path.Combine(storeDir, "truedat.db");
+                using (global::Truedat.Store.StoreLog.Quiet())
+                using (global::Truedat.Store.OpenStore.Open(store, true, VersionInfo.Display, DateTime.UtcNow.ToString("o"))) { }
+                var summary = RunChild(exe, storeDir, "--no-config --store-summary-min --store " + Q(store), out int summaryExit);
+                File.WriteAllText(Path.Combine(root, "summary.log"), summary);
+                string firstLine = "";
+                foreach (var line in summary.Split(new[] { (char)13, (char)10 }, StringSplitOptions.RemoveEmptyEntries)) { firstLine = line; break; }
+                Check(summaryExit == 0 && firstLine.StartsWith("--- copy from here", StringComparison.Ordinal), $"store-summary: the first thing printed is the block's own opening line ('{firstLine}')");
+                Check(!summary.Contains(storeDir), "store-summary: and the store's path is nowhere in the output");
             }
             catch (Exception ex) { keep = true; assert(false, "scan-advice: threw " + ex.GetType().Name + ": " + ex.Message + "  [fixture kept: " + root + "]"); }
             finally { if (!keep) { try { Directory.Delete(root, true); } catch { } } }

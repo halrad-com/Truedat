@@ -3271,7 +3271,9 @@ namespace Truedat
                     storePath = null;
                 }
                 else
-                global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
+                // --store-summary prints a block made to be pasted somewhere else: nothing goes above it, a path least of all.
+                if (storeSummaryMode) global::Truedat.Store.StoreLog.Debug($"store: {storePath} ({storeWhy})");
+                else global::Truedat.Store.StoreLog.Info($"store: {storePath} ({storeWhy})");
                 // The adoption banner is a SCAN's line (it says what this run will write to); on a read verb it is noise and its
                 // "--no-edges leaves it alone" clause means nothing (operator's MB3 EV3 pass, 2026-10-22). The resolution INFO line above stays:
                 // a read verb answering from a store should say which one.
