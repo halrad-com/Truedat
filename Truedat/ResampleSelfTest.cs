@@ -94,12 +94,6 @@ namespace Truedat
             assert(Program.ConversionCeilingMs(0, 0) == five && Program.ConversionCeilingMs(-5, -1) == five, "conversion-ceiling: with nothing known at all the floor applies; a conversion is never without a ceiling");
             assert(Program.ConversionCeilingMs(3600, perSec * 10) == 3600 * 1000L, "conversion-ceiling: a known length is used as it is, whatever the size");
 
-            // The per-track line: how far, how long to go, how many workers are busy. Nothing that repeats on every line without changing a decision.
-            assert(Program.ProgressSuffix("5m02s", 19, 20) == " ETA 5m02s · ess 19/20", $"progress: ETA and worker use ('{Program.ProgressSuffix("5m02s", 19, 20)}')");
-            assert(Program.ProgressSuffix(null, 3, 20) == " ess 3/20", $"progress: before there is an estimate, worker use alone ('{Program.ProgressSuffix(null, 3, 20)}')");
-            assert(Program.ProgressSuffix("12s", 0, 0) == " ETA 12s", $"progress: outside a scan with workers, the ETA alone ('{Program.ProgressSuffix("12s", 0, 0)}')");
-            assert(Program.ProgressSuffix(null, 0, 0) == "", "progress: nothing to say, nothing said");
-
             using (var idle = Start(cmd!, "/c pause", holdInput: true))
             {
                 var outcome = SubprocessWait.WhileProgressing(idle, pollMs: 200, maxIdlePolls: 500, cancelled: () => true);

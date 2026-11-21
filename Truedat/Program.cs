@@ -28356,17 +28356,6 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             return (long)(Math.Max(ConversionFloorSec, secs) * 1000.0);
         }
 
-        /// <summary>What follows the count on a per-track line: the time left and how many workers are busy. The audio hours,
-        /// the per-track cost and the throughput used to ride on every line too; they change slowly, decide nothing while a
-        /// scan runs, and are all in the summary at the end.</summary>
-        internal static string ProgressSuffix(string? eta, int essActive, int essTotal)
-        {
-            var parts = new List<string>(2);
-            if (!string.IsNullOrEmpty(eta)) parts.Add("ETA " + eta);
-            if (essTotal > 0) parts.Add($"ess {essActive}/{essTotal}");
-            return parts.Count == 0 ? "" : " " + string.Join(" · ", parts);
-        }
-
         static SubprocessWait.Outcome WaitForConversion(Process proc, string inputPath, CancellationToken ct = default, double durationSec = -1)
         {
             if (durationSec < 0) TryReadRateAndChannels(inputPath, out _, out _, out durationSec);   // not read by the caller: read it here
@@ -30866,6 +30855,32 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (done < 10 || total <= done) return "";
             var etaSecs = ComputeEtaSecs(elapsed, done, total);
+            // Per-track avg. Once anything has analyzed, show the ANALYZED-class
+            // average (Essentia thread-time — the cost that actually matters); the
+            // blended wall average is dominated by ~0ms cache hits and reads as
+            // nonsense ("163ms/trk" while podcasts take minutes). The blend only
+            // remains for pure-cache runs, where it genuinely is the per-track cost.
+            string avgTag;
+            int an = Volatile.Read(ref _analyzeCount);
+            if (an > 0)
+            {
+                var aAvg = (double)Interlocked.Read(ref _analyzeTicksTotal) / Stopwatch.Frequency / an;
+                avgTag = aAvg >= 60 ? FormatTimeSpan(TimeSpan.FromSeconds(aAvg)) : $"{aAvg:F1}s";
+            }
+            else
+            {
+                var avg = elapsed.TotalSeconds / done;
+                avgTag = avg >= 1 ? $"{avg:F1}s/trk" : $"{avg * 1000:F0}ms/trk";
+            }
+            // Live analyzed throughput (trailing window). Headline is DURATION-
+            // normalized (Nx = audio-seconds per wall-second): a FLAC and a
+            // low-bitrate MP3 of the same content cost the same to scan, so MB/s
+            // can't compare across libraries — it stays as the IO footnote.
+            var rate = CurrentRateMBps(elapsed.TotalSeconds);
+            var rtfLive = CurrentRealtimeFactor(elapsed.TotalSeconds);
+            var rateTag = rtfLive > 0
+                ? $" · {rtfLive:F1}x{(rate > 0 ? $" ({rate:F1} MB/s)" : "")}"
+                : (rate > 0 ? $" · {rate:F1} MB/s" : "");
             // Saturation gauge: running Essentia subprocesses vs the worker count.
             // MoodsMode-primed only (_scanParallelism stays 0 in verify/backfill).
             // "ess 8/14" well below full while new work remains = workers parked
@@ -30874,9 +30889,18 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // this line is printed by a worker at its own track boundary, so a raw
             // instantaneous sample can never include the printer and would read
             // P-1 on a fully saturated box (looks like a missing worker).
-            int essNow = _scanParallelism > 0 ? Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive)) : 0;
-            // Negative = no honest estimate yet; the line then carries worker use alone.
-            return ProgressSuffix(etaSecs < 0 ? null : FormatTimeSpan(TimeSpan.FromSeconds(etaSecs)), essNow, _scanParallelism);
+            var essTag = _scanParallelism > 0
+                ? $" · ess {Math.Max(TakeEssentiaPeak(), Volatile.Read(ref _essentiaActive))}/{_scanParallelism}"
+                : "";
+            // Duration progress: audio processed / total audio in the work list — the
+            // honest "how far through the library" (see the pct note). Leads the suffix.
+            long totMs = Volatile.Read(ref _scanAudioMsTotal);
+            var audioTag = totMs > 0
+                ? $"{FormatTimeSpan(TimeSpan.FromMilliseconds(Interlocked.Read(ref _processedAudioMsTotal)))}/{FormatTimeSpan(TimeSpan.FromMilliseconds(totMs))} · "
+                : "";
+            // Negative = no honest estimate yet; show the measured bits without an ETA.
+            var etaTag = etaSecs < 0 ? "" : $"ETA {FormatTimeSpan(TimeSpan.FromSeconds(etaSecs))} · ";
+            return $" {audioTag}{etaTag}{avgTag}{rateTag}{essTag}";
         }
 
         /// <summary>Parse "M/N" or "MofN" chunk spec. Returns false on any malformed input.</summary>
