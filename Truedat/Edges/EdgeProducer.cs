@@ -55,7 +55,7 @@ namespace Truedat.Edges
 
         /// <summary>What truedat hands the extractor as its one profile file: the frames block when edges are on, the scan keys when the
         /// build honours them (<see cref="Program.ScanProfileCapable"/>), both when both — the extractor takes a single profile. Extractor .7
-        /// also gets its RAM spool cap (<paramref name="spoolMaxBytes"/>, <see cref="Program.SpoolCapBytes"/>): the per-track ceiling on the
+        /// also gets its RAM spool cap (<paramref name="spoolMaxBytes"/>, <see cref="SpoolBudget"/>): the room this track was given for the
         /// in-memory decode it replays to its later passes; above it the track decodes per pass as before, same output.</summary>
         internal static string ProfileTextFor(bool edges, bool scan, long? spoolMaxBytes = null)
             => (edges ? ProfileText() : "") + (scan ? ScanProfileKeys : "")

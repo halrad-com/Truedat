@@ -7240,9 +7240,23 @@ namespace Truedat
                 Parallel.ForEach(msLikelyCached, msOptions, processTrack);
                 // Work lane: single-item NoBuffering -> the slow analyses spread evenly
                 // across all threads instead of pinning 1-2 at low CPU on an incremental scan.
-                Parallel.ForEach(
-                    Partitioner.Create(msLikelyWork, EnumerablePartitionerOptions.NoBuffering),
-                    msOptions, processTrack);
+                // The order: a few workers take the longest track left and the rest take the library in order, so a long track
+                // neither starts last nor arrives with a whole album of others its size (LongFirstQueue). The budget is the RAM
+                // the extractors share; with an extractor that holds nothing in memory there is nothing to make room for.
+                if (msLikelyWork.Count > 0)
+                {
+                    long orderBudget = essentiaExe != null && SpoolCapable(essentiaExe) ? _spoolBudget.Value.TotalBytes : 0;
+                    var workOrder = new LongFirstQueue<ITunesTrack>(msLikelyWork, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget);
+                    if (workOrder.LongCount > 0)
+                        Console.WriteLine($"  Order:      {workOrder.LongCount:N0} long track(s) taken first, {workOrder.Lanes} at a time; the rest in library order");
+                    Parallel.ForEach(
+                        Partitioner.Create(workOrder.Feed(), EnumerablePartitionerOptions.NoBuffering),
+                        msOptions, pick =>
+                        {
+                            try { processTrack(pick.Key); }
+                            finally { workOrder.Done(pick.Value); }
+                        });
+                }
             }
             catch (OperationCanceledException) { }
             budgetTimer?.Dispose();   // also keeps the timer reachable until here (a local-only Timer can be collected before it fires)
@@ -7475,6 +7489,15 @@ namespace Truedat
                 using var currentProcess = Process.GetCurrentProcess();
                 var peakMb = currentProcess.PeakWorkingSet64 / (1024.0 * 1024.0);
                 Console.WriteLine($"  Peak mem:   {peakMb:F0} MB");
+                if (_spoolBudget.IsValueCreated)
+                {
+                    var spoolLine = _spoolBudget.Value.SummaryLine();
+                    if (spoolLine != null) Console.WriteLine($"  Spool:      {spoolLine}");
+                    // Every track gives its room back when its extractor exits. Anything still held here was never returned, and
+                    // would have been refusing room to the tracks after it.
+                    if (_spoolBudget.Value.ReservedBytes != 0)
+                        Console.WriteLine($"  WARNING: {_spoolBudget.Value.ReservedBytes / 1048576.0:F0} MB of the shared RAM budget was never given back; later tracks may have been refused room");
+                }
             }
             catch { }
             // The FILTERED work list = exactly what a rescan re-analyzes. Wave-missing
@@ -11749,43 +11772,29 @@ namespace Truedat
         internal static bool SpoolCapable(string exePath)
             => SpoolCapableMd5s.Contains(_extractorMd5ByPath.GetOrAdd(exePath, p => ExtractorMd5(p) ?? ""));
 
-        /// <summary>The RAM spool cap for ONE track: what is left of this worker's share (60 % of available RAM / N) once the extractor's own
-        /// cost for this track is taken out — 109.1 + 0.0656 MiB per audio-second (essentia-build/spike-x6/b5-mem.txt, .7 with B5, 10 real rows) —
-        /// and never below zero. There is no fixed ceiling: the share IS the limit, and it is measured rather than chosen, so a box with RAM
-        /// to spare spools a whole side of a record or a live set while a small box still gets a small cap. The 256 MiB constant this replaces
-        /// held every machine to about 12.7 minutes of 44.1 kHz stereo — short enough that live sets, DJ mixes, podcast episodes and vinyl
-        /// side rips all fell back to decoding once per pass, and it bound even the 8 GB box, whose own share allows about 21 minutes.
-        /// So extractor + spool stays inside the share whatever the track's channel count or sample rate: the spool
-        /// records the SOURCE format, and the earlier run-wide cap, which assumed stereo 44.1 kHz, let a mono track spool twice the duration
-        /// past it (review 2026-10-25 R3). Unknown duration = 0. Zero = no spool: the extractor decodes per pass as before, same output.
-        /// Operator 2026-10-25: it has to work at 8 GB.</summary>
-        internal static long SpoolCapBytes(long availableRamBytes, int workers, double durationSec)
-        {
-            const double BaseMiB = 109.1, ExtractorMiBPerSec = 0.0656, Share = 0.6;
-            if (availableRamBytes <= 0 || !(durationSec > 0)) return 0;
-            int n = Math.Max(1, workers);
-            double cap = Share * (availableRamBytes / 1048576.0) / n - BaseMiB - ExtractorMiBPerSec * durationSec;
-            return (long)(Math.Max(0, cap) * 1048576);
-        }
-
-        /// <summary>A track's length for the spool cap: TagLib's header read (~1 ms, no audio decoded); 0 when it cannot say.</summary>
-        static double TrackSecondsForSpool(string path)
-        {
-            try { using var f = TagLib.File.Create(path); return f.Properties?.Duration.TotalSeconds ?? 0; }
-            catch { return 0; }
-        }
-
         /// <summary>How many extractors this run starts at once — set by the scan modes beside their Parallel.ForEach; 1 until then.</summary>
         internal static int _extractorWorkers = 1;
 
-        /// <summary>The RAM AVAILABLE when the first track is analysed (not the installed total: a RAM drive or a busy box shrinks it), read
-        /// once and logged once — to stderr, so <c>--json-output</c>'s stdout stays one JSON document (review 2026-10-25 R2).</summary>
-        static readonly Lazy<long> _runAvailableRam = new Lazy<long>(() =>
+        /// <summary>The RAM the run's extractors share for decoded audio (<see cref="SpoolBudget"/>), sized from the RAM AVAILABLE when
+        /// the first track is analyzed — not the installed total: a RAM drive or a busy machine shrinks it. Read once and said once, to
+        /// stderr, so <c>--json-output</c>'s stdout stays one JSON document. It has to work at 8 GB: the budget is a share of what is
+        /// free, so a small machine gets a small one.</summary>
+        static readonly Lazy<SpoolBudget> _spoolBudget = new Lazy<SpoolBudget>(() =>
         {
             long avail = AvailablePhysicalBytes();
-            Console.Error.WriteLine($"  Spool:      up to {SpoolCapBytes(avail, _extractorWorkers, 1) / 1048576.0:F0} MB per track in RAM, less for long tracks (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
-            return avail;
+            var budget = new SpoolBudget(avail);
+            Console.Error.WriteLine($"  Spool:      {budget.TotalBytes / 1073741824.0:F1} GB of RAM shared by the tracks being analyzed (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
+            return budget;
         });
+
+        /// <summary>The room one track takes from the shared budget: its length and format from a header read (TagLib, no audio
+        /// decoded). A track whose length cannot be read is not held in memory — its extractor decodes once per pass, same output.</summary>
+        static SpoolBudget.Grant ReserveSpool(string path)
+        {
+            bool known = TryReadRateAndChannels(path, out int rate, out int channels, out double seconds) && seconds > 0;
+            long bytesPerSec = known ? (long)rate * Math.Max(1, channels) * 4 : 0;
+            return _spoolBudget.Value.Reserve(known ? seconds : 0, bytesPerSec);
+        }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         sealed class MemoryStatusEx
@@ -17324,6 +17333,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             StoreOpenRefusalSelfTest.Run(Assert);                    // a store that cannot be written is refused at open; the record's final generation
             ListRecordSelfTest.Run(Assert);                          // the run record with no store, and a list scan's account of its paths
             ChromaMarkerSelfTest.Run(Assert);                        // chromaFold: how a track's chroma was grouped; --refresh-chroma
+            ScanTuningSelfTest.Run(Assert);                          // the RAM the extractors share, and the order long tracks are taken in
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -28550,10 +28560,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // 2-arg call — never a failed track; with edges on that is also a failed fold for this track, as before.
             bool scanProfile = ScanProfileCapable(essentiaExe);
             bool spools = SpoolCapable(essentiaExe);
+            SpoolBudget.Grant? spoolGrant = null;
             if (_stageOpts.Edges || scanProfile || spools)
             {
-                // .7: this track's RAM spool ceiling (its own length against the worker's share).
-                long? spoolCap = spools ? SpoolCapBytes(_runAvailableRam.Value, _extractorWorkers, TrackSecondsForSpool(audioPath)) : (long?)null;
+                // .7: this track's room in the RAM the extractors share. Given back in the finally below, or here if the track stops first.
+                if (spools) spoolGrant = ReserveSpool(audioPath);
+                long? spoolCap = spoolGrant?.SpoolBytes;
                 try { (edgesProfile, edgesFrames) = global::Truedat.Edges.EdgeProducer.PrepareFor(tempJson, edges: _stageOpts.Edges, scan: scanProfile, spoolMaxBytes: spoolCap); }
                 catch (Exception ex) { edgesPrepError = $"could not write the extractor profile beside the extractor output: {ex.Message}"; }
                 // Without the profile .7 spools up to its own 256 MiB default, past the cap just computed — the 2-arg fallback would lift
@@ -28562,6 +28574,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 {
                     try { if (File.Exists(tempJson)) File.Delete(tempJson); } catch { }
                     if (tempLink != null) { try { RetryDelete(tempLink); } catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); } }
+                    if (spoolGrant.HasValue) _spoolBudget.Value.Release(spoolGrant.Value);
                     return (null, edgesPrepError ?? "could not write the extractor profile that carries the RAM spool cap");
                 }
             }
@@ -28751,6 +28764,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 long cleanupStartedAt = Stopwatch.GetTimestamp();
                 Interlocked.Decrement(ref _essentiaActive);
+                if (spoolGrant.HasValue) _spoolBudget.Value.Release(spoolGrant.Value);   // the extractor has exited: its room goes back
                 try { File.Delete(tempJson); } catch { }
                 if (edgesProfile != null) try { File.Delete(edgesProfile); } catch { }
                 if (edgesFrames != null) try { File.Delete(edgesFrames); } catch { }
