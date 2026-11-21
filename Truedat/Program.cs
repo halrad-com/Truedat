@@ -2526,7 +2526,9 @@ namespace Truedat
         /// a stored authenticity measurement from an older method.</summary>
         static bool HasCurrentEntry(TrackEntry? e)
             => HasCurrentFeatures(e?.Features)
-               && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!))
+               // The lacking-edges list is read once, when the scan begins; content this run has analyzed since is no longer lacking.
+               && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!)
+                    && !_contentMeasuredThisRun.ContainsKey(e.AudioStreamSha256!))
                && !(_refreshAuthenticity && AuthenticityStale(e?.Features));
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
@@ -6339,6 +6341,7 @@ namespace Truedat
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
+            int sameAudioReused = 0;   // of those, tracks left for the second pass that reused an analysis made in this run
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
             int smfmAdded = 0;         // tracks that gained SMFM data this scan (file newly carries 12-TONE)
 
@@ -7166,6 +7169,7 @@ namespace Truedat
 
                         ClearReviewRecord(t.Location);
                         NoteFreshAnalysis(t.Location);
+                        NoteFreshContent(audioStreamSha256);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
@@ -7246,16 +7250,37 @@ namespace Truedat
                 if (msLikelyWork.Count > 0)
                 {
                     long orderBudget = essentiaExe != null && SpoolCapable(essentiaExe) ? _spoolBudget.Value.TotalBytes : 0;
-                    var workOrder = new LongFirstQueue<ITunesTrack>(msLikelyWork, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget);
-                    if (workOrder.LongCount > 0)
-                        Console.WriteLine($"  Order:      {workOrder.LongCount:N0} long track(s) taken first, {workOrder.Lanes} at a time; the rest in library order");
-                    Parallel.ForEach(
-                        Partitioner.Create(workOrder.Feed(), EnumerablePartitionerOptions.NoBuffering),
-                        msOptions, pick =>
+                    // Two passes, so the same audio is not analyzed twice: a track the same exact length as one before it waits
+                    // until the first pass is done, then is checked against what that pass analyzed (ScanOrder).
+                    ScanOrder.SplitRepeatedLengths(msLikelyWork, t => t.TotalTimeMs, out var firstPass, out var secondPass);
+                    bool announced = false;
+                    void RunPass(List<ITunesTrack> pass)
+                    {
+                        if (pass.Count == 0) return;
+                        var workOrder = new LongFirstQueue<ITunesTrack>(pass, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget);
+                        if (workOrder.LongCount > 0 && !announced)
                         {
-                            try { processTrack(pick.Key); }
-                            finally { workOrder.Done(pick.Value); }
-                        });
+                            announced = true;
+                            Console.WriteLine($"  Order:      long tracks are taken first, {workOrder.Lanes} at a time; the rest in library order");
+                        }
+                        Parallel.ForEach(
+                            Partitioner.Create(workOrder.Feed(), EnumerablePartitionerOptions.NoBuffering),
+                            msOptions, pick =>
+                            {
+                                try { processTrack(pick.Key); }
+                                finally { workOrder.Done(pick.Value); }
+                            });
+                    }
+                    RunPass(firstPass);
+                    if (secondPass.Count > 0)
+                    {
+                        // What the first pass analyzed is what the second may reuse. Only entries that are current: an older entry
+                        // for the same audio would be found first and send the track to be analyzed again.
+                        moodShaIndex = BuildHashIndex(allTracks, e => HasCurrentEntry(e) ? e.AudioStreamSha256 : null);
+                        int reusedBefore = Volatile.Read(ref cachedByShaCross);
+                        RunPass(secondPass);
+                        sameAudioReused = Volatile.Read(ref cachedByShaCross) - reusedBefore;
+                    }
                 }
             }
             catch (OperationCanceledException) { }
@@ -7342,6 +7367,8 @@ namespace Truedat
                 Console.WriteLine($"  Head-quick: {cachedByHeadPath:N0}  (of {cachedCount:N0} cached: tags-only via audioHead64kMd5)");
             if (cachedByShaPath > 0 || cachedByShaCross > 0)
                 Console.WriteLine($"  Cross-SHA:  {cachedByShaPath + cachedByShaCross:N0}  (of {cachedCount:N0} cached: {cachedByShaPath:N0} same-path tag-edits, {cachedByShaCross:N0} cross-path)");
+            if (sameAudioReused > 0)
+                Console.WriteLine($"  Same audio: {sameAudioReused:N0} track(s) reused the analysis of an identical track in this scan instead of being analyzed again");
                 if (Volatile.Read(ref _movedKeptUnreachable) > 0)   // F3: an offline volume is not a deletion; those old paths stay until it answers
                     Console.WriteLine($"              {_movedKeptUnreachable:N0} old path(s) kept, not retired: their volume did not answer ({_movedUnreachableRoot})");
             if (shaBackfilled > 0)
@@ -22604,6 +22631,13 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(HasCurrentEntry(lacking), "gate: a normal scan never re-analyses for edges");
                 _refreshFeatures = true;
                 Assert(!HasCurrentEntry(new TrackEntry { Features = batch2Missing, AudioStreamSha256 = "6b" + StaleSha.Substring(2) }), "gate: HasCurrentEntry still applies the feature-wave markers");
+                // The list was read when the scan began. Content analyzed since then has had its edges folded in this run, so an
+                // identical track met later in the same scan may reuse it rather than be analyzed again.
+                Assert(!HasCurrentEntry(lacking), "gate: content on the lacking-edges list is stale until this run analyzes it");
+                NoteFreshContent(StaleSha);
+                Assert(HasCurrentEntry(lacking), "gate: content this run has analyzed is current for the rest of the run, so its duplicate can reuse it");
+                _contentMeasuredThisRun.TryRemove(StaleSha, out _);
+                Assert(!HasCurrentEntry(lacking), "gate: and only that content");
                 _edgesStale = savedStale;
                 _refreshFeatures = savedRf;
             }
@@ -26373,6 +26407,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// it into "measured" told the operator "nothing to run" where --refresh would have filled it (pre-tag review
         /// 2026-10-31, finding 1).</summary>
         static readonly ConcurrentDictionary<string, byte> _measuredThisRun = new ConcurrentDictionary<string, byte>(PathComparer.Instance);
+        /// <summary>Content (by audio hash) the extractor analyzed in this run.</summary>
+        static readonly ConcurrentDictionary<string, byte> _contentMeasuredThisRun = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        internal static void NoteFreshContent(string? audioSha)
+        {
+            if (!string.IsNullOrEmpty(audioSha)) _contentMeasuredThisRun[audioSha!] = 0;
+        }
         internal static void NoteFreshAnalysis(string filePath)
         {
             if (!string.IsNullOrEmpty(filePath)) _measuredThisRun[filePath] = 0;

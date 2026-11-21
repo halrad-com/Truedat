@@ -15,6 +15,26 @@ namespace Truedat
         {
             Budget(assert);
             Order(assert);
+            Repeats(assert);
+        }
+
+        /// <summary>Tracks that may be the same audio as one before them wait for a second pass, by which time the first has been
+        /// analyzed and the same-audio cache tier can reuse it. The test for "may be the same" is an exact length: two copies of the
+        /// same audio are always the same length, and the library already says how long each track is.</summary>
+        static void Repeats(Action<bool, string> assert)
+        {
+            //           0     1     2     3     4   5     6     7
+            var ms = new long[] { 1000, 2000, 1000, 3000, 0, 2000, 1000, 0 };
+            var idx = Enumerable.Range(0, ms.Length).ToList();
+            ScanOrder.SplitRepeatedLengths(idx, i => ms[i], out var first, out var again);
+            assert(first.SequenceEqual(new[] { 0, 1, 3, 4, 7 }), $"second pass: the first track of each length is analyzed in the first pass, in library order ({string.Join(",", first)})");
+            assert(again.SequenceEqual(new[] { 2, 5, 6 }), $"second pass: a later track of the same exact length waits, in library order ({string.Join(",", again)})");
+            assert(first.Contains(4) && first.Contains(7), "second pass: a track of unknown length never waits — it cannot be matched to anything");
+            assert(first.Count + again.Count == ms.Length && !first.Intersect(again).Any(), "second pass: every track is in exactly one pass");
+            ScanOrder.SplitRepeatedLengths(new List<int>(), i => 0, out var f0, out var a0);
+            assert(f0.Count == 0 && a0.Count == 0, "second pass: nothing in, nothing out");
+            ScanOrder.SplitRepeatedLengths(new List<int> { 0, 1, 3 }, i => ms[i], out var f1, out var a1);
+            assert(f1.Count == 3 && a1.Count == 0, "second pass: a library with no repeated length has no second pass");
         }
 
         static void Budget(Action<bool, string> assert)

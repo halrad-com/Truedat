@@ -4,6 +4,33 @@ using System.Linq;
 
 namespace Truedat
 {
+    /// <summary>Which tracks a scan leaves for a second pass, so that the same audio is not analyzed twice.
+    ///
+    /// Two copies of the same audio at different paths were each analyzed in full when they were both new to the scan. The scan
+    /// already knows how to reuse an analysis for the same audio at another path — it is how a moved file is recognized — but only
+    /// once the first copy's analysis exists. So a track that could be a copy of one before it waits for a second pass, and is
+    /// checked against what the first pass analyzed.
+    ///
+    /// "Could be a copy" is an exact length: copies of the same audio are always the same length, the library already records
+    /// each track's length, and nothing has to be read from disk to compare. Most tracks that share a length are not copies; they
+    /// lose nothing by waiting, and are analyzed in the second pass as they would have been in the first.</summary>
+    internal static class ScanOrder
+    {
+        internal static void SplitRepeatedLengths<T>(IReadOnlyList<T> items, Func<T, long> lengthMs, out List<T> first, out List<T> again)
+        {
+            first = new List<T>(items.Count);
+            again = new List<T>();
+            var seen = new HashSet<long>();
+            foreach (var item in items)
+            {
+                long ms = lengthMs(item);
+                // An unknown length matches nothing, so it never waits.
+                if (ms > 0 && !seen.Add(ms)) again.Add(item);
+                else first.Add(item);
+            }
+        }
+    }
+
     /// <summary>The order a scan takes its tracks in, so that long tracks get the memory they need, do not all run at once, and do
     /// not start last.
     ///
