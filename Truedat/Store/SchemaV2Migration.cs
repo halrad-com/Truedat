@@ -30,8 +30,8 @@ namespace Truedat.Store
             long rows = long.Parse(db.ExecScalar("SELECT count(*) FROM track_feature;") ?? "0");
 
             // 1. One content row per media, from its first-imported copy.
-            db.Exec("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") " +
-                    "SELECT l.entity_id, f.content_key, f.content_key_kind, f.imported_run_id, f.updated_utc, " + TrackEntryMapper.ContentColumnList("f") + " " +
+            db.Exec("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") " +
+                    "SELECT l.entity_id, f.content_key, f.content_key_kind, f.imported_run_id, f.updated_utc, " + TrackEntryMapper.LegacyContentColumnList("f") + " " +
                     "FROM track_feature f JOIN track_location l ON l.id = f.location_id " +
                     "WHERE f.location_id = (SELECT min(f2.location_id) FROM track_feature f2 JOIN track_location l2 ON l2.id = f2.location_id WHERE l2.entity_id = l.entity_id);");
             long content = long.Parse(db.ExecScalar("SELECT count(*) FROM track_content;") ?? "0");
@@ -40,7 +40,7 @@ namespace Truedat.Store
             long conflicts = 0, noiseDiffs = 0, copiesWithinNoise = 0, copiesInConflict = 0;
             using (var ins = db.Prepare("INSERT INTO conflict(entity_a, kind, field, value_a, value_b, detail, state, created_utc) VALUES (?, ?, ?, ?, ?, ?, 'open', ?);"))
             using (var sel = db.Prepare(
-                "SELECT l.entity_id, f.location_id, l.display_path, " + TrackEntryMapper.ContentColumnList("f") + " " +
+                "SELECT l.entity_id, f.location_id, l.display_path, " + TrackEntryMapper.LegacyContentColumnList("f") + " " +
                 "FROM track_feature f JOIN track_location l ON l.id = f.location_id " +
                 "WHERE l.entity_id IN (SELECT l3.entity_id FROM track_feature f3 JOIN track_location l3 ON l3.id = f3.location_id GROUP BY l3.entity_id HAVING count(*) > 1) " +
                 "ORDER BY l.entity_id, f.location_id;"))

@@ -154,6 +154,7 @@ namespace Truedat
         public double[]? Hpcp12 { get; set; }                 // tonal.hpcp.mean folded 36->12 semitones, unit-max, 4dp
         public double? DynamicComplexity { get; set; }        // lowlevel.dynamic_complexity, 4dp
         public double[]? Thpcp12 { get; set; }                // tonal.thpcp folded 36->12 (key-invariant), unit-max, 4dp
+        public int? ChromaFold { get; set; }                  // which grouping hpcp12 / thpcp12 were folded with (Program.ChromaFoldCurrent); null = written before the marker
         public double? BeatsIntervalMean { get; set; }        // inter-beat interval mean (s), from rhythm.beats_position
         public double? BeatsIntervalStdev { get; set; }       // inter-beat interval stdev (s) — beatgrid steadiness
         public double? BeatsIntervalMin { get; set; }         // shortest inter-beat interval (s)
@@ -1055,6 +1056,9 @@ namespace Truedat
             Console.WriteLine("                      track is analyzed again. Asks you to type RESET first. Keeps the exclusion");
             Console.WriteLine("                      rules and the config file. Library scan only.");
             Console.WriteLine("  --imeanit           Confirms --reset when nobody is at the console to type the word.");
+            Console.WriteLine("  --refresh-chroma    Re-analyze every track that does not carry the current chroma marker (chromaFold):");
+            Console.WriteLine("                      tracks analyzed before the chroma grouping was corrected, and any analyzed before the");
+            Console.WriteLine("                      marker existed. On an older library that is every track, so it is a full pass. Opt-in.");
             Console.WriteLine("  --refresh           Re-analyze entries missing the newest feature fields; with the store and");
             Console.WriteLine("                      edges on (config or flags), also tracks the store lists as lacking edge rows:");
             Console.WriteLine("                      one scan, the scan's workers and progress, edges written as each track lands.");
@@ -1121,7 +1125,7 @@ namespace Truedat
             "json-output", "output", "chunk", "self-test", "no-stage",
             "no-quick-cache", "no-dir-batch", "file-md5", "apply-exclusions", "preview",
             "long-track-mins", "exclusions", "no-exclusions", "exclude-playlist",
-            "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "pause", "allow-sleep",
+            "accept-flac-tag-drift", "force-clean", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "refresh-chroma", "pause", "allow-sleep",
             "stage-dir", "max-duration", "enableshortfiles", "no-bitusage", "no-hf-analysis", "no-smfm", "smfm", "version", "v",
             "background", "cpu-limit", "snapshot", "restore", "keep-backups",
             "compact", "prettify", "paths", "json",
@@ -2417,9 +2421,11 @@ namespace Truedat
         /// dynamicComplexity marks the 2026-08-09 harmonic-texture wave. Both are
         /// markers because the extractor emits them unconditionally for any decodable
         /// track (unlike hpcp12, which is null on silence and would loop forever).</summary>
-        static bool HasCurrentFeatures(TrackFeatures? f)
+        internal static bool HasCurrentFeatures(TrackFeatures? f)
             => f != null && f.DynamicRange.HasValue && f.LoudnessMomentary.HasValue
-               && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue && f.SpectralContrastCoeffs != null));
+               && (!_refreshFeatures || (f.AverageLoudness.HasValue && f.DynamicComplexity.HasValue && f.SpectralContrastCoeffs != null))
+               // The marker is written for every analyzed track, with or without chroma, so this cannot loop on a silent one.
+               && (!_refreshChroma || f.ChromaFold == ChromaFoldCurrent);
 
         /// <summary>Content the store lists as lacking edge rows at the current producer version (loaded before a --refresh scan when a
         /// store and edges are in force; null otherwise). <see cref="HasCurrentEntry"/> treats those entries as stale.</summary>
@@ -2507,6 +2513,14 @@ namespace Truedat
                    || (f.HfEnergyMethod != null && !string.Equals(f.HfEnergyMethod, HfEnergyMethodCurrent, StringComparison.Ordinal))
                    || (f.HfSpectralStructure != null && !string.Equals(f.HfSpectralStructure.Method, HfStructureMethodCurrent, StringComparison.Ordinal)));
         internal static bool _refreshAuthenticity;
+        /// <summary>The grouping this build folds the extractor's 36 chroma bins into 12 with (<see cref="FoldHpcp36To12"/>),
+        /// written into every analyzed track as <c>chromaFold</c>. 1 was the first grouping (a note's energy split across two
+        /// cells); 2 is the corrected one. Raise it only together with a change to that fold: it is what lets a library say
+        /// which of its tracks hold which values, and what <c>--refresh-chroma</c> compares against.</summary>
+        internal const int ChromaFoldCurrent = 2;
+        /// <summary><c>--refresh-chroma</c>: re-analyze every track that does not carry the current chroma marker. Opt-in — on
+        /// a library scanned before the marker existed that is every track, a full pass.</summary>
+        internal static bool _refreshChroma;
 
         /// <summary>The cache tiers' question, per entry: the feature canary, plus (under --refresh) edges, plus (under --refresh-authenticity)
         /// a stored authenticity measurement from an older method.</summary>
@@ -3116,6 +3130,7 @@ namespace Truedat
                 else if (canonical == "allow-sleep") _allowSleep = true;
                 else if (canonical == "enableshortfiles") _enableShortFiles = true;
                 else if (canonical == "refresh-smfm") _refreshSmfm = true;
+                else if (canonical == "refresh-chroma") _refreshChroma = true;
                 else if (canonical == "refresh-authenticity") _refreshAuthenticity = true;   // plan row R: opt-in remeasure of an older bitUsage method
                 else if (canonical == "stage-dir" && i + 1 < args.Length) { _stageOpts.StageDir = args[++i]; }
                 else if (canonical == "max-duration" && i + 1 < args.Length)
@@ -5949,7 +5964,7 @@ namespace Truedat
             if (migrateMode) modeList.Add("migrate");
             if (fixupMode) modeList.Add("fixup");
             if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode)) modeList.Add("analyze");
-            Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}{(_refreshFeatures ? " | Refresh" : "")}");
+            Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}{(_refreshFeatures ? " | Refresh" : "")}{(_refreshChroma ? " | RefreshChroma" : "")}");
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
@@ -17285,6 +17300,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
             ListScanSelfTest.Run(Assert);                            // --file-list: each path once, every list read, an older XML does not win
             SummaryAdviceSelfTest.Run(Assert);                       // the scan summary's advice for entries lacking the newest fields
+            ChromaMarkerSelfTest.Run(Assert);                        // chromaFold: how a track's chroma was grouped; --refresh-chroma
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -27535,6 +27551,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 foreach (var v in f.Thpcp12) WriteShortestNumber(jw, Math.Round(v, FieldPrecision.Dp("thpcp12")));
                 jw.WriteEndArray();
             }
+            // How the two arrays above were grouped. Absent on a track written before the marker existed.
+            if (f.ChromaFold.HasValue && !FieldPolicy.IsExcluded("chromaFold")) jw.WriteNumber("chromaFold", f.ChromaFold.Value);
             WriteOpt(jw, "beatsIntervalMean", f.BeatsIntervalMean);
             WriteOpt(jw, "beatsIntervalStdev", f.BeatsIntervalStdev);
             WriteOpt(jw, "beatsIntervalMin", f.BeatsIntervalMin);
@@ -27955,6 +27973,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     ? hpArr.EnumerateArray().Select(e => e.GetDouble()).ToArray()
                     : null,
                 DynamicComplexity = GetNullableDbl(track, "dynamicComplexity"),
+                ChromaFold = track.TryGetProperty("chromaFold", out var cfEl) && cfEl.ValueKind == JsonValueKind.Number && cfEl.TryGetInt32(out var cfVal) ? cfVal : (int?)null,
                 Thpcp12 = track.TryGetProperty("thpcp12", out var thArr) && thArr.ValueKind == JsonValueKind.Array
                     ? thArr.EnumerateArray().Select(e => e.GetDouble()).ToArray() : null,
                 BeatsIntervalMean = GetNullableDbl(track, "beatsIntervalMean"),
@@ -29069,6 +29088,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     TuningDiatonicStrength = tuningDiatonicStrength,
                     TuningNontemperedEnergyRatio = tuningNontemperedEnergyRatio,
                     AverageLoudness = averageLoudness,
+                    ChromaFold = ChromaFoldCurrent,   // every analysis by this build, chroma or not
                     Hpcp12 = hpcp12,
                     DynamicComplexity = dynamicComplexity,
                     Thpcp12 = thpcp12,
@@ -30744,6 +30764,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Hpcp12 = sf.Hpcp12,                  // 2026-08-09 harmonic-texture — preserve across cache hits
                     DynamicComplexity = sf.DynamicComplexity,
                     Thpcp12 = sf.Thpcp12,
+                    ChromaFold = sf.ChromaFold,          // the marker travels with the values it describes
                     BeatsIntervalMean = sf.BeatsIntervalMean,
                     BeatsIntervalStdev = sf.BeatsIntervalStdev,
                     BeatsIntervalMin = sf.BeatsIntervalMin,

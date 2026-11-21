@@ -45,8 +45,8 @@ namespace Truedat.Store
             if (hasV2)
             {
                 // 1. descriptions: v2 reader -> v3 binder, one row at a time (the blobs change shape, so no SQL-only copy).
-                using (var sel = db.Prepare("SELECT entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + " FROM track_content;"))
-                using (var ins = db.Prepare("INSERT INTO track_content_v3(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, ?, ?" + Params(TrackEntryMapper.ContentColumnCount) + ");"))
+                using (var sel = db.Prepare("SELECT entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + " FROM track_content;"))
+                using (var ins = db.Prepare("INSERT INTO track_content_v3(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, ?, ?" + Params(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                 {
                     while (sel.Step())
                     {
@@ -56,7 +56,7 @@ namespace Truedat.Store
                         ins.Bind(1, sel.GetString(0)!).Bind(2, sel.GetString(1)!).Bind(3, sel.GetString(2)!);
                         if (sel.IsNull(3)) ins.BindNull(4); else ins.Bind(4, sel.GetInt64(3));
                         ins.Bind(5, sel.GetString(4)!);
-                        TrackEntryMapper.BindContent(ins, 6, TrackEntryMapper.ContentRowFromValues(values));
+                        TrackEntryMapper.BindContentLegacy(ins, 6, TrackEntryMapper.ContentRowFromValues(values));
                         while (ins.Step()) { }
                         movedContent++;
                     }

@@ -42,7 +42,7 @@ namespace Truedat
             void VF(int dp, params string[] names) { foreach (var n in names) t.Add(n, new Spec(Shape.FixedVec, dp)); }
             void VI(params string[] names) { foreach (var n in names) t.Add(n, new Spec(Shape.IntVec, 0)); }
 
-            I("trackId", "bitUsage_lowestNonZeroBit", "bitUsage_samplesAnalyzed", "smfmChannel",
+            I("trackId", "chromaFold", "bitUsage_lowestNonZeroBit", "bitUsage_samplesAnalyzed", "smfmChannel",
               "fingerprint_v1_fileSize", "fingerprint_v1_durationMs", "fingerprint_v1_sampleRate", "fingerprint_v1_channels",
               "fingerprint_v1_bitDepth", "fingerprint_v1_bitrate", "fingerprint_v1_mp3LameTag_infoTagRevision", "fingerprint_v1_mp3LameTag_vbrMethodCode",
               "fingerprint_v1_mp3LameTag_lowpassHz", "fingerprint_v1_mp3LameTag_encoderDelay", "fingerprint_v1_mp3LameTag_encoderPadding", "fingerprint_v1_mp3LameTag_musicCrc");

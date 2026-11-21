@@ -23,6 +23,12 @@ Four I/O surfaces must stay in sync: `AnalyzeWithEssentiaCore` (extract), `Write
 
 `fingerprint.v1` is **one flat property name containing a dot**, not a `fingerprint` object with a `v1` child (`WriteFingerprintV1`, `Program.cs:21199`). MBXHub reads it that way too (`MoodCache.ReadTrackEntry`, `CatalogSpanIndex`). The README drew it nested for months and nobody noticed, because the only consumer was written against the bytes rather than the doc. Legacy `audioMd5` / `chromaprint` / `chromaprintDuration` keys in old files are ignored on read and stripped by `--migrate`.
 
+**`chromaFold` (2026-11-21) is a contract with the hub and a store schema bump.** It marks how a track's chroma was grouped;
+a track without the current marker is one whose chroma may be from before the grouping was corrected. `--refresh-chroma`
+(opt-in, also a config key) re-analyzes those. The store holds it as `track_content.chromaFold`, **schema v5** — a hub that
+reads the store must accept v5. Adding any later store column follows the same shape: `Later(n, …)` at the end of the mapper's
+column list, a delta script `vN.sql`, and the older migration steps left reading the columns of their own time.
+
 ## Rounding convention (extended features)
 
 `Opt(v, int dp = 4)` / `OptN(root, path, int dp = 4)` — default 4 dp. Overrides:

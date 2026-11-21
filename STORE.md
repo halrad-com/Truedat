@@ -59,6 +59,11 @@ One row of file facts per copy, one audio description per media:
 Schema changes are forward-only scripts (`Truedat/Store/Schema/v1.sql` … `v4.sql`); an older store migrates
 forward on first open by a newer build (backup first), and an older build refuses a newer store.
 
+**The chroma marker (schema v5, 2026-11-21).** `track_content.chromaFold` says how a track's `hpcp12` / `thpcp12` were
+grouped (the catalog's `chromaFold`); NULL means the track was described before the marker existed. A store at v4 gains the
+column when it is opened, after a backup beside it (`truedat.db.bak.v4.<time>`). The marker is never taken from a different
+source than the chroma it describes: an arrival that carries chroma keeps its own marker, a missing one included.
+
 **Edges and verdicts (schema v4, 2026-10-16).** The edge is a typed `edge` row per edge. By default it holds
 the scalars the readers use — status, window, key name / scale / code / strength / agreement / votes, bpm with
 beats and regularity, start / end / mean LUFS, fade, silence and its source, RMS crest and transition, the

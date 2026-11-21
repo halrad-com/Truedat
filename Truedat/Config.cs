@@ -79,6 +79,7 @@ namespace Truedat
             new Setting { Key = "allow-sleep",     Kind = Kind.Bool, Default = "false", Help = "let the machine sleep during a scan" },
             new Setting { Key = "refresh-features",Kind = Kind.Bool, Default = "false", Help = "re-analyze entries missing new fields" },
             new Setting { Key = "refresh-smfm",    Kind = Kind.Bool, Default = "false", Help = "re-read SMFM tags on cache hits" },
+            new Setting { Key = "refresh-chroma",  Kind = Kind.Bool, Default = "false", Help = "re-analyze tracks without the current chroma marker" },
             new Setting { Key = "audit",           Kind = Kind.Bool, Default = "false", Help = "per-track diagnostics to stderr" },
             new Setting { Key = "parallel",        Kind = Kind.Int,  Min = 1, Max = 1024,    Default = "cores-2", Help = "worker count" },
             new Setting { Key = "cpu-limit",       Kind = Kind.Int,  Min = 1, Max = 100,     Default = "none", Help = "CPU % cap for subprocesses" },

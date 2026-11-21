@@ -2970,7 +2970,7 @@ namespace Truedat.Store
             // spectralDecrease 12; vectors 4; writer-side analysisDuration 1, smfmBpm 3; ints as ints.
             var pin = new (string Name, string Spec)[]
             {
-                ("trackId","Int"), ("bitUsage_lowestNonZeroBit","Int"), ("bitUsage_samplesAnalyzed","Int"), ("smfmChannel","Int"),
+                ("trackId","Int"), ("chromaFold","Int"), ("bitUsage_lowestNonZeroBit","Int"), ("bitUsage_samplesAnalyzed","Int"), ("smfmChannel","Int"),
                 ("fingerprint_v1_fileSize","Int"), ("fingerprint_v1_durationMs","Int"), ("fingerprint_v1_sampleRate","Int"), ("fingerprint_v1_channels","Int"),
                 ("fingerprint_v1_bitDepth","Int"), ("fingerprint_v1_bitrate","Int"), ("fingerprint_v1_mp3LameTag_infoTagRevision","Int"), ("fingerprint_v1_mp3LameTag_vbrMethodCode","Int"),
                 ("fingerprint_v1_mp3LameTag_lowpassHz","Int"), ("fingerprint_v1_mp3LameTag_encoderDelay","Int"), ("fingerprint_v1_mp3LameTag_encoderPadding","Int"), ("fingerprint_v1_mp3LameTag_musicCrc","Int"),
@@ -3234,7 +3234,7 @@ namespace Truedat.Store
                 assert(r1.Ok && r1.Entries == 1, $"v3: the fixture entry is written ({r1.Entries} entries, {r1.Error})");
                 using (var os = OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 4, $"a fresh store is schema v4 — v3 types + the T05 edge table and value.dtype + the T19 verdict table ({SchemaMigrator.ReadVersion(os.Db)})");
+                    assert(SchemaMigrator.ReadVersion(os.Db) == 5, $"a fresh store is schema v5 — v3 types, the v4 edge and verdict tables, the v5 chroma marker column ({SchemaMigrator.ReadVersion(os.Db)})");
                     // TDA F10 (keeper's real MB3 migration: the transient WAL reached 101.5 MB on a 139.9 MB store, beside a 103.2 MB backup): the
                     // free-space check must cover the backup AND a WAL about the store's size, plus margin — not the backup alone.
                     long gb = 1L << 30;
@@ -3279,7 +3279,7 @@ namespace Truedat.Store
                 {
                     SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
                     db.Exec("PRAGMA foreign_keys=OFF;");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, "e1").Bind(2, "k1").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, row, content: true); st.Step(); }
                     using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (7, NULL, ?" + Q(copyCols) + ");"))
                     { st.Bind(1, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 2, row, content: false); st.Step(); }
@@ -3288,12 +3288,16 @@ namespace Truedat.Store
                 }
                 using (var os = OpenStore.Open(v2store, false, "selftest-v3", DateTime.UtcNow.ToString("o")))
                 {
-                    assert(SchemaMigrator.ReadVersion(os.Db) == 4, $"a v2 store migrates to the current schema (v4) on open ({SchemaMigrator.ReadVersion(os.Db)})");
+                    assert(SchemaMigrator.ReadVersion(os.Db) == StoreSchema.CurrentVersion, $"a v2 store migrates to the current schema (v{StoreSchema.CurrentVersion}) on open ({SchemaMigrator.ReadVersion(os.Db)})");
                     assert(os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;") == "integer" && os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;") == "52" && os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;") == "integer" && os.Db.ExecScalar("SELECT count(*) FROM track_content;") == "1" && os.Db.ExecScalar("SELECT count(*) FROM track_copy;") == "1",
                         $"migrated columns are typed and every row survived (bpm {os.Db.ExecScalar("SELECT typeof(bpm) FROM track_content;")}, mfcc {os.Db.ExecScalar("SELECT length(mfcc) FROM track_content;")} bytes, smfmBpm {os.Db.ExecScalar("SELECT typeof(smfmBpm) FROM track_copy;")}, rows {os.Db.ExecScalar("SELECT count(*) FROM track_content;")}/{os.Db.ExecScalar("SELECT count(*) FROM track_copy;")})");
                     var back = os.Dal.ReadContent("e1");
                     int diff = 0; string firstDiff = "";
-                    for (int k = 0; k < TrackEntryMapper.ContentColumnCount; k++)
+                    // A v2 store holds the columns of its time; one added by a later schema is not in it and reads back empty.
+                    for (int k = TrackEntryMapper.LegacyContentColumnCount; k < TrackEntryMapper.ContentColumnCount; k++)
+                        assert(back?.Values[k] == null, $"V15: a column newer than the v2 store ({TrackEntryMapper.ContentColumnName(k)}) is empty after the migration, not invented");
+                    assert(TrackEntryMapper.LegacyContentIsPrefix, "V15: the columns an old store had come first, so a value's position means the same to the old migration steps");
+                    for (int k = 0; k < TrackEntryMapper.LegacyContentColumnCount; k++)
                         if (!TrackEntryMapper.ContentEqualExact(k, TrackEntryMapper.ContentValue(row, k), back?.Values[k])) { diff++; if (firstDiff == "") firstDiff = $"{TrackEntryMapper.ContentColumnName(k)}: {TrackEntryMapper.FormatContent(k, TrackEntryMapper.ContentValue(row, k))} -> {TrackEntryMapper.FormatContent(k, back?.Values[k])}"; }
                     var copyBack = os.Dal.ReadCopyValues(7);
                     var copyDiff = copyBack == null ? "copy row missing" : TrackEntryMapper.FirstCopyDifference(copyBack, row);
@@ -3325,7 +3329,7 @@ namespace Truedat.Store
                 {
                     SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
                     db.Exec("PRAGMA foreign_keys=OFF;");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, "e2").Bind(2, "k2").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, rawRow, content: true); st.Step(); }
                     using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (8, NULL, ?" + Q(copyCols) + ");"))
                     { st.Bind(1, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 2, rawRow, content: false); st.Step(); }
@@ -3355,7 +3359,7 @@ namespace Truedat.Store
                 {
                     SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
                     db.Exec("PRAGMA foreign_keys=OFF;");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, "e4").Bind(2, "k4").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, badRow, content: true); st.Step(); }
                 }
                 bool refused = false; string refusal = "";
@@ -3379,7 +3383,7 @@ namespace Truedat.Store
                 {
                     SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
                     db.Exec("PRAGMA foreign_keys=OFF;");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, "e5").Bind(2, "k5").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, realRow, content: true); st.Step(); }
                 }
                 bool refusedE = false; string refusalE = "";
@@ -3496,7 +3500,7 @@ namespace Truedat.Store
                 {
                     SchemaMigrator.Apply(db, "selftest-v2", targetVersion: 2);
                     db.Exec("PRAGMA foreign_keys=OFF;");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES (?, ?, ?, NULL, ?" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, "e3").Bind(2, "k3").Bind(3, "sha").Bind(4, "2026-10-15T00:00:00Z"); TrackEntryMapper.BindLegacyV2(st, 5, row, content: true); st.Step(); }
                 }
                 SchemaV3Migration.FailAfterMoveForTest = true;

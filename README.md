@@ -574,6 +574,12 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --budget <time>         Library scan: after 90s / 30m / 2h / 1h30m, finish the tracks in hand, save and
                           exit. Run the same command again to continue.
   --edges-export [path]   With --store: write mbxedges.v1.json from the store (default: beside the catalog).
+  --refresh-chroma        Re-analyze every track that does not carry the current chroma marker
+                          (chromaFold): tracks analyzed before the chroma grouping was corrected,
+                          and any analyzed before the marker existed. On an older library that is
+                          every track, so it is a full pass; a second run finds nothing to do.
+                          Opt-in, also a config key. Works with a library scan, --folder and
+                          --file-list alike.
   --refresh-authenticity
                           Re-analyze cached tracks whose stored bitUsage was measured by an older method
                           (the tag differs from this build's). Opt-in; --refresh alone never does this.
@@ -1306,6 +1312,7 @@ All nullable, populated on fresh analysis only (legacy entries lack them until r
       "averageLoudness": 0.87,
       "hpcp12": [1.0, 0.21, 0.44, "..."],
       "thpcp12": [1.0, 0.33, 0.18, "..."],
+      "chromaFold": 2,
       "dynamicComplexity": 3.14,
       "beatsIntervalMean": 0.469, "beatsIntervalStdev": 0.011,
       "beatsIntervalMin": 0.44, "beatsIntervalMax": 0.51,

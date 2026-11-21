@@ -22,7 +22,7 @@ namespace Truedat.Store
     /// <summary>Names shared by the DDL (Schema/v1.sql), the drift test and the C4 mapper.</summary>
     internal static class StoreSchema
     {
-        internal const int CurrentVersion = 4;   // v4 (T05 + T19): the typed edge table + value.dtype, the per-location verdict projection; v3 (T04): typed columns
+        internal const int CurrentVersion = 5;   // v5: track_content.chromaFold (how hpcp12 / thpcp12 were grouped); v4 (T05 + T19): the typed edge table + value.dtype, the per-location verdict projection; v3 (T04): typed columns
 
         /// <summary>Columns of track_content / track_copy that are not catalog JSON keys (v2 split).</summary>
         internal static readonly string[] TrackContentMetaColumns = { "entity_id", "content_key", "content_key_kind", "run_id", "updated_utc" };

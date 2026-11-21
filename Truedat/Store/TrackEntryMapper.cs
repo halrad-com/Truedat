@@ -15,6 +15,10 @@ namespace Truedat.Store
         sealed class Col
         {
             public readonly string Name; public readonly Kind Kind;
+            /// <summary>The schema version this column first exists in. The migration steps of older versions build their SQL
+            /// from the columns of THEIR time (<see cref="LegacyContentIdx"/>): a column added later is not in the tables they
+            /// read and write.</summary>
+            public int Since = 1;
             public readonly Func<TrackEntry, object?> Get; public readonly Action<TrackEntry, object> Set;
             public Col(string name, Kind kind, Func<TrackEntry, object?> get, Action<TrackEntry, object> set) { Name = name; Kind = kind; Get = get; Set = set; }
         }
@@ -25,6 +29,9 @@ namespace Truedat.Store
         static Col T(string n, Func<TrackEntry, string?> g, Action<TrackEntry, string> s) => new Col(n, Kind.Text, e => g(e), (e, v) => s(e, (string)v));
         static Col VF(string n, Func<TrackEntry, double[]?> g, Action<TrackEntry, double[]> s) => new Col(n, Kind.VecF64, e => g(e), (e, v) => s(e, (double[])v));
         static Col VI(string n, Func<TrackEntry, int[]?> g, Action<TrackEntry, int[]> s) => new Col(n, Kind.VecI32, e => g(e), (e, v) => s(e, (int[])v));
+        /// <summary>A column added by a later schema version. Keep these at the END of <see cref="Cols"/>: the older migration
+        /// steps address content values by position, and the columns of their time must stay a prefix (pinned by the self-test).</summary>
+        static Col Later(int since, Col c) { c.Since = since; return c; }
 
         // ---- nested blocks, created on first write so an absent block reads back as null, not empty.
         static TrackFeatures F(TrackEntry e) => e.Features ??= new TrackFeatures();
@@ -181,6 +188,8 @@ namespace Truedat.Store
             I("fingerprint_v1_mp3LameTag_musicCrc", e => e.FingerprintV1?.Mp3MusicCrc, (e, v) => Fp(e).Mp3MusicCrc = (int)v),
             T("fingerprint_v1_audioHead64kMd5", e => e.FingerprintV1?.AudioHead64kMd5, (e, v) => Fp(e).AudioHead64kMd5 = v),
             T("fingerprint_v1_audioHead64kMd5Source", e => e.FingerprintV1?.AudioHead64kMd5Source, (e, v) => Fp(e).AudioHead64kMd5Source = v),
+            // ---- columns added after schema v4, in the order they were added
+            Later(5, I("chromaFold", e => F(e).ChromaFold, (e, v) => F(e).ChromaFold = (int)v)),   // how hpcp12 / thpcp12 were grouped
         };
 
         static readonly string[] Names = Array.ConvertAll(Cols, c => c.Name);
@@ -209,6 +218,21 @@ namespace Truedat.Store
             return l.ToArray();
         }
         internal static IReadOnlyList<string> ContentColumnNames => Array.ConvertAll(ContentIdx, i => Cols[i].Name);
+        /// <summary>The content columns a store had up to schema v4 — what the v2 and v3 migration steps read and write. A prefix
+        /// of <see cref="ContentIdx"/>, so a value's position means the same thing in both.</summary>
+        static readonly int[] LegacyContentIdx = Array.FindAll(ContentIdx, i => Cols[i].Since <= 4);
+        internal static int LegacyContentColumnCount => LegacyContentIdx.Length;
+        internal static bool LegacyContentIsPrefix
+        {
+            get { for (int k = 0; k < LegacyContentIdx.Length; k++) if (LegacyContentIdx[k] != ContentIdx[k]) return false; return true; }
+        }
+        static readonly int ChromaFoldCol = Array.FindIndex(Cols, c => c.Name == "chromaFold");
+        static readonly int Hpcp12Col = Array.FindIndex(Cols, c => c.Name == "hpcp12");
+        static readonly int Thpcp12Col = Array.FindIndex(Cols, c => c.Name == "thpcp12");
+        /// <summary>The chroma marker says how the chroma values beside it were grouped, so it is never taken from a different
+        /// source than they were. An arrival that carries chroma keeps its own marker, a missing one included: filling it from
+        /// what was stored would label one grouping's values with another's marker.</summary>
+        static bool KeepsOwnChromaMarker(object?[] arrivingRow) => arrivingRow[Hpcp12Col] != null || arrivingRow[Thpcp12Col] != null;
         internal static IReadOnlyList<string> CopyColumnNames => Array.ConvertAll(CopyIdx, i => Cols[i].Name);
 
         // ---- content comparison (the v2 split, later C2's drift rule): run-to-run extractor noise is NOT a disagreement.
@@ -422,7 +446,12 @@ namespace Truedat.Store
         internal static object?[] WithStoredContentWhereUnobserved(object?[] row, object?[] storedContent)
         {
             var merged = (object?[])row.Clone();
-            for (int k = 0; k < ContentIdx.Length; k++) if (merged[ContentIdx[k]] == null) merged[ContentIdx[k]] = storedContent[k];
+            bool ownMarker = KeepsOwnChromaMarker(row);
+            for (int k = 0; k < ContentIdx.Length; k++)
+            {
+                if (ContentIdx[k] == ChromaFoldCol && ownMarker) continue;
+                if (merged[ContentIdx[k]] == null) merged[ContentIdx[k]] = storedContent[k];
+            }
             return merged;
         }
 
@@ -565,6 +594,8 @@ namespace Truedat.Store
 
         /// <summary>Quoted, comma-separated column lists for SQL built outside this class (the v2 migration).</summary>
         internal static string ContentColumnList(string? alias = null) => JoinQuoted(ContentIdx, alias);
+        /// <summary>The same list as a store up to schema v4 had it, for the migration steps of those versions.</summary>
+        internal static string LegacyContentColumnList(string? alias = null) => JoinQuoted(LegacyContentIdx, alias);
         internal static string CopyColumnList(string? alias = null) => JoinQuoted(CopyIdx, alias);
         static string JoinQuoted(int[] idx, string? alias)
         {
@@ -638,11 +669,13 @@ namespace Truedat.Store
         {
             if (first == null && second == null) return arriving;
             var row = ToRow(arriving); var f = first != null ? ToRow(first) : null; var s = second != null ? ToRow(second) : null; bool any = false;
+            bool ownMarker = KeepsOwnChromaMarker(row);
             for (int k = 0; k < ContentIdx.Length; k++)
             {
                 int i = ContentIdx[k];
                 bool carried = observed != null ? ContentIsObserved(observed, k) : row[i] != null;
                 if (carried) continue;
+                if (i == ChromaFoldCol && ownMarker) continue;
                 var v = f?[i] ?? s?[i];
                 if (v != null) { row[i] = v; any = true; }
                 else if (observed != null && row[i] != null) { row[i] = null; any = true; }   // a parser default with nothing to supply is not a value
@@ -721,6 +754,8 @@ namespace Truedat.Store
         internal const int UpsertCopyFirstParam = 4;
 
         internal static void BindContent(SqliteStmt st, int firstParam, object?[] row) => BindIdx(st, firstParam, row, ContentIdx);
+        /// <summary>Binds the content columns a store up to schema v4 had (the v3 migration step's insert).</summary>
+        internal static void BindContentLegacy(SqliteStmt st, int firstParam, object?[] row) => BindIdx(st, firstParam, row, LegacyContentIdx);
         internal static void BindCopy(SqliteStmt st, int firstParam, object?[] row) => BindIdx(st, firstParam, row, CopyIdx);
 
         /// <summary>Binds the chosen columns of a ToRow() row at parameter indexes firstParam … firstParam + idx.Length - 1.</summary>
@@ -752,8 +787,8 @@ namespace Truedat.Store
         /// self-tests that build a v2 fixture: reads a v2 content row's values.</summary>
         internal static object?[] ReadContentValuesLegacyV2(SqliteStmt st, int firstColumn)
         {
-            var values = new object?[ContentIdx.Length];
-            for (int k = 0; k < ContentIdx.Length; k++)
+            var values = new object?[ContentIdx.Length];   // full width; a column newer than the store being read stays null
+            for (int k = 0; k < LegacyContentIdx.Length; k++)
             {
                 int c = firstColumn + k;
                 if (st.IsNull(c)) continue;
@@ -789,7 +824,7 @@ namespace Truedat.Store
         /// <summary>Binds a ToRow() row's chosen columns in the v2 representation (self-test fixture builder only).</summary>
         internal static void BindLegacyV2(SqliteStmt st, int firstParam, object?[] row, bool content)
         {
-            var idx = content ? ContentIdx : CopyIdx;
+            var idx = content ? LegacyContentIdx : CopyIdx;
             for (int k = 0; k < idx.Length; k++)
             {
                 int i = idx[k], p = firstParam + k;

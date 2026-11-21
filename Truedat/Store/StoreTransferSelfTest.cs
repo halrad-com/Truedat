@@ -318,7 +318,7 @@ namespace Truedat.Store
                     db.Exec("INSERT INTO file_entity(id, created_utc) VALUES ('e1', '2026-10-11T00:00:00Z');");
                     db.Exec(@"INSERT INTO track_location(id, entity_id, root_id, rel_path, canonical_path, display_path, last_modified_utc, last_seen_utc) " +
                             @"VALUES (7, 'e1', 1, 'old.flac', 'old.flac', 'D:\music\old.flac', '2026-05-01T00:00:00.0000000Z', '2026-10-11T00:00:00Z');");
-                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.ContentColumnList() + ") VALUES ('e1', ?, 'sha', NULL, '2026-10-11T00:00:00Z'" + Q(TrackEntryMapper.ContentColumnCount) + ");"))
+                    using (var st = db.Prepare("INSERT INTO track_content(entity_id, content_key, content_key_kind, run_id, updated_utc, " + TrackEntryMapper.LegacyContentColumnList() + ") VALUES ('e1', ?, 'sha', NULL, '2026-10-11T00:00:00Z'" + Q(TrackEntryMapper.LegacyContentColumnCount) + ");"))
                     { st.Bind(1, new string('o', 64)); TrackEntryMapper.BindLegacyV2(st, 2, row, content: true); st.Step(); }
                     using (var st = db.Prepare("INSERT INTO track_copy(location_id, run_id, updated_utc, " + TrackEntryMapper.CopyColumnList() + ") VALUES (7, NULL, '2026-10-11T00:00:00Z'" + Q(copyCols) + ");"))
                     { TrackEntryMapper.BindLegacyV2(st, 1, row, content: false); st.Step(); }

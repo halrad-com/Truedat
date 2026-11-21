@@ -467,7 +467,7 @@ namespace Truedat.Edges
                 using (var os = Truedat.Store.OpenStore.Open(store, false, VersionInfo.Display, DateTime.UtcNow.ToString("o")))
                 {
                     var db = os.Db;
-                    assert(Truedat.Store.SchemaMigrator.ReadVersion(db) == 4 && Truedat.Store.SchemaV4Migration.LastMovedEdgeRows == 2, $"v3 -> v4 on open: {Truedat.Store.SchemaV4Migration.LastMovedEdgeRows} packed rows moved");
+                    assert(Truedat.Store.SchemaMigrator.ReadVersion(db) == Truedat.Store.StoreSchema.CurrentVersion && Truedat.Store.SchemaV4Migration.LastMovedEdgeRows == 2, $"v3 -> current on open: {Truedat.Store.SchemaV4Migration.LastMovedEdgeRows} packed rows moved by the v4 step (schema {Truedat.Store.SchemaMigrator.ReadVersion(db)})");
                     assert(db.ExecScalar("SELECT count(*) FROM value WHERE field = 'edge.row';") == "0" && db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || min(arrays_dtype) FROM edge WHERE content_hash = '" + Sha1 + "';") == "2/2/" + EdgeStore.ArraysDtype,
                         $"the packed rows are gone; two typed edge rows, BOTH with their arrays kept ({db.ExecScalar("SELECT count(*) || '/' || count(arrays) || '/' || coalesce(min(arrays_dtype), '-') FROM edge;")})");
                     var keptHead = db.Prepare("SELECT arrays FROM edge WHERE kind = 'head';"); keptHead.Step(); var kept = keptHead.GetBlob(0); keptHead.Dispose();

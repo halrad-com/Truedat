@@ -41,7 +41,7 @@ namespace Truedat
             "file-md5", "no-bitusage", "no-hf-analysis", "smfm", "no-smfm",
             "enableshortfiles", "max-duration", "long-track-mins",
             "exclusions", "no-exclusions", "exclude-playlist", "accept-flac-tag-drift",
-            "retry-errors", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity",
+            "retry-errors", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "refresh-chroma",
             "?", "h", "help", "version", "v",   // these print and exit before any scan, so nothing is reset beside them
             "store", "store-dir", "no-store", "edges", "no-edges", "edge-arrays", "no-edge-arrays",
             "publish", "no-publish", "split-mb", "keep-backups", "scan-summary", "fixup-after-scan",
