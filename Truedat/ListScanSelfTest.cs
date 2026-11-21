@@ -21,6 +21,7 @@ namespace Truedat
             Console.WriteLine("List scans: each path once, every list read, and an older XML does not win");
             TestDedupe(assert);
             TestXmlText(assert);
+            TestAbsolute(assert);
             TestCli(assert);
         }
 
@@ -74,6 +75,23 @@ namespace Truedat
             finally { Program.LibraryXmlWrittenUtc = saved; }
         }
 
+        /// <summary>A track is recorded under its full path. A path typed relative to the working folder used to go in as
+        /// typed: a bare file name then failed its identity check (the name the fingerprint records needs a folder), and
+        /// a relative folder wrote relative keys into the catalog.</summary>
+        static void TestAbsolute(Action<bool, string> assert)
+        {
+            string cwd = Path.Combine("D:" + Path.DirectorySeparatorChar, "work");
+            string rooted = Path.Combine("E:" + Path.DirectorySeparatorChar, "Music", "a.flac");
+            assert(Program.AbsoluteScanPath("a.flac", cwd) == Path.Combine(cwd, "a.flac"), $"scan-path: a bare file name is the file of that name in the working folder ({Program.AbsoluteScanPath("a.flac", cwd)})");
+            assert(Program.AbsoluteScanPath(Path.Combine("sub", "a.flac"), cwd) == Path.Combine(cwd, "sub", "a.flac"), "scan-path: a relative path is taken from the working folder");
+            assert(Program.AbsoluteScanPath(".", cwd) == cwd, $"scan-path: a dot is the working folder itself ({Program.AbsoluteScanPath(".", cwd)})");
+            assert(Program.AbsoluteScanPath(rooted, cwd) == rooted, "scan-path: a full path is left exactly as typed");
+            string share = new string(Path.DirectorySeparatorChar, 2) + "server" + Path.DirectorySeparatorChar + "share" + Path.DirectorySeparatorChar + "a.flac";
+            assert(Program.AbsoluteScanPath(share, cwd) == share, "scan-path: so is a network path");
+            assert(Program.AbsoluteScanPath("https://example.invalid/a.mp3", cwd) == "https://example.invalid/a.mp3", "scan-path: a stream address is not a file path and is not turned into one");
+            assert(Program.AbsoluteScanPath("", cwd) == "", "scan-path: nothing stays nothing");
+        }
+
         /// <summary>Two lists on one command line, overlapping and each repeating a path. The paths do not exist, so
         /// nothing is analyzed; what is being read is how many the scan set out to process.</summary>
         static void TestCli(Action<bool, string> assert)
@@ -106,6 +124,25 @@ namespace Truedat
                 Check(output.Contains("Processing 3 files"), "list-cli: two lists holding a, b, a, A and b, c are three files to process");
                 Check(output.Contains("more than once"), "list-cli: and the run says some paths were listed more than once");
                 Check(exit == 0, $"list-cli: listed files that are not on disk are skipped, not an error for the run (exit {exit})");
+
+                // ---- a file named relative to the working folder is analyzed, and recorded under its full path
+                var ffmpeg = Path.Combine(exeDir, "ffmpeg.exe");
+                if (!File.Exists(ffmpeg)) { Console.WriteLine("  NOT RUN  relative paths through a scan: needs ffmpeg.exe beside the test binary to make a track"); return; }
+                var work = Path.Combine(root, "work"); Directory.CreateDirectory(Path.Combine(work, "sub"));
+                RunChild(ffmpeg, work, "-v error -f lavfi -i sine=frequency=440:duration=25 -ac 2 -ar 44100 -y tone.flac", out _);
+                RunChild(ffmpeg, work, "-v error -f lavfi -i sine=frequency=550:duration=25 -ac 2 -ar 44100 -y " + Q(Path.Combine("sub", "other.flac")), out _);
+                var relCatalog = Path.Combine(root, "rel", "mbxmoods.json"); Directory.CreateDirectory(Path.Combine(root, "rel"));
+                var one = RunChild(exe, work, "--no-config --no-store --analyze-file tone.flac --moods " + Q(relCatalog), out int oneExit);
+                File.WriteAllText(Path.Combine(root, "relative-file.log"), one);
+                Check(oneExit == 0 && !one.Contains("analysis incomplete"), $"scan-path: --analyze-file with a bare file name analyzes the file (exit {oneExit})");
+                var folder = RunChild(exe, work, "--no-config --no-store --folder . --moods " + Q(relCatalog) + " -p 1", out int folderExit);
+                File.WriteAllText(Path.Combine(root, "relative-folder.log"), folder);
+                Check(folderExit == 0, $"scan-path: --folder with a relative folder runs (exit {folderExit})");
+                var held = new System.Collections.Concurrent.ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
+                if (File.Exists(relCatalog)) Program.LoadExistingMoodsForStore(relCatalog, held);
+                var keys = string.Join(" | ", held.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase));
+                Check(held.Count == 2 && held.Keys.All(Path.IsPathRooted), $"scan-path: both tracks are in the catalog under full paths, and the one named twice is one entry ({keys})");
+                Check(folder.Contains("1 cached") || folder.Contains("(1 cached"), "scan-path: the folder scan found the file the single-file scan had recorded, by the same path");
             }
             catch (Exception ex) { keep = true; assert(false, "list-cli: threw " + ex.GetType().Name + ": " + ex.Message + "  [fixture kept: " + root + "]"); }
             finally { if (!keep) { try { Directory.Delete(root, true); } catch { } } }

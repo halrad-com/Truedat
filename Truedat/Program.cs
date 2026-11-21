@@ -3341,6 +3341,9 @@ namespace Truedat
                 folderPath = ResolveFolderArgument(folderPath!, Directory.Exists, Environment.GetFolderPath, out var folderNote);
                 if (folderNote != null) Console.Error.WriteLine(folderNote);
             }
+            // Relative paths are resolved here, once: a track is recorded under its full path.
+            if (analyzeFileMode && !string.IsNullOrEmpty(analyzeFilePath)) analyzeFilePath = AbsoluteScanPath(analyzeFilePath!, Environment.CurrentDirectory);
+            if (folderMode && Directory.Exists(folderPath!)) folderPath = AbsoluteScanPath(folderPath!, Environment.CurrentDirectory);
             if (folderMode && !Directory.Exists(folderPath!))
             {
                 var folderHint = PathCodepageHint(folderPath!, Directory.Exists);
@@ -5142,7 +5145,12 @@ namespace Truedat
                             + (flUrlSkipped > 0 ? $" ({flUrlSkipped} stream URL(s) skipped)" : ""));
                 }
 
-                // Each path once, whatever listed it and however often.
+                // Full paths first (a relative entry in a list is relative to the working folder), then each path once,
+                // whatever listed it and however often.
+                {
+                    string listCwd = Environment.CurrentDirectory;
+                    filePaths = filePaths.Select(p => AbsoluteScanPath(p, listCwd)).ToList();
+                }
                 filePaths = DedupePaths(filePaths, out int listedAgain);
                 if (listedAgain > 0)
                     Console.Error.WriteLine($"  {listedAgain:N0} path(s) were listed more than once; each is processed once");
@@ -8088,6 +8096,22 @@ namespace Truedat
             var tracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             LoadExistingMoods(moodsPath, tracks);
             RunDuplicates(moodsPath, tracks);
+        }
+
+        /// <summary>The full path of a file or folder named for a scan. A track is recorded under its full path — the
+        /// catalog's key, the store's location, the name the fingerprint keeps — so a path typed relative to the working
+        /// folder is resolved once, here, before anything records it. A full path, a network path and a stream address
+        /// are returned as typed; so is anything the path functions refuse, which then fails where it always did.</summary>
+        internal static string AbsoluteScanPath(string path, string workingFolder)
+        {
+            if (string.IsNullOrEmpty(path) || path.IndexOf("://", StringComparison.Ordinal) >= 0) return path;
+            try
+            {
+                if (Path.IsPathRooted(path) && Path.GetPathRoot(path)!.Length >= 2 && path.Length >= 3 && (path[1] != ':' || path[2] == Path.DirectorySeparatorChar || path[2] == Path.AltDirectorySeparatorChar))
+                    return path;   // C:\x and \\server\share\x; "C:x" (relative to that drive's current folder) falls through
+                return Path.GetFullPath(Path.Combine(workingFolder, path));
+            }
+            catch (Exception) { return path; }
         }
 
         /// <summary>What <c>--moods</c> names. The word <c>library</c> is the catalog beside the library — the library XML named
