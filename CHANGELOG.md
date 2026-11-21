@@ -10,14 +10,17 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Changed
 
-- A long track is held in memory during analysis as far as the machine's RAM allows, instead of stopping at a fixed 256 MB (about 12.7 minutes). Examples:
+- RAM use is fitted to the machine. A long track is held in memory during analysis as far as the free RAM allows, instead of stopping at a fixed 256 MB (about 12.7 minutes). The RAM is shared by the tracks being analyzed, and the first to ask gets the room. Examples:
 
-| Free RAM, workers | Held in memory per track | Track length covered |
+| Free RAM, workers | RAM shared | Longest track held in memory |
 |---|---|---|
-| 6 GB, 6 workers | 423 MB | 21 minutes |
-| 13 GB, 10 workers | 577 MB | 29 minutes |
-| 26 GB, 20 workers | 577 MB | 29 minutes |
-| 120 GB, 30 workers | 1,965 MB | 97 minutes |
+| 6 GB, 6 workers | 3.6 GB | 1.7 hours |
+| 13 GB, 10 workers | 7.8 GB | 4 hours |
+| 26 GB, 20 workers | 15.6 GB | 7.8 hours |
+| 120 GB, 30 workers | 72 GB | 45 hours |
+
+- Scan order is fitted to the library. Long tracks are taken first and spread out, so they do not all run at once or finish last. The rest is taken in library order.
+- The scan summary says how many tracks were held in memory.
 
 ## [0.5.5.4-EV6.1] — 2026-11-21
 
