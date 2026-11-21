@@ -20,7 +20,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 | 120 GB, 30 workers | 72 GB | 45 hours |
 
 - Scan order is fitted to the library. Long tracks are taken first and spread out, so they do not all run at once or finish last. The rest is taken in library order.
-- The scan summary says how many tracks were held in memory.
+- The same audio at two paths is analyzed once. A track the same length as an earlier one waits for a second pass and reuses the earlier analysis when the audio is identical.
+- The scan summary says how many tracks were held in memory, and how many reused an identical track's analysis.
 
 ## [0.5.5.4-EV6.1] — 2026-11-21
 
