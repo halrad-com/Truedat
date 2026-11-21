@@ -23,6 +23,14 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - Long tracks no longer hit a fixed 300-second limit on conversion; a conversion runs while it is making progress.
 - A hi-res track is not converted when the copy would not fit in the staging folder; the original is analyzed instead.
 
+### Backup, restore, reset
+
+| Command | What it does |
+|---|---|
+| `--snapshot` | Backup: one zip of the catalog, the exclusion rules, and the store if there is one. Changes nothing. |
+| `--restore <zip>` | Puts the catalog back from a snapshot, a backup or a reset archive. Add `--store` to restore the store too. |
+| `--reset` | Zips everything truedat wrote, removes it, and scans from nothing. Asks you to type `RESET`. |
+
 ## [0.5.5.4-EV2.3] — 2026-11-20
 
 ### Added
