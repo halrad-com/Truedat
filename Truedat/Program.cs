@@ -956,10 +956,12 @@ namespace Truedat
             Console.WriteLine("                      Use '-' as <path> to read paths from stdin instead of a file");
             Console.WriteLine("                      Mutually exclusive with --analyze-file / --folder; -p sets parallelism");
             Console.WriteLine("                      NOTE: results are recorded ONLY if --moods is also given.");
-            Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them");
+            Console.WriteLine("  --folder <dir>      Walk <dir> recursively for audio files and analyze them. The word 'music'");
+            Console.WriteLine("                      (or MyMusic) is your Windows Music folder, unless a folder of that name exists.");
             Console.WriteLine("  --paths [--json]    Report every path this run would use (catalog, sidecar, exclusions,");
             Console.WriteLine("                      playlist, logs, ledgers, staging), each present or absent, and which");
             Console.WriteLine("                      step resolved the catalog. Read-only; writes and creates nothing.");
+            Console.WriteLine("                      (--moods library = the catalog beside the library, so no path is needed)");
             Console.WriteLine("  --moods <path>      Moods file for the per-file modes / --verify / --stats (merge target");
             Console.WriteLine("                      for --analyze-file / --file-list / --folder; default mbxmoods.json");
             Console.WriteLine("                      next to the XML, else auto-discovered beside the exe (exe-dir");
@@ -3177,6 +3179,16 @@ namespace Truedat
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
             if (workBudgetText != null && (analyzeFilePath != null || fileListMode || folderPath != null))
                 Console.Error.WriteLine("  WARNING: --budget caps the library scan; it does nothing in --analyze-file / --file-list / --folder");
+            // --moods library: resolved here, before anything (the store first of all) is resolved against the catalog.
+            if (string.Equals(analyzeFileMoods, "library", StringComparison.OrdinalIgnoreCase) && !File.Exists(analyzeFileMoods!))
+            {
+                string? libraryForMoods = null;
+                try { var found = ResolveITunesXml(xmlPath); if (File.Exists(found)) libraryForMoods = found; } catch { }
+                analyzeFileMoods = ResolveMoodsArgument(analyzeFileMoods, File.Exists, libraryForMoods, out var moodsNote, out var moodsError);
+                if (moodsError != null) { Console.Error.WriteLine(moodsError); Environment.ExitCode = 2; return; }
+                if (moodsNote != null) Console.Error.WriteLine(moodsNote);
+            }
+
             // --reset belongs to the library scan and to nothing else. Checked here, before the store is resolved or any
             // verb is dispatched: beside another verb it would either be dropped without a word or run next to it.
             if (_resetRequested)
@@ -3320,6 +3332,11 @@ namespace Truedat
             {
                 Environment.ExitCode = RefuseScan(_storePath, "Error: --folder is mutually exclusive with --file-list and --analyze-file.", 1);
                 return;
+            }
+            if (folderMode)
+            {
+                folderPath = ResolveFolderArgument(folderPath!, Directory.Exists, Environment.GetFolderPath, out var folderNote);
+                if (folderNote != null) Console.Error.WriteLine(folderNote);
             }
             if (folderMode && !Directory.Exists(folderPath!))
             {
@@ -8025,6 +8042,44 @@ namespace Truedat
             var tracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
             LoadExistingMoods(moodsPath, tracks);
             RunDuplicates(moodsPath, tracks);
+        }
+
+        /// <summary>What <c>--moods</c> names. The word <c>library</c> is the catalog beside the library — the library XML named
+        /// on the command line, or the one discovery finds — so a command needs no path of its own to say "this library's
+        /// catalog". A file that exists under that name is the file meant; a path is returned as typed; no <c>--moods</c>
+        /// stays none. With no library to stand beside, the word is an error: left alone it would be taken as a catalog
+        /// to create, and the run would write a new file called "library" wherever it was started.</summary>
+        internal static string? ResolveMoodsArgument(string? value, Func<string, bool> fileExists, string? libraryXml, out string? note, out string? error)
+        {
+            note = null; error = null;
+            if (string.IsNullOrEmpty(value) || !string.Equals(value, "library", StringComparison.OrdinalIgnoreCase) || fileExists(value!)) return value;
+            if (string.IsNullOrEmpty(libraryXml))
+            {
+                error = "Error: --moods library means the catalog beside the library, and no library was found. Name the library, or give --moods a path. Nothing was changed.";
+                return value;
+            }
+            string resolved = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(libraryXml!)) ?? ".", MoodsFileName);
+            note = $"  Catalog:    --moods library is the catalog beside the library, {resolved}";
+            return resolved;
+        }
+
+        /// <summary>What <c>--folder</c> names. The word <c>music</c> (or <c>MyMusic</c>, the name Windows gives it) is the
+        /// user's Music folder, so a launcher that passes fixed arguments with no shell to expand a profile path can still
+        /// name it. A folder that exists under that name is the folder meant: the word is read as the Music folder only when
+        /// it is not an existing folder, which was the not-found error before. Everything else is returned as typed.
+        /// <paramref name="note"/> is the line to print when the word was resolved, so the run shows which folder it scanned.</summary>
+        internal static string ResolveFolderArgument(string value, Func<string, bool> directoryExists, Func<Environment.SpecialFolder, string> specialFolder, out string? note)
+        {
+            note = null;
+            if (string.IsNullOrEmpty(value)) return value;
+            bool isWord = string.Equals(value, "music", StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(value, "mymusic", StringComparison.OrdinalIgnoreCase);
+            if (!isWord || directoryExists(value)) return value;
+            string resolved;
+            try { resolved = specialFolder(Environment.SpecialFolder.MyMusic); } catch { return value; }
+            if (string.IsNullOrEmpty(resolved)) return value;
+            note = $"  Folder:     --folder {value} is your Music folder, {resolved}";
+            return resolved;
         }
 
         /// <summary>The volume/share root used to probe library reachability before a
@@ -17162,6 +17217,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             ResetSelfTest.Run(Assert);                               // --reset: archive, remove, scan from nothing
             ResampleSelfTest.Run(Assert);                            // conversions: run while progressing, only when the copy fits
             XmlIssuesSelfTest.Run(Assert);                           // a character removed from the library XML: what it touched
+            FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry

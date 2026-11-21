@@ -149,6 +149,32 @@ What to expect:
   restores the catalog alone and tells you the archive holds a store). The error and skip lists and the
   review records are in the zip as well and are not put back.
 
+### Scanning a folder (`--folder`)
+
+The library scan reads the list of tracks from the library XML, and MusicBee writes that file when it
+exits — so a track added while MusicBee is open is not in it yet. A folder scan does not use the XML:
+it walks a folder and its subfolders for audio files, serves the ones already in the catalog from the
+cache, and analyzes the rest.
+
+```
+truedat --folder "D:\Music" --moods "D:\MusicBee\Library\mbxmoods.json"
+```
+
+Without `--moods` a folder scan analyzes and saves nothing, and says so. Two words make the command
+independent of where things are on a particular machine:
+
+```
+truedat --folder music --moods library
+```
+
+- `--folder music` (or `MyMusic`) is your Windows Music folder.
+- `--moods library` is the catalog beside the library — the library XML named on the command line, or
+  the one truedat finds by itself.
+
+Each word is read that way only when no folder or file of that name exists, and the run prints the
+path it resolved to. A folder scan covers everything under the folder, including files that are not in
+your MusicBee library; exclusion rules apply as in any scan.
+
 ### Filename Check (`--check-filenames`)
 
 Scans your library for filenames with characters that cause Essentia tools to fail. Reports three tiers:

@@ -11,6 +11,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 ### Added
 
 - `--reset` starts a library over: it archives every file truedat wrote into one zip, removes them, and scans from nothing. It asks you to type `RESET` first (`--imeanit` for scripts); `--restore` of the zip goes back.
+- `--folder music` scans your Windows Music folder and `--moods library` means the catalog beside the library, so a folder scan command needs no machine-specific path.
 
 ### Changed
 
