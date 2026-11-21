@@ -17142,6 +17142,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             global::Truedat.Store.StoreSummarySelfTest.Run(Assert);  // --store-summary: the hub's two mirrored rules + this report's arithmetic
             ReviewLedgerScanSelfTest.Run(Assert);                    // the scan and --fixup against a review ledger on disk
             ResetSelfTest.Run(Assert);                               // --reset: archive, remove, scan from nothing
+            ResampleSelfTest.Run(Assert);                            // conversions: run while progressing, only when the copy fits
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
             // Read back as an exact arrival, the missing field was a clear: --strip-smfm erased the stored histogram of every entry
@@ -24638,10 +24639,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(300000)) // 5 min timeout
+                TryReadRateAndChannels(audioPath, out _, out _, out double downmixDurationSec);   // 0 when unreadable: no ceiling, the stall rule only
+                var downmixWait = WaitForConversion(proc, default, downmixDurationSec);
+                if (downmixWait != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine($"  DEBUG downmix timed out (300s)");
+                    Console.Error.WriteLine(downmixWait == SubprocessWait.Outcome.Overran
+                        ? $"  WARNING: downmix to stereo stopped — it ran longer than the track itself lasts  [{Path.GetFileName(audioPath)}]"
+                        : $"  WARNING: downmix to stereo stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s)  [{Path.GetFileName(audioPath)}]");
                     try { File.Delete(tempPath); } catch { }
                     return null;
                 }
@@ -24737,10 +24742,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(300000)) // 5 min, matches DownmixToStereo
+                if (WaitForConversion(proc) != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine("Error: ffmpeg transcode timed out (300s).");
+                    Console.Error.WriteLine($"Error: ffmpeg transcode stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s).");
                     return 1;
                 }
                 proc.WaitForExit();
@@ -24810,10 +24815,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var so = proc.StandardOutput.ReadToEndAsync();
                 var se = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(600000)) // 10 min — level-8 on a big lossless file
+                if (WaitForConversion(proc) != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine("    ffmpeg convert timed out (600s)");
+                    Console.Error.WriteLine($"    ffmpeg convert stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s)");
                     try { File.Delete(output); } catch { }
                     return 1;
                 }
@@ -25462,6 +25467,15 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             catch { return 0UL; }
         }
 
+        /// <summary>Bytes the process has read and written so far, or 0 when the counters cannot be read. A conversion
+        /// writing a large file to a slow volume can sit in the write with no CPU to show for it, so written bytes are
+        /// progress as much as read ones.</summary>
+        internal static ulong TryReadProcessIoBytes(Process proc)
+        {
+            try { return GetProcessIoCounters(proc.Handle, out var c) ? c.ReadTransferCount + c.WriteTransferCount : 0UL; }
+            catch { return 0UL; }
+        }
+
         /// <summary>Liveness for the stall watchdog: has the extractor made ANY observable progress
         /// since the last poll? CPU time alone is not enough — a process blocked on IO accrues none
         /// while working normally — so read bytes count as progress too.</summary>
@@ -25656,7 +25670,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return 2;
             }
 
-            // 7. Archive, then remove.
+            // 7. Archive, then remove. A large store and catalog take minutes to compress, and a silent verb looks hung.
+            Console.WriteLine($"  Archiving {Mb(totalBytes)} (compressed and read back before anything is removed; a large library takes a few minutes) ...");
             ResetCommand.Result result;
             try { result = ResetCommand.Execute(files, archive, store != null ? Path.GetFileName(store) : null); }
             catch (Exception ex)
@@ -28001,9 +28016,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // identity hash still read the ORIGINAL file, which is why this sits here and not in staging.
             string? resampled = null;
             _tsResampleSecs = 0;
-            bool rateKnown = TryReadRateAndChannels(audioPath, out int srcRate, out int srcChannels);
+            bool rateKnown = TryReadRateAndChannels(audioPath, out int srcRate, out int srcChannels, out double srcDurationSec);
             if (rateKnown && ShouldPreResample(srcRate, srcChannels, _ffmpegPath.Value != null))
-                resampled = ResampleTo44k(audioPath, srcRate, shown);
+                resampled = ResampleTo44k(audioPath, srcRate, srcChannels, srcDurationSec, shown, ct);
             try
             {
             _tsNativeCpuSecs = 0;
@@ -28088,16 +28103,77 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         internal static bool ShouldPreResample(int sampleRate, int channels, bool ffmpegAvailable)
             => ffmpegAvailable && sampleRate > 44100 && channels >= 1 && channels <= 2;
 
+        internal const long WavHeaderAllowance = 4096;
+        /// <summary>Room left in the staging folder after a conversion's copy is counted. The folder also takes the staged
+        /// source copies and the extractor's own output while the conversion runs; this keeps a long conversion from
+        /// being the thing that fills the volume under them.</summary>
+        internal const long StageHeadroomBytes = 1L << 30;
+
+        /// <summary>Bytes the 44.1 kHz 32-bit float copy of a track will occupy, known before any of it is written: the copy is
+        /// uncompressed, so its size is the track's length. 0 when the length or channel count is unknown — no estimate,
+        /// never a small one.</summary>
+        internal static long ResampledBytes(double durationSec, int channels)
+            => durationSec > 0 && channels > 0 ? (long)Math.Ceiling(durationSec * 44100.0) * channels * 4 + WavHeaderAllowance : 0;
+
+        /// <summary>Is there room for the copy. Asked BEFORE the conversion starts: the alternative is to find out by filling
+        /// the staging volume, which fails every other track being staged there at the same time. Room already promised to
+        /// conversions in flight is set aside first (their bytes are partly on disk already, so this counts some of them
+        /// twice — the error is on the side of not starting). No estimate, or free space that cannot be read, is not a
+        /// reason to refuse: the conversion runs and its own failure falls back to the original.</summary>
+        internal static bool ResampleFits(long neededBytes, long freeBytes, long reservedByOthers)
+            => neededBytes <= 0 || freeBytes < 0 || freeBytes - Math.Max(0, reservedByOthers) - StageHeadroomBytes >= neededBytes;
+
+        /// <summary>Free bytes on the volume holding <paramref name="dir"/>, or -1 when it cannot be read.</summary>
+        static long StageFreeBytes(string dir)
+        {
+            if (_stageFreeBytesForTest >= 0) return _stageFreeBytesForTest;
+            try { return new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dir)) ?? dir).AvailableFreeSpace; }
+            catch { return -1; }
+        }
+        static long _stageFreeBytesForTest = -1;
+        /// <summary>Bytes of staging room promised to conversions that are running now.</summary>
+        static long _conversionReservedBytes;
+        internal static long ConversionReservedBytes => Interlocked.Read(ref _conversionReservedBytes);
+
+        /// <summary>The resample call with its inputs supplied, for the self-test: the staging folder, the free space it should
+        /// believe in, and what the call printed.</summary>
+        internal static string? ResampleForTest(string source, int rate, int channels, double durationSec, string stageDir, long freeBytes, out string said)
+        {
+            var savedDir = _stageOpts.StageDir; var savedErr = Console.Error; var captured = new StringWriter();
+            _stageOpts.StageDir = stageDir; _stageFreeBytesForTest = freeBytes; Console.SetError(captured);
+            try { return ResampleTo44k(source, rate, channels, durationSec, Path.GetFileName(source), default); }
+            finally { _stageOpts.StageDir = savedDir; _stageFreeBytesForTest = -1; Console.SetError(savedErr); said = captured.ToString(); }
+        }
+
+        /// <summary>The wait every ffmpeg conversion uses: for as long as the process makes progress, with no wall-clock cap.
+        /// A conversion's work is proportional to the length of the track, so any fixed cap is wrong for some track; the
+        /// one there used to be (300 s) fired on the longest tracks, after spending the 300 s. A process that has done
+        /// nothing for the stall window is the thing worth stopping, and that is the extractor watchdog's rule too.</summary>
+        /// <summary>No track is given less time than the cap that used to apply to all of them.</summary>
+        internal const int ConversionFloorSec = 300;
+
+        /// <summary>How long a conversion may run while still making progress: as long as the track itself lasts, and never
+        /// less than <see cref="ConversionFloorSec"/>. Progress cannot tell a long job from an endless one — ffmpeg looping
+        /// on a damaged file is busy the whole time — so something has to end it, and the track's own length is the bound
+        /// that scales with the work: a conversion slower than real time has already cost more than analysing the original
+        /// would have. 0 (no ceiling) when the length is unknown; the stall rule still applies.</summary>
+        internal static long ConversionCeilingMs(double durationSec)
+            => durationSec > 0 ? (long)(Math.Max(ConversionFloorSec, durationSec) * 1000.0) : 0;
+
+        static SubprocessWait.Outcome WaitForConversion(Process proc, CancellationToken ct = default, double durationSec = 0)
+            => SubprocessWait.WhileProgressing(proc, EssentiaPollSeconds * 1000, EssentiaStallIdlePolls, () => ct.IsCancellationRequested, ConversionCeilingMs(durationSec));
+
         /// <summary>The source's sample rate and channel count from a header read (TagLib, no decode). False when
         /// TagLib cannot read it — the caller then leaves the file as it is.</summary>
-        static bool TryReadRateAndChannels(string path, out int sampleRate, out int channels)
+        static bool TryReadRateAndChannels(string path, out int sampleRate, out int channels, out double durationSec)
         {
-            sampleRate = 0; channels = 0;
+            sampleRate = 0; channels = 0; durationSec = 0;
             try
             {
                 using var f = TagLib.File.Create(path);
                 sampleRate = f.Properties?.AudioSampleRate ?? 0;
                 channels = f.Properties?.AudioChannels ?? 0;
+                durationSec = f.Properties?.Duration.TotalSeconds ?? 0;   // 0 = unknown: no size estimate is made from it
                 return sampleRate > 0;
             }
             catch { return false; }
@@ -28162,12 +28238,26 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>One ffmpeg pass: source -> 44.1 kHz, same channels, 32-bit float WAV in the stage dir (16-bit would
         /// itself move the low-level features). soxr, not ffmpeg's default resampler: the default flipped a weak tempo
         /// 3:2 in the spike and soxr did not. Null on any failure, and the caller analyses the original.</summary>
-        static string? ResampleTo44k(string audioPath, int sourceRate, string shown)
+        static string? ResampleTo44k(string audioPath, int sourceRate, int channels, double durationSec, string shown, CancellationToken ct)
         {
             var ffmpeg = _ffmpegPath.Value;
             if (ffmpeg == null) return null;
             string dir = _stageOpts.StageDir;
             try { Directory.CreateDirectory(dir); } catch { dir = Path.GetTempPath(); }
+            // Room first. The copy's size is known from the track's length, so a copy that will not fit is not started.
+            long need = ResampledBytes(durationSec, channels);
+            long reservedNow = Interlocked.Add(ref _conversionReservedBytes, need);
+            long free = StageFreeBytes(dir);
+            if (!ResampleFits(need, free, reservedNow - need))
+            {
+                Interlocked.Add(ref _conversionReservedBytes, -need);
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                string Sz(long b) => b >= 1L << 30 ? (b / (double)(1L << 30)).ToString("F1", inv) + " GB" : (b / (double)(1L << 20)).ToString("F0", inv) + " MB";
+                Console.Error.WriteLine($"  NOTE: not resampling to 44.1 kHz: the copy needs {Sz(need)} and the staging folder has {Sz(free)} free"
+                    + (reservedNow - need > 0 ? $", {Sz(reservedNow - need)} of it promised to conversions already running" : "")
+                    + $" ({Sz(StageHeadroomBytes)} is kept clear); analysing the original  [{shown}]");
+                return null;
+            }
             string tempPath = Path.Combine(dir, $"truedat_44k_{Guid.NewGuid():N}.wav");   // swept with the rest of the stage dir
             var sw = Stopwatch.StartNew();
             bool ran = false;   // ffmpeg actually started: from here the time is real, success or not
@@ -28188,10 +28278,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 DisableEcoQos(proc.Handle);
                 var stdoutTask = proc.StandardOutput.ReadToEndAsync();
                 var stderrTask = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(300000))
+                var waited = WaitForConversion(proc, ct, durationSec);
+                if (waited != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz timed out (300 s); analysing the original  [{shown}]");
+                    if (waited == SubprocessWait.Outcome.Stalled)
+                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analysing the original  [{shown}]");
+                    else if (waited == SubprocessWait.Outcome.Overran)
+                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stopped after {sw.Elapsed.TotalSeconds:F0} s — longer than the track itself lasts; analysing the original  [{shown}]");
                     try { File.Delete(tempPath); } catch { }
                     return null;
                 }
@@ -28214,9 +28308,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             finally
             {
-                // Every run ffmpeg actually made, success or failure: a failed or timed-out resample still cost the track that time,
+                // Every run ffmpeg actually made, success or failure: a failed or stalled resample still cost the track that time,
                 // inside the Essentia task (AnalyzeWithEssentia calls this before the extractor starts).
                 if (ran) { _stageResample.RecordTicks(sw.ElapsedTicks); _tsResampleSecs = (double)sw.ElapsedTicks / Stopwatch.Frequency; }
+                Interlocked.Add(ref _conversionReservedBytes, -need);
             }
             return null;
         }
