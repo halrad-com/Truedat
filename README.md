@@ -210,7 +210,10 @@ together, at one generation. The nine catalog-changing verbs (`--fixup`, `--rema
 `--migrate`, `--strip-smfm`, `--prune-entry`, `--prune-excluded`, `--merge-moods`, `--restore`) do the
 same. A store and a catalog that disagree refuse the run and name the command that reconciles them. The
 store saves at the scan's five-minute checkpoints and at the end; `store-result.json` beside it records
-each run's outcome (`completed`, `failed`, `interrupted`). A stored value
+each run's outcome (`completed`, `failed`, `interrupted`). A scan with no store writes the same record in
+the same place, with `store` and `export` null. A list scan (`--file-list`) adds a `list` block: how many
+paths were listed and how many were analyzed, already current, excluded, skipped, failed, not found or not
+reached, with the failed and not-found paths named. A stored value
 that was null (a signal not measured on an earlier scan, say without ffmpeg) is filled when a later
 scan measures it; an older extractor build never overwrites a newer build's description, and a newer
 one that does replace it leaves a resolved `content-replaced` conflict naming both. It uses the SQLite that ships with Windows 10/11 (`winsqlite3.dll`,

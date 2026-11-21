@@ -12,6 +12,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 - `--reset` starts a library over: it archives every file truedat wrote into one zip, removes them, and scans from nothing. It asks you to type `RESET` first (`--imeanit` for scripts); `--restore` of the zip goes back.
 - `--folder music` scans your Windows Music folder and `--moods library` means the catalog beside the library, so a folder scan command needs no machine-specific path.
+- `store-result.json` is written by every scan, with or without a store, and a `--file-list` scan records what became of each listed path.
 - Each analyzed track records how its chroma was grouped (`chromaFold`). `--refresh-chroma` re-analyzes the tracks without the current marker — on a library scanned before this build, all of them. The store moves to schema v5 (upgraded on open, with a backup).
 
 ### Changed

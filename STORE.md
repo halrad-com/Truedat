@@ -31,6 +31,11 @@ on for one run. Use it only with a hub that reads the store; a hub that reads th
   never makes a scan refuse: no SQLite on the machine or a failed seed means a scan without a store and a
   note; an extractor older than `.5` skips edges with a note.
 - Beside the store: `store-result.json`, `store-import-result.json`, `store-info.json`.
+- `store-result.json` is written by every scan, store or no store. With no store in force it sits where the
+  store would be and its `store` and `export` are null. A list scan's record has verb `scan-list` and a `list`
+  block: `path`, `listed`, then `analyzed`, `current`, `excluded`, `skipped`, `failed`, `notFound` and
+  `notExamined`, which add up to `listed`; `outcomes` names the failed and not-found paths (up to 1,000, with
+  `outcomesOmitted` for the rest). A count not known yet is null, never 0.
 - Not beside the store: the in-flight edge stashes. They are transient — written during a scan, consumed by
   the flush that commits their rows, deleted — so they live in `pending\` under the stage directory and move
   with `--stage-dir`. Leftovers from an interrupted scan are swept.

@@ -62,6 +62,14 @@ local tidy-up:
   truncate. **Never make a path that skips writing it**: the caller cannot distinguish "no
   result" from "stale result from the previous run" without a freshness check, and it had to
   add one after we shipped a case where truedat could die before writing.
+- **`store-result.json` is written by every scan, with or without a store, and a list scan's `list` block is the hub's
+  account of what it asked for** (2026-11-21). With no store in force the record sits where the store would be
+  (`StoreLocation.Resolve` from the catalog) with `store` and `export` null — null, not empty objects, because
+  `export.performed false` beside a store means "the files are behind it". A `--file-list` run has verb `scan-list` and a
+  `list` block whose counts (`analyzed`, `current`, `excluded`, `skipped`, `failed`, `notFound`, `notExamined`) add up to
+  `listed`; a count not known yet is null. The field names are the hub's. Every site in the list scan that decides a
+  listed path's fate tells `StoreResult.List` — a new skip or failure site that does not will show up as `notExamined`.
+  Not written: a run with no catalog target (nowhere a reader would look), and a `--chunk` shard with no store.
 - **`--preview` emits both `preview.json` and the page**, and `preview.json` **is** the review
   manifest the hub serves (its filename stem is the route id). The hub's asset route serves
   only `.html` and no route serves an arbitrary sibling JSON, which is why the plan payload

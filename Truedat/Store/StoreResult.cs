@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace Truedat.Store
 {
@@ -43,6 +46,115 @@ namespace Truedat.Store
         /// <summary>Verb-specific counters (an import's matched/created counts, a scan's entries/failures) — outside
         /// the hub contract, under one key the hub ignores; for the operator and the self-tests.</summary>
         public Dictionary<string, long>? Detail;
+        /// <summary>No store was in force for this run: <c>store</c> and <c>export</c> are written as null — there is no store
+        /// to describe and nothing was published from one. The record sits where the store's would (the reader looks in one place).</summary>
+        public bool NoStore;
+        /// <summary>A list scan's account of the paths it was given; null for every other verb.</summary>
+        public StoreResultList? List;
+    }
+
+    /// <summary>What became of the paths a list scan (<c>--file-list</c>) was given. Every listed path is in exactly one count,
+    /// so the seven add up to <see cref="Listed"/>. A count not known yet is null (a pending record knows only how many were listed).</summary>
+    internal sealed class StoreResultList
+    {
+        /// <summary>The list as it was named on the command line (several lists joined with <c>|</c>; <c>-</c> for standard input).
+        /// A record of what was asked, not a handle: the caller may remove its list after the run.</summary>
+        public string Path = "";
+        /// <summary>Distinct paths after a path listed more than once is counted once.</summary>
+        public long? Listed;
+        public long? Analyzed, Current, Excluded, Failed, NotFound;
+        /// <summary>Not attempted for a reason that is not an exclusion rule: not an audio file, or held by a review record.</summary>
+        public long? Skipped;
+        /// <summary>Never reached — the run stopped, or the source went away, before this path's turn.</summary>
+        public long? NotExamined;
+        /// <summary>The failed and not-found paths by name, up to <see cref="StoreResult.MaxListOutcomes"/>.</summary>
+        public List<StoreResultListOutcome> Outcomes = new List<StoreResultListOutcome>();
+        /// <summary>How many failed or not-found paths are counted but not named in <see cref="Outcomes"/>.</summary>
+        public long OutcomesOmitted;
+    }
+
+    /// <summary><c>outcome</c> is the same word as the count it belongs to: <c>failed</c> or <c>notFound</c>.</summary>
+    internal sealed class StoreResultListOutcome { public string Path = "", Outcome = "", Reason = ""; }
+
+    /// <summary>The list scan's counters, written to from the scan's worker threads.</summary>
+    internal sealed class ListTally
+    {
+        long _analyzed, _current, _excluded, _skipped, _failed, _notFound;
+        int _named;
+        readonly ConcurrentQueue<StoreResultListOutcome> _outcomes = new ConcurrentQueue<StoreResultListOutcome>();
+
+        public void Analyzed() => Interlocked.Increment(ref _analyzed);
+        public void Current() => Interlocked.Increment(ref _current);
+        public void Excluded() => Interlocked.Increment(ref _excluded);
+        public void Skipped() => Interlocked.Increment(ref _skipped);
+        public void Failed(string path, string reason) { Interlocked.Increment(ref _failed); Name(path, "failed", reason); }
+        public void NotFound(string path, string reason) { Interlocked.Increment(ref _notFound); Name(path, "notFound", reason); }
+
+        void Name(string path, string outcome, string? reason)
+        {
+            if (Interlocked.Increment(ref _named) > StoreResult.MaxListOutcomes) return;
+            var line = (reason ?? "").Replace((char)13, ' ').Replace((char)10, ' ').Trim();
+            _outcomes.Enqueue(new StoreResultListOutcome { Path = path ?? "", Outcome = outcome, Reason = line });
+        }
+
+        /// <summary>The counts as they stand, into the record's list block. A listed path no count holds was never reached.</summary>
+        internal void ApplyTo(StoreResultList list)
+        {
+            list.Analyzed = Interlocked.Read(ref _analyzed); list.Current = Interlocked.Read(ref _current);
+            list.Excluded = Interlocked.Read(ref _excluded); list.Skipped = Interlocked.Read(ref _skipped);
+            list.Failed = Interlocked.Read(ref _failed); list.NotFound = Interlocked.Read(ref _notFound);
+            long reached = list.Analyzed.Value + list.Current.Value + list.Excluded.Value + list.Skipped.Value + list.Failed.Value + list.NotFound.Value;
+            list.NotExamined = Math.Max(0, (list.Listed ?? reached) - reached);
+            list.Outcomes = _outcomes.ToList();
+            list.OutcomesOmitted = Math.Max(0, list.Failed.Value + list.NotFound.Value - list.Outcomes.Count);
+        }
+    }
+
+    internal static partial class StoreResult
+    {
+        internal const string VerbScanList = "scan-list";
+        /// <summary>The most failed / not-found paths a record names; the counts are always complete.</summary>
+        internal const int MaxListOutcomes = 1000;
+        static ListTally? _listTally;
+        /// <summary>The list scan's tally while its record is pending; null in every other run, so a caller counts with <c>List?.</c>.</summary>
+        internal static ListTally? List => _listTally;
+
+        /// <summary>A scan with NO store in force has begun: its record is kept where the store's would be (the one place a reader
+        /// looks), with <c>store</c> and <c>export</c> null. Nothing when a record is already pending (the store's own, when a store is
+        /// in force), and nothing without a catalog target — there is then no place a reader would look.</summary>
+        internal static void BeginScanWithoutStore(string? catalogPath, string? storeDir, string startedUtc)
+        {
+            if (string.IsNullOrWhiteSpace(catalogPath) || _scan != null) return;
+            string at;
+            try
+            {
+                at = StoreLocation.Resolve(null, storeDir, catalogPath!, out _);
+                var dir = Path.GetDirectoryName(at);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
+            }
+            catch (Exception ex) { StoreLog.Debug($"store-result.json not begun for a run with no store: {ex.Message}"); return; }
+            ResetScanForTest();
+            _scanRecordAt = at;
+            _scan = Begin("scan");
+            _scan.StartedUtc = startedUtc;
+            _scan.NoStore = true;
+            Write(at, _scan, null, OutcomeInterrupted, ProvisionalReason);
+        }
+
+        /// <summary>The pending scan is a list scan and its list has been read: the record says so, with how many distinct paths
+        /// were listed. The other counts stay null until the run ends (the agreed rule: a count not known yet is null).</summary>
+        internal static void BeginList(string listPath, long listed)
+        {
+            var rec = _scan; var at = _scanStore ?? _scanRecordAt;
+            if (rec == null || at == null) return;
+            rec.Verb = VerbScanList;
+            rec.List = new StoreResultList { Path = listPath ?? "", Listed = listed };
+            _listTally = new ListTally();
+            if (_scanStoreFailure == null) Write(at, rec, null, OutcomeInterrupted, ProvisionalReason);
+        }
+
+        /// <summary>The run is ending: the list block takes the counts as they stand.</summary>
+        static void ApplyList(StoreResultFile rec) { if (rec.List != null) _listTally?.ApplyTo(rec.List); }
     }
 
     internal sealed class StoreResultStore
@@ -110,6 +222,8 @@ namespace Truedat.Store
         // every exit path — writes the final outcome against the exit code the launcher sees.
         static StoreResultFile? _scan;
         static string? _scanStore;
+        // A scan with no store in force: where its store WOULD be — the record sits beside that, with store and export null.
+        static string? _scanRecordAt;
         static string? _scanStoreFailure;
         static string? _scanOutcome, _scanReason;
         // Dormant outside self-tests: hold the real stopped-result write at its completion boundary.
@@ -169,8 +283,9 @@ namespace Truedat.Store
         /// plain sentence. Null when no scan record is pending.</summary>
         internal static string? FinishScan(int exitCode)
         {
-            var rec = _scan; var store = _scanStore;
+            var rec = _scan; var store = _scanStore ?? _scanRecordAt;
             if (rec == null || store == null) return null;
+            ApplyList(rec);
             string outcome, reason;
             if (_scanStoreFailure != null) { outcome = OutcomeFailed; reason = _scanStoreFailure; }
             else if (_scanOutcome != null) { outcome = _scanOutcome; reason = _scanReason ?? ""; }
@@ -182,7 +297,7 @@ namespace Truedat.Store
         }
 
         /// <summary>Self-test only: forget a pending scan so one process can exercise several.</summary>
-        internal static void ResetScanForTest() { _scan = null; _scanStore = null; _scanStoreFailure = null; _scanOutcome = null; _scanReason = null; }
+        internal static void ResetScanForTest() { _scan = null; _scanStore = null; _scanRecordAt = null; _listTally = null; _scanStoreFailure = null; _scanOutcome = null; _scanReason = null; }
 
         /// <summary>
         /// The scan's record, from the SCAN-WIDE sink tally (<see cref="ScanSink.Total"/>: every checkpoint flush and the final
@@ -218,8 +333,10 @@ namespace Truedat.Store
         internal static string? FinishStoppedScan(string? storePath, ScanSinkReport r, bool edgesOn, string? companionPath, int? exitCode, string reason)
         {
             var rec = _scan; var fullStore = _scanStore;
+            if (rec != null && rec.NoStore && _scanRecordAt != null) return SealStoppedWithoutStore(rec, exitCode, reason);
             if (storePath == null || rec == null || fullStore == null) return null;
             RefreshScanFacts(rec, fullStore, r, edgesOn);
+            ApplyList(rec);
             if (rec.Export.Companion == null && companionPath != null && File.Exists(companionPath)) rec.Export.Companion = Describe(companionPath);
             var path = SealStopped(rec, fullStore, exitCode, reason);
             ResetScanForTest();
@@ -233,11 +350,23 @@ namespace Truedat.Store
         internal static string? FinishStoppedAfterFinal(int? exitCode, string reason)
         {
             var rec = _scan; var fullStore = _scanStore;
+            if (rec != null && rec.NoStore && _scanRecordAt != null) return SealStoppedWithoutStore(rec, exitCode, reason);
             if (rec == null || fullStore == null) return null;
+            ApplyList(rec);
             // The final store flush may have been SKIPPED (a persistent checkpoint failure) so no flush refreshed the record: the committed
             // generation and the scan-wide tally are read now, the export block kept as the last publication left it (codex Cli.Persistent).
             RefreshScanFacts(rec, fullStore, ScanSink.Total, Program._stageOpts.Edges);
             var path = SealStopped(rec, fullStore, exitCode, reason);
+            ResetScanForTest();
+            return path;
+        }
+
+        /// <summary>A stop of a scan with no store: there are no store facts to refresh and no publication to keep — the record takes
+        /// the list's counts as they stand and the stop's outcome, and is cleared so the boundary cannot rewrite it completed.</summary>
+        static string? SealStoppedWithoutStore(StoreResultFile rec, int? exitCode, string reason)
+        {
+            ApplyList(rec);
+            var path = SealStopped(rec, _scanRecordAt!, exitCode, reason);
             ResetScanForTest();
             return path;
         }
@@ -337,6 +466,15 @@ namespace Truedat.Store
                     if (r.ExitCode.HasValue) w.WriteNumber("exitCode", r.ExitCode.Value); else w.WriteNull("exitCode");
                     w.WriteString("outcome", r.Outcome);
                     if (r.Reason == null) w.WriteNull("reason"); else w.WriteString("reason", r.Reason);
+                    if (r.NoStore)
+                    {
+                        // No store in force: there is none to describe and nothing was published from one. Null, not empty objects —
+                        // "export.performed false" beside a store means the files are behind it, which is not this.
+                        w.WriteNull("store");
+                        w.WriteNull("export");
+                    }
+                    else
+                    {
                     w.WriteStartObject("store");
                     w.WriteString("path", r.Store.Path);
                     if (r.Store.SchemaVersion.HasValue) w.WriteNumber("schemaVersion", r.Store.SchemaVersion.Value); else w.WriteNull("schemaVersion");
@@ -350,6 +488,26 @@ namespace Truedat.Store
                     WriteRef(w, "sidecar", r.Export.Sidecar);
                     WriteRef(w, "companion", r.Export.Companion);
                     w.WriteEndObject();
+                    }
+                    if (r.List != null)
+                    {
+                        var l = r.List;
+                        w.WriteStartObject("list");
+                        w.WriteString("path", l.Path);
+                        WriteCount(w, "listed", l.Listed); WriteCount(w, "analyzed", l.Analyzed); WriteCount(w, "current", l.Current);
+                        WriteCount(w, "excluded", l.Excluded); WriteCount(w, "failed", l.Failed); WriteCount(w, "notFound", l.NotFound);
+                        WriteCount(w, "skipped", l.Skipped); WriteCount(w, "notExamined", l.NotExamined);
+                        w.WriteStartArray("outcomes");
+                        foreach (var o in l.Outcomes)
+                        {
+                            w.WriteStartObject();
+                            w.WriteString("path", o.Path); w.WriteString("outcome", o.Outcome); w.WriteString("reason", o.Reason);
+                            w.WriteEndObject();
+                        }
+                        w.WriteEndArray();
+                        w.WriteNumber("outcomesOmitted", l.OutcomesOmitted);
+                        w.WriteEndObject();
+                    }
                     if (r.Capture != null)
                     {
                         w.WriteStartObject("capture");
@@ -394,6 +552,8 @@ namespace Truedat.Store
             }
         }
 
+        static void WriteCount(Utf8JsonWriter w, string name, long? v) { if (v.HasValue) w.WriteNumber(name, v.Value); else w.WriteNull(name); }
+
         static void WriteRef(Utf8JsonWriter w, string name, StoreResultFileRef? f)
         {
             if (f == null) { w.WriteNull(name); return; }
@@ -426,6 +586,18 @@ namespace Truedat.Store
                         SchemaVersion = s.TryGetProperty("schemaVersion", out var ssv) && ssv.ValueKind == JsonValueKind.Number ? ssv.GetInt32() : (int?)null,
                         Generation = s.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt64() : (long?)null,
                     };
+                r.NoStore = root.TryGetProperty("store", out var ns) && ns.ValueKind == JsonValueKind.Null;
+                if (root.TryGetProperty("list", out var li) && li.ValueKind == JsonValueKind.Object)
+                {
+                    r.List = new StoreResultList
+                    {
+                        Path = Str(li, "path"), Listed = NL(li, "listed"), Analyzed = NL(li, "analyzed"), Current = NL(li, "current"), Excluded = NL(li, "excluded"),
+                        Failed = NL(li, "failed"), NotFound = NL(li, "notFound"), Skipped = NL(li, "skipped"), NotExamined = NL(li, "notExamined"), OutcomesOmitted = L(li, "outcomesOmitted"),
+                    };
+                    if (li.TryGetProperty("outcomes", out var os) && os.ValueKind == JsonValueKind.Array)
+                        foreach (var o in os.EnumerateArray())
+                            r.List.Outcomes.Add(new StoreResultListOutcome { Path = Str(o, "path"), Outcome = Str(o, "outcome"), Reason = Str(o, "reason") });
+                }
                 if (root.TryGetProperty("export", out var e) && e.ValueKind == JsonValueKind.Object)
                 {
                     r.Export = new StoreResultExport
@@ -454,6 +626,7 @@ namespace Truedat.Store
 
         static string Str(JsonElement o, string name) => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
         static string? NullableStr(JsonElement o, string name) => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        static long? NL(JsonElement o, string name) => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt64() : (long?)null;
         static long L(JsonElement o, string name) => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt64() : 0;
         static StoreResultFileRef? ReadRef(JsonElement o, string name)
         {

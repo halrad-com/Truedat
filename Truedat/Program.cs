@@ -4377,6 +4377,7 @@ namespace Truedat
                 using var afConsole = new JsonConsoleScope(jsonOutput);
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
+                BeginScanRecordWithoutStore(analyzeFileMoods);                               // and a scan with none is recorded too, where the store would be
                 // No path at all is a usage error and stays exit 1 — there is nothing to
                 // ledger and nothing the caller could have meant.
                 if (string.IsNullOrEmpty(analyzeFilePath))
@@ -5010,6 +5011,7 @@ namespace Truedat
                 using var flConsole = new JsonConsoleScope(jsonOutput);
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
+                BeginScanRecordWithoutStore(analyzeFileMoods);                               // and a scan with none is recorded too, where the store would be
                 List<string> filePaths;
 
                 // Phase 5.1 — skipped-CSV resolves like errors.csv would: next to the
@@ -5180,6 +5182,9 @@ namespace Truedat
                 }
 
                 Console.Error.WriteLine($"Processing {filePaths.Count} files (parallelism: {parallelism})");
+                // A list scan's record accounts for the paths it was given. A --folder walk is not a list: its record is a plain scan's.
+                if (!folderMode)
+                    global::Truedat.Store.StoreResult.BeginList(fileListPaths.Count > 1 ? string.Join("|", fileListPaths) : (fileListPath ?? ""), filePaths.Count);
                 _scanWorkPaths = filePaths.ToArray();   // the store's root hint: the whole list, never just what is analysed so far
 
                 // Find Essentia (mirror MoodsMode resolution).
@@ -5327,7 +5332,7 @@ namespace Truedat
                         var flMissReason = MissingFileSkipReason(filePath);
                         AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), flMissReason);
                         Console.Error.WriteLine($"[skipped missing] {filePath} ({flMissReason})");
-                        Interlocked.Increment(ref flDsdSkipped);
+                        Interlocked.Increment(ref flDsdSkipped); global::Truedat.Store.StoreResult.List?.NotFound(filePath, flMissReason);
                         return;
                     }
 
@@ -5342,7 +5347,7 @@ namespace Truedat
                         var flSkipExt = Path.GetExtension(filePath);
                         AppendSkipped(flSkippedPath, filePath, flSkipExt, flStructReason);
                         Console.Error.WriteLine($"[skipped {StructuralSkipConsoleTag(flStructReason)}] {Path.GetFileName(filePath)}");
-                        Interlocked.Increment(ref flDsdSkipped);
+                        Interlocked.Increment(ref flDsdSkipped); global::Truedat.Store.StoreResult.List?.Skipped();
                         return;
                     }
 
@@ -5351,7 +5356,7 @@ namespace Truedat
                     if (flReviewSkip != null)
                     {
                         Console.Error.WriteLine($"[skipped review] {Path.GetFileName(filePath)} ({flReviewSkip})");
-                        Interlocked.Increment(ref flDsdSkipped);
+                        Interlocked.Increment(ref flDsdSkipped); global::Truedat.Store.StoreResult.List?.Skipped();
                         return;
                     }
 
@@ -5372,7 +5377,7 @@ namespace Truedat
                         {
                             AppendSkipped(flSkippedPath, filePath, GetExtensionSafe(filePath), $"excluded (rule: {flExclReason})");
                             Console.Error.WriteLine($"[skipped excluded: {flExclReason}] {Path.GetFileName(filePath)}");
-                            Interlocked.Increment(ref flDsdSkipped);   // reuse the skip counter fl already reports
+                            Interlocked.Increment(ref flDsdSkipped); global::Truedat.Store.StoreResult.List?.Excluded();   // reuse the skip counter fl already reports
                             return;
                         }
 
@@ -5440,7 +5445,7 @@ namespace Truedat
                                     flMoodsTracks[fullPath] = flMtimeEntry;
                                     if (_storePath != null) RecordPerFileCacheHit(fullPath, flMtimeEntry);   // T18
                                     ClearReviewRecord(filePath);
-                                    Interlocked.Increment(ref flProcessed);
+                                    Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Current();
                                     Interlocked.Increment(ref flCachedByMtime);
                                     Console.Error.WriteLine($"[CACHED{flMtimeSmfmTag}] {Path.GetFileName(filePath)}");
                                     return;
@@ -5470,7 +5475,7 @@ namespace Truedat
                                         flMoodsTracks[fullPath] = flHeadEntry;
                                         if (_storePath != null) RecordPerFileCacheHit(fullPath, flHeadEntry);   // T18
                                         ClearReviewRecord(filePath);
-                                        Interlocked.Increment(ref flProcessed);
+                                        Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Current();
                                         Interlocked.Increment(ref flCachedByHeadPath);
                                         Console.Error.WriteLine($"[CACHED·head{flHeadSmfmTag}] {Path.GetFileName(filePath)}");
                                         return;
@@ -5506,7 +5511,7 @@ namespace Truedat
                                         flMoodsTracks[fullPath] = flShaPathEntry;
                                         if (_storePath != null) RecordPerFileCacheHit(fullPath, flShaPathEntry);   // T18
                                         ClearReviewRecord(filePath);
-                                        Interlocked.Increment(ref flProcessed);
+                                        Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Current();
                                         Interlocked.Increment(ref flCachedByShaPath);
                                         Console.Error.WriteLine($"[CACHED·sha{flShaPathSmfmTag}] {Path.GetFileName(filePath)}");
                                         return;
@@ -5544,7 +5549,7 @@ namespace Truedat
                                     if (_storePath != null) RecordPerFileCacheHit(fullPath, flCrossShaEntry);   // T18
                                     ClearReviewRecord(filePath);
                                     RemoveIfMoved(flMoodsTracks, xs.OldKey!);
-                                    Interlocked.Increment(ref flProcessed);
+                                    Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Current();
                                     Interlocked.Increment(ref flCachedByShaCross);
                                     Console.Error.WriteLine($"[CACHED·sha{flCrossShaSmfmTag}] {Path.GetFileName(filePath)}");
                                     return;
@@ -5596,7 +5601,7 @@ namespace Truedat
 
                         if (features == null)
                         {
-                            Interlocked.Increment(ref flFailed);
+                            Interlocked.Increment(ref flFailed); global::Truedat.Store.StoreResult.List?.Failed(filePath, flResults.EssentiaError ?? "analysis failed");
                             flErrors.Add($"{filePath}: {flResults.EssentiaError}");
                             RecordReviewFailure(filePath, flResults.EssentiaError ?? "", 0, 0, "essentia", "file-list");
                             Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {flResults.EssentiaError}");
@@ -5611,7 +5616,7 @@ namespace Truedat
                             {
                                 var comps = string.Join(";", healthFailed);
                                 var reason = $"analysis incomplete: {comps}" + TagsFailDetail(healthFailed, tags);
-                                Interlocked.Increment(ref flFailed);
+                                Interlocked.Increment(ref flFailed); global::Truedat.Store.StoreResult.List?.Failed(filePath, reason);
                                 flErrors.Add($"{filePath}: {reason}");
                                 RecordReviewFailure(filePath, reason, 0, 0, comps, "file-list");
                                 Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {reason}");
@@ -5669,7 +5674,7 @@ namespace Truedat
                             NoteFreshAnalysis(flKey);
                         }
 
-                        Interlocked.Increment(ref flProcessed);
+                        Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Analyzed();
                         Interlocked.Increment(ref flAnalyzed);
                         Console.Error.WriteLine($"[OK{flOkSmfmTag}] {Path.GetFileName(filePath)}");
                         // The analysis-completion path only (a cache hit returns earlier), as in MoodsMode.
@@ -5680,7 +5685,7 @@ namespace Truedat
                     }
                     catch (Exception ex)
                     {
-                        Interlocked.Increment(ref flFailed);
+                        Interlocked.Increment(ref flFailed); global::Truedat.Store.StoreResult.List?.Failed(filePath, ex.Message);
                         flErrors.Add($"{filePath}: {ex.Message}");
                         RecordReviewFailure(filePath, ex.Message, 0, 0, "exception", "file-list");
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
@@ -5949,6 +5954,9 @@ namespace Truedat
             if (seed == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // the catalog could not be pinned: nothing scanned, nothing rewritten
             if (seed == SeedResult.StoreInForce)
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);
+            // No store in force: the library scan is recorded too. Not a --chunk shard — shards share one folder, and each would
+            // overwrite the others' record.
+            else if (libraryScan && chunkTotal == 0) BeginScanRecordWithoutStore(moodsPath);
             var logPath = Path.Combine(outputDir, "truedat.log");
             TeeWriter? tee = null;
             if (auditLog)
@@ -12227,6 +12235,15 @@ namespace Truedat
             return true;
         }
 
+        /// <summary>The run record for a scan with no store in force (operator ruling 2026-11-21: the record is written for every
+        /// run): kept where the store would be, with its store block null. Nothing when a store is in force — its own record is
+        /// already pending — and nothing without a catalog target.</summary>
+        static void BeginScanRecordWithoutStore(string? catalogPath)
+        {
+            if (_storePath != null || string.IsNullOrEmpty(catalogPath)) return;
+            global::Truedat.Store.StoreResult.BeginScanWithoutStore(catalogPath, _storeDirOpt, _scanStartedUtc);
+        }
+
         internal static int RefuseScan(string? storePath, string sentence, int exitCode)
         {
             Console.Error.WriteLine(sentence);
@@ -17300,6 +17317,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
             ListScanSelfTest.Run(Assert);                            // --file-list: each path once, every list read, an older XML does not win
             SummaryAdviceSelfTest.Run(Assert);                       // the scan summary's advice for entries lacking the newest fields
+            ListRecordSelfTest.Run(Assert);                          // the run record with no store, and a list scan's account of its paths
             ChromaMarkerSelfTest.Run(Assert);                        // chromaFold: how a track's chroma was grouped; --refresh-chroma
 
             // A store-backed verb writes its result back from the PUBLISHED catalog, where the field policy keeps bpmHistogram out.
