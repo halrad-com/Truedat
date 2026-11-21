@@ -133,8 +133,14 @@ What to expect:
 - A library that used the store and edges gets both back from the new scan.
 - It stops before changing anything when the extractor is not found, when part of the library is
   unreachable or its files are not on this machine (a catalog copied from another machine could not
-  be rebuilt there), when another program holds one of the files (close MusicBee first), or when
-  another verb is on the command line.
+  be rebuilt there), when another program holds one of the files (the message names it; close it
+  and run again), or when another verb is on the command line.
+- If the scan that follows stops for a reason of its own, fix that and run a plain `truedat`: the
+  reset has already happened and the archive holds the old files.
+- MBXHub does not watch for a reset. If MusicBee stays open it keeps the values it loaded before,
+  and if it is started while the catalog is absent it shows no moods; either way, use Reload mood
+  data in MBXHub (or restart MusicBee) once the scan has finished. Closing MusicBee for the reset
+  avoids both.
 - To go back, `truedat --restore mbxmoods-reset-<time>.zip` restores the catalog, and the store when
   the archive holds one. The error and skip lists and the review records are in the zip as well.
 

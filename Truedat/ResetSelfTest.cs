@@ -359,6 +359,17 @@ namespace Truedat
                 {
                     Check(doneExit == 0, $"reset-cli: the reset and its scan exit 0 (got {doneExit})");
                     Check(File.Exists(catalog) && File.ReadAllText(catalog).Contains("track.flac"), "reset-cli: the new catalog holds the track, measured by this run");
+
+                    // ---- with a store: the scan after the reset makes the store again
+                    string withStore = "--no-config " + Q(xml) + " --store --stage-dir " + Q(stage) + " -p 1";
+                    var seeded = RunChild(exe, lib, withStore, out int seededExit);
+                    File.WriteAllText(Path.Combine(root, "store-scan.log"), seeded);
+                    Check(seededExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a scan with a store makes one (exit {seededExit})");
+                    var again = RunChild(exe, lib, withStore + " --reset --imeanit", out int againExit);
+                    File.WriteAllText(Path.Combine(root, "store-reset.log"), again);
+                    Check(againExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a library with a store has one again after the reset (exit {againExit})");
+                    Check(again.Contains("truedat.db") && again.Contains("Existing moods: 0"), "reset-cli: the old store was archived with the rest and the scan started from nothing");
+                    Check(Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip").Length == 2, "reset-cli: the second reset wrote its own archive and left the first one alone");
                 }
                 else
                     Console.WriteLine("  NOT RUN  reset-cli exit code and fresh entry: needs ffmpeg.exe beside the test binary to make a track the extractor will analyze");
