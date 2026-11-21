@@ -91,7 +91,11 @@ namespace Truedat.Store
         /// </summary>
         internal static LoadResult LoadAuthoritative(string storePath, string catalogPath, ConcurrentDictionary<string, TrackEntry> target, bool writeLedger = false)
         {
-            var r = LoadAuthoritativeCore(storePath, catalogPath, target, writeLedger);
+            LoadResult r;
+            // A store that cannot be opened (read-only, not a database, a newer schema) is a refusal like any other here: one
+            // sentence and an ordinary exit code, never an exception escaping the scan.
+            try { r = LoadAuthoritativeCore(storePath, catalogPath, target, writeLedger); }
+            catch (StoreException ex) { return Refuse(new LoadResult(), "store-unopenable", ex.Message + " Nothing was scanned."); }
             if (writeLedger && !r.Refused) ClearDisagreeLedger(catalogPath);
             return r;
         }

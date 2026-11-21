@@ -23,6 +23,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 ### Fixed
 
 - Long tracks no longer hit a fixed 300-second limit on conversion; a conversion runs while it is making progress.
+- A store file that is read-only is refused when it is opened, before any backup, upgrade or analysis, instead of failing partway through.
+- A list scan's run record reports the store generation the run ended at.
 - A hi-res track is not converted when the copy would not fit in the staging folder; the original is analyzed instead.
 - A list scan processes each path once, reads every `--file-list` given, and its tag-read titles are no longer overwritten by an older library XML.
 - A file or folder named relative to the working folder is scanned (`--analyze-file tone.flac` used to fail).

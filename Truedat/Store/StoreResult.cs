@@ -267,6 +267,9 @@ namespace Truedat.Store
                 Catalog = ok ? Describe(rep.OutPath) : null, Sidecar = ok ? Describe(rep.SidecarPath) : null,
                 Companion = ok && rep.Companion ? Describe(rep.CompanionPath) : null,
             };
+            // The store block was read at the last flush; a publication after it can have advanced the generation (the edge
+            // version stamp does). The publication knows the generation it published at, so the record ends on that one.
+            if (ok && !_scan.NoStore) _scan.Store.Generation = rep.Generation;
             _scan.Messages.RemoveAll(m => m.Id == "publish-failed" || m.Id == "publication-off");
             if (rep.PublicationOff && error == null)
             {

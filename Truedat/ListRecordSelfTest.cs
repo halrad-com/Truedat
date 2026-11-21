@@ -238,7 +238,7 @@ namespace Truedat
             return keys;
         }
 
-        static string RunChild(string exe, string cwd, string args, out int exitCode)
+        internal static string RunChild(string exe, string cwd, string args, out int exitCode)
         {
             var start = new ProcessStartInfo
             {

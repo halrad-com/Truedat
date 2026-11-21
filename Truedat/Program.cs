@@ -17317,6 +17317,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             FolderArgumentSelfTest.Run(Assert);                      // --folder music = the user's Music folder
             ListScanSelfTest.Run(Assert);                            // --file-list: each path once, every list read, an older XML does not win
             SummaryAdviceSelfTest.Run(Assert);                       // the scan summary's advice for entries lacking the newest fields
+            StoreOpenRefusalSelfTest.Run(Assert);                    // a store that cannot be written is refused at open; the record's final generation
             ListRecordSelfTest.Run(Assert);                          // the run record with no store, and a list scan's account of its paths
             ChromaMarkerSelfTest.Run(Assert);                        // chromaFold: how a track's chroma was grouped; --refresh-chroma
 

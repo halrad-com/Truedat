@@ -19,6 +19,23 @@ namespace Truedat.Store
         OpenStore(SqliteDb db, StoreDal dal, MachineIdentity machine, SqliteProbeResult probe, string path)
         { Db = db; Dal = dal; Machine = machine; Probe = probe; Path = path; }
 
+        /// <summary>Why an existing store file cannot be written, or null when it can (or does not exist yet). Asked before the
+        /// file is opened: SQLite opens a read-only file without complaint and fails at its first write, which for an older store
+        /// is in the middle of the upgrade (after the backup was made) and for a current one is the scan's first save, after the
+        /// analysis it then cannot keep. A file in use or on a volume that is away is not this finding — SQLite reports those.</summary>
+        internal static string? NotWritableReason(string storePath)
+        {
+            try
+            {
+                if (!File.Exists(storePath)) return null;
+                if ((File.GetAttributes(storePath) & FileAttributes.ReadOnly) != 0) return "its read-only attribute is set";
+                using (new FileStream(storePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete)) { }
+                return null;
+            }
+            catch (UnauthorizedAccessException) { return "this account may not write to it"; }
+            catch { return null; }
+        }
+
         internal static OpenStore Open(string? storePath, bool create, string truedatVersion, string nowUtc)
         {
             if (string.IsNullOrWhiteSpace(storePath))
@@ -39,6 +56,9 @@ namespace Truedat.Store
                 var dir = System.IO.Path.GetDirectoryName(full);
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir!);
             }
+
+            if (NotWritableReason(full) is string notWritable)
+                throw new StoreException($"The store {full} is read-only ({notWritable}), so nothing can be saved to it. Make the file writable and run again.");
 
             bool network = StoreLocation.IsNetworkPath(full);
             if (network)
