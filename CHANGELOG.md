@@ -22,6 +22,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - Scan order is fitted to the library. Long tracks are taken first and spread out, so they do not all run at once or finish last. The rest is taken in library order.
 - The same audio at two paths is analyzed once. A track the same length as an earlier one waits for a second pass and reuses the earlier analysis when the audio is identical.
 - The scan summary says how many tracks were held in memory, and how many reused an identical track's analysis.
+- `--clear` starts a library's analysis over and keeps what is yours: it archives and removes truedat's analysis data (the catalog, sidecar, edges file, store, and the error and skipped lists) and keeps your exclusion rules and duplicate verdicts.
+- `--reset` is now a full reset: it does what `--clear` does and also archives and removes your exclusion rules and duplicate verdicts. Before this it kept the exclusion rules.
 
 ## [0.5.5.4-EV6.1] — 2026-11-21
 
