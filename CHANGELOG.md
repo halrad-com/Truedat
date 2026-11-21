@@ -6,6 +6,19 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV6.2] — 2026-11-21
+
+### Changed
+
+- A long track is held in memory during analysis as far as the machine's RAM allows, instead of stopping at a fixed 256 MB (about 12.7 minutes). Examples:
+
+| Free RAM, workers | Held in memory per track | Track length covered |
+|---|---|---|
+| 6 GB, 6 workers | 423 MB | 21 minutes |
+| 13 GB, 10 workers | 577 MB | 29 minutes |
+| 26 GB, 20 workers | 577 MB | 29 minutes |
+| 120 GB, 30 workers | 1,965 MB | 97 minutes |
+
 ## [0.5.5.4-EV6.1] — 2026-11-21
 
 ### Fixed
