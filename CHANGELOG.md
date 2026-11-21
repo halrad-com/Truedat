@@ -22,6 +22,10 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 - Long tracks no longer hit a fixed 300-second limit on conversion; a conversion runs while it is making progress.
 - A hi-res track is not converted when the copy would not fit in the staging folder; the original is analyzed instead.
+- A list scan processes each path once, reads every `--file-list` given, and its tag-read titles are no longer overwritten by an older library XML.
+- A file or folder named relative to the working folder is scanned (`--analyze-file tone.flac` used to fail).
+- A scan no longer tells you at its start to run `--refresh` for entries a refresh cannot reach; the end summary's advice stays.
+- A seeded description being measured by a scan is no longer logged as a warning, and `--store-summary` prints nothing above its block.
 
 ### Backup, restore, reset
 
