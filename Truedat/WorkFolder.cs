@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 
 namespace Truedat
@@ -62,6 +63,9 @@ namespace Truedat
         static readonly Dictionary<string, string> Settled = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> Created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> Beginning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>A work folder that could not be written this run but exists (review #15): the catalog folder takes the writes, and
+        /// this one stays a READ source, so the ledgers an earlier run moved into it are still consulted.</summary>
+        static readonly Dictionary<string, string> ReadAlso = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>The work folder of the library this run is working on, once one has been settled; null before that.
         /// This is the value <c>store-result.json</c> reports as <c>workFolder</c> (hub contract), so the hub's utility never
@@ -79,7 +83,7 @@ namespace Truedat
             {
                 _option = string.IsNullOrWhiteSpace(option) ? null : option;
                 _exeDir = string.IsNullOrWhiteSpace(exeDir) ? AppDomain.CurrentDomain.BaseDirectory : exeDir;
-                Settled.Clear(); Created.Clear(); Beginning.Clear();
+                Settled.Clear(); Created.Clear(); Beginning.Clear(); ReadAlso.Clear();
                 Current = null; CurrentCatalogDir = null;
             }
         }
@@ -132,7 +136,11 @@ namespace Truedat
             if (!Same(want, cat) && SameEntry(want, cat)) want = cat;
             if (!Same(want, cat) && !Ensure(want))
             {
-                note = $"Work folder: {want} cannot be written — truedat's working files stay beside the catalog in {cat}";
+                bool holdsFiles = false;
+                try { holdsFiles = Directory.Exists(want); } catch { }
+                note = $"Work folder: {want} cannot be written — truedat's working files stay beside the catalog in {cat}"
+                     + (holdsFiles ? "; the files already in it are still read" : "");
+                if (holdsFiles) lock (Gate) ReadAlso[cat] = want;
                 want = cat;
             }
             lock (Gate) { Settled[cat] = want; Current = want; CurrentCatalogDir = cat; }
@@ -180,7 +188,23 @@ namespace Truedat
             FirstUse(cat);
             var dir = For(cat);
             var work = Path.Combine(dir, name);
-            if (Same(dir, cat)) return work;
+            if (Same(dir, cat))
+            {
+                // After a fallback (review #15): a file the catalog folder does not hold but the unwritable work folder does is the
+                // history this run must consult. It is copied beside the catalog (where this run's writes go) on first use, so it is
+                // read AND can be appended to; when the copy cannot be made, the old file is still read where it is.
+                string? old; lock (Gate) ReadAlso.TryGetValue(cat, out old);
+                if (old == null) return work;
+                try
+                {
+                    if (File.Exists(work)) return work;
+                    var held = Path.Combine(old, name);
+                    if (!File.Exists(held)) return work;
+                    try { File.Copy(held, work, false); File.SetLastWriteTimeUtc(work, File.GetLastWriteTimeUtc(held)); return work; }
+                    catch { return File.Exists(work) ? work : held; }
+                }
+                catch { return work; }
+            }
             try { if (File.Exists(work)) return work; } catch { }
             var beside = Path.Combine(cat, name);
             try { if (File.Exists(beside)) return beside; } catch { }
@@ -198,6 +222,8 @@ namespace Truedat
             var work = For(cat);
             var list = new List<string> { work };
             if (!Same(work, cat)) list.Add(cat);
+            string? old; lock (Gate) ReadAlso.TryGetValue(cat, out old);
+            if (old != null && !list.Contains(old, StringComparer.OrdinalIgnoreCase)) list.Add(old);   // review #15: still a place its files are
             return list;
         }
 

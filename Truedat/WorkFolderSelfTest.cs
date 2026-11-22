@@ -52,6 +52,7 @@ namespace Truedat
                 CustomCatalog(assert, Path.Combine(root, "custom"));
                 CrossVolumeRace(assert, Path.Combine(root, "race"));
                 Alias(assert, Path.Combine(root, "alias"));
+                ReadOnlyLater(assert, Path.Combine(root, "readonly"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -682,6 +683,60 @@ namespace Truedat
             }
             finally { try { Directory.Delete(junction); } catch { } }   // non-recursive: removes the link, never the folder it points at
             assert(!Directory.Exists(junction) && File.Exists(ledger), "work alias: the test's junction is removed and the folder it pointed at is intact");
+        }
+
+        /// <summary>A work folder written once and later unwritable (review #15): writes fall back to the catalog folder, and the ledgers
+        /// the earlier run moved there must still be consulted — otherwise the fallback reads an empty catalog-folder ledger, a file
+        /// that failed before is tried again, and a new ledger starts. Write access is denied with an ACL this test removes again.</summary>
+        static void ReadOnlyLater(Action<bool, string> assert, string root)
+        {
+            var lib = Path.Combine(root, "Library");
+            var work = Path.Combine(root, "work");
+            Directory.CreateDirectory(lib);
+            var catalog = Path.Combine(lib, "mbxmoods.json");
+            File.WriteAllText(catalog, "{}");
+            const string failedRow = "decode failed,A,T,D:\\Music\\broken.flac,1.0,2.0,essentia";
+            File.WriteAllText(Path.Combine(lib, "mbxmoods-errors.csv"), "Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents\r\n" + failedRow + "\r\n");
+
+            // Run 1: the folder is writable, the ledger moves into it.
+            WorkFolder.Configure(work, Path.Combine(root, "Tools"));
+            WorkFolder.Begin(lib, out _);
+            WorkFolder.MoveExisting(catalog, null);
+            assert(File.Exists(Path.Combine(work, "mbxmoods-errors.csv")) && !File.Exists(Path.Combine(lib, "mbxmoods-errors.csv")),
+                "work read-only later: the first run moves the ledger into the work folder");
+
+            var me = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+            var deny = new System.Security.AccessControl.FileSystemAccessRule(me,
+                System.Security.AccessControl.FileSystemRights.CreateFiles | System.Security.AccessControl.FileSystemRights.AppendData
+                | System.Security.AccessControl.FileSystemRights.WriteData | System.Security.AccessControl.FileSystemRights.Delete
+                | System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles,
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Deny);
+            var acl = Directory.GetAccessControl(work);
+            acl.AddAccessRule(deny);
+            Directory.SetAccessControl(work, acl);
+            try
+            {
+                // Run 2: the folder cannot be written now.
+                WorkFolder.Configure(work, Path.Combine(root, "Tools"));
+                var used = WorkFolder.Begin(lib, out var note);
+                assert(used == lib && note != null, $"work read-only later: the next run falls back to the catalog folder for its writes ({used})");
+                var ledger = WorkFolder.Read(lib, "mbxmoods-errors.csv");
+                bool sees = File.Exists(ledger) && File.ReadAllText(ledger).Contains(failedRow);
+                assert(sees, $"work read-only later: the ledger the earlier run moved is still consulted, so the failed file is still skipped ({ledger})");
+                var appendTo = WorkFolder.Read(lib, "mbxmoods-errors.csv");
+                bool appended = false;
+                try { File.AppendAllText(appendTo, "new failure,A,U,D:\\Music\\new.flac,1.0,2.0,essentia\r\n"); appended = true; } catch { }
+                assert(appended && Path.GetDirectoryName(appendTo) == lib, $"work read-only later: and what this run adds goes where it can be written, the catalog folder ({appendTo})");
+                assert(WorkFolder.Folders(lib).Contains(work), "work read-only later: the work folder is still listed among the places this library's files are");
+            }
+            finally
+            {
+                var back = Directory.GetAccessControl(work);
+                back.RemoveAccessRule(deny);
+                Directory.SetAccessControl(work, back);
+                WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
+            }
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>
