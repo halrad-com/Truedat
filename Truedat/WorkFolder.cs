@@ -523,8 +523,10 @@ namespace Truedat
             {
                 var name = Path.GetFileName(src);
                 if (!IsWorkingFile(name, catalogName, sidecarName, companion, storeName)) continue;
-                bool kept; lock (Gate) kept = Kept.Contains(src);
-                if (kept) continue;   // a file this run was handed stays where it was given (review #8)
+                List<string> keptPaths; lock (Gate) keptPaths = Kept.ToList();
+                // A file this run was handed stays where it was given (review #8) — by identity, not spelling (#14): the same archive
+                // named through a mapped drive, a junction or an 8.3 name is still the run's own input.
+                if (keptPaths.Any(k => SameEntry(k, src))) continue;
                 if (!Ensure(work)) return report;
                 var dest = Path.Combine(work, name);
                 try

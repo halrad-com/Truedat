@@ -681,6 +681,14 @@ namespace Truedat
                 assert(aside.Length == 0 && r.Moved == 0 && r.Renamed.Count == 0,
                     $"work alias: an alias-to-itself move moves nothing and renames nothing ({r.Moved} moved, {r.Renamed.Count} renamed, {aside.Length} .moved- files)");
                 assert(WorkFolder.Describe(r) == null, "work alias: and has nothing to say");
+
+                // A file a run was handed (review #8), named through the alias: still the same file, so it stays.
+                WorkFolder.Configure(Path.Combine(root, "realwork"), Path.Combine(root, "Tools"));
+                WorkFolder.Keep(Path.Combine(junction, "mbxmoods-errors.csv"));
+                WorkFolder.Begin(lib, out _);
+                WorkFolder.MoveExisting(catalog, null);
+                assert(File.Exists(ledger) && !File.Exists(Path.Combine(root, "realwork", "mbxmoods-errors.csv")),
+                    "work alias: a file the run was handed under another spelling of its folder is kept where it is");
                 WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
             }
             finally { try { Directory.Delete(junction); } catch { } }   // non-recursive: removes the link, never the folder it points at
