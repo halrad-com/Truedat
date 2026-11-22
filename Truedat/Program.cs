@@ -4756,6 +4756,9 @@ namespace Truedat
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
                                 : RebuildCacheEntryFromTags(xs.Entry, freshTags.Artist, freshTags.Title,
                                     freshTags.Album, freshTags.Genre, afKey, afCurrentLastMod, refreshedMd5, refreshedFp);
+                            // Another path's entry: its library number and SMFM block are that file's (review #5).
+                            trackEntry.Features.TrackId = 0;
+                            TakeOwnSmfm(trackEntry.Features, f => ApplySmfmInPlace(f, analyzeFilePath!));
                             RefreshedMd5Rule(trackEntry, xs.Entry.FileMd5, refreshedMd5);
                             RemoveIfMoved(afMoodsTracks, xs.OldKey!);
                             afHitTag = "cached·sha";
@@ -5637,8 +5640,11 @@ namespace Truedat
                                         : RebuildCacheEntryFromTags(
                                             xs.Entry, freshTags.Artist, freshTags.Title, freshTags.Album,
                                             freshTags.Genre, fullPath, currentLastMod, refreshedMd5, refreshedFp);
+                                    // Another path's entry: its library number and SMFM block are that file's (review #5).
+                                    flCrossShaEntry.Features.TrackId = 0;
+                                    TakeOwnSmfm(flCrossShaEntry.Features, f => ApplySmfmInPlace(f, filePath));
                                     RefreshedMd5Rule(flCrossShaEntry, xs.Entry.FileMd5, refreshedMd5);
-                                    var flCrossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(flCrossShaEntry.Features, filePath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                    var flCrossShaSmfmTag = _refreshSmfm && flCrossShaEntry.Features.HasSmfm && !xs.Entry.Features.HasSmfm ? " +smfm" : "";
                                     if (flCrossShaSmfmTag.Length > 0) Interlocked.Increment(ref flSmfmAdded);
                                     flMoodsTracks[fullPath] = flCrossShaEntry;
                                     if (_storePath != null) RecordPerFileCacheHit(fullPath, flCrossShaEntry);   // T18
@@ -7071,11 +7077,12 @@ namespace Truedat
                                         var refreshedFp = ComputeFingerprintV1(msStagedPath, msSourceSize, t.Location, out _);
                                         var currentLastMod = DateTime.MinValue;
                                         try { currentLastMod = File.GetLastWriteTimeUtc(scanPath); } catch { }
-                                        var crossShaEntry = crossLegacyHit
-                                            ? RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp, localSha, "flac-frames")
-                                            : RebuildCacheEntry(xs.Entry, t, currentLastMod, refreshedMd5, refreshedFp);
+                                        // Another path's entry: reuse its analysis; the text, number and SMFM are this copy's own (review #5).
+                                        var crossShaEntry = RebuildFromAnotherCopy(xs.Entry, t, currentLastMod,
+                                            f => ApplySmfmInPlace(f, scanPath), refreshedMd5, refreshedFp,
+                                            crossLegacyHit ? localSha : null, crossLegacyHit ? "flac-frames" : null);
                                         RefreshedMd5Rule(crossShaEntry, xs.Entry.FileMd5, refreshedMd5);
-                                        var crossShaSmfmTag = _refreshSmfm && ApplySmfmInPlace(crossShaEntry.Features, scanPath, xs.Entry.Features.SmfmScores) ? " +smfm" : "";
+                                        var crossShaSmfmTag = _refreshSmfm && crossShaEntry.Features.HasSmfm && !xs.Entry.Features.HasSmfm ? " +smfm" : "";
                                         if (crossShaSmfmTag.Length > 0) Interlocked.Increment(ref smfmAdded);
                                         allTracks[t.Location] = crossShaEntry;
                                         if (_storePath != null) global::Truedat.Store.ScanSink.RecordCacheHit(t.Location, crossShaEntry);   // T18: the store holds every catalog change
@@ -31047,6 +31054,30 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 genre = Keep(source.Features.Genre, genre);
             }
             return RebuildCacheEntryCore(source, t.TrackId, artist, title, album, genre, t.Location, newLastMod, refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
+        }
+
+        /// <summary>A cache hit on the same audio at ANOTHER path (review #5): the acoustic features are the other copy's, which is
+        /// the point of the reuse; everything that belongs to a copy - its text, its library number, its SMFM block, its MD5 and
+        /// fingerprint - is this copy's own.</summary>
+        internal static TrackEntry RebuildFromAnotherCopy(TrackEntry donor, ITunesTrack t, DateTime newLastMod,
+            Action<TrackFeatures>? readSmfm, string? refreshedFileMd5, FingerprintV1? refreshedFp,
+            string? refreshedSha = null, string? refreshedShaSource = null)
+        {
+            // Exactly what a fresh analysis of this copy would write, less the analysis: the library's text and number for
+            // it. The rule that keeps an entry's own newer tags over an older XML (RebuildCacheEntry) is for an entry of the
+            // SAME path; this one is another file's, so its text is never kept.
+            var e = RebuildCacheEntryCore(donor, t.TrackId, t.Artist, t.Name, t.Album, t.Genre, t.Location, newLastMod,
+                refreshedFileMd5, refreshedFp, refreshedSha, refreshedShaSource);
+            TakeOwnSmfm(e.Features, readSmfm);
+            return e;
+        }
+
+        /// <summary>The SMFM block is written into each FILE, and two files with the same audio frames can carry different ones
+        /// (or one and none). An entry reused from another path starts with none, then gets the copy's own if the scan reads SMFM.</summary>
+        internal static void TakeOwnSmfm(TrackFeatures f, Action<TrackFeatures>? readSmfm)
+        {
+            f.SmfmScores = null; f.SmfmChannel = null; f.SmfmChannelName = null; f.SmfmBpm = null;
+            readSmfm?.Invoke(f);
         }
 
         /// <summary>

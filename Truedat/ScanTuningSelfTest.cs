@@ -16,6 +16,61 @@ namespace Truedat
             Budget(assert);
             Order(assert);
             Repeats(assert);
+            OtherCopy(assert);
+        }
+        /// <summary>Review #5. When a track's audio is already in the catalog under another path, the acoustic features are reused
+        /// and everything that belongs to the copy comes from the copy: its own text, its own SMFM block, its own place in the
+        /// library. The donor's are another file's.</summary>
+        static void OtherCopy(Action<bool, string> assert)
+        {
+            var donor = new TrackEntry
+            {
+                Features = new TrackFeatures
+                {
+                    TrackId = 11, Artist = "Donor Artist", Title = "Donor Title", Album = "Donor Album", Genre = "Donor Genre",
+                    FilePath = @"C:\lib\a.flac", Bpm = 120.5, Key = "A", Mode = "minor",
+                    SmfmScores = new[] { 1, 2, 3 }, SmfmChannel = 2, SmfmChannelName = null, SmfmBpm = 119.9,
+                },
+                AudioStreamSha256 = "aa", FileMd5 = "donor-md5", LastModified = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            };
+            var recipient = new ITunesTrack
+            {
+                TrackId = 22, Artist = "Xml Artist", Name = "Xml Title", Album = "Xml Album", Genre = "Xml Genre",
+                Location = @"C:\lib\b.flac",
+            };
+            // What a fresh analysis of this copy would write: the library's text and number for it - never the other copy's,
+            // whether or not the file was written after the XML.
+            var reused = Program.RebuildFromAnotherCopy(donor, recipient, new DateTime(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc),
+                readSmfm: null, refreshedFileMd5: "own-md5", refreshedFp: null);
+            var prev = Program.LibraryXmlWrittenUtc;
+            Program.LibraryXmlWrittenUtc = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc);   // the file is newer than the XML
+            var reusedNewer = Program.RebuildFromAnotherCopy(donor, recipient, new DateTime(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc),
+                readSmfm: null, refreshedFileMd5: "own-md5", refreshedFp: null);
+            Program.LibraryXmlWrittenUtc = prev;
+            foreach (var e in new[] { reused, reusedNewer })
+                assert(e.Features.Title == "Xml Title" && e.Features.Artist == "Xml Artist" && e.Features.Album == "Xml Album"
+                    && e.Features.Genre == "Xml Genre",
+                    $"another copy: the copy's own text from the library, never the other copy's (got '{e.Features.Artist} - {e.Features.Title} / {e.Features.Album}')");
+            var newer = reusedNewer;
+            assert(newer.Features.TrackId == 22, "another copy: the library's own number for the copy, not the other copy's");
+            assert(newer.Features.FilePath == @"C:\lib\b.flac", "another copy: the entry names the copy's own path");
+
+            // SMFM is the copy's: a copy with none has none, a copy with its own has its own.
+            assert(newer.Features.SmfmScores == null && newer.Features.SmfmChannel == null && newer.Features.SmfmBpm == null,
+                "another copy: an untagged copy does not carry the other copy's SMFM block");
+            var ownSmfm = Program.RebuildFromAnotherCopy(donor, recipient, new DateTime(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc),
+                readSmfm: f => { f.SmfmScores = new[] { 9, 9 }; f.SmfmChannel = 0; f.SmfmBpm = 88.0; },
+                refreshedFileMd5: null, refreshedFp: null);
+            assert(ownSmfm.Features.SmfmScores != null && ownSmfm.Features.SmfmScores.Length == 2 && ownSmfm.Features.SmfmScores[0] == 9
+                && ownSmfm.Features.SmfmBpm == 88.0,
+                "another copy: a tagged copy carries its OWN SMFM block");
+
+            // What the copies share is kept: the analysis of the audio.
+            assert(newer.Features.Bpm == 120.5 && newer.Features.Key == "A" && newer.Features.Mode == "minor",
+                "another copy: the analysis of the shared audio is reused");
+            assert(newer.FileMd5 == "own-md5", "another copy: the copy's own file MD5");
+            assert(donor.Features.Title == "Donor Title" && donor.Features.SmfmScores != null,
+                "another copy: the other copy's entry is left as it was");
         }
 
         /// <summary>Tracks that may be the same audio as one before them wait for a second pass, by which time the first has been
@@ -109,6 +164,11 @@ namespace Truedat
             // Review #12: every worker's extractor runs whether or not its track is held in memory, so a grant must leave room for the
             // extractors of the workers that have not started yet. Without that, early tracks take the room and later extractors push
             // what is reserved over the budget.
+            // A list or folder scan knows no lengths, so it runs with the default typical length (codex, after e5827df).
+            var twelveUnknown = new SpoolBudget(8 * GiB, workers: 20);
+            for (int i = 0; i < 20; i++) twelveUnknown.Reserve(12 * 60, Cd);
+            assert(twelveUnknown.ReservedBytes <= twelveUnknown.TotalBytes,
+                $"spool budget: 20 workers on 12-minute tracks in 8 GiB stay inside the budget when the run knows no typical length ({twelveUnknown.ReservedBytes:N0} of {twelveUnknown.TotalBytes:N0})");
             var twelve = new SpoolBudget(8 * GiB, workers: 20, typicalSeconds: 12 * 60);   // a library of 12-minute tracks
             for (int i = 0; i < 20; i++) twelve.Reserve(12 * 60, Cd);
             assert(twelve.ReservedBytes <= twelve.TotalBytes,
