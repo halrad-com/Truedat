@@ -13955,6 +13955,16 @@ namespace Truedat
                     var names = WorkFolder.MovedNames(report, dir);
                     if (names.Count > 0) _workNames.Add((dir, names));
                 }
+                catch (WorkFolder.OwnedException ex)
+                {
+                    // The work folder belongs to another library (hub review, item A): refused here, before anything was settled or moved,
+                    // and before the verb that asked for a working-file path has written one. Not a note and a fallback — two libraries
+                    // in one folder is the state this exists to stop, and the folder is the operator's to choose again.
+                    Console.Out.Flush();
+                    Console.Error.WriteLine(ex.Message);
+                    Console.Error.Flush();
+                    Environment.Exit(2);
+                }
                 catch (Exception ex) { _workLines.Add($"Work folder: the move did not run ({ex.Message}); the working files are read where they are"); }
             }
         }

@@ -134,6 +134,7 @@ namespace Truedat
             // The catalog folder under another name (a junction to it, a subst drive): it IS the catalog folder, and is settled as that,
             // so nothing is moved into itself (review #14).
             if (!Same(want, cat) && SameEntry(want, cat)) want = cat;
+            if (!Same(want, cat) && Ensure(want)) ClaimOwnership(want, cat);   // throws OwnedException before anything is settled or moved
             if (!Same(want, cat) && !Ensure(want))
             {
                 bool holdsFiles = false;
@@ -145,6 +146,67 @@ namespace Truedat
             }
             lock (Gate) { Settled[cat] = want; Current = want; CurrentCatalogDir = cat; }
             return want;
+        }
+
+        // ---- the owner marker (hub review, item A) ------------------------------------------------------------
+
+        /// <summary>The file a work folder that is not its catalog folder carries, naming the catalog folder it belongs to. A dot name:
+        /// not a working file, so it is never moved, archived or rotated.</summary>
+        internal const string OwnerMarkerName = ".truedat-work-owner.json";
+        internal const string OwnerMarkerKind = "truedat-work-owner";
+
+        /// <summary>A work folder that already belongs to another library. Nothing was settled and nothing moved.</summary>
+        internal sealed class OwnedException : IOException
+        {
+            internal OwnedException(string message) : base(message) { }
+        }
+
+        /// <summary>The first library to settle a work folder writes the marker; any other library is refused. A config <c>work-dir</c>
+        /// is used as given for every catalog, so without this two libraries shared one folder's backups, reports and error lists,
+        /// and a reset or a rotation of one took the other's. The owner is compared by directory identity
+        /// (<see cref="SameEntry"/>), not by spelling. Written to a temp name and moved into place without writing over anything; a
+        /// marker that appeared meanwhile is read and judged like one that was there.</summary>
+        static void ClaimOwnership(string work, string cat)
+        {
+            var marker = Path.Combine(work, OwnerMarkerName);
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (File.Exists(marker))
+                {
+                    string? owner = null;
+                    try
+                    {
+                        var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(marker));
+                        if (doc?["kind"]?.GetValue<string>() == OwnerMarkerKind) owner = doc?["catalogFolder"]?.GetValue<string>();
+                    }
+                    catch (Exception) { }
+                    if (owner != null && SameEntry(owner, cat)) return;
+                    throw new OwnedException(owner == null
+                        ? $"Error: the work folder {work} holds {OwnerMarkerName}, which could not be read, so it cannot be told whose it is; this run's catalog is in {cat}. Nothing was changed. Remove that file if the folder is this library's, or give this library its own --{Flag}."
+                        : $"Error: the work folder {work} belongs to the library in {owner} (its {OwnerMarkerName} says so), and this run's catalog is in {cat}. "
+                          + $"Two libraries must not share one work folder: their backups, reports and error lists would mix. Nothing was changed. "
+                          + $"Give this library its own --{Flag} (or config {Flag}), or remove {marker} if that library is gone.");
+                }
+                var json = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["kind"] = OwnerMarkerKind,
+                    ["version"] = 1,
+                    ["catalogFolder"] = cat,
+                    ["libraryId"] = global::Truedat.Store.StoreLocation.LibraryId(cat),
+                }.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                var tmp = marker + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(tmp, json);
+                    File.Move(tmp, marker);   // never over a marker another run wrote meanwhile: that one is read on the next pass
+                    return;
+                }
+                catch (Exception)
+                {
+                    try { File.Delete(tmp); } catch { }
+                    if (!File.Exists(marker)) return;   // the folder takes no marker: the run goes on as before, unmarked
+                }
+            }
         }
 
         /// <summary>True once this run has settled the work folder for <paramref name="catalogDir"/>.</summary>

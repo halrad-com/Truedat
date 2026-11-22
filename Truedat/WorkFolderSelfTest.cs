@@ -53,6 +53,7 @@ namespace Truedat
                 CrossVolumeRace(assert, Path.Combine(root, "race"));
                 Alias(assert, Path.Combine(root, "alias"));
                 ReadOnlyLater(assert, Path.Combine(root, "readonly"));
+                Owner(assert, Path.Combine(root, "owner"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -737,6 +738,76 @@ namespace Truedat
                 Directory.SetAccessControl(work, back);
                 WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
             }
+        }
+
+        /// <summary>One configured work folder, two libraries (hub review P1, item A): a config work-dir is used as given for every
+        /// catalog, so two libraries shared backup and report names, and a reset or a rotation of one picked up the other's. The first
+        /// library to settle the folder writes .truedat-work-owner.json there; a second is refused, naming both folders, before
+        /// anything moves.</summary>
+        static void Owner(Action<bool, string> assert, string root)
+        {
+            var lib1 = Path.Combine(root, "One", "Library");
+            var lib2 = Path.Combine(root, "Two", "Library");
+            var shared = Path.Combine(root, "shared-work");
+            foreach (var lib in new[] { lib1, lib2 })
+            {
+                Directory.CreateDirectory(lib);
+                File.WriteAllText(Path.Combine(lib, "mbxmoods.json"), "{}");
+                File.WriteAllText(Path.Combine(lib, "mbxmoods-errors.csv"), "ledger of " + lib);
+            }
+            var tools = Path.Combine(root, "Tools");
+
+            WorkFolder.Configure(shared, tools);
+            WorkFolder.Begin(lib1, out _);
+            WorkFolder.MoveExisting(Path.Combine(lib1, "mbxmoods.json"), null);
+            var marker = Path.Combine(shared, ".truedat-work-owner.json");
+            var doc = File.Exists(marker) ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(marker)) : null;
+            assert(doc?["kind"]?.GetValue<string>() == "truedat-work-owner" && doc?["version"]?.GetValue<int>() == 1
+                   && doc?["catalogFolder"]?.GetValue<string>() == lib1
+                   && doc?["libraryId"]?.GetValue<string>() == global::Truedat.Store.StoreLocation.LibraryId(lib1),
+                $"work owner: the first library to settle a work folder that is not its catalog folder marks it as its own ({(doc == null ? "no marker" : doc.ToJsonString())})");
+
+            WorkFolder.Configure(shared, tools);   // the next run, the other library, the same configured folder
+            string? refusal = null;
+            try { WorkFolder.Begin(lib2, out _); } catch (Exception ex) { refusal = ex.Message; }
+            assert(refusal != null && refusal.Contains(lib1) && refusal.Contains(lib2),
+                $"work owner: a second library is refused, the refusal naming both folders ({refusal ?? "not refused"})");
+            assert(File.Exists(Path.Combine(lib2, "mbxmoods-errors.csv")) && File.ReadAllText(Path.Combine(shared, "mbxmoods-errors.csv")) == "ledger of " + lib1,
+                "work owner: and nothing of the second library moved into the first one's folder");
+            assert(!WorkFolder.IsSettled(lib2), "work owner: the refused library has no work folder settled");
+
+            WorkFolder.Configure(shared, tools);   // the owner itself, again: fine
+            bool ownerOk = true;
+            try { WorkFolder.Begin(lib1, out _); } catch { ownerOk = false; }
+            assert(ownerOk && WorkFolder.Current == shared, "work owner: the library the marker names settles it as before");
+            assert(!WorkFolder.IsWorkingFile(".truedat-work-owner.json", "mbxmoods.json", "mbxmoods.mbxs", null, "truedat.db"),
+                "work owner: the marker is not a working file (never moved, archived or rotated)");
+            WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
+
+            // Through a real verb: the second library's run stops with exit 2, says why, and writes nothing into the folder.
+            var lib3 = Path.Combine(root, "Three", "Library");
+            Directory.CreateDirectory(lib3);
+            File.WriteAllText(Path.Combine(lib3, "mbxmoods.json"), "{\"version\":1,\"trackCount\":0,\"tracks\":{}}");
+            File.WriteAllText(Path.Combine(lib3, "mbxmoods-errors.csv"), "ledger of three");
+            var start = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = typeof(Program).Assembly.Location, WorkingDirectory = lib3,
+                Arguments = "--no-config --moods \"" + Path.Combine(lib3, "mbxmoods.json") + "\" --list-formats --work-dir \"" + shared + "\"",
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+            };
+            int exit; string output;
+            using (var child = System.Diagnostics.Process.Start(start)!)
+            {
+                child.StandardInput.Close();
+                var so = child.StandardOutput.ReadToEndAsync(); var se = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(120000)) { try { child.Kill(); } catch { } }
+                exit = child.HasExited ? child.ExitCode : -1;
+                output = so.GetAwaiter().GetResult() + se.GetAwaiter().GetResult();
+            }
+            assert(exit == 2 && output.Contains(lib1) && output.Contains(lib3),
+                $"work owner (cli): a run of another library against the claimed folder exits 2, naming both folders (exit {exit})");
+            assert(File.Exists(Path.Combine(lib3, "mbxmoods-errors.csv")) && !File.Exists(Path.Combine(shared, "mbxmoods-formats.csv")),
+                "work owner (cli): its working files stayed where they were and its report was not written into the other library's folder");
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>
